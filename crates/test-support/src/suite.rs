@@ -511,7 +511,7 @@ impl<'a> Suite<'a> {
         let (id, registration) = (self.create(role, image, sandboxd, from_now(startup))).unwrap();
         // Nothing stops the start, whose `sandboxd` dials.
         let (sender, arrivals) = mpsc::channel();
-        let accepted = registration.accept(by, None, false, sender, |arrival| arrival, || false);
+        let accepted = registration.accept(|| by.remaining(), None, false, sender, |a| a, || false);
         let accepted = accepted.map_err(|error| error.to_string());
         let session = accepted.and_then(|mut session| {
             session

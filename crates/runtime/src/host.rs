@@ -4,8 +4,8 @@
 //! - the session's and the provider's calls, and the model route's, each take a [`Deadline`]
 //!   that `deadline` makes from the clock as the time left then, so a later jump of the clock
 //!   shortens only the waits made after it;
-//! - the gateway's own deadlines and its looks at a socket;
-//! - a start's looks between its lists of the provider's sandboxes;
+//! - the gateway's own deadlines and its looks at a socket, and within a start's wait for its
+//!   sandbox, each dial and the answer to its hello, which take the time left as they begin;
 //! - the simulated provider's sleeps (`SLOW`, `HUNG`, `LINGERING`);
 //! - the model route's requests upstream, through `ureq`;
 //! - [`Clock::unix`], the run's start by the machine's clock.
@@ -166,4 +166,10 @@ fn disconnected() -> ! {
 /// The deadline at `at`, a time since the run started by `clock`, for a call that takes one.
 pub(super) fn deadline(clock: &impl Clock, at: Duration) -> Deadline {
     Deadline::after(at.saturating_sub(clock.now()))
+}
+
+/// The time left until `at`, a time since the run started by `clock`: never zero, and none once
+/// it has passed, as [`Deadline::remaining`] gives.
+pub(super) fn left(clock: &impl Clock, at: Duration) -> Option<Duration> {
+    (at.checked_sub(clock.now())).filter(|left| !left.is_zero())
 }

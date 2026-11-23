@@ -153,7 +153,7 @@ fn check_apis(entries: &[(Api, &[&str])], cases: &[(&str, Request)], expect: &Ex
     let sandbox = thread::spawn(move || fake_sandbox(&socket, requests, None, None));
     let (sender, arrivals) = mpsc::channel();
     let by = Deadline::after(HUNG);
-    let accepted = registration.accept(by, None, true, sender, |arrival| arrival, || false);
+    let accepted = registration.accept(|| by.remaining(), None, true, sender, |a| a, || false);
     let session = accepted.unwrap();
     let mut first = None;
     let sent: Vec<Option<String>> = cases

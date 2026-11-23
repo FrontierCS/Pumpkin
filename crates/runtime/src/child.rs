@@ -21,7 +21,6 @@ use gateway::{Arrival, IncomingModelRequest, Session, Trees};
 use provider::UnixTime;
 use schema::sandbox::OpPayloadLimit;
 
-use super::host::deadline;
 use super::log::Entry;
 use super::sandbox::{Sandboxes, Which};
 use super::{Asked, Clock, Host, Inbox, Input, Runtime};
@@ -148,7 +147,7 @@ pub(super) fn run<H: Host, O: Send + 'static>(
             format!("{noun} sandbox wasn't created: its start was due by a time that had passed");
         return child.close(End::failed(which, reason), || Ok(()));
     }
-    let by = deadline(&child.clock, child.deadlines.startup);
+    let by = (&child.clock, child.deadlines.startup);
     let inbox = child.inbox.sender();
     let started = (child.sandboxes).start(which, ops, by, child.hard_end, inbox, Message::Session);
     let mut sandbox = match started {

@@ -753,6 +753,7 @@ impl Sim {
             .name("sim-sandboxd".to_owned())
             .spawn(move || sandboxd(&gateway, mute, hung, (&hello, awaited), model, &ours))
             .map_err(|error| format!("the sandbox's thread didn't start: {error}"))?;
+        ended(&thread, mute && !hung);
         let late = made == Made::Slow && {
             thread::sleep(SLOW_CREATE.min(by.remaining().unwrap_or_default()));
             by.remaining().is_none()
@@ -1084,6 +1085,14 @@ fn stop(sandbox: Sandbox) {
     thread.thread().unpark();
     // Only a bug panics the thread, and joining raises its panic here.
     thread.join().unwrap();
+}
+
+// Waits for the thread of a sandbox that `ends` at once to end, so that every list after its
+// create finds it ended.
+fn ended(thread: &JoinHandle<()>, ends: bool) {
+    while ends && !thread.is_finished() {
+        thread::sleep(AWAIT_POLL);
+    }
 }
 
 const NEVER_DIALS: &str = "sandboxd: a simulated one, which never dials\n";

@@ -12,7 +12,7 @@ use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::mpsc::Sender;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 use std::{fmt, io};
 
 use decision::{JobId, LeaseId};
@@ -34,7 +34,7 @@ use schema::workflow::{
 use serde::{Deserialize, Deserializer, de};
 use stdx::{Context, Deadline};
 
-use super::{Host, Input, Stopped, interruption, log, record};
+use super::{Clock, Host, Input, Stopped, deadline, interruption, left, log, record};
 
 /// The most entries, files and directories, that the host collects from a sandbox in one tree.
 pub(super) const ENTRIES: u64 = 100_000;
@@ -490,22 +490,20 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         }
     }
 
-    /// Creates and registers a sandbox by its startup bound. On failure the caller owns
-    /// disposal, so it can release prepared peers before a console read or deletion.
+    /// Creates and registers a sandbox by `by`, its startup bound as a time on `clock`. On failure
+    /// the caller owns disposal, so it can release prepared peers before a console read or
+    /// deletion.
     pub(super) fn start<T: Send + 'static>(
         &self,
         which: Which,
         ops: Option<OpPayloadLimit>,
-        by: Deadline,
+        (clock, by): (&H::Clock, Duration),
         hard_end: UnixTime,
         arrivals: Sender<T>,
         wrap: impl Fn(Arrival) -> T + Send + 'static,
     ) -> Result<Started, Unstarted> {
         let name = which.name();
         let now = UnixTime::of(SystemTime::now())?;
-        // The start's deadline by the machine's clock, which the provider reads, at most the hard
-        // end, as the run is abandoned then.
-        let by_unix = (by.remaining()).map_or(now, |left| now.saturating_add(left));
         let role = which.role();
         let model = self.workflow().model(role).is_some();
         let placement = self.placed.placement(role);
@@ -521,13 +519,17 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             ops: ops.is_some(),
             model,
             hard_end,
-            by: by_unix.min(hard_end),
+            // The start's deadline by the machine's clock, which the provider reads, at most the
+            // hard end, as the run is abandoned then.
+            by: (now.saturating_add(by.saturating_sub(clock.now()))).min(hard_end),
         };
-        let started = hosting.meets.create(&self.sockets, &create, by);
+        let by_machine = deadline(clock, by);
+        let started = hosting.meets.create(&self.sockets, &create, by_machine);
         let (Created { id }, registration) = started.inspect_err(|_| {
             let mut inventory = stdx::unpoisoned(self.inventory.lock());
             inventory.unnamed.insert(&placement.provider);
         })?;
+        let looks = Looks::new(clock);
         let made = Made {
             on: &placement.provider,
             id: id.clone(),
@@ -545,14 +547,13 @@ impl<'p, H: Host> Sandboxes<'p, H> {
                 reason: error,
             });
         }
-        let looks = Looks::new();
         // The wait ends at once for a signal, and for a sandbox that its provider lists as
         // ended, which will never connect.
         let stopped = || {
             interruption::signal().is_some()
                 || looks.ended(self.between_looks, || self.ended(hosting.provider, &id))
         };
-        let accepted = registration.accept(by, ops, model, arrivals, wrap, stopped);
+        let accepted = registration.accept(|| left(clock, by), ops, model, arrivals, wrap, stopped);
         let accepted = accepted.map_err(|error| match looks.found() {
             (true, _) => "it ended before it met the gateway: expected its `sandboxd` to run \
                           until it connects"
@@ -562,7 +563,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             }
             (false, _) => error.to_string(),
         });
-        let session = accepted.and_then(|mut session| session.set_up(by).map(|()| session));
+        let session = accepted.and_then(|mut session| session.set_up(by_machine).map(|()| session));
         let session = session.and_then(|session| match session.gpus() {
             Some(gpus) => self.saw(which, &id, gpus).map(|()| session),
             None => Ok(session),
@@ -832,18 +833,20 @@ fn sweep_one(
     Ok(ids)
 }
 
-/// Looks at whether a sandbox has ended, at most once per `between`, and keeps the failure of
-/// the last look if no look has succeeded since.
-struct Looks {
-    last: Cell<Instant>,
+/// Looks at whether a sandbox has ended, at most once per `between` by the run's clock, and keeps
+/// the failure of the last look if no look has succeeded since.
+struct Looks<'c, C> {
+    clock: &'c C,
+    last: Cell<Duration>,
     ended: Cell<bool>,
     failed: RefCell<Option<String>>,
 }
 
-impl Looks {
-    fn new() -> Self {
+impl<'c, C: Clock> Looks<'c, C> {
+    fn new(clock: &'c C) -> Self {
         Self {
-            last: Cell::new(Instant::now()),
+            clock,
+            last: Cell::new(clock.now()),
             ended: Cell::new(false),
             failed: RefCell::new(None),
         }
@@ -852,7 +855,8 @@ impl Looks {
     // The first look comes `between` after the create returned, so every list speaks for the
     // sandbox it made.
     fn ended(&self, between: Duration, look: impl FnOnce() -> Result<bool, String>) -> bool {
-        if !self.ended.get() && self.last.get().elapsed() >= between {
+        let since = self.clock.now().saturating_sub(self.last.get());
+        if !self.ended.get() && since >= between {
             match look() {
                 Ok(ended) => {
                     self.failed.replace(None);
@@ -862,7 +866,7 @@ impl Looks {
                     self.failed.replace(Some(error));
                 }
             }
-            self.last.set(Instant::now());
+            self.last.set(self.clock.now());
         }
         self.ended.get()
     }

@@ -111,7 +111,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
     ) -> Result<(), String> {
         for target in self.workflow().work_targets() {
             let which = Which::Shared(target);
-            let by = deadline(&self.clock, self.placed.startup(target.role()));
+            let by = self.placed.startup(target.role());
             let hard_end = self.unix_hard_end;
             let (resident, rx) = Resident::open();
             self.residents.insert(target, resident);
@@ -128,6 +128,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 .stack_size(bodies.stack_bytes())
                 .spawn_scoped(scope, move || {
                     let arrivals = move |arrival| Input::Shared(target, observed.now(), arrival);
+                    let by = (&clock, by);
                     let started =
                         sandboxes.start(which, None, by, hard_end, inbox.clone(), arrivals);
                     let mut sandbox = match started {

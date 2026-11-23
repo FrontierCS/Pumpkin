@@ -126,7 +126,7 @@ impl Fixture {
         let by = startup();
         let Created { id } = provider().create(create, dial)?;
         let (sender, arrivals) = mpsc::channel();
-        let accepted = registration.accept(by, ops, model, sender, |arrival| arrival, || false);
+        let accepted = registration.accept(|| by.remaining(), ops, model, sender, |a| a, || false);
         let set_up = accepted
             .map_err(|error| error.to_string())
             .and_then(|mut session| {
@@ -1210,7 +1210,8 @@ fn refused_calls() {
             let (status, arrived) = thread::scope(|scope| {
                 let second = scope.spawn(move || {
                     let (arrivals, _) = mpsc::channel();
-                    second.accept(hung(), None, false, arrivals, |arrival| arrival, || false)
+                    let by = hung();
+                    second.accept(|| by.remaining(), None, false, arrivals, |a| a, || false)
                 });
                 let served = serve(&mut sandbox, process, &[]);
                 drop(second.join().unwrap().unwrap());

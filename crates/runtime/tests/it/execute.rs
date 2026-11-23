@@ -1355,8 +1355,14 @@ fn sweep_unrecorded() {
 fn unstarted_undeletable() {
     let mut ir = workflow(&["exit", "0"]);
     ir["roles"][0]["image"] = json!(sim::image(MUTE).as_str());
+    // The create's record lasts until the start's first look, which finds the sandbox ended.
+    let looked = SlowSync {
+        record: Synced::Holding(AGENT_SANDBOX, "sim-1"),
+        queued: 0,
+        at: Duration::from_secs(1),
+    };
     let shown = executed(
-        &SimHost::new(),
+        &SimHost::new().slow_sync(looked),
         "unstarted-undeletable",
         &[(PROVIDER, &Sim::new())],
         &ir,
@@ -1369,9 +1375,9 @@ fn unstarted_undeletable() {
         agent `agent`'s sandbox, agents/agent/sandbox.json: {"delete":{"state":"failed"},"id":"sim-1","provider":"simulated"}
         log.jsonl:
         {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"18270000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-        {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
-        {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_failed","reason":"the agent's sandbox didn't start: it ended before it met the gateway: expected its `sandboxd` to run until it connects"},"observed_ns":"0","seq":2}
-        {"at_ns":"0","note":"the run failed: sandbox sim-1: it ended before it met the gateway: expected its `sandboxd` to run until it connects; its console ends: sandboxd: a simulated one, which never dials; deleting it failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `simulated` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","seq":3}
+        {"actions":[],"at_ns":"1000000000","event":{"kind":"work_started"},"observed_ns":"1000000000","seq":1}
+        {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"agent_failed","reason":"the agent's sandbox didn't start: it ended before it met the gateway: expected its `sandboxd` to run until it connects"},"observed_ns":"1000000000","seq":2}
+        {"at_ns":"1000000000","note":"the run failed: sandbox sim-1: it ended before it met the gateway: expected its `sandboxd` to run until it connects; its console ends: sandboxd: a simulated one, which never dials; deleting it failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `simulated` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","seq":3}
         its last record came before the agent's teardown was to end
         listed once it ended: ["sim-1"]"#]]
     .assert_eq(&shown);
@@ -1752,30 +1758,38 @@ fn interrupted_during_teardown() {
     assert!(!shown.contains(r#""kind":"start_final_call""#));
 }
 
-// The simulated host's clock stands still. So the setup's wait takes the start's failure, and no
-// deadline passes before the core hears of it.
+// The final call's start runs out at its startup, past a look whose list fails. An agent's start
+// that ran out then would race the setup's wait, which ends at the startup too.
 #[test]
 fn unlistable() {
+    let mut ir = workflow(&["exit", "0"]);
+    ir["roles"][2]["image"] = json!(sim::image(UNLISTABLE).as_str());
+    let startup = SlowSync {
+        record: Synced::Holding("jobs/0/.sandbox.json.partial", "sim-2"),
+        queued: 0,
+        at: Duration::from_secs(SHORT_STARTUP),
+    };
     check(
-        &SimHost::new(),
+        &SimHost::new().slow_sync(startup),
         "unlistable",
         &[(PROVIDER, &Sim::with_startup(SHORT_STARTUP))],
-        &workflow(&["exit", "0"]),
-        UNLISTABLE,
+        &ir,
+        SANDBOXD,
         &expect![[r#"
             finished without a result
-            outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: no sandbox connected to <sockets>/agent-0/s by the deadline: expected its sandbox to connect while the deadline lasts; the last list of its provider failed: the simulated list failed while sim-1 lasts: delete it, or create one with another `sandboxd`"}}],"verdict":{"failure":{"kind":"error","reason":"the job's sandbox didn't start: sandbox sim-2: no sandbox connected to <sockets>/job-0/s by the deadline: expected its sandbox to connect while the deadline lasts; the last list of its provider failed: the simulated list failed while sim-2 lasts: delete it, or create one with another `sandboxd`; its console ends: sandboxd: a simulated one, which never dials"},"kind":"no_result"}}
+            outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"failure":{"kind":"error","reason":"the job's sandbox didn't start: sandbox sim-2: no sandbox connected to <sockets>/job-0/s by the deadline: expected its sandbox to connect while the deadline lasts; the last list of its provider failed: the simulated list failed while sim-2 lasts: delete it, or create one with another `sandboxd`; its console ends: sandboxd: a simulated one, which never dials"},"kind":"no_result"}}
             log.jsonl:
             {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"18183000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
-            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_failed","reason":"the agent's sandbox didn't start: no sandbox connected to <sockets>/agent-0/s by the deadline: expected its sandbox to connect while the deadline lasts; the last list of its provider failed: the simulated list failed while sim-1 lasts: delete it, or create one with another `sandboxd`"},"observed_ns":"0","seq":2}
-            {"actions":[],"at_ns":"0","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":3}
-            {"at_ns":"0","note":"agent `agent`: the agent's sandbox didn't start: sandbox sim-1: no sandbox connected to <sockets>/agent-0/s by the deadline: expected its sandbox to connect while the deadline lasts; the last list of its provider failed: the simulated list failed while sim-1 lasts: delete it, or create one with another `sandboxd`; its console ends: sandboxd: a simulated one, which never dials","seq":4}
-            {"at_ns":"0","note":"the agent's sandbox never started: nothing was collected","seq":5}
-            {"actions":[{"job":0,"kind":"start_final_call","selections":[{"role":"agent","selection":null}],"timeout_ns":"120000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"0","seq":6}
-            {"actions":[],"at_ns":"0","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":7}
-            {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_failed","reason":"the job's sandbox didn't start: sandbox sim-2: no sandbox connected to <sockets>/job-0/s by the deadline: expected its sandbox to connect while the deadline lasts; the last list of its provider failed: the simulated list failed while sim-2 lasts: delete it, or create one with another `sandboxd`; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"0","seq":8}
-            {"actions":[{"kind":"finish"}],"at_ns":"0","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"0","seq":9}
+            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
+            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"0","seq":3}
+            {"at_ns":"0","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":4}
+            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_collected"},"seq":5}
+            {"actions":[],"at_ns":"0","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":6}
+            {"actions":[{"job":0,"kind":"start_final_call","selections":[{"role":"agent","selection":null}],"timeout_ns":"120000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"0","seq":7}
+            {"actions":[],"at_ns":"1000000000","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":8}
+            {"actions":[],"at_ns":"1000000000","event":{"job":0,"kind":"call_failed","reason":"the job's sandbox didn't start: sandbox sim-2: no sandbox connected to <sockets>/job-0/s by the deadline: expected its sandbox to connect while the deadline lasts; the last list of its provider failed: the simulated list failed while sim-2 lasts: delete it, or create one with another `sandboxd`; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"1000000000","seq":9}
+            {"actions":[{"kind":"finish"}],"at_ns":"1000000000","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"1000000000","seq":10}
             its last record came before the agent's teardown was to end"#]],
     );
 }
@@ -2052,12 +2066,18 @@ fn call_starts_past_the_deadline() {
 #[test]
 fn call_placed_apart() {
     // The call's start runs out at its target's class's startup, though the agent's class gives
-    // 30 s, so the agent sees the call errored long before the deadline.
+    // 30 s, so the agent sees the call errored long before the deadline. The create's record
+    // lasts until that startup.
     let mut ir = ops_workflow(&["ops", "call train 6", "await 0 errored"], 30);
     ir["roles"][1]["image"] = json!(sim::image(HUNG).as_str());
     ir["roles"][1]["needs"]["cpu_model"] = json!(BRIEF);
+    let startup = SlowSync {
+        record: Synced::Holding("jobs/0/.sandbox.json.partial", "sim-2"),
+        queued: 0,
+        at: Duration::from_secs(1),
+    };
     check(
-        &System,
+        &SimHost::new().slow_sync(startup),
         "call-placed-apart",
         &[(PROVIDER, &Sim::new())],
         &ir,
@@ -2067,22 +2087,22 @@ fn call_placed_apart() {
             payloads hold: ["xxxxxx"]
             outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"work_started"},"observed_ns":"<ns>","seq":1}
-            {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-            {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":3}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":4}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_failed","reason":"the job's sandbox didn't start: sandbox sim-2: no sandbox connected to <sockets>/job-0/s by the deadline: expected its sandbox to connect while the deadline lasts; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"<ns>","seq":5}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":6}
-            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":7}
-            {"at_ns":"<ns>","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":8}
-            {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_collected"},"seq":9}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":10}
-            {"actions":[{"job":1,"kind":"start_final_call","selections":[{"role":"agent","selection":null}],"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"<ns>","seq":11}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"call_started"},"observed_ns":"<ns>","seq":12}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"call_returned","returned":[{"name":"score","value":0}]},"observed_ns":"<ns>","seq":13}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":14}
-            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":1,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":15}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
+            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
+            {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
+            {"actions":[],"at_ns":"1000000000","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":4}
+            {"actions":[],"at_ns":"1000000000","event":{"job":0,"kind":"call_failed","reason":"the job's sandbox didn't start: sandbox sim-2: no sandbox connected to <sockets>/job-0/s by the deadline: expected its sandbox to connect while the deadline lasts; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"1000000000","seq":5}
+            {"actions":[],"at_ns":"1000000000","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"1000000000","seq":6}
+            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"1000000000","seq":7}
+            {"at_ns":"1000000000","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":8}
+            {"actions":[],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"agent_collected"},"seq":9}
+            {"actions":[],"at_ns":"1000000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":10}
+            {"actions":[{"job":1,"kind":"start_final_call","selections":[{"role":"agent","selection":null}],"timeout_ns":"120000000000"}],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"1000000000","seq":11}
+            {"actions":[],"at_ns":"1000000000","event":{"job":1,"kind":"call_started"},"observed_ns":"1000000000","seq":12}
+            {"actions":[],"at_ns":"1000000000","event":{"job":1,"kind":"call_returned","returned":[{"name":"score","value":0}]},"observed_ns":"1000000000","seq":13}
+            {"actions":[],"at_ns":"1000000000","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":14}
+            {"actions":[{"kind":"finish"}],"at_ns":"1000000000","event":{"job":1,"kind":"call_torn_down"},"observed_ns":"1000000000","seq":15}
             its last record came before the agent's teardown was to end"#]],
     );
 }
@@ -2111,7 +2131,7 @@ fn spans_providers() {
         let (here, there) = (Sim::new().named("here"), there(reach(Sim::new())));
         let providers = [("here", &here), ("there", &there)];
         let shown = executed(
-            &System,
+            &SimHost::new(),
             "spans-providers",
             &providers,
             &ir,
@@ -2125,32 +2145,32 @@ fn spans_providers() {
             outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
             outcome.json's usage: {"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"here"},{"class":"brief","count":1,"lasted_ns":"<ns>","provider":"there"},{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"there"}],"tokens":{"input":0,"output":0,"responses":0}}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"work_started"},"observed_ns":"<ns>","seq":1}
-            {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-            {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":3}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_started"},"observed_ns":"<ns>","seq":4}
-            {"actions":[],"at_ns":"<ns>","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":0,"kind":"target_put","path":"/work/payload"},"observed_ns":"<ns>","seq":5}
-            {"actions":[],"at_ns":"<ns>","event":{"argv":["judge","/work/payload","/work/result.json"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"<ns>","seq":6}
-            {"actions":[],"at_ns":"<ns>","event":{"command":0,"end":{"exited":{"code":0}},"job":0,"kind":"command_ended"},"observed_ns":"<ns>","seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":0,"kind":"target_get","path":"/work/result.json"},"observed_ns":"<ns>","seq":8}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_returned","returned":[{"name":"raw_score","value":6}]},"observed_ns":"<ns>","seq":9}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"there","sandbox":"job-0"},"seq":10}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":11}
-            {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":"<s>","returned":{"state":"accepted"}}}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":1,"request":{"evaluated":{"effects":["set_submission","end_work"],"returned":[{"name":"state","value":"accepted"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":12}
-            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":13}
-            {"at_ns":"<ns>","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":14}
-            {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_collected"},"seq":15}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"here","sandbox":"agent-0"},"seq":16}
-            {"actions":[{"job":1,"kind":"start_final_call","selections":[{"role":"agent","selection":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}],"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"<ns>","seq":17}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"call_started"},"observed_ns":"<ns>","seq":18}
-            {"actions":[],"at_ns":"<ns>","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":1,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"<ns>","seq":19}
-            {"actions":[],"at_ns":"<ns>","event":{"argv":["judge","/pumpkin/in/payload/raw"],"command":0,"job":1,"kind":"target_run"},"observed_ns":"<ns>","seq":20}
-            {"actions":[],"at_ns":"<ns>","event":{"command":0,"end":{"exited":{"code":0}},"job":1,"kind":"command_ended"},"observed_ns":"<ns>","seq":21}
-            {"actions":[],"at_ns":"<ns>","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":1,"kind":"target_get","path":"/pumpkin/out/result.json"},"observed_ns":"<ns>","seq":22}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"call_returned","returned":[{"name":"score","value":6}]},"observed_ns":"<ns>","seq":23}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"there","sandbox":"job-1"},"seq":24}
-            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":1,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":25}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
+            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
+            {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
+            {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_started"},"observed_ns":"0","seq":4}
+            {"actions":[],"at_ns":"0","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":0,"kind":"target_put","path":"/work/payload"},"observed_ns":"0","seq":5}
+            {"actions":[],"at_ns":"0","event":{"argv":["judge","/work/payload","/work/result.json"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"0","seq":6}
+            {"actions":[],"at_ns":"0","event":{"command":0,"end":{"exited":{"code":0}},"job":0,"kind":"command_ended"},"observed_ns":"0","seq":7}
+            {"actions":[],"at_ns":"0","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":0,"kind":"target_get","path":"/work/result.json"},"observed_ns":"0","seq":8}
+            {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_returned","returned":[{"name":"raw_score","value":6}]},"observed_ns":"0","seq":9}
+            {"actions":[],"at_ns":"0","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"there","sandbox":"job-0"},"seq":10}
+            {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"0","seq":11}
+            {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":30,"returned":{"state":"accepted"}}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":1,"request":{"evaluated":{"effects":["set_submission","end_work"],"returned":[{"name":"state","value":"accepted"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":12}
+            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"0","seq":13}
+            {"at_ns":"0","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":14}
+            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_collected"},"seq":15}
+            {"actions":[],"at_ns":"0","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"here","sandbox":"agent-0"},"seq":16}
+            {"actions":[{"job":1,"kind":"start_final_call","selections":[{"role":"agent","selection":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}],"timeout_ns":"120000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"0","seq":17}
+            {"actions":[],"at_ns":"0","event":{"job":1,"kind":"call_started"},"observed_ns":"0","seq":18}
+            {"actions":[],"at_ns":"0","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":1,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"0","seq":19}
+            {"actions":[],"at_ns":"0","event":{"argv":["judge","/pumpkin/in/payload/raw"],"command":0,"job":1,"kind":"target_run"},"observed_ns":"0","seq":20}
+            {"actions":[],"at_ns":"0","event":{"command":0,"end":{"exited":{"code":0}},"job":1,"kind":"command_ended"},"observed_ns":"0","seq":21}
+            {"actions":[],"at_ns":"0","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":1,"kind":"target_get","path":"/pumpkin/out/result.json"},"observed_ns":"0","seq":22}
+            {"actions":[],"at_ns":"0","event":{"job":1,"kind":"call_returned","returned":[{"name":"score","value":6}]},"observed_ns":"0","seq":23}
+            {"actions":[],"at_ns":"0","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"there","sandbox":"job-1"},"seq":24}
+            {"actions":[{"kind":"finish"}],"at_ns":"0","event":{"job":1,"kind":"call_torn_down"},"observed_ns":"0","seq":25}
             its last record came before the agent's teardown was to end
             here published: ["sandboxd /sim/sandboxd", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
             here: the class at each create: ["sim"]
@@ -2199,15 +2219,13 @@ fn sweeps_each_provider() {
     );
 }
 
-// The watcher takes each provider's list for that provider's starts alone.
+// Each start looks at its own provider's list.
 #[test]
+#[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
 fn watches_each_provider() {
     let argv = [
         "ops",
         "call near 6",
-        // The agent can't tell when a start is handed to the watcher, so a second's sleep orders
-        // the two: `here`'s start waits as `there`'s begins.
-        "sleep 1",
         "call train 6",
         "await 0 errored",
         "await 1 errored",
@@ -2225,15 +2243,24 @@ fn watches_each_provider() {
     grant["name"] = json!("near");
     grant["job"]["target"] = json!("nearer");
     grants.as_array_mut().unwrap().push(grant);
-    // A simulated sandbox that never dials waits on nothing but its start's deadline, so the near
-    // call's start is kept waiting by its class's startup, 4 s: past the end of the train call's
-    // start, a second later, at its class's 2 s. A watcher that listed `here` alone while its
-    // start waits would leave the train call's start to run out at its startup.
+    // The train call's create's record lasts half its class's startup, so its start's look at
+    // `there` finds its sandbox ended. A look at `here` would leave that start waiting.
+    let looked = SlowSync {
+        record: Synced::Holding("jobs/1/.sandbox.json.partial", "sim-1"),
+        queued: 0,
+        at: Duration::from_millis(500),
+    };
+    // The run log's next record after the train call's end lasts until the near call's startup.
+    let startup = SlowSync {
+        record: Synced::Holding("log.jsonl", r#""event":{"job":1,"kind":"call_torn_down"}"#),
+        queued: 0,
+        at: Duration::from_secs(4),
+    };
     let here = Sim::with_startup(4).named("here");
     let there = there(Sim::new());
     let providers = [("here", &here), ("there", &there)];
     check(
-        &System,
+        &SimHost::new().slow_sync(looked).slow_sync(startup),
         "watches-each-provider",
         &providers,
         &ir,
@@ -2244,26 +2271,26 @@ fn watches_each_provider() {
             provider.json places the roles: {"agent":{"class":"sim","provider":"here"},"final_judge":{"class":"sim","provider":"there"},"nearer":{"class":"sim","provider":"here"},"trainer":{"class":"brief","provider":"there"}}
             outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"<ns>","event":{"hard_end_ns":"248000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"work_started"},"observed_ns":"<ns>","seq":1}
-            {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-            {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"near","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"near","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":3}
-            {"actions":[{"kind":"reply","reply":{"job":1,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":1,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":1,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":4}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"there","sandbox":"job-1"},"seq":5}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"call_failed","reason":"the job's sandbox didn't start: sandbox sim-1: it ended before it met the gateway: expected its `sandboxd` to run until it connects; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"<ns>","seq":6}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"here","sandbox":"job-0"},"seq":8}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_failed","reason":"the job's sandbox didn't start: sandbox sim-2: no sandbox connected to <sockets>/job-0/s by the deadline: expected its sandbox to connect while the deadline lasts; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"<ns>","seq":9}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":10}
-            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":11}
-            {"at_ns":"<ns>","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":12}
-            {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_collected"},"seq":13}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"here","sandbox":"agent-0"},"seq":14}
-            {"actions":[{"job":2,"kind":"start_final_call","selections":[{"role":"agent","selection":null}],"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"<ns>","seq":15}
-            {"actions":[],"at_ns":"<ns>","event":{"job":2,"kind":"call_started"},"observed_ns":"<ns>","seq":16}
-            {"actions":[],"at_ns":"<ns>","event":{"job":2,"kind":"call_returned","returned":[{"name":"score","value":0}]},"observed_ns":"<ns>","seq":17}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"there","sandbox":"job-2"},"seq":18}
-            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":2,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":19}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"248000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
+            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
+            {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"near","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"near","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
+            {"actions":[{"kind":"reply","reply":{"job":1,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":1,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":1,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":4}
+            {"actions":[],"at_ns":"500000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"there","sandbox":"job-1"},"seq":5}
+            {"actions":[],"at_ns":"500000000","event":{"job":1,"kind":"call_failed","reason":"the job's sandbox didn't start: sandbox sim-1: it ended before it met the gateway: expected its `sandboxd` to run until it connects; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"500000000","seq":6}
+            {"actions":[],"at_ns":"500000000","event":{"job":1,"kind":"call_torn_down"},"observed_ns":"500000000","seq":7}
+            {"actions":[],"at_ns":"4000000000","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"here","sandbox":"job-0"},"seq":8}
+            {"actions":[],"at_ns":"4000000000","event":{"job":0,"kind":"call_failed","reason":"the job's sandbox didn't start: sandbox sim-2: no sandbox connected to <sockets>/job-0/s by the deadline: expected its sandbox to connect while the deadline lasts; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"4000000000","seq":9}
+            {"actions":[],"at_ns":"4000000000","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"4000000000","seq":10}
+            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"4000000000","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"4000000000","seq":11}
+            {"at_ns":"4000000000","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":12}
+            {"actions":[],"at_ns":"4000000000","event":{"caller":"agent-0","kind":"agent_collected"},"seq":13}
+            {"actions":[],"at_ns":"4000000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"here","sandbox":"agent-0"},"seq":14}
+            {"actions":[{"job":2,"kind":"start_final_call","selections":[{"role":"agent","selection":null}],"timeout_ns":"120000000000"}],"at_ns":"4000000000","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"4000000000","seq":15}
+            {"actions":[],"at_ns":"4000000000","event":{"job":2,"kind":"call_started"},"observed_ns":"4000000000","seq":16}
+            {"actions":[],"at_ns":"4000000000","event":{"job":2,"kind":"call_returned","returned":[{"name":"score","value":0}]},"observed_ns":"4000000000","seq":17}
+            {"actions":[],"at_ns":"4000000000","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"there","sandbox":"job-2"},"seq":18}
+            {"actions":[{"kind":"finish"}],"at_ns":"4000000000","event":{"job":2,"kind":"call_torn_down"},"observed_ns":"4000000000","seq":19}
             its last record came before the agent's teardown was to end
             here published: ["sandboxd /sim/sandboxd", "image sha256:1111111111111111111111111111111111111111111111111111111111111111", "image sha256:2f73696d2f68756e670000000000000000000000000000000000000000000000"]
             here: the class at each create: ["sim", "sim"]
@@ -2446,12 +2473,14 @@ fn undeleted_after_its_return() {
 #[test]
 fn deleted_while_torn_down() {
     let argv = ["ops", "call train slow", "await_log target_run", "exit"];
-    // A call timeout far longer than the agent takes to exit, so that the stop ends the call.
     let mut ir = short_workflow(&argv, 30);
-    ir["roles"][0]["runtime"]["agent"]["grants"][0]["job"]["call_timeout_seconds"] = json!(20);
     ir["roles"][0]["image"] = json!(sim::image(LAST).as_str());
+    // The agent's delete is recorded once the call's is logged: its `LAST` sandbox orders only
+    // the provider's deletes, not what each thread reports after its delete.
+    let deleted = Synced::Holding(AGENT_SANDBOX, DELETED);
+    let host = SimHost::new().held_sync(deleted, r#""provider":"simulated","sandbox":"job-0""#);
     let dir = TestDir::new();
-    let (record, outcome) = execute_agents(&System, SHORT_STARTUP, ir, &dir, None);
+    let (record, outcome) = execute_agents(&host, SHORT_STARTUP, ir, &dir, None);
     outcome.unwrap();
     let recorded: Value =
         serde_json::from_slice(&fs::read(record.join("outcome.json")).unwrap()).unwrap();
@@ -2661,32 +2690,28 @@ fn model_request_after_abandon() {
         at: Duration::ZERO,
         then: 3,
     };
-    // Its sandbox was created on time, but the record holds its start past the hard end.
-    let late = SlowSync {
-        record: Synced::Holding("jobs/0/.sandbox.json.partial", "sim-2"),
-        queued: 0,
-        at: PAST_THE_HARD_END,
-    };
     // The call reports its command and model request while the loop syncs its abandon.
     let requested = SlowSync {
         record: Synced::Holding("log.jsonl", r#""kind":"abandon""#),
         queued: 2,
         at: PAST_THE_HARD_END,
     };
-    let host = SimHost::new()
-        .late_take(waited)
-        .slow_sync(late)
-        .slow_sync(requested);
+    let host = SimHost::new().late_take(waited).slow_sync(requested);
+    // Its sandbox met the gateway on time, but its set-up lasts past the hard end.
+    let late = host.moving_to(PAST_THE_HARD_END);
+    let here = Sim::with_startup(SHORT_STARTUP).named("here");
+    let there = there(Sim::with_startup(SHORT_STARTUP)).holding_set_ups(1, late);
     check(
         &host,
         "model-request-after-abandon",
-        &[(PROVIDER, &Sim::with_startup(SHORT_STARTUP))],
+        &[("here", &here), ("there", &there)],
         &ir,
         SANDBOXD,
         &expect![[r#"
             failed: the run was still going at its hard end, 6 s after it started: expected it to end within its deadline, its finalize grace, its final call's timeout and its sandboxes' startups
             payloads hold: ["xxxxxx"]
             provider.json routes: {"final_judge":[{"api":"responses","models":{"m-small":{"upstream_name":"vendor/m-small","usd_per_mtok":{"cache_write":3.75,"cached":0.3,"input":3.0,"output":15.0}}},"upstream":"stand-in"}]}
+            provider.json places the roles: {"agent":{"class":"sim","provider":"here"},"final_judge":{"class":"sim","provider":"there"},"trainer":{"class":"sim","provider":"there"}}
             log.jsonl:
             {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"6000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
@@ -2695,7 +2720,7 @@ fn model_request_after_abandon() {
             {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":0,"returned":{"state":"accepted"}}},{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":1,"request":{"evaluated":{"effects":["set_submission","end_work"],"returned":[{"name":"state","value":"accepted"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":4}
             {"at_ns":"0","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":5}
             {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_collected"},"seq":6}
-            {"actions":[],"at_ns":"0","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":7}
+            {"actions":[],"at_ns":"0","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"here","sandbox":"agent-0"},"seq":7}
             {"actions":[{"job":0,"kind":"start_final_call","selections":[{"role":"agent","selection":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}],"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"0","seq":8}
             {"actions":[{"kind":"abandon"}],"at_ns":"6500000000","event":{"kind":"tick"},"observed_ns":"6500000000","seq":9}
             {"actions":[],"at_ns":"6500000000","event":{"job":0,"kind":"call_started"},"observed_ns":"6500000000","seq":10}
@@ -2705,11 +2730,15 @@ fn model_request_after_abandon() {
             {"at_ns":"6500000000","note":"job 0's log/0 is incomplete: collecting /pumpkin/log/0 failed: the request's deadline passed before it was sent: expected time left to send it","seq":14}
             {"at_ns":"6500000000","note":"job 0's out is incomplete: collecting /pumpkin/out failed: the request's deadline passed before it was sent: expected time left to send it","seq":15}
             {"actions":[],"at_ns":"6500000000","event":{"job":0,"kind":"call_failed","reason":"the call was stopped"},"observed_ns":"6500000000","seq":16}
-            {"actions":[],"at_ns":"6500000000","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":17}
+            {"actions":[],"at_ns":"6500000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"there","sandbox":"job-0"},"seq":17}
             {"actions":[],"at_ns":"6500000000","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"6500000000","seq":18}
             {"at_ns":"6500000000","note":"the run failed: the run was still going at its hard end, 6 s after it started: expected it to end within its deadline, its finalize grace, its final call's timeout and its sandboxes' startups","seq":19}
             its last record came once the hard end had passed
-            the model endpoint at each create: [false, true]"#]],
+            here published: ["sandboxd /sim/sandboxd", "image sha256:1111111111111111111111111111111111111111111111111111111111111111"]
+            here: the class at each create: ["sim"]
+            there published: ["sandboxd /sim/sandboxd", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
+            there: the model endpoint at each create: [true]
+            there: the class at each create: ["sim"]"#]],
     );
 }
 
@@ -5271,6 +5300,13 @@ fn final_body_reads_submitted_bytes_after_one_agent_fails_to_start() {
     let mut broken = roles[0].clone();
     broken["name"] = json!("broken");
     broken["image"] = json!(sim::image(sim::HUNG_LAST).as_str());
+    // A startup shorter than the other agents', at which its create's record ends.
+    broken["needs"]["cpu_model"] = json!(BRIEF);
+    let startup = SlowSync {
+        record: Synced::Holding("agents/broken/.sandbox.json.partial", "sim-"),
+        queued: 0,
+        at: Duration::from_secs(1),
+    };
     let mut beta = roles[0].clone();
     beta["name"] = json!("beta");
     beta["runtime"]["agent"]["command"]["argv"] = json!([
@@ -5282,7 +5318,7 @@ fn final_body_reads_submitted_bytes_after_one_agent_fails_to_start() {
     ]);
     roles.extend([broken, beta]);
     let dir = TestDir::new();
-    let (record, agents, result) = judged(&System, ir, &dir);
+    let (record, agents, result) = judged(&SimHost::new().slow_sync(startup), ir, &dir);
     assert!(agents[0].submission.as_ref().unwrap().finalized);
     assert!(matches!(
         agents[1].work_end,
@@ -5385,9 +5421,16 @@ fn judge_waits_for_failed_agent_deletion() {
     let mut broken = roles[0].clone();
     broken["name"] = json!("broken");
     broken["image"] = json!(sim::image(sim::HUNG_REFUSED).as_str());
+    // A startup shorter than the other agent's, at which its create's record ends.
+    broken["needs"]["cpu_model"] = json!(BRIEF);
     roles.push(broken);
+    let startup = SlowSync {
+        record: Synced::Holding("agents/broken/.sandbox.json.partial", "sim-"),
+        queued: 0,
+        at: Duration::from_secs(1),
+    };
     let dir = TestDir::new();
-    let (record, outcome) = execute_agents(&System, 2, ir, &dir, None);
+    let (record, outcome) = execute_agents(&SimHost::new().slow_sync(startup), 2, ir, &dir, None);
     assert!(
         outcome
             .unwrap_err()
@@ -5735,8 +5778,14 @@ fn shared_start_failure_is_disposed_before_final() {
         "board",
     );
     ir["roles"][1]["image"] = json!(sim::image(MUTE).as_str());
+    // The create's record lasts until the start's first look, which finds the sandbox ended.
+    let looked = SlowSync {
+        record: Synced::Holding("shared/trainer/.sandbox.json.partial", "sim-"),
+        queued: 0,
+        at: Duration::from_secs(1),
+    };
     let dir = TestDir::new();
-    let (record, agents, _) = judged(&SimHost::new(), ir, &dir);
+    let (record, agents, _) = judged(&SimHost::new().slow_sync(looked), ir, &dir);
     assert!(agents[0].submission.as_ref().unwrap().finalized);
     let log = read_log(&record);
     let failure = log

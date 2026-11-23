@@ -136,8 +136,8 @@ impl Sandbox {
         };
         let sandboxd = sandboxd.spawn().unwrap();
         let (sender, arrivals) = mpsc::channel();
-        let accepted =
-            registration.accept(hung(), None, false, sender, |arrival| arrival, || false);
+        let by = hung();
+        let accepted = registration.accept(|| by.remaining(), None, false, sender, |a| a, || false);
         let mut session = accepted.unwrap();
         let dirs = ["in", "out", "home", "log"].map(relative);
         session
@@ -1403,7 +1403,8 @@ fn as_root_with_user() {
     let container = format!("sandboxd-{}-as-root", std::process::id());
     start_as_root(&dir, &container, "1234:1235");
     let (sender, arrivals) = mpsc::channel();
-    let accepted = registration.accept(hung(), None, false, sender, |arrival| arrival, || false);
+    let by = hung();
+    let accepted = registration.accept(|| by.remaining(), None, false, sender, |a| a, || false);
     let mut session = accepted.unwrap();
     let mut lines = as_user(&mut session, &arrivals, &root.join("collected"));
     lines.extend(left_behind(&mut session, &arrivals, &container));

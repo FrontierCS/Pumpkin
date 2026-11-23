@@ -177,8 +177,9 @@ fn connect(
         replies
     });
     let (sender, arrivals) = mpsc::channel();
+    let by = hung();
     let session = registration
-        .accept(hung(), ops, models, sender, |arrival| arrival, || false)
+        .accept(|| by.remaining(), ops, models, sender, |a| a, || false)
         .unwrap();
     let second = UnixStream::connect(&socket).unwrap_err().kind();
     assert_eq!(second, std::io::ErrorKind::NotFound, "a second connection");
@@ -204,7 +205,7 @@ fn opened(dir: &Path, opening: Opening, by: Deadline) -> String {
         answer
     });
     let (sender, _arrivals) = mpsc::channel();
-    let accepted = registration.accept(by, None, false, sender, |arrival| arrival, || false);
+    let accepted = registration.accept(|| by.remaining(), None, false, sender, |a| a, || false);
     let outcome = outcome(accepted.and_then(|mut session| session.freeze(hung())));
     format!("heard {}; {outcome}", sandbox.join().unwrap())
 }
@@ -1258,7 +1259,8 @@ fn stopped() {
                 let (sender, _) = mpsc::channel();
                 let by = hung();
                 let stopped = || first || !socket.exists();
-                let accepted = registration.accept(by, None, false, sender, |a| a, stopped);
+                let accepted =
+                    registration.accept(|| by.remaining(), None, false, sender, |a| a, stopped);
                 let returned = by.remaining().map_or("past", |_| "before");
                 let accepted = outcome(accepted.map(drop));
                 let accepted = accepted.replace(&dir.display().to_string(), "<dir>");
@@ -1505,7 +1507,7 @@ fn twice(address: SocketAddr, said: &Sender<String>, name: &'static str) -> [Joi
 
 fn accept_and_freeze(registration: Registration, by: Deadline) -> String {
     let (sender, _arrivals) = mpsc::channel();
-    let accepted = registration.accept(by, None, false, sender, |arrival| arrival, || false);
+    let accepted = registration.accept(|| by.remaining(), None, false, sender, |a| a, || false);
     outcome(accepted.and_then(|mut session| session.freeze(hung())))
 }
 
@@ -1566,7 +1568,8 @@ fn awaited(listener: &Listener, address: SocketAddr) -> Vec<String> {
     let sandbox = sandbox(address, hello.clone(), PAUSE, answer, (said, "awaited"));
     let ops = Some(OpPayloadLimit::NONE);
     let (sender, arrivals) = mpsc::channel();
-    let accepted = registration.accept(hung(), ops, false, sender, |arrival| arrival, || false);
+    let by = hung();
+    let accepted = registration.accept(|| by.remaining(), ops, false, sender, |a| a, || false);
     let mut session = accepted.unwrap();
     let frozen = outcome(session.freeze(hung()));
     let mut lines = vec![format!("{}; freeze: {frozen}", heard.recv().unwrap())];
@@ -1650,7 +1653,7 @@ fn stopped_accept(listener: &Listener, address: SocketAddr) -> Vec<String> {
         looks.get() > 2
     };
     let (sender, _) = mpsc::channel();
-    let accepted = registration.accept(by, None, false, sender, |arrival| arrival, stopped);
+    let accepted = registration.accept(|| by.remaining(), None, false, sender, |a| a, stopped);
     let accepted = outcome(accepted.map(drop));
     let returned = by.remaining().map_or("past", |_| "before");
     let presented = present(address, &attesting("stopped"));
@@ -1777,9 +1780,10 @@ fn dials() {
                 let (Listening { grant }, unreached) = dialer.issue().unwrap();
                 (grant, unreached)
             };
-            let accepted = |registration: Registration, by, stopped: bool| {
+            let accepted = |registration: Registration, by: Deadline, stopped: bool| {
                 let (sender, _) = mpsc::channel();
-                let session = registration.accept(by, None, false, sender, |a| a, || stopped);
+                let session =
+                    registration.accept(|| by.remaining(), None, false, sender, |a| a, || stopped);
                 session
                     .map(drop)
                     .map_err(|error| format!("{:?}: {error}", error.kind()))
@@ -1845,7 +1849,7 @@ fn untrusted() -> String {
     let (sender, _) = mpsc::channel();
     let by = Deadline::after(Duration::from_millis(900));
     let registration = unreached.at(endpoint(port));
-    let session = registration.accept(by, None, false, sender, |a| a, || false);
+    let session = registration.accept(|| by.remaining(), None, false, sender, |a| a, || false);
     let session = session.map(drop).map_err(|error| {
         format!("{:?}: {error}", error.kind()).replace(&port.to_string(), "$PORT")
     });

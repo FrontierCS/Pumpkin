@@ -33,20 +33,24 @@ pub(super) struct Agent {
 }
 
 impl Agent {
-    /// Creates the sandbox and installs the files its command needs. Keeps the session even on
-    /// a file error so its output and deletion are accounted for by the usual teardown.
-    fn prepare(
-        sandboxes: &Sandboxes<'_, impl Host>,
+    /// Creates the sandbox by `startup`, a time on `clock`, and installs the files its command
+    /// needs by `by`. Keeps the session even on a file error so its output and deletion are
+    /// accounted for by the usual teardown.
+    fn prepare<H: Host>(
+        sandboxes: &Sandboxes<'_, H>,
         agent: &workflow::Agent,
+        startup: Duration,
         by: Deadline,
         hard_end: UnixTime,
         inbox: Sender<Input>,
-        clock: impl Clock,
+        clock: &H::Clock,
     ) -> Result<(Self, Result<Launch, String>), Unstarted> {
         let id = agent.id;
         let ops = Some(op_payload_limit(sandboxes.workflow(), id));
-        let wrap = move |arrival| Input::Agent(id, clock.now(), arrival);
-        let mut sandbox = sandboxes.start(Which::Agent(id), ops, by, hard_end, inbox, wrap)?;
+        let stamp = clock.clone();
+        let wrap = move |arrival| Input::Agent(id, stamp.now(), arrival);
+        let startup = (clock, startup);
+        let mut sandbox = sandboxes.start(Which::Agent(id), ops, startup, hard_end, inbox, wrap)?;
         let launch = put(&mut sandbox.session, agent, by).map(|stdin| Launch {
             stdin,
             ..launch(&agent.command)
@@ -218,7 +222,8 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             let inbox = self.inbox.sender();
             let bound = self.placed.startup(id.role());
             let by = deadline(&clock, bound);
-            let prepare = move || Agent::prepare(sandboxes, role, by, hard_end, inbox, clock);
+            let prepare =
+                move || Agent::prepare(sandboxes, role, bound, by, hard_end, inbox, &clock);
             startup = startup.max(bound);
             self.starting.insert(id, false);
             let (release, gate) = mpsc::channel();
