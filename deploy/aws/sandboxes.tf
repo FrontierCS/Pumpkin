@@ -2,12 +2,9 @@
 
 # A sandbox's instance pulls its role's image and the `sandboxd` image, and may do nothing else.
 resource "aws_iam_role" "sandbox" {
-  name        = "${local.prefix}-sandbox"
-  description = "Pumpkin sandbox instances: pull their images"
-  assume_role_policy = jsonencode({
-    Version   = "2012-10-17"
-    Statement = [{ Effect = "Allow", Principal = { Service = "ec2.amazonaws.com" }, Action = "sts:AssumeRole" }]
-  })
+  name               = "${local.prefix}-sandbox"
+  description        = "Pumpkin sandbox instances: pull their images"
+  assume_role_policy = local.ec2_assume_role_policy
 }
 
 resource "aws_iam_role_policy" "sandbox" {

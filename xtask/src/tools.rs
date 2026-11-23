@@ -91,8 +91,9 @@ pub(crate) const TERRAFORM: Release = Release {
     member: Some("terraform"),
 };
 
-/// Terraform's AWS provider, at the oldest version that `deploy/aws/versions.tf` allows. Its
-/// SHA-256 is from its release's signed `SHA256SUMS` too.
+/// Terraform's AWS provider, at the oldest version that `deploy/aws/versions.tf` allows and the
+/// root in `deploy/aws/examples/team` pins. Its SHA-256 is from its release's signed `SHA256SUMS`
+/// too.
 const AWS_PROVIDER: Release = Release {
     name: "terraform-provider-aws",
     version: "6.72.0",
