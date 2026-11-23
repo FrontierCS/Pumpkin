@@ -1,14 +1,14 @@
 // A failure, as the run page draws every one, a run's ending or a call's, from one object: whose
 // fault the record says it is, its subject as a link that selects it, when it failed, what the
-// subject left, and the reason whole; and the one mark that the lanes and the diagram carry on
-// the subject. Nothing here reads a reason's words, or asks what kind a subject is.
+// subject left, and the reason, as the server cuts strings; and the one mark that the lanes and
+// the diagram carry on the subject. Nothing here reads a reason's words, or asks what kind a subject is.
 
 import { bytes, clock, fill, getText, h, plural, sentence, svg, utc } from "./h.js";
 
 /**
  * @typedef {object} Failure a failure that the record states, or a run's ending without a result
  * @property {string} state how it ended, as words: `failed`, `finished without a result`
- * @property {string | null} reason the record's reason, whole
+ * @property {string | null} reason the record's reason, as the server cuts strings
  * @property {string} [fault] whose fault the record says it is
  * @property {number | null} at seconds since the run started
  * @property {{ kind: string, [id: string]: any }} subject what failed, by the ids its record names it by

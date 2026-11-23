@@ -87,9 +87,10 @@ enum Parsed {
     /// `ls` prints a line for each run, oldest first, then a line of totals. Without a prefix, it
     /// lists the runs that are live or ended within the last day, and the totals say how to list
     /// the others. A live run's line gives its phase and the bound on it. An ended run's line
-    /// gives its state, how long it ran and its result's values. If a run can't be listed, `ls`
-    /// says why and lists the others. With `[controller]` in the configuration and no `--runs`,
-    /// `ls` lists the controller's runs beside this machine's copies.
+    /// gives its state, how long it ran and its result's values, cut short if they are long.
+    /// `pumpkin wait --outcome` prints them whole. If a run can't be listed, `ls` says why and
+    /// lists the others. With `[controller]` in the configuration and no `--runs`, `ls` lists the
+    /// controller's runs beside this machine's copies.
     Ls(Ls),
     /// Stop a run and remove what it left.
     ///

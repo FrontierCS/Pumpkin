@@ -13,9 +13,6 @@ use super::{Held, when};
 use crate::progress::{self, Listed, Row};
 use crate::{controller, next};
 
-/// The longest string a reply carries whole; a longer one is cut, and its entry is read apart.
-const STRING_CUT_BYTES: usize = 8 * 1024;
-
 /// How many marks at most a lane's answers and failures are drawn as across the run's time: a
 /// lane's track on a page is about a thousand pixels wide, and a run makes thousands of requests.
 const LANE_TICKS: u32 = 500;
@@ -33,22 +30,28 @@ pub(super) fn record_json(byte: u64, line: &[u8]) -> Value {
     json!({ "byte": byte, "unread": text })
 }
 
-/// `value` with each string longer than [`STRING_CUT_BYTES`] cut at a character. Each cut string
-/// is marked with its whole length.
+/// `value` with each string cut as [`cut_text`] cuts it.
 pub(super) fn cut(value: Value) -> Value {
     match value {
-        Value::String(text) if text.len() > STRING_CUT_BYTES => {
-            let at = text.floor_char_boundary(STRING_CUT_BYTES);
-            Value::String(format!("{}… [{} bytes in all]", &text[..at], text.len()))
-        }
+        Value::String(text) => Value::String(cut_text(text)),
         Value::Array(values) => Value::Array(values.into_iter().map(cut).collect()),
         Value::Object(fields) => Value::Object(
             (fields.into_iter())
                 .map(|(name, value)| (name, cut(value)))
                 .collect(),
         ),
-        Value::String(_) | Value::Null | Value::Bool(_) | Value::Number(_) => value,
+        Value::Null | Value::Bool(_) | Value::Number(_) => value,
     }
+}
+
+/// A text past [`progress::TEXT_SHOWN_BYTES`] cut there, at a character's start, and marked with
+/// its whole length; a shorter one as it is.
+pub(super) fn cut_text(text: String) -> String {
+    if text.len() <= progress::TEXT_SHOWN_BYTES {
+        return text;
+    }
+    let shown = progress::clipped(&text, progress::TEXT_SHOWN_BYTES);
+    format!("{shown} [{} bytes in all]", text.len())
 }
 
 /// The row of the run list for a run that has not ended.

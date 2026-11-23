@@ -30,11 +30,11 @@
 </tspan>
     <tspan x="10px" y="100px"><tspan>run's line gives its phase and the bound on it. An ended run's line gives its state, how long it ran</tspan>
 </tspan>
-    <tspan x="10px" y="118px"><tspan>and its result's values. If a run can't be listed, `ls` says why and lists the others. With</tspan>
+    <tspan x="10px" y="118px"><tspan>and its result's values, cut short if they are long. `pumpkin wait --outcome` prints them whole. If</tspan>
 </tspan>
-    <tspan x="10px" y="136px"><tspan>`[controller]` in the configuration and no `--runs`, `ls` lists the controller's runs beside this</tspan>
+    <tspan x="10px" y="136px"><tspan>a run can't be listed, `ls` says why and lists the others. With `[controller]` in the configuration</tspan>
 </tspan>
-    <tspan x="10px" y="154px"><tspan>machine's copies.</tspan>
+    <tspan x="10px" y="154px"><tspan>and no `--runs`, `ls` lists the controller's runs beside this machine's copies.</tspan>
 </tspan>
     <tspan x="10px" y="172px">
 </tspan>
