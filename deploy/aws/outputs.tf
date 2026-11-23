@@ -1,5 +1,5 @@
 output "settings_parameter_arn" {
-  description = "The ARN of the SSM parameter of the controller's settings. `pumpkin-admin install --settings` takes it."
+  description = "The ARN of the SSM parameter of the controller's settings. `pumpkin-admin install ec2 --settings` takes it."
   value       = aws_ssm_parameter.settings.arn
 }
 

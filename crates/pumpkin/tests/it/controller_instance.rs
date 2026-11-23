@@ -52,7 +52,7 @@ fn check(cases: &[Case], expect: &Expect) {
             profile: part(&description["profile"]),
         };
         let problems = described.problems("controller").into_iter();
-        let unchecked = described.unchecked("controller").into_iter();
+        let unchecked = described.unchecked("controller", "alice").into_iter();
         let found = (problems.map(|wrong| format!("\n  {wrong}")))
             .chain(unchecked.map(|wrong| format!("\n  unchecked: {wrong}")));
         format!("{case}:{}", found.collect::<String>())
@@ -97,7 +97,7 @@ fn controller_instance() {
             running without a public address:
               controller: it runs with no public IPv4 address, which its jobs reach AWS and Modal through, and which Modal's tunnels admit: give it one, as its launch by deploy/aws does
             stopped, without a public address:
-              unchecked: controller: it is stopped, so its public IPv4 address is unchecked: run `pumpkin ls` to start it, then check again
+              unchecked: controller: it is stopped, so its public IPv4 address is unchecked: run `pumpkin ls --controller alice` to start it, then check again
             pending:
               unchecked: controller: it is starting, so its public IPv4 address is unchecked: check again once it runs"#]],
     );

@@ -30,7 +30,7 @@ text{font:12.5px system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;f
 <text class="name mid" x="130" y="190">the Docker engine</text>
 <text class="note mid" x="130" y="208">builds every image; the Docker</text>
 <text class="note mid" x="130" y="223">provider's containers run here</text>
-<text class="note" x="32" y="272">with no [controller] in its</text>
+<text class="note" x="32" y="272">with no [controllers] in its</text>
 <text class="note" x="32" y="287">configuration, the machine</text>
 <text class="note" x="32" y="302">runs its runs itself, on its</text>
 <text class="note" x="32" y="317">engine or on EC2 and Modal</text>

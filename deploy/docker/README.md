@@ -44,7 +44,7 @@ release's tag, and in it write:
   ([README](https://gitlab.com/gitlab-org/omnibus-gitlab/-/blob/9b9a2e883910b2f996fd23f4845435e0cdc71550/doc/docker/README.md#L339-L353)).
 
 - `conf/settings.toml`, the jobs' settings, of envelope 1.1, readable by every user, as each job
-  reads it as `pumpkin`. `[deployment]` is the host's: the controller's `name`, 1 to 16 of a-z,
+  reads it as `pumpkin`, in a `conf/` that every user may enter. `[deployment]` is the host's: the controller's `name`, 1 to 16 of a-z,
   0-9 and `-`, and the path of the members' list in the container. The rest is a configuration
   with a Docker engine and one provider of kind `docker`, as `pumpkin help config` says:
 

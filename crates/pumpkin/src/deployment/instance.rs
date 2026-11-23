@@ -79,8 +79,9 @@ impl Described {
     }
 
     /// What of the instance goes unchecked while it doesn't run, as a problem of `resource`,
-    /// which names it, that fails nothing.
-    pub(crate) fn unchecked(&self, resource: &str) -> Option<Problem> {
+    /// which names it, that fails nothing. It says to start it by `pumpkin ls` of controller
+    /// `name`.
+    pub(crate) fn unchecked(&self, resource: &str, name: &str) -> Option<Problem> {
         let wrong = match self.instance.state.name.as_str() {
             "running" => return None,
             "pending" => {
@@ -88,8 +89,8 @@ impl Described {
                     .to_owned()
             }
             state => format!(
-                "it is {state}, so its public IPv4 address is unchecked: run `pumpkin ls` to \
-                 start it, then check again"
+                "it is {state}, so its public IPv4 address is unchecked: run `pumpkin ls \
+                 --controller {name}` to start it, then check again"
             ),
         };
         Some(Problem::new(resource, wrong))

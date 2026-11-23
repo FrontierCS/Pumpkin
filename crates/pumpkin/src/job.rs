@@ -154,6 +154,7 @@ pub(crate) fn job(job: cli::Job) -> Result<Exit, String> {
     build_first(&id, &home, &path, &jobs, task, &controller)?;
     let run = cli::Run {
         config: Some(config),
+        controller: Some(controller),
         wait: cli::Waiting(None),
         ..run
     };

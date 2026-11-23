@@ -121,7 +121,10 @@ pub(super) fn allowed(
             format!(
                 "start it from the page that `pumpkin view` serves, or run a command that reaches \
                  it, which starts it: {}",
-                next::of_runs("ls", at)
+                match at {
+                    next::At::Controller(_) => next::of_runs("ls", at),
+                    next::At::Default | next::At::Runs(_) => "pumpkin ls".to_owned(),
+                }
             ),
         ),
         Asked::Runs { .. }

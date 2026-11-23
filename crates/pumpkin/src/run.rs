@@ -45,7 +45,8 @@ pub(crate) fn run(flags: cli::Run) -> Result<Exit, String> {
 
 /// Starts run `id` in a driver of its own, and returns once the run has started, or with
 /// `flags.wait` once it has ended. It says nothing of how to follow the run to a follower
-/// ([`Reader`]).
+/// ([`Reader`]). The commands it says to run next name `flags.controller`, if given, as a
+/// controller's job is given its client's name for the controller.
 pub(crate) fn start(id: &RunTag, flags: cli::Run, reader: Reader) -> Result<Exit, String> {
     // Absolute, so that the record's path, which the driver says and `run` opens, names it from
     // any directory. A runs directory not given is left for the driver to find as `run` does,
@@ -57,7 +58,10 @@ pub(crate) fn start(id: &RunTag, flags: cli::Run, reader: Reader) -> Result<Exit
         ..flags
     };
     let runs = named.as_deref().unwrap_or(&runs);
-    let named = &next::At::runs(named.as_deref());
+    let named = &match &flags.controller {
+        Some(controller) => next::At::Controller(controller.clone()),
+        None => next::At::runs(named.as_deref()),
+    };
     // The driver parses these as `run`'s own, and finds everything else wrong with them. The
     // entry comes last, after `--`, so that a path that starts with `-` is not taken for a flag.
     let mut args: Vec<OsString> = vec!["run".into()];
