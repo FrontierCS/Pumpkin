@@ -121,7 +121,7 @@ pub trait Creator<D, C = Created>: Sync {
 
 /// What a provider holds for a run ([`Provider::reserve`]), until it is dropped.
 pub struct Reservation(
-    // Whatever the provider holds it by, such as a locked file; its drop releases it.
+    // Whatever the provider holds it by, such as a locked file.
     #[expect(
         dead_code,
         reason = "the reservation is held by owning it, and released by dropping it"
