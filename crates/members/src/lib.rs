@@ -4,6 +4,11 @@
 //! with a line that this crate refuses gives no line to `sshd`. The caller decides where the list
 //! is kept and which file `sshd` reads.
 
+// Without `std`, the crate can name no file, process or clock: it reads only the list it is given.
+#![no_std]
+
+extern crate alloc;
+
 mod list;
 mod member;
 

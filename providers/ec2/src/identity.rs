@@ -12,6 +12,11 @@
 //! <https://github.com/hashicorp/vault/blob/558abfa75702b5dab4c98e86b802fb9aef43b0eb/builtin/credential/aws/path_login.go#L477-L513>,
 //! <https://github.com/hashicorp/vault/blob/558abfa75702b5dab4c98e86b802fb9aef43b0eb/builtin/credential/aws/path_login.go#L771-L779>.
 //!
+//! What it leaves open is what SPIRE says of `aws_iid`: whatever runs on the instance before
+//! `sandboxd` says its hello could say one first. Only the image's root services and the boot run
+//! there before it, and the container never reaches the metadata:
+//! <https://github.com/spiffe/spire/blob/a676d95d6e6992ce73715f01c17525e60b50b5e8/doc/plugin_server_nodeattestor_aws_iid.md#L86-L91>.
+//!
 //! The key is the one in AWS's certificate for the region ([`IDENTITY_CERTIFICATES`], which
 //! `cargo xtask aws-certificates` writes from AWS's page), whose dates go unchecked, as SPIRE
 //! checks none of its certificate's and AWS's own steps take the key alone out of it:
@@ -122,7 +127,8 @@ impl Documents {
         let key =
             UnparsedPublicKey::new(&RSA_PKCS1_1024_8192_SHA256_FOR_LEGACY_USE_ONLY, &self.key);
         // The signature is checked first, so that nothing else of the document is read unless
-        // AWS signed it.
+        // AWS signed it. A key that AWS changes fails this check for each sandbox of its region
+        // until `IDENTITY_CERTIFICATES` holds the new certificate.
         if key.verify(document.as_bytes(), &signature).is_err() {
             return Err(format!(
                 "the identity document's signature doesn't verify with the key of AWS's \
@@ -136,6 +142,7 @@ impl Documents {
                  `accountId`, `region`, `instanceId` and `privateIp`"
             )
         })?;
+        // Several regions share a key, so the account and the instance pin the sandbox.
         if document.account_id != self.account {
             return Err(
                 "the identity document names an account other than the envelope's: \
@@ -156,6 +163,8 @@ impl Documents {
                     .to_owned(),
             );
         }
+        // The address binding rests on EC2's source and destination check, which drops a packet
+        // whose source address isn't its sender's.
         if document.private_ip != peer {
             return Err(format!(
                 "the hello comes from {peer}, not {}, the private address that its identity \
