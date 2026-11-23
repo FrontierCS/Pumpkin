@@ -142,15 +142,15 @@ pub fn sandboxd() -> PathBuf {
     PathBuf::from(sandboxd).canonicalize().unwrap()
 }
 
-/// The standard outputs that `record`, a run's record, holds, each after a line that says whose
-/// it is.
+/// The standard outputs that `record`, a run's record, holds, each after a line naming whose it is.
 ///
 /// The agent's command's, then each call's commands', in the order of the jobs' numbers and then
-/// of the commands'; not a lease's commands', whose log entries hold their ends.
+/// of the commands'; not a lease's commands', whose log entries hold their ends. An output that
+/// can't be read as UTF-8 is left out, and ends its call's list.
 ///
 /// # Panics
 ///
-/// Panics if a job's directory isn't named by its number, or an output can't be read as UTF-8.
+/// Panics if a job's directory isn't named by its number.
 pub fn standard_outputs(record: &Path) -> Vec<String> {
     let mut lines = Vec::new();
     let mut shown = |whose: String, stdout: PathBuf| {

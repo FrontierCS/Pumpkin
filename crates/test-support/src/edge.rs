@@ -3,12 +3,13 @@
 //! Its keys are made for these tests, and are public, so they keep nothing secret.
 
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::time::Duration;
 use std::{io, thread};
 
 use rustls::pki_types::pem::PemObject as _;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use stdx::Deadline;
+
+use crate::HUNG;
 
 /// The name the stand-in's certificate is for.
 pub const NAME: &str = "localhost";
@@ -68,7 +69,7 @@ pub fn server() -> tls::Server {
 ///
 /// # Panics
 ///
-/// Panics if the stand-in's certificates or key, constants, can't be read.
+/// Panics if the stand-in's root, a constant, can't be read.
 pub fn client() -> tls::Client {
     let root = CertificateDer::from_pem_slice(ROOT.as_bytes()).unwrap();
     tls::Client::trusting(&root).unwrap()
@@ -95,7 +96,7 @@ pub fn front(target: SocketAddr) -> u16 {
 
 /// Ends the TLS of `stream`, and copies it both ways with a connection to `target`.
 fn relay(stream: TcpStream, target: SocketAddr) {
-    let Ok(secured) = server().accept(stream, Deadline::after(Duration::from_secs(60))) else {
+    let Ok(secured) = server().accept(stream, Deadline::after(HUNG)) else {
         return;
     };
     let Ok(sandbox) = TcpStream::connect(target) else {
