@@ -1,14 +1,19 @@
 [profile.default]
-# A test still running at 5 s is killed and fails ci: a test that hangs, or one far slower than
-# it was. Every test not named below ends within about 3 s, as a bound it waits for on the real
-# clock is a whole second, so 5 s leaves room for a busy machine.
-slow-timeout = { period = "5s", terminate-after = 1 }
+# A test still running at 5 s is shown as slow, beside the run's failures, and one still running
+# at 120 s is killed as a hang. Every test not named below ends within about 3 s on an idle
+# machine, as a bound it waits for on the real clock is a whole second. 120 s is past the tests'
+# own 60 s hang guards, which say what hung. uv kills at 120 s too, "as a stop-gap measure to
+# terminate on deadlock", and rust-analyzer kills at 300 s:
+# https://github.com/astral-sh/uv/blob/f8bec5eac866c5dd3794b4420e21e5dbd44045c6/.config/nextest.toml#L3-L6
+# https://github.com/rust-lang/rust-analyzer/blob/55effabb762bbd0a21c5af530ea447bd6772881d/.config/nextest.toml#L1-L2
+slow-timeout = { period = "5s", terminate-after = 24 }
+final-status-level = "slow"
 
 # The shared provider suite waits a second, its `soon()`, for each wait that nothing can end
 # sooner, for each of its three subjects.
 [[profile.default.overrides]]
 filter = 'package(runtime) & test(=conformance::suite)'
-slow-timeout = { period = "15s", terminate-after = 1 }
+slow-timeout = { period = "15s", terminate-after = 8 }
 
 # The tests that need a Docker engine, which `cargo xtask live docker` runs: they build and run
 # images, and take a minute or more.

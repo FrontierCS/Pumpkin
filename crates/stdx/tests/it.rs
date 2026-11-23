@@ -27,8 +27,7 @@ use stdx::process::{Bound, Echo, Environment, Failure, Run, Stream};
 // The floor: the doubling finds the bound by which `sh` starts on this machine.
 const LIMIT: Duration = Duration::from_millis(1);
 
-// Where the bound isn't what a test is about: one that no test comes near, as nextest ends each
-// test within 5 s.
+// Where the bound isn't what a test is about: one that no test comes near.
 const LONG_BOUND: Bound = Bound::Within(Duration::from_mins(1));
 
 #[derive(Clone, Copy)]

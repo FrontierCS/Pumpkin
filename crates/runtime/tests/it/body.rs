@@ -8,11 +8,13 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::time::Duration;
 
 use schema::ir::{self, AbsolutePath, Argv, Name};
 use schema::sandbox::RESULT_MAX_BYTES;
 use serde_json::{Map, Value, json};
 
+use crate::host::SimTime;
 use crate::sim;
 
 /// The tests' bodies, each by its `def`'s name: `check` puts the payload at `/work/payload`, runs
@@ -20,13 +22,15 @@ use crate::sim;
 /// there, runs `judge` on it, and returns its result's `raw_score`; `run` puts the payload at
 /// `/pumpkin/in/payload/raw` and runs its keyword `argv`; `slow` runs `slow`, which runs until it
 /// is killed. `again` runs a command of two seconds, then `print two`, and returns what it printed;
-/// `holds` and `waits` run `print one`, then get `/work/held`, which the simulated sandbox holds,
-/// or wait for the record to show the agent's sandbox deleted, then run `print two`; `missing`
-/// gets a missing file; what `deep` returns nests, its dict included, its keyword `depth` deep;
-/// `large` returns [`large()`].
+/// `pauses` and `waits` run `print one`, then pause a second once the record shows job 0's command
+/// ended, as a simulated program's `sleep 1` does, or wait for the record to show the agent's
+/// sandbox deleted, then run `print two`; `missing` gets a missing file; what `deep` returns nests,
+/// its dict included, its keyword `depth` deep; `large` returns [`large()`].
 pub(crate) struct Bodies<'r> {
     /// The run's record.
     pub(crate) record: &'r Path,
+    /// The clock that `pauses` moves, if the host's is simulated.
+    pub(crate) time: Option<SimTime>,
 }
 
 /// More stack than a test's thread has, 2 MiB unless `RUST_MIN_STACK` says otherwise, and less
@@ -90,12 +94,7 @@ impl runtime::Bodies for Bodies<'_> {
                     target.get(&AbsolutePath::from_static("/pumpkin/log/1/command.stdout"))?;
                 Ok(vec![(Name::from_static("printed"), json!(printed))])
             }
-            "holds" => {
-                target.run(&argv(&["print", "one"]))?;
-                target.get(&AbsolutePath::from_static("/work/held"))?;
-                target.run(&argv(&["print", "two"]))?;
-                Ok(Vec::new())
-            }
+            "pauses" => pauses(target, self.record, self.time.as_ref()),
             "waits" => {
                 target.run(&argv(&["print", "one"]))?;
                 // The core stops the run's calls as the agent's work ends. The record shows the
@@ -231,6 +230,23 @@ fn raw_score(target: &mut dyn runtime::Target) -> Result<Value, String> {
     let result = target.get(&AbsolutePath::from_static("/pumpkin/out/result.json"))?;
     let mut result: Value = serde_json::from_str(&result).map_err(|error| error.to_string())?;
     Ok(result["raw_score"].take())
+}
+
+fn pauses(
+    target: &mut dyn runtime::Target,
+    record: &Path,
+    time: Option<&SimTime>,
+) -> Result<Vec<(Name, Value)>, String> {
+    let argv = |words: &[&str]| -> Argv { serde_json::from_value(json!(words)).unwrap() };
+    target.run(&argv(&["print", "one"]))?;
+    // Once the run has logged the command's end, whose time the pause would move.
+    sim::logged(record, r#""job":0,"kind":"command_ended""#);
+    let Some(time) = time else {
+        panic!("`pauses` moves the simulated clock: run it on a `SimHost`")
+    };
+    time.reach(time.now() + Duration::from_secs(1));
+    target.run(&argv(&["print", "two"]))?;
+    Ok(Vec::new())
 }
 
 fn board(target: &mut dyn runtime::Target) -> Result<Vec<(Name, Value)>, String> {

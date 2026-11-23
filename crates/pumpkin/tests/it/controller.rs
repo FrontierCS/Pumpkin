@@ -2297,6 +2297,9 @@ fn commands_share_a_recent_failed_repair() {
         .count();
     let _ = calls(&scratch);
     let _ = noted(&scratch);
+    // As if written just now, so that the second command comes within the failure's 5 s however
+    // long a busy machine took over the first.
+    days_ago(&scratch.0.join(SHARED).join("failed"), 0);
     let second = ls_ran(&scratch, &client, &[]);
     let recent = fs::read_to_string(scratch.0.join(SHARED).join("failed")).unwrap();
     assert!(first.contains(&recent) && second.contains(&recent));

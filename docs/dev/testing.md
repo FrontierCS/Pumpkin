@@ -62,7 +62,8 @@ The rules for writing Pumpkin's tests and their snapshots.
   binary, and `cargo test` would build each target again for an empty unit-test harness; SET
   `doctest = false` too on each library whose docs hold no Rust example, which rustdoc would build
   an empty doctest run for
-- `cargo xtask ci` checks the rest: each test ends within 5 s, but those that
-  `.config/nextest.toml` names with why, and no file but Rust sits under a `tests/` directory
+- KEEP each test within 5 s on an idle machine, but those that `.config/nextest.toml` names with
+  why; FAIL only a test that hangs, as a busy machine stretches a correct one
+- `cargo xtask ci` checks the rest: no file but Rust sits under a `tests/` directory
   outside `crates/lang`'s vendored suites and `.star` fixtures, and `crates/pumpkin`'s help
   snapshots in `tests/it/help/`
