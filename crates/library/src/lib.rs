@@ -27,19 +27,18 @@
 // function and its own keywords, as Bazel states the attributes its rules share on one page
 // (https://bazel.build/reference/be/common-definitions) and each rule's page only its own.
 
-// The files are a table, as Buck2 bundles a test cell
-// (https://github.com/facebook/buck2/blob/e3dc98f84acf5f70c40b857819556baa7ec9c929/app/buck2_external_cells_bundled/src/lib.rs#L42-L77),
-// rather than the list a build script writes, as it writes Buck2's prelude: a handful of files,
-// each named once, and the tests fail if the table and the directory differ.
 #![no_std]
 
-/// Each file's path below `library/` and the bytes it holds, sorted by path.
 macro_rules! files {
     ($($path:literal),* $(,)?) => {
         [$(($path, include_bytes!(concat!("../../../library/", $path)).as_slice())),*]
     };
 }
 
+// The files are a table, as Buck2 bundles a test cell
+// (https://github.com/facebook/buck2/blob/e3dc98f84acf5f70c40b857819556baa7ec9c929/app/buck2_external_cells_bundled/src/lib.rs#L42-L77),
+// rather than the list a build script writes, as it writes Buck2's prelude: a handful of files,
+// each named once, and the tests fail if the table and the directory differ.
 /// Each file of the library, by its path below the library's root, such as
 /// `harness/codex/codex.star`, sorted by the paths' bytes.
 pub const FILES: [(&str, &[u8]); 16] = files![
