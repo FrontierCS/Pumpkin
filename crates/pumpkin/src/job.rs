@@ -1,5 +1,7 @@
 //! The jobs of a controller: what `pumpkin controller job`, which the unit of each job runs, does
-//! on the controller, and the prune that keeps the controller's volume from filling.
+//! on the controller, and the prune that keeps the controller's volume from filling. That volume
+//! is the filesystem of the user's home, which holds the engine's images and build cache too, as
+//! `deploy/aws` and `deploy/docker` lay them out.
 //!
 //! They find the controller's settings through the host file (`crate::host::target`). Everything
 //! else they read and write lies below the controller user's home:
@@ -99,12 +101,6 @@ const BUILDING: &str = "building";
 // The file of a job's tmpfs directory that exists while the job waits for a build slot, so that
 // `ls` lists it as waiting.
 pub(crate) const WAITING: &str = "waiting";
-
-// The path on the controller's one volume, which holds the engine's images and build cache, the
-// store, the trees and the records, as `deploy/aws` makes it. In `deploy/docker`'s container, `/`
-// is an overlay, which reports the filesystem of the outer engine's data, which holds the volumes
-// too.
-pub(crate) const VOLUME: &str = "/";
 
 // The bound of `df`, which reads only the volume's counters.
 const DF_TIMEOUT: Duration = Duration::from_secs(10);
@@ -571,7 +567,7 @@ fn prune(home: &Path, config: &Path, jobs: &Path) -> Result<(), String> {
         fs::remove_dir_all(&dir).context(dir.display())?;
     }
     // The engine is reached only once there may be something to remove.
-    if !disk(VOLUME)?.full() {
+    if !disk(home)?.full() {
         return Ok(());
     }
     collect(home, &engine(config)?, jobs)
@@ -599,7 +595,7 @@ fn collect(home: &Path, engine: &Engine, jobs: &Path) -> Result<(), String> {
     let images = engine.images()?;
     let locked = open_jobs(jobs)?;
     locked.lock().context(jobs_named(jobs))?;
-    let disk = disk(VOLUME)?;
+    let disk = disk(home)?;
     if !disk.full() {
         return Ok(());
     }
@@ -696,7 +692,7 @@ impl Admission<'_> {
     /// Prunes the images and the build cache of `engine`, once the volume is full, saying why the
     /// prune failed, if it did, as the build goes on.
     fn prune(&self, engine: &Engine) {
-        let pruned = disk(VOLUME).and_then(|disk| {
+        let pruned = disk(self.home).and_then(|disk| {
             if disk.full() {
                 collect(self.home, engine, self.jobs)
             } else {
@@ -738,7 +734,7 @@ impl engine::Admit for Admission<'_> {
             self.slot = Some(take_slot(&self.slots, self.id, &self.sent())?);
         }
         self.prune(engine);
-        let disk = disk(VOLUME)?;
+        let disk = disk(self.home)?;
         if disk.refused() {
             let used_bytes = disk.size_bytes.saturating_sub(disk.free_bytes);
             let used = (used_bytes.saturating_mul(100))
@@ -829,10 +825,11 @@ fn last_used(home: &Path, runs: &Path) -> Result<BTreeMap<Image, String>, String
 
 /// The disk that holds `path`, as `df` says, in bytes: its size, and what an ordinary user may
 /// still write there.
-pub(crate) fn disk(path: &str) -> Result<Disk, String> {
+pub(crate) fn disk(path: &Path) -> Result<Disk, String> {
     // Only `PATH`, so that no locale changes what it prints.
     let mut df = stdx::process::command("df", Environment::Only(&["PATH"]));
-    df.args(["--block-size=1", "--output=size,avail", "--", path]);
+    df.args(["--block-size=1", "--output=size,avail", "--"])
+        .arg(path);
     let how = Run::new(Bound::Within(DF_TIMEOUT), Echo::Silent);
     let printed = stdx::process::run(&mut df, how).map_err(|failure| failure.to_string())?;
     let printed = String::from_utf8_lossy(&printed.stdout);

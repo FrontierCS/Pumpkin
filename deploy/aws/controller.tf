@@ -1,6 +1,6 @@
 # The team's controller. It builds the tasks' images and runs the drivers, and it runs no role.
 # Its members reach it over ssh from its VPC, each with a key that `members` lists. It stops
-# itself when idle, by a unit that `pumpkin-admin install` sets up, so it costs only its volume
+# itself when idle, by a unit that `pumpkin-admin install` sets up, so it costs only its volumes
 # between runs.
 
 resource "aws_iam_role" "controller" {
@@ -129,20 +129,21 @@ resource "aws_instance" "controller" {
   iam_instance_profile   = aws_iam_instance_profile.controller.name
   # A public address: the way out to the settings parameter, ECR and Modal, and the one Modal's tunnels admit.
   associate_public_ip_address = true
-  # A shutdown stops it, keeping its volume: the build cache, the trees and the records.
+  # A shutdown stops it, so that a member's command can start it again.
   instance_initiated_shutdown_behavior = "stop"
   # What every controller installs is deploy/controller's, beside this module in the package that
   # a root fetches whole
   # (https://github.com/hashicorp/web-unified-docs/blob/4ec2d604280fff09cfca1d2648fed5cb51f81f14/content/terraform/v1.16.x/docs/language/modules/sources.mdx#L484-L487).
   user_data = templatefile("${path.module}/controller.yaml", {
-    install_script  = filebase64("${path.module}/../controller/install.sh")
-    docker_key      = filebase64("${path.module}/../controller/docker.asc")
+    install_script  = base64gzip(file("${path.module}/../controller/install.sh"))
+    docker_key      = base64gzip(file("${path.module}/../controller/docker.asc"))
     aws_cli_version = local.controller_versions.aws_cli
     aws_cli_sha256  = local.controller_versions.aws_cli_sha256
     uv_version      = local.controller_versions.uv
     uv_sha256       = local.controller_versions.uv_sha256
     pumpkin_release = var.pumpkin_release
     settings_arn    = aws_ssm_parameter.settings.arn
+    volume_id       = aws_ebs_volume.controller.id
   })
 
   # The first boot's install reads the settings and the members' keys.
@@ -155,11 +156,12 @@ resource "aws_instance" "controller" {
     http_put_response_hop_limit = 1
   }
 
+  # The OS and the packages alone, which each instance installs anew: what the controller keeps
+  # is on its data volume. 30 GiB, as the GitHub runner module gives a runner's root
+  # (https://github.com/github-aws-runners/terraform-aws-github-runner/blob/3355ae029d598d7baf096eebafd19bfd5429bbaa/variables.tf#L324-L340).
   root_block_device {
-    volume_size = var.controller_volume_gib
+    volume_size = 30
     volume_type = "gp3"
-    iops        = var.controller_volume_iops
-    throughput  = var.controller_volume_throughput
     encrypted   = true
   }
 
@@ -169,13 +171,46 @@ resource "aws_instance" "controller" {
   # cloud-init runs the user data at the instance's first boot alone. So a new `pumpkin_release`
   # replaces the controller, and the new one's first boot installs it.
   lifecycle {
-    # A stopped instance reads as having no public address, and a change to it replaces the
-    # instance, its volume and the records on it with it. The controller stops itself when idle.
+    # A stopped instance reads as having no public address, and a change to it would replace the
+    # instance. The controller stops itself when idle.
     ignore_changes = [ami, user_data, associate_public_ip_address]
     # On the release, not on the user data, so that a change to the rest of the user data replaces
     # nothing.
     replace_triggered_by = [terraform_data.pumpkin_release]
   }
+}
+
+data "aws_subnet" "controller" {
+  id = var.subnet_id
+}
+
+# What the controller keeps from one instance to the next, as the first boot mounts it: the
+# engine's images and build cache, the home of `pumpkin` with its store, trees, jobs, installs and
+# records, and the host key. A replacement of the instance moves it to the new one. Its zone stays
+# the one it was made in, so that a subnet in another zone fails the attachment instead of
+# replacing the volume. GitLab's toolkit keeps a data disk's zone so, and stops its instance before
+# it detaches the disk
+# (https://gitlab.com/gitlab-org/gitlab-environment-toolkit/-/blob/2eef5ab5ed5a085424096e5ee7e44457390afb04/terraform/modules/gitlab_aws_instance/data_disks.tf#L4-L62).
+resource "aws_ebs_volume" "controller" {
+  availability_zone = data.aws_subnet.controller.availability_zone
+  type              = "gp3"
+  size              = var.controller_volume_gib
+  iops              = var.controller_volume_iops
+  throughput        = var.controller_volume_throughput
+  encrypted         = true
+  tags              = { Name = "${local.prefix}-controller" }
+
+  lifecycle {
+    ignore_changes = [availability_zone]
+  }
+}
+
+# The instance stops before the volume is detached, so that its shutdown unmounts the volume.
+resource "aws_volume_attachment" "controller" {
+  device_name                    = "/dev/sdf"
+  volume_id                      = aws_ebs_volume.controller.id
+  instance_id                    = aws_instance.controller.id
+  stop_instance_before_detaching = true
 }
 
 # What the controller installs beside what deploy/controller's install.sh pins, at these versions:
