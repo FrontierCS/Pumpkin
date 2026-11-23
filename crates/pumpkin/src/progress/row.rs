@@ -17,6 +17,8 @@ pub(crate) struct Row {
     pub(super) spent: Spent,
     /// The member whose job the run is, on a controller whose job names one.
     pub(crate) member: Option<Member>,
+    /// What of the run's log this `pumpkin` can't read, as `progress::unread` says it, if any.
+    pub(crate) unread: Option<String>,
 }
 
 /// What a run is doing or how it ended, with what only that stage has.
@@ -78,6 +80,13 @@ impl Row {
             stage,
             spent: Spent::of(listed),
             member: None,
+            unread: match listed {
+                Listed::Run(run) => run.unread.clone(),
+                Listed::Building { .. }
+                | Listed::Waiting { .. }
+                | Listed::Unstarted
+                | Listed::Unread(_) => None,
+            },
         }
     }
 

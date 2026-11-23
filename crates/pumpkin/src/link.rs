@@ -29,7 +29,7 @@ use schema::ir::Sha256Digest;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::progress::Listing;
+use crate::progress::{Listing, Unlisted};
 use crate::reaping::{Reaping, RunReaped};
 use crate::{config, manifest, workspace};
 
@@ -210,11 +210,8 @@ pub(crate) struct ListRequest {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ListedHead {
-    /// The listing, a [`Listing`]'s JSON, in a body of `body_bytes`.
-    Listed {
-        body_bytes: u64,
-        unlisted_count: u64,
-    },
+    /// The [`Listed`]'s JSON, in a body of `body_bytes`.
+    Listed { body_bytes: u64 },
 }
 
 impl Request for ListRequest {
@@ -226,37 +223,22 @@ impl Request for ListRequest {
     }
 
     fn sent(listed: Listed) -> io::Result<(ListedHead, Vec<u8>)> {
-        let Listed {
-            listing,
-            unlisted_count,
-        } = listed;
-        let body = serde_json::to_vec(&listing)?;
+        let body = serde_json::to_vec(&listed)?;
         let body_bytes = body.len() as u64;
-        let head = ListedHead::Listed {
-            body_bytes,
-            unlisted_count,
-        };
-        Ok((head, body))
+        Ok((ListedHead::Listed { body_bytes }, body))
     }
 
     fn received(head: ListedHead, link: &mut Link) -> Result<Listed, Unanswered> {
-        let ListedHead::Listed {
-            body_bytes,
-            unlisted_count,
-        } = head;
-        let listing = serde_json::from_slice(&link.body(body_bytes)?)
-            .map_err(|error| Unanswered::Failed(format!("its listing doesn't read: {error}")))?;
-        Ok(Listed {
-            listing,
-            unlisted_count,
-        })
+        let ListedHead::Listed { body_bytes } = head;
+        link.json(body_bytes, "its listing")
     }
 }
 
-/// The runs that `serve` listed, and how many it couldn't list, as it said on its standard error.
+/// The runs that `serve` listed, and those that it couldn't list.
+#[derive(Serialize, Deserialize)]
 pub(crate) struct Listed {
     pub(crate) listing: Listing,
-    pub(crate) unlisted_count: u64,
+    pub(crate) unlisted: Vec<Unlisted>,
 }
 
 /// The runs' jobs there, as `crate::job::ids` lists them, each with its member.

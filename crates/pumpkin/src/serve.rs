@@ -36,7 +36,7 @@ use crate::link::{
     ViewRequest,
 };
 use crate::manifest::store::{Missing, PutAnswer};
-use crate::progress::{self, Entry, Listing, Row};
+use crate::progress::{self, Entry, Listing, Row, Unlisted};
 use crate::say;
 use crate::view::Answering;
 
@@ -300,7 +300,7 @@ fn listed(home: &Path, prefixes: &[String]) -> Result<Listed, String> {
     let (mut listing, mut unlisted) = crate::listed_in(&runs, prefixes, since, now, None)?;
     unstarted(home, prefixes, since, now, &mut listing)?;
     let jobs = home.join(JOBS);
-    // A run whose member can't be read is left out and said, as one whose record can't be.
+    // A run whose member can't be read is left out, as one whose record can't be read is.
     listing.runs.retain(|id, entry| {
         let Entry::Row(row) = entry else {
             return true;
@@ -311,16 +311,16 @@ fn listed(home: &Path, prefixes: &[String]) -> Result<Listed, String> {
                 true
             }
             Err(error) => {
-                say(format_args!("run {id}: {error}"));
-                unlisted += 1;
+                let message = format!("run {id}: {error}");
+                unlisted.push(Unlisted {
+                    id: id.clone(),
+                    message,
+                });
                 false
             }
         }
     });
-    Ok(Listed {
-        listing,
-        unlisted_count: unlisted as u64,
-    })
+    Ok(Listed { listing, unlisted })
 }
 
 /// Adds to `listing` each job in `home`'s `JOBS` whose id starts with one of `prefixes`, or each
@@ -365,7 +365,9 @@ fn unstarted(
             continue;
         };
         let row = Row::of(id, &listed, now, None);
-        listing.runs.insert(id.to_owned(), Entry::Row(row));
+        listing
+            .runs
+            .insert(id.to_owned(), Entry::Row(Box::new(row)));
     }
     Ok(())
 }

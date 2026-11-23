@@ -57,11 +57,18 @@ pub(crate) struct Listing {
     pub(crate) runs: BTreeMap<String, Entry>,
 }
 
+/// A run that `ls` can't list, and why, as `ls` says it.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Unlisted {
+    pub(crate) id: String,
+    pub(crate) message: String,
+}
+
 /// A run in a listing.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Entry {
-    Row(Row),
+    Row(Box<Row>),
     /// A run that ended before `listed_since`, which `ls` names in a line, not a row.
     Older,
 }
@@ -105,17 +112,19 @@ pub(crate) struct Run {
     ending: Option<Ending>,
     progress: Option<Progress>,
     asked: Option<Duration>,
+    /// What of its log this `pumpkin` can't read, as [`unread`] says it, if any.
+    unread: Option<String>,
 }
 
 impl Listed {
-    /// The run of `record`, which says on the standard error what of its log this `pumpkin`
-    /// can't read.
+    /// The run of `record`, with what of its log this `pumpkin` can't read.
     pub(crate) fn run(record: &Record, ending: Option<Ending>) -> Result<Self, ReadError> {
         let Readout { progress, unread } = record.progress()?;
-        if let Some(unread) = self::unread(&unread) {
-            crate::say(format_args!("run {}: {unread}", record.id()));
+        let mut listed = Self::of(record, record.task()?, ending, progress);
+        if let Self::Run(run) = &mut listed {
+            run.unread = self::unread(&unread);
         }
-        Ok(Self::of(record, record.task()?, ending, progress))
+        Ok(listed)
     }
 
     /// The run in `dir`, whose record failed to read with `error`, if the record is in a form
@@ -144,6 +153,7 @@ impl Listed {
             ending,
             progress,
             asked: runtime::minted(record.id()),
+            unread: None,
         }))
     }
 }
@@ -283,6 +293,7 @@ impl Totals {
             stage,
             spent,
             member: _,
+            unread: _,
         } = row;
         *self.states.entry(stage.state()).or_default() += 1;
         match stage {

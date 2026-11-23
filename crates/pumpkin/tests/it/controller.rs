@@ -1504,33 +1504,24 @@ fn reap_by_writer() {
     let own = id_ago(0, "0e000001");
     let other = id_ago(0, "0e000002");
     let old = id_ago(0, "0e000003");
-    let record =
-        json!({"record_version":"pumpkin.record/v1","pumpkin":super::this_build(),"args":[]});
-    scratch.write(&format!("{made}/{own}/record.json"), &record);
-    scratch.write(&format!("{made}/{own}/driver.pid"), "4242\n");
-    scratch.write(
-        &format!("{made}/{own}/provider.json"),
-        &json!({"providers":{}}),
-    );
-    scratch.write(
-        &format!("{made}/{other}/record.json"),
-        &json!({"pumpkin":{"version":"1.2.3"},"record_version":"future"}),
-    );
-    scratch.write(
-        &format!("{made}/{old}/record.json"),
-        &json!({"record_version":"old"}),
-    );
+    let lost = |id: &str, args, providers| {
+        let record =
+            json!({"record_version":"pumpkin.record/v1","pumpkin":super::this_build(),"args":args});
+        scratch.write(&format!("{made}/{id}/record.json"), &record);
+        scratch.write(&format!("{made}/{id}/driver.pid"), "4242\n");
+        let providers = json!({ "providers": providers });
+        scratch.write(&format!("{made}/{id}/provider.json"), &providers);
+    };
+    lost(&own, json!([]), json!({}));
+    let future = json!({"pumpkin":{"version":"1.2.3"},"record_version":"future"});
+    for (id, record) in [(&other, future), (&old, json!({"record_version":"old"}))] {
+        scratch.write(&format!("{made}/{id}/record.json"), &record);
+    }
     // Its provider can't be reached, as the configuration that ran it is gone.
     let unreached = id_ago(0, "0e000004");
     let gone = scratch.0.join("gone.toml");
-    let mut ran_gone = record.clone();
-    ran_gone["args"] = json!(["--config", gone]);
-    scratch.write(&format!("{made}/{unreached}/record.json"), &ran_gone);
-    scratch.write(&format!("{made}/{unreached}/driver.pid"), "4243\n");
-    scratch.write(
-        &format!("{made}/{unreached}/provider.json"),
-        &json!({ "providers": { "aws": { "report": { "region": "us-west-1" } } } }),
-    );
+    let aws = json!({ "aws": { "report": { "region": "us-west-1" } } });
+    lost(&unreached, json!(["--config", gone]), aws);
     let mut lines = Vec::new();
     for _ in 0..2 {
         let mut reap = on_client(&scratch, &client, &["reap"]);
@@ -1538,20 +1529,8 @@ fn reap_by_writer() {
         let reaped = reap.output().unwrap();
         lines.push(report(invoked, &reaped, &scratch.0, false));
     }
-    for foreign in [&other, &old] {
-        assert!(
-            !scratch
-                .0
-                .join(format!("{made}/{foreign}/outcome.json"))
-                .exists()
-        );
-    }
-    assert!(
-        scratch
-            .0
-            .join(format!("{made}/{own}/outcome.json"))
-            .is_file()
-    );
+    let outcome = |id: &str| scratch.0.join(format!("{made}/{id}/outcome.json"));
+    assert!(outcome(&own).is_file() && !outcome(&other).exists() && !outcome(&old).exists());
     check(
         &scratch,
         &lines.join("\n"),

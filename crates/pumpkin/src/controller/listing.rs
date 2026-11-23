@@ -13,7 +13,7 @@ use super::linking::Build;
 use super::{Name, Reached};
 use crate::cli::Exit;
 use crate::link::{Boot, Health, HealthRequest, ListRequest, Listed};
-use crate::progress::{Entry, Listing};
+use crate::progress::{Entry, Listing, Unlisted};
 use crate::workspace::Workspace;
 use crate::{config, say};
 
@@ -41,8 +41,10 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<Exit, S
         unlisted,
         asked,
     } = answered(&mut reached, prefixes)?;
+    crate::said_beside(&listing, &unlisted);
     let runs = PathBuf::from(crate::default_runs()?);
     let (here, unlisted_here) = crate::listed_in(&runs, prefixes, since, now, None)?;
+    crate::said_beside(&here, &unlisted_here);
     // The controller's word on a run wins over a copy's.
     for (id, entry) in here.runs {
         listing.runs.entry(id).or_insert(entry);
@@ -57,7 +59,7 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<Exit, S
     let lines = crate::progress::lines(&listing, None);
     crate::print(lines.as_bytes()).context("printing the runs failed")?;
     said_when(asked);
-    let unlisted = unlisted + unlisted_here;
+    let unlisted = unlisted.len() + unlisted_here.len();
     if unlisted > 0 {
         let runs = crate::counted(unlisted, "run");
         return Err(format!("{runs} can't be listed, as said above"));
@@ -84,8 +86,8 @@ struct Answers {
     /// The controller's health, or why there is none.
     health: Result<Health, String>,
     listing: Listing,
-    /// How many runs couldn't be listed.
-    unlisted: usize,
+    /// The runs that couldn't be listed.
+    unlisted: Vec<Unlisted>,
     /// When the listing was asked for, as `serve` makes its rows then.
     asked: UnixTime,
 }
@@ -96,13 +98,10 @@ fn answers(
     listed: Result<Listed, String>,
     asked: UnixTime,
 ) -> Result<Answers, String> {
-    let Listed {
-        listing,
-        unlisted_count,
-    } = listed.map_err(|message| format!("controller `{name}` refused: {message}"))?;
+    let Listed { listing, unlisted } =
+        listed.map_err(|message| format!("controller `{name}` refused: {message}"))?;
     let health = health
         .map_err(|message| format!("controller `{name}` says nothing of its health: {message}"));
-    let unlisted = usize::try_from(unlisted_count).unwrap_or(usize::MAX);
     Ok(Answers {
         health,
         listing,
