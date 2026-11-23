@@ -38,10 +38,14 @@ fn timer() {
 
 #[test]
 fn sandbox() {
-    check(
-        "sandbox",
-        &expect_file!["../../../../deploy/aws/policies/sandbox.json.tftpl"],
+    let policy = output("sandbox");
+    // An image's tag is its digest, and ECR serves `tags/list` as `ecr:ListImages`: with no list,
+    // an instance can't name another role's image, such as a judge's.
+    assert!(
+        !policy.contains("ecr:List") && !policy.contains("ecr:Describe"),
+        "{policy}"
     );
+    expect_file!["../../../../deploy/aws/policies/sandbox.json.tftpl"].assert_eq(&policy);
 }
 
 #[test]
