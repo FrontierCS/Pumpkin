@@ -114,11 +114,12 @@ runtime, the core and the providers never see the language. Only `library` knows
 
 ### `crates/gateway`, `crates/tls`, `crates/sandboxd`
 
-The two ends of a session. The `gateway` is the host's end: the `Session`'s one owner moves trees,
-runs commands, and hears of each op, model request and exit as an `Arrival`. `sandboxd` serves the
-sandbox's end, carries ops from `sandboxctl` and model requests from its model endpoint, and
-freezes the sandbox. `tls` carries a session that crosses the Internet, below the session's
-protocol.
+The two ends of a session. The `gateway` is the host's end: a process's sessions live on its
+loop, in its owner's `Sessions`, through which the owner moves trees, runs commands, and hears of
+each op, model request and exit as an `Arrival`; another thread drives a session through a
+`Remote`, whose calls the loop serves. `sandboxd` serves the sandbox's end, carries ops from
+`sandboxctl` and model requests from its model endpoint, and freezes the sandbox. `tls` carries a
+session that crosses the Internet, below the session's protocol.
 
 **Architecture Invariant:** a sandbox can't harm the host through its session. Anything out of
 protocol ends the session, and a session costs the host only bounded memory and bounded waits.
@@ -174,19 +175,23 @@ each as a sandbox in a Modal workspace, under gVisor, through its helper, `pumpk
 ### `crates/runtime`
 
 The host side. `Run::prepare` reserves on each provider and begins the record, and `Run::execute`
-drives the `Core` on the run's providers to its outcome, or until a signal stops it. One thread
-drives the core, and each call and lease is a child on a thread of its own. `record` and `log` lay
-out the record, and `Record` reads it back.
+drives the `Core` on the run's providers to its outcome, or until a signal stops it. One loop
+drives the core: it holds every session, the agent's start and teardown, every sandbox's start and
+delete, and the record's syncs. Each call and lease is a child on a thread of its own, which
+reaches the loop through its events. A sandbox's start and delete call its provider on a thread
+of their own, which completes into the loop. `record` and `log` lay out the record, and `Record`
+reads it back.
 
 **Architecture Invariant:** the runtime is written once, against `Provider`. It depends on no
 provider's crate, not even in its tests, which run on a simulated provider.
 
-**Architecture Invariant:** every sandbox starts on one path (`Sandboxes::start`), and a run's end
+**Architecture Invariant:** every sandbox starts on one path, the loop's (`starts`), and a run's end
 deletes whatever its providers still list of it, so a run ends with none of its sandboxes left, or
 fails.
 
-**Architecture Invariant:** every deadline of a run is a time on its `Host`'s clock, so a
-simulated host decides every outcome that time decides.
+**Architecture Invariant:** every deadline of a run is a time on its loop's clock, which its
+`Host` gives, so a simulated world decides every outcome that time decides. The loop stamps each
+input with the time of the batch that takes it.
 
 ### `crates/pumpkin`, `crates/install`, `crates/members`, `crates/retention`
 
@@ -288,5 +293,5 @@ next (`next`).
 
 [`docs/dev/testing.md`](docs/dev/testing.md) holds the rules. `cargo xtask ci` reaches no Docker
 engine, network or cloud, so it tests the core, the gateway, the route and the runtime with
-Pumpkin's own processes, loopback sockets and a simulated host and provider. `cargo xtask live`
+Pumpkin's own processes, loopback sockets, and a simulated world and provider. `cargo xtask live`
 tests the real providers.

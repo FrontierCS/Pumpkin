@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use decision::JobId;
-use gateway::{Arrival, IncomingOp, Process, Session};
+use gateway::{Arrival, IncomingOp, Process, Remote};
 use schema::ir::Name;
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::{LeaseStatusReply, OpReply, SessionOp};
@@ -54,7 +54,7 @@ impl Relay {
         job: JobId,
         timeout: Duration,
         process: Process,
-        session: &mut Session<H::Clock>,
+        session: &mut Remote,
     ) -> Result<Waited, String> {
         self.until(child, job, timeout, session, |arrival| match arrival {
             Arrived::Exited(exited, status) if exited == process => Some(Ok(status)),
@@ -67,7 +67,7 @@ impl Relay {
         child: &mut Child<'_, H, Order>,
         job: JobId,
         timeout: Duration,
-        session: &mut Session<H::Clock>,
+        session: &mut Remote,
         grant: &Name,
         (waiting, op): (crate::scoped::Waiting, SessionOp),
     ) -> Result<Waited<LeaseStatusReply>, String> {
@@ -92,7 +92,7 @@ impl Relay {
         child: &mut Child<'_, H, Order>,
         job: JobId,
         timeout: Duration,
-        session: &mut Session<H::Clock>,
+        session: &mut Remote,
         finished: impl Fn(Arrived) -> Option<Result<T, String>>,
     ) -> Result<Waited<T>, String> {
         if let Some(reason) = &self.closed {
@@ -121,7 +121,7 @@ impl Relay {
         &mut self,
         child: &mut Child<'_, H, Order>,
         job: JobId,
-        (session, by): (&mut Session<H::Clock>, Duration),
+        (session, by): (&mut Remote, Duration),
     ) -> Result<bool, String> {
         if let Some(reason) = &self.closed {
             return Err(reason.clone());
@@ -140,7 +140,7 @@ impl Relay {
         &mut self,
         child: &mut Child<'_, H, Order>,
         job: JobId,
-        (session, by): (&mut Session<H::Clock>, Duration),
+        (session, by): (&mut Remote, Duration),
         message: Message<Order>,
     ) -> Result<Option<Arrived>, String> {
         match message {

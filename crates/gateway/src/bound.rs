@@ -1,12 +1,11 @@
-//! A request's deadline as a time on its clock, which every wait of a session reads as it goes.
+//! A deadline as a time on a clock, which every wait of a meeting on a thread reads as it goes.
 
 use std::io::{self, Write};
 use std::time::Duration;
 
-use stdx::Deadline;
 use stdx::time::{self, Clock};
 
-use crate::{Connection, ModelResponse, Session, Shared};
+use crate::meeting::Connection;
 
 // The deadline `by`, a time on `clock`.
 pub(crate) struct Bound<'a, C> {
@@ -36,38 +35,8 @@ impl<C: Clock> Bound<'_, C> {
     }
 
     // The deadline by the machine's clock at the time left now.
-    pub(crate) fn deadline(self) -> Deadline {
-        Deadline::after(self.left().unwrap_or_default())
-    }
-}
-
-impl<C> Session<C> {
-    // The deadline `by`, a time on the session's clock.
-    pub(crate) fn by(&self, by: Duration) -> Bound<'_, C> {
-        Bound {
-            clock: &self.clock,
-            by,
-        }
-    }
-}
-
-impl<C: Clock> ModelResponse<C> {
-    pub(crate) fn by(&self) -> Bound<'_, C> {
-        Bound {
-            clock: &self.clock,
-            by: self.by,
-        }
-    }
-}
-
-impl Shared {
-    // Ends the session for a request that its deadline passed without an answer.
-    pub(crate) fn unanswered(&self) -> io::Error {
-        self.timed_out(
-            "the sandbox didn't answer before the request's deadline: expected its answer while \
-             the deadline lasts"
-                .to_owned(),
-        )
+    pub(crate) fn deadline(self) -> stdx::Deadline {
+        stdx::Deadline::after(self.left().unwrap_or_default())
     }
 }
 

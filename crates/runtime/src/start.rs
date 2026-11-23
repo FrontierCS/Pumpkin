@@ -4,23 +4,20 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::sync::mpsc::Sender;
-use std::thread::{self, Scope};
 use std::time::Duration;
 
 use decision::{Caller, Core, JobId, LeaseId, PayloadRef};
 use schema::ir::{ArgumentValue, Name};
 use schema::workflow::{AgentId, JobFunctionId, SessionId};
 use stdx::Context;
-use stdx::time::Clock as _;
 
 use crate::child::{Child, Deadlines, End, Message, Report};
 use crate::sandbox::Which;
 use crate::{Called, Clock, Host, Inbox, Input, Runtime, body, call, lease};
 
-impl<'r, H: Host + 'r> Runtime<'r, H> {
-    pub(crate) fn start_call<'s>(
+impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
+    pub(crate) fn start_call(
         &mut self,
-        scope: &'s Scope<'s, 'r>,
         core: &Core<'_>,
         job: JobId,
         function: JobFunctionId,
@@ -33,7 +30,8 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         // A call ends with the work phase, which ends by the core's next act of its own, and what
         // it left is collected by the agent's teardown's end, which leaves the final call its
         // share of the hard end.
-        let startup = (self.clock.now())
+        let startup = self
+            .at
             .saturating_add(self.placed.startup(role))
             .min(core.phase_due());
         let deadlines = Deadlines {
@@ -49,17 +47,17 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             inputs: vec![self.payloads.stored(payload)],
             timeout,
         };
-        self.start_body(scope, call, deadlines, instance)
+        self.start_body(call, deadlines, instance)
     }
 
-    pub(crate) fn start_final_call<'s>(
+    pub(crate) fn start_final_call(
         &mut self,
-        scope: &'s Scope<'s, 'r>,
+        io: &mut crate::Io<'r, 's, H>,
         job: JobId,
         selections: Vec<(AgentId, Option<PayloadRef>)>,
         timeout: Duration,
     ) -> Result<(), crate::Stopped> {
-        let swept = self.sandboxes.finish_work();
+        let swept = self.finish_work(io);
         crate::interruption::check()?;
         swept.context("cleaning up work sandboxes before the final call")?;
         let final_call = self.workflow().final_call();
@@ -67,9 +65,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         // The final call's body starts in time to run its whole timeout before the hard end, by
         // which what it left is collected.
         let start = self.hard_end().saturating_sub(timeout);
-        let startup = (self.clock.now())
-            .saturating_add(self.placed.startup(role))
-            .min(start);
+        let startup = self.at.saturating_add(self.placed.startup(role)).min(start);
         let deadlines = Deadlines {
             startup,
             collect: self.hard_end(),
@@ -96,13 +92,12 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             inputs,
             timeout,
         };
-        Ok(self.start_body(scope, call, deadlines, Some(0))?)
+        Ok(self.start_body(call, deadlines, Some(0))?)
     }
 
     /// Runs a call on its reserved fresh instance or the work phase's shared instance.
-    fn start_body<'s>(
+    fn start_body(
         &mut self,
-        scope: &'s Scope<'s, 'r>,
         call: call::job::Call<'r>,
         deadlines: Deadlines,
         instance: Option<u32>,
@@ -116,7 +111,6 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         let orders = if instance.is_some() {
             let bodies = self.bodies;
             self.start_child(
-                scope,
                 which,
                 deadlines,
                 Some(bodies.stack_bytes()),
@@ -146,9 +140,8 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         Ok(())
     }
 
-    pub(crate) fn start_lease<'s>(
+    pub(crate) fn start_lease(
         &mut self,
-        scope: &'s Scope<'s, 'r>,
         core: &Core<'_>,
         (lease, instance, start_by): (LeaseId, u32, Duration),
         (holder, grant): (Caller, SessionId),
@@ -177,7 +170,8 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             }
         };
         // A sandbox's start ends by when the lease must start and by the core's `start_by`.
-        let startup = (self.clock.now())
+        let startup = self
+            .at
             .saturating_add(self.placed.startup(runner_id.role()))
             .min(start)
             .min(start_by);
@@ -189,14 +183,13 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             start,
         };
         let run = move |mut child: Child<'r, H, lease::Order>| lease::run(&leased, &mut child);
-        let orders = self.start_child(scope, which, deadlines, None, run)?;
+        let orders = self.start_child(which, deadlines, None, run)?;
         self.leases.insert(lease, orders);
         Ok(())
     }
 
-    fn start_child<'s, O: Send + 'static>(
+    fn start_child<O: Send + 'static>(
         &mut self,
-        scope: &'s Scope<'s, 'r>,
         which: Which,
         deadlines: Deadlines,
         stack_bytes: Option<usize>,
@@ -204,19 +197,14 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
     ) -> Result<Sender<Message<O>>, String> {
         let child = self.child(which, deadlines)?;
         let sender = child.inbox.sender();
-        let mut builder = thread::Builder::new().name(which.name().to_string());
-        if let Some(bytes) = stack_bytes {
-            builder = builder.stack_size(bytes);
-        }
-        let spawned = builder.spawn_scoped(scope, move || run(child));
-        if let Err(error) = spawned {
+        let spawned = self.spawn((&which.name().to_string(), stack_bytes), move || run(child));
+        if let Err(reason) = spawned {
             // Reported as the child's thread would have, behind what reached the host before.
-            let reason = format!("{} thread didn't start: {error}", which.noun());
-            let at = self.clock.now();
+            let at = self.at;
             let (before, after) = End::failed(which, reason).reports(at);
             for report in before.into_iter().chain([Report::Event(at, after)]) {
                 // The inbox holds its receiver, so the send can't fail.
-                let _ = self.inbox.sender().send(Input::Child(report));
+                self.input(Input::Child(report));
             }
         }
         Ok(sender)
@@ -235,12 +223,11 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         Ok(Child {
             which,
             deadlines,
-            hard_end: self.unix_hard_end,
             dir,
             sandboxes: self.sandboxes,
             clock: self.clock.clone(),
             inbox,
-            reports: self.inbox.sender(),
+            reports: self.events.clone(),
         })
     }
 }

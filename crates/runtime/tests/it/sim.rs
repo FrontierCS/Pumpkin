@@ -269,7 +269,7 @@ enum Listing {
 #[derive(Default)]
 struct Status {
     console: String,
-    connection: Option<UnixStream>,
+    connection: Option<Link>,
     stalled: bool,
     // Where a stalled sandbox moves the clock to as it takes its next request.
     stall_to: Option<Duration>,
@@ -1027,7 +1027,12 @@ fn sandboxd(
 }
 
 fn dial(socket: &Path, hello: &Value, model: bool, shared: &Mutex<Status>) {
-    let dialed = UnixStream::connect(socket).and_then(|connection| {
+    let time = status(shared).time.clone();
+    let connected = match &time {
+        Some(time) => time.connect(socket).map(Link::World),
+        None => UnixStream::connect(socket).map(Link::Unix),
+    };
+    let dialed = connected.and_then(|connection| {
         let other = connection.try_clone()?;
         Ok((connection, other))
     });
@@ -1050,7 +1055,7 @@ fn dial(socket: &Path, hello: &Value, model: bool, shared: &Mutex<Status>) {
     }
 }
 
-fn open(connection: &mut UnixStream, hello: &Value) -> bool {
+fn open(connection: &mut Link, hello: &Value) -> bool {
     let sent = frame::write(connection, hello, &[]);
     let answer = sent.and_then(|()| frame::read::<HelloReply>(connection));
     // Unlike `sandboxd`, it prints no refusal: a run reads the console of a start that failed as
@@ -1137,6 +1142,8 @@ struct Caller {
     released: bool,
     // Where the sandbox's stall moves the clock to, once a `stall` step says so.
     stall: Option<Duration>,
+    // Where the clock moves to as the sandbox next sends, once a `sleep` step before a send says.
+    moved: Option<Duration>,
     /// The run's record, if `Sim::records` named it.
     record: Option<PathBuf>,
     time: Option<SimTime>,
@@ -1168,6 +1175,7 @@ impl Caller {
             end: None,
             released: false,
             stall: None,
+            moved: None,
             record,
             time,
         }
@@ -1251,7 +1259,14 @@ impl Caller {
                     // On a simulated host, as Kubernetes' fake `Sleep` steps its clock:
                     // https://github.com/kubernetes/utils/blob/ca04ba58ecab621c984998618739fbafa14398ad/clock/testing/fake_clock.go#L244-L247
                     let seconds = Duration::from_secs(seconds);
+                    let sends = matches!(
+                        self.steps.front(),
+                        Some(Step::Op { .. } | Step::Model { .. })
+                    );
                     match &self.time {
+                        // What it sends next reaches the loop at the time it slept until, which
+                        // the clock reaches as it sends, so the loop takes both at once.
+                        Some(time) if sends => self.moved = Some(time.now() + seconds),
                         Some(time) => time.reach(time.now() + seconds),
                         None => thread::sleep(seconds),
                     }
@@ -2071,7 +2086,7 @@ fn stall_after(caller: Option<&Caller>, shared: &Mutex<Status>) {
     }
 }
 
-fn serve(mut connection: UnixStream, model: bool, shared: &Mutex<Status>) {
+fn serve(mut connection: Link, model: bool, shared: &Mutex<Status>) {
     let (mut replies, mut crashed) = (Vec::<(FromSandbox, Vec<u8>)>::new(), false);
     let mut served = Served::default();
     let (freezing, mut frozen) = (status(shared).freezing, false);
@@ -2139,6 +2154,7 @@ fn serve(mut connection: UnixStream, model: bool, shared: &Mutex<Status>) {
         {
             collect(stream, &dir, &mut served, &mut replies);
         }
+        move_on_send(&mut served, &mut connection);
         let caller = served.caller.as_ref();
         stall_after(caller, shared);
         let close = caller.and_then(|caller| caller.end) == Some(End::Close);
@@ -2148,8 +2164,21 @@ fn serve(mut connection: UnixStream, model: bool, shared: &Mutex<Status>) {
     }
 }
 
+// Has what the sandbox sends next move the clock to where its last `sleep` step slept until.
+fn move_on_send(served: &mut Served, connection: &mut Link) {
+    if let (Some(at), Link::World(peer)) = (
+        served
+            .caller
+            .as_mut()
+            .and_then(|caller| caller.moved.take()),
+        connection,
+    ) {
+        peer.move_on_write(at);
+    }
+}
+
 fn send(
-    connection: &mut UnixStream,
+    connection: &mut Link,
     replies: &mut Vec<(FromSandbox, Vec<u8>)>,
     crashed: bool,
     close: bool,
@@ -2175,4 +2204,59 @@ fn send(
         let _ = connection.shutdown(Shutdown::Both);
     }
     !crashed
+}
+
+/// A sandbox's connection to its gateway: a socket of the machine's, or a stream in the simulated
+/// world.
+enum Link {
+    Unix(UnixStream),
+    World(test_support::world::Peer),
+}
+
+impl Link {
+    fn try_clone(&self) -> std::io::Result<Self> {
+        match self {
+            Self::Unix(stream) => stream.try_clone().map(Self::Unix),
+            Self::World(peer) => peer.try_clone().map(Self::World),
+        }
+    }
+
+    fn shutdown(&self, how: Shutdown) -> std::io::Result<()> {
+        match (self, how) {
+            (Self::Unix(stream), how) => stream.shutdown(how),
+            (Self::World(peer), Shutdown::Read) => {
+                peer.shutdown_read();
+                Ok(())
+            }
+            (Self::World(peer), Shutdown::Write | Shutdown::Both) => {
+                peer.shutdown();
+                Ok(())
+            }
+        }
+    }
+}
+
+impl std::io::Read for Link {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Unix(stream) => stream.read(buf),
+            Self::World(peer) => peer.read(buf),
+        }
+    }
+}
+
+impl std::io::Write for Link {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Unix(stream) => stream.write(buf),
+            Self::World(peer) => peer.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Unix(stream) => stream.flush(),
+            Self::World(peer) => peer.flush(),
+        }
+    }
 }

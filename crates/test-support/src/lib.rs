@@ -23,6 +23,7 @@ use stdx::process::Environment;
 use stdx::time::{Clock as _, Machine};
 
 pub mod edge;
+pub mod gateway;
 pub mod http;
 pub mod io;
 pub mod suite;

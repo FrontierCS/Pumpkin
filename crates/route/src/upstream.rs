@@ -321,7 +321,7 @@ impl Upstream {
         }
         let headers = returned(response.headers(), closed);
         let Client { request, by, keep } = client;
-        let mut client = match request.respond(status, headers, by) {
+        let mut client = match request.respond(status, headers, by.1) {
             Ok(client) => client,
             Err(error) => {
                 answered(Answer::Cut {
@@ -574,7 +574,7 @@ fn barred(
     keep.request(&request.request.body, None);
     keep.response(refusal.body(api).as_bytes());
     answered(refusal.barred(bar));
-    refusal.answer(api, request, by)
+    refusal.answer(api, request, by.1)
 }
 
 /// The time that `until`, a time on its clock, leaves the exchange: none once it has passed, and
@@ -600,7 +600,7 @@ fn refuse(
     let api = closed.route().api();
     keep.response(refusal.body(api).as_bytes());
     answered(answer);
-    refusal.answer(api, request, by)
+    refusal.answer(api, request, by.1)
 }
 
 /// Answers `client`'s request with `refusal` in place of the upstream's response with the status
@@ -621,7 +621,7 @@ fn replaced(
         keep.response(&buffer[..read]);
     }
     answered(refusal.answered(Some(status), request_id));
-    refusal.answer(closed.route().api(), request, by)
+    refusal.answer(closed.route().api(), request, by.1)
 }
 
 enum Relayed {
@@ -637,7 +637,7 @@ enum Relayed {
 /// how it went.
 fn relay(
     body: &mut impl Read,
-    client: &mut ModelResponse<impl Clock>,
+    client: &mut ModelResponse,
     scan: &mut Scan,
     keep: &dyn Keep,
 ) -> Relayed {

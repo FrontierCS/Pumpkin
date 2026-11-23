@@ -3,7 +3,6 @@
 //! request.
 
 use std::sync::Arc;
-use std::thread::{self, Scope};
 use std::time::Duration;
 
 use decision::{Caller, Core, Outcome, WorkEnd};
@@ -16,12 +15,12 @@ use stdx::time::Clock as _;
 use crate::budget::Budget;
 use crate::log::{Entry, ModelAnswer};
 use crate::model::{Exchange, Served};
-use crate::{Host, Inbox, Input, Runtime, Stopped};
+use crate::{Host, Input, Runtime, Stopped};
 
-impl<'r, H: Host + 'r> Runtime<'r, H> {
-    pub(crate) fn model_request<'s>(
+impl<'r, H: Host + 'r> Runtime<'r, '_, H> {
+    pub(crate) fn model_request(
         &mut self,
-        scope: Option<&'s Scope<'s, 'r>>,
+        live: bool,
         core: &Core<'_>,
         (caller, at): (Caller, Duration),
         incoming: IncomingModelRequest,
@@ -29,11 +28,11 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         let number = self.next_model_request;
         self.next_model_request += 1;
         // A call's start and request may both arrive after the run ends, with no route installed.
-        let Some(scope) = scope else {
+        if !live {
             drop(incoming);
             let note = format!("model request {number} wasn't answered: the run has ended");
             return self.log.note(&note);
-        };
+        }
         // No type excludes a model request here, since one `Arrival` serves sessions with model
         // requests and without.
         let Some(served) = self.served.get(&caller).map(Arc::clone) else {
@@ -58,54 +57,49 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             Caller::Agent(_) => self.teardown_end(),
             Caller::Job(job) => self.call(job).collect,
         };
-        let reports = self.inbox.sender();
+        let reports = self.events.clone();
         let clock = self.clock.clone();
         let exchange = Exchange::new(self.dir, number, clock.clone());
         // A request stays in flight until its thread writes its response's end, the thread's last
         // step, so the session's bound on the requests in flight, `MAX_MODEL_REQUESTS_IN_FLIGHT`,
         // bounds these threads too, but for those writing that end.
-        let spawned = thread::Builder::new()
-            .name(format!("model-{number}"))
-            .spawn_scoped(scope, move || {
-                // The loop's inbox outlives every request's thread, which the run's end waits for.
-                // Both reports come before the answer's end, and so before what the caller does
-                // next. Each time is read here, as it happens, since the loop writes the record
-                // later, by however long it is busy.
-                let forwarding = || {
-                    let started = Entry::ModelRequestStarted((caller, number), clock.now());
-                    let _ = reports.send(Input::Logged(started));
+        let spawned = self.spawn((&format!("model-{number}"), None), move || {
+            // The loop's inbox outlives every request's thread, which the run's end waits for.
+            // Both reports come before the answer's end, and so before what the caller does
+            // next. Each time is read here, as it happens, since the loop writes the record
+            // later, by however long it is busy.
+            let forwarding = || {
+                let started = Entry::ModelRequestStarted((caller, number), clock.now());
+                reports.send(Input::Logged(started));
+            };
+            let answered = |taken: Option<&(Name, Api)>, answer| {
+                let answered = ModelAnswer {
+                    taken: taken.cloned(),
+                    answer,
+                    kept: exchange.kept(),
+                    first: exchange.timed(),
+                    ended: clock.now(),
                 };
-                let answered = |taken: Option<&(Name, Api)>, answer| {
-                    let answered = ModelAnswer {
-                        taken: taken.cloned(),
-                        answer,
-                        kept: exchange.kept(),
-                        first: exchange.timed(),
-                        ended: clock.now(),
-                    };
-                    let answered = Entry::ModelAnswered((caller, number), Box::new(answered));
-                    let _ = reports.send(Input::Logged(answered));
-                };
-                served.serve(
-                    (number, &exchange),
-                    incoming,
-                    admission,
-                    by,
-                    forwarding,
-                    answered,
-                );
-                if let Some(failed) = exchange.finish() {
-                    let note = format!("model request {number} wasn't kept whole: {failed}");
-                    let _ = reports.send(Input::Logged(Entry::Note(note)));
-                }
-            });
+                let answered = Entry::ModelAnswered((caller, number), Box::new(answered));
+                reports.send(Input::Logged(answered));
+            };
+            served.serve(
+                (number, &exchange),
+                incoming,
+                admission,
+                by,
+                forwarding,
+                answered,
+            );
+            if let Some(failed) = exchange.finish() {
+                let note = format!("model request {number} wasn't kept whole: {failed}");
+                reports.send(Input::Logged(Entry::Note(note)));
+            }
+        });
         match spawned {
-            Ok(_) => Ok(()),
+            Ok(()) => Ok(()),
             Err(error) => {
-                let note = format!(
-                    "model request {number} wasn't answered: its thread didn't start: {error}"
-                );
-                self.log.note(&note)
+                (self.log).note(&format!("model request {number} wasn't answered: {error}"))
             }
         }
     }

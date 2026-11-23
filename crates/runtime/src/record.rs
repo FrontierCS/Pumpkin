@@ -32,7 +32,6 @@ use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use decision::PayloadRef;
 use jiff::Timestamp;
 use jiff::civil::DateTime;
 use jiff::tz::Offset;
@@ -56,7 +55,7 @@ mod writer;
 
 pub use ending::Ending;
 use ending::{State, read_outcome};
-pub(super) use payload::reference;
+pub(super) use payload::{Payloads, Stored, reference};
 pub use writer::{Writer, writer};
 use writer::{read_record_json, writer_of};
 
@@ -1056,16 +1055,14 @@ pub(super) fn write_ir(host: &impl Host, dir: &Path, workflow: &Workflow) -> Res
     replace(host, dir, "ir.json", ir_json(workflow).as_bytes())
 }
 
-/// Writes `dir`'s `sandbox.json`, `dir` made if need be: the sandbox's provider and id, its GPUs if
-/// known, and how its latest delete went, if one was tried.
-pub(super) fn write_sandbox(
-    host: &impl Host,
-    dir: &Path,
+/// What a sandbox's `sandbox.json` holds: the sandbox's provider and id, its GPUs if known, and how
+/// its latest delete went, if one was tried.
+pub(super) fn sandbox_json(
     provider: &Name,
     id: &SandboxId,
     gpus: Option<&[GpuModel]>,
     deleted: Option<Result<(), &str>>,
-) -> Result<(), String> {
+) -> Vec<u8> {
     let mut sandbox = json!({ "provider": provider, "id": id.as_str() });
     if let Some(gpus) = gpus {
         sandbox["gpus"] = json!(gpus);
@@ -1076,8 +1073,7 @@ pub(super) fn write_sandbox(
             Err(_) => json!({ "state": "failed" }),
         };
     }
-    fs::create_dir_all(dir).context(dir.display())?;
-    write_json(host, dir, "sandbox.json", &sandbox)
+    format!("{sandbox:#}\n").into_bytes()
 }
 
 /// Makes `dir/name` hold `bytes`, as it is or as it was, whenever the machine fails: written and
@@ -1089,83 +1085,8 @@ fn replace(host: &impl Host, dir: &Path, name: &str, bytes: &[u8]) -> Result<(),
         file.write_all(bytes)?;
         host.sync(&file, Durable::All)
     });
-    let renamed = (written.context(temporary.display()))
-        .and_then(|()| fs::rename(&temporary, &path).context(path.display()));
-    if let Err(error) = renamed {
-        // A temporary file that wasn't renamed holds nothing the record needs.
-        return match fs::remove_file(&temporary) {
-            Ok(()) => Err(error),
-            Err(removing) if removing.kind() == io::ErrorKind::NotFound => Err(error),
-            Err(removing) => Err(format!(
-                "{error}; {} is left: {removing}",
-                temporary.display()
-            )),
-        };
-    }
+    crate::disk::rename(written.context(temporary.display()), &temporary, &path)?;
     sync_dir(host, dir)
-}
-
-/// The record's `payloads/`, where each accepted payload is kept under the digest of its bytes.
-pub(super) struct Payloads<'h, H> {
-    dir: PathBuf,
-    host: &'h H,
-}
-
-impl<'h, H: Host> Payloads<'h, H> {
-    pub(super) fn create(host: &'h H, record: &Path) -> Result<Self, String> {
-        let dir = record.join("payloads");
-        fs::create_dir(&dir).context(dir.display())?;
-        sync_dir(host, record)?;
-        Ok(Self { dir, host })
-    }
-
-    /// Keeps `bytes`, whose reference is `payload`, unless a payload of that digest is kept
-    /// already: a file has a digest's name only once it holds all of its bytes.
-    pub(super) fn store(&self, bytes: &[u8], payload: &PayloadRef) -> Result<(), String> {
-        let path = self.path(&payload.digest);
-        match fs::symlink_metadata(&path) {
-            Ok(_) => Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                replace(self.host, &self.dir, payload.digest.hex(), bytes)
-            }
-            Err(error) => Err(error).context(path.display()),
-        }
-    }
-
-    pub(super) fn stored(&self, payload: &PayloadRef) -> Stored {
-        Stored {
-            path: self.path(&payload.digest),
-            reference: payload.clone(),
-        }
-    }
-
-    fn path(&self, digest: &Sha256Digest) -> PathBuf {
-        self.dir.join(digest.hex())
-    }
-}
-
-pub(super) struct Stored {
-    path: PathBuf,
-    pub(super) reference: PayloadRef,
-}
-
-impl Stored {
-    /// The payload's bytes. Fails if the file's size or digest isn't the reference's.
-    pub(super) fn read(&self) -> Result<Vec<u8>, String> {
-        let bytes = fs::read(&self.path).context(self.path.display())?;
-        let read = reference(&bytes);
-        if read != self.reference {
-            let (PayloadRef { size, digest }, expected) = (read, &self.reference);
-            return Err(format!(
-                "{} holds {size} bytes of digest {}: expected the payload's {} bytes of digest {}",
-                self.path.display(),
-                digest.as_str(),
-                expected.size,
-                expected.digest.as_str()
-            ));
-        }
-        Ok(bytes)
-    }
 }
 
 /// What `dir`, where a sandbox's `out` and `log` were collected, holds of each, for the run log:

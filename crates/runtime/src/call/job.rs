@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use decision::{CallResult, JobId};
-use gateway::Session;
+use gateway::Remote;
 use schema::sandbox::OpPayloadLimit;
 use schema::workflow::Holder;
 
@@ -44,7 +44,7 @@ pub(crate) fn evaluate<H: Host>(
     call: Call<'_>,
     bodies: &dyn Bodies,
     child: &mut Child<'_, H, crate::relay::Order>,
-    session: &mut Session<H::Clock>,
+    session: &mut Remote,
     stdin: &mut body::Stdin,
 ) -> End {
     let Call {

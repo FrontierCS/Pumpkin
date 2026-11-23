@@ -14,15 +14,19 @@ use std::io;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::time::{Duration, Instant, SystemTime};
 
+use stdx::io::{Backend, Durable};
 use stdx::time::Clock as _;
 
 /// The machine a run runs on, as far as the run reads time, waits, and makes its record last.
-// Sync, as each child's thread syncs the record of its sandbox's start and delete through it.
-pub trait Host: Sync {
+pub trait Host {
     type Clock: Clock;
 
     /// The clock of a run that starts now.
     fn start(&self) -> Self::Clock;
+
+    /// What the loop that the run's driver runs on performs its operations on, whose clock is the
+    /// run's.
+    fn backend(&self) -> io::Result<Box<dyn Backend>>;
 
     /// Makes what was written to `file`, a file or directory of a run's record, last through a
     /// crash of the machine, as far as `durable` says. A failure may lose what was written to
@@ -30,21 +34,10 @@ pub trait Host: Sync {
     fn sync(&self, file: &File, durable: Durable) -> io::Result<()>;
 }
 
-#[derive(Clone, Copy, Debug)]
-pub enum Durable {
-    /// Its data, and what of its metadata reading the data back needs, such as its size, as
-    /// `fdatasync` makes last.
-    Data,
-    /// Its data and all its metadata, and a directory's entries, as `fsync` makes last.
-    All,
-}
-
 /// A run's clock, whose origin is the run's start: the core takes its time with each event.
 ///
 /// Each of the run's threads reads it through a clone of its own.
-// 'static, as the agent's session's reader, a thread that outlives the run's borrows, stamps each
-// of the agent's arrivals with a clone.
-pub trait Clock: stdx::time::Clock + Send + 'static {
+pub trait Clock: stdx::time::Clock + Send {
     type Inbox<T: Send + 'static>: Inbox<T> + Send;
 
     /// An empty inbox, whose waits this clock times.
@@ -76,6 +69,10 @@ impl Host for System {
         SystemClock {
             start: Instant::now(),
         }
+    }
+
+    fn backend(&self) -> io::Result<Box<dyn Backend>> {
+        stdx::io::machine()
     }
 
     fn sync(&self, file: &File, durable: Durable) -> io::Result<()> {

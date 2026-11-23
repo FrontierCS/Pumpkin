@@ -21,7 +21,7 @@ pub(super) struct Waiter {
     number: Option<u64>,
 }
 
-impl<H: Host> Runtime<'_, H> {
+impl<'r, H: Host + 'r> Runtime<'r, '_, H> {
     pub(super) fn watch(
         &mut self,
         core: &Core<'_>,

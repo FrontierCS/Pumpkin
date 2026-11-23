@@ -1,33 +1,34 @@
 //! How sandboxes meet the gateway.
 //!
-//! A meeting issues one [`Registration`] for a sandbox about to start, and the registration's
-//! `accept` waits for that sandbox, reads its hello and opens its [`Session`]. Dropping a
-//! registration unspent withdraws what its meeting issued. What identifies a sandbox is how it
+//! A meeting issues one [`Registration`] for a sandbox about to start. The loop accepts the
+//! sandbox on a socket of its own and reads its hello there ([`crate::Sessions::accept`]). A
+//! meeting elsewhere waits on a thread for the sandbox and its hello ([`Elsewhere::meet`]). The
+//! loop then opens its session ([`crate::Sessions::open`]). What identifies a sandbox is how it
 //! meets, as [the sandbox protocol](schema::sandbox) says.
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, DirBuilder, File};
 use std::io::{self, Read};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use schema::frame;
 use schema::ir::{GpuModel, Name};
 use schema::sandbox::{
-    Attestation, Endpoint, HELLO_TIMEOUT, Hello, HelloReply, Listening, OpPayloadLimit,
-    PrivateDial, REGISTRATION_GRANT_BYTES, RegistrationGrant, SOCKET_NAME, SocketDial,
+    Attestation, Endpoint, HELLO_TIMEOUT, Hello, HelloReply, Listening, PrivateDial,
+    REGISTRATION_GRANT_BYTES, RegistrationGrant, SOCKET_NAME, SocketDial,
 };
 use stdx::Deadline;
+use stdx::io::{Io, Loop};
 use stdx::time::{Clock, Machine};
 
-use crate::{Arrival, Bound, Connection, Session, Until, context, lock, passed};
+use crate::bound::{Bound, Until};
+use crate::context;
 
 // Names each file this process holds open by its descriptor's number: a path through one resolves
 // as through the file, a directory included. A socket's path holds 107 bytes at most, which a deep
@@ -82,10 +83,14 @@ impl Sockets {
         Ok(Self { dir })
     }
 
-    /// Makes the directory and the socket of the sandbox `name`, which is new, and returns where
-    /// the sandbox dials. The socket takes the first connection, whoever makes it, which identifies
-    /// the sandbox, so show the directory to that sandbox alone.
-    pub fn issue(&self, name: &Name) -> io::Result<(SocketDial, Registration)> {
+    /// Makes the directory and the socket of the sandbox `name`, which is new, on `io`, and returns
+    /// where the sandbox dials. The socket takes the first connection, whoever makes it, which
+    /// identifies the sandbox, so show the directory to that sandbox alone.
+    pub fn issue<C: Loop>(
+        &self,
+        io: &mut Io<C>,
+        name: &Name,
+    ) -> io::Result<(SocketDial, Registration)> {
         // A name is one path component, neither `.` nor `..`, so each sandbox's directory is
         // directly within this one: none is outside it, and none holds another's.
         let dir = self.dir.join(name.as_str());
@@ -98,11 +103,23 @@ impl Sockets {
             let what = format_args!("the mode of {} can't be set", dir.display());
             context(what, &error)
         })?;
-        let listener = SocketListener::bind(&dir)?;
-        let registration = Registration {
-            meeting: Meeting::Socket(listener),
-        };
-        Ok((SocketDial { dir }, registration))
+        let path = dir.join(SOCKET_NAME);
+        // Any user may connect, since a sandbox's user is not the gateway's; only the sandbox can
+        // reach `dir`. Bound below the directory's descriptor, as its path may be longer than a
+        // socket's.
+        let listener = File::open(&dir).and_then(|handle| {
+            let fd = handle.as_raw_fd();
+            io.listen(
+                Path::new(&format!("{OPEN_FILES}/{fd}/{SOCKET_NAME}")),
+                0o666,
+            )
+        });
+        let listener = listener.map_err(|error| {
+            let what = format_args!("the session's socket can't be made at {}", path.display());
+            context(what, &error)
+        })?;
+        let meeting = SocketMeeting { listener, path };
+        Ok((SocketDial { dir }, Registration::Socket(meeting)))
     }
 }
 
@@ -186,10 +203,13 @@ impl fmt::Debug for Check {
     }
 }
 
+/// A connection that met its sandbox on another thread, whose hello was read and admitted, for
+/// the loop to open its session ([`crate::Sessions::open`]).
 #[derive(Debug)]
-struct Met {
-    connection: Connection,
-    gpus: Option<Vec<GpuModel>>,
+pub struct Met {
+    pub(crate) connection: Connection,
+    pub(crate) gpus: Option<Vec<GpuModel>>,
+    pub(crate) grant: Option<RegistrationGrant>,
 }
 
 impl Listener {
@@ -290,9 +310,7 @@ impl Unattested {
         };
         awaited.check = Some(Check(Box::new(check)));
         drop(registry);
-        Registration {
-            meeting: Meeting::Private(awaiting),
-        }
+        Registration::Elsewhere(Elsewhere(Meeting::Private(awaiting)))
     }
 }
 
@@ -341,7 +359,12 @@ fn register(registry: &Mutex<Registry>, stream: TcpStream, peer: IpAddr, timeout
     // Only its own deadline ends the read: no accept waits on it until a check admits it.
     let unopened = match set.and_then(|()| read_hello(&connection, by, &|| false)) {
         Ok((Hello { gpus }, attestation)) => {
-            present(registry, attestation, peer, Met { connection, gpus }).err()
+            let met = Met {
+                connection,
+                gpus,
+                grant: None,
+            };
+            present(registry, attestation, peer, met).err()
         }
         Err(error) => Some((connection, error)),
     };
@@ -501,13 +524,11 @@ impl Unreached {
     /// Registers the endpoint where the sandbox listens.
     pub fn at(self, endpoint: Endpoint) -> Registration {
         let Self { client, grant } = self;
-        Registration {
-            meeting: Meeting::Dial(Dialed {
-                client,
-                grant,
-                endpoint,
-            }),
-        }
+        Registration::Elsewhere(Elsewhere(Meeting::Dial(Dialed {
+            client,
+            grant,
+            endpoint,
+        })))
     }
 }
 
@@ -585,7 +606,11 @@ impl Dialed {
             Err(error) => return Err(DialError::Again(error)),
         };
         match read_hello(&connection, by, stopped) {
-            Ok((Hello { gpus }, None)) => Ok(Met { connection, gpus }),
+            Ok((Hello { gpus }, None)) => Ok(Met {
+                connection,
+                gpus,
+                grant: Some(self.grant.clone()),
+            }),
             Ok((_, Some(_))) => {
                 let message = "the hello presents an attestation where the gateway dialed the \
                                sandbox, which its endpoint identifies: expected none there";
@@ -653,57 +678,66 @@ fn random_grant() -> io::Result<RegistrationGrant> {
     Ok(RegistrationGrant::from(bytes))
 }
 
-/// Where one sandbox meets the gateway, and the accept of the session it opens there.
+/// Where one sandbox meets the gateway.
 ///
-/// Dropping the registration ends the meeting: it removes the socket, or ends the wait for the
-/// sandbox's hello, closing any connection that its check admitted.
+/// Dropping a meeting elsewhere unspent withdraws it. It ends the wait for the sandbox's hello,
+/// closing any connection that its check admitted. A socket is withdrawn on its loop
+/// ([`SocketMeeting::withdraw`]).
 #[derive(Debug)]
-pub struct Registration {
-    meeting: Meeting,
+pub enum Registration {
+    /// On a socket of the sandbox's own, where the loop accepts it ([`crate::Sessions::accept`]).
+    Socket(SocketMeeting),
+    /// Where a thread waits for it ([`Elsewhere::meet`]).
+    Elsewhere(Elsewhere),
 }
+
+/// A socket that one sandbox connects to, on the loop that made it, which either accepts on it
+/// ([`crate::Sessions::accept`]) or withdraws it ([`SocketMeeting::withdraw`]).
+#[derive(Debug)]
+#[must_use = "a socket left unaccepted stays open: withdraw it on its loop"]
+pub struct SocketMeeting {
+    pub(crate) listener: stdx::io::Listener,
+    pub(crate) path: PathBuf,
+}
+
+impl SocketMeeting {
+    /// Withdraws a socket that no sandbox is to connect to: closes it on `io`, the loop that made
+    /// it, and removes it.
+    pub fn withdraw<C: Loop>(self, io: &mut Io<C>) {
+        let Self { listener, path } = self;
+        io.close_listener(listener);
+        // A socket already gone is fine.
+        let _ = fs::remove_file(path);
+    }
+}
+
+/// A meeting over the network, which a thread waits for.
+#[derive(Debug)]
+pub struct Elsewhere(Meeting);
 
 #[derive(Debug)]
 enum Meeting {
-    Socket(SocketListener),
     Private(Awaiting),
     Dial(Dialed),
 }
 
-impl Registration {
-    /// Waits for the sandbox to meet the gateway by `by`, a time on `clock`, accepts its hello, and
-    /// returns its session, which times its requests by `clock`.
-    ///
-    /// `ops` is the session's limit on an op's payload, none for a session that takes no ops, and
-    /// `models` whether it takes model requests. The session's reader thread sends each arrival, as
-    /// `wrap` makes it, to `arrivals`, and drops it once `arrivals`' receiver has gone.
-    /// `stopped` is asked while the call waits, and once it says yes the call fails. A sandbox that
-    /// has not met the gateway by `by` fails it with `TimedOut`, and a hello that is wrong, which
-    /// the sandbox is told of, with `InvalidData`.
-    pub fn accept<C: Clock, T: Send + 'static>(
-        self,
-        (clock, by): (&C, Duration),
-        ops: Option<OpPayloadLimit>,
-        models: bool,
-        arrivals: Sender<T>,
-        wrap: impl Fn(Arrival) -> T + Send + 'static,
-        stopped: impl Fn() -> bool,
-    ) -> io::Result<Session<C>> {
-        let by = Bound { clock, by };
-        let (Met { connection, gpus }, grant) = match self.meeting {
-            Meeting::Socket(listener) => (listener.connected(by, &stopped)?, None),
-            Meeting::Private(awaiting) => (awaiting.presented(by, &stopped)?, None),
+impl Elsewhere {
+    /// Waits for the sandbox to meet the gateway by `by` and reads its hello, for the loop to open
+    /// its session. `stopped` is asked while the call waits, and once it says yes the call fails.
+    /// A sandbox that has not met the gateway by `by` fails it with `TimedOut`, and a hello that
+    /// is wrong, which the sandbox is told of, with `InvalidData`.
+    pub fn meet(self, by: Deadline, stopped: impl Fn() -> bool) -> io::Result<Met> {
+        let by = Bound {
+            clock: &Machine,
+            by: Machine
+                .now()
+                .saturating_add(by.remaining().unwrap_or_default()),
+        };
+        match self.0 {
+            Meeting::Private(awaiting) => awaiting.presented(by, &stopped),
             // A `sandboxd` that listens serves only a peer that answers its hello with its grant.
-            Meeting::Dial(dialed) => (dialed.connected(by, &stopped)?, Some(dialed.grant)),
-        };
-        welcome(&connection, by, grant)?;
-        // `arrivals` is unbounded, so the reader never waits on its owner; the protocol bounds what
-        // a session leaves there: the op in flight, the model requests in flight, at most
-        // `MAX_MODEL_REQUESTS_IN_FLIGHT`, the exit of each command the owner started, and the end.
-        // An owner that has dropped its receiver hears nothing more, as it chose.
-        let send = move |arrival| {
-            let _ = arrivals.send(wrap(arrival));
-        };
-        Session::new(clock.clone(), connection, gpus, ops, models, Box::new(send))
+            Meeting::Dial(dialed) => dialed.connected(by, &stopped),
+        }
     }
 }
 
@@ -721,84 +755,6 @@ fn unstopped(
         )));
     }
     Ok(())
-}
-
-#[derive(Debug)]
-struct SocketListener {
-    listener: UnixListener,
-    path: PathBuf,
-}
-
-impl SocketListener {
-    fn bind(dir: &Path) -> io::Result<Self> {
-        let path = dir.join(SOCKET_NAME);
-        let bound = File::open(dir)
-            .and_then(|handle| {
-                let fd = handle.as_raw_fd();
-                UnixListener::bind(format!("{OPEN_FILES}/{fd}/{SOCKET_NAME}"))
-            })
-            .and_then(|listener| {
-                // Any user may connect, since a sandbox's user is not the gateway's; only the
-                // sandbox can reach `dir`.
-                fs::set_permissions(&path, fs::Permissions::from_mode(0o666))?;
-                Ok(listener)
-            });
-        let listener = bound.map_err(|error| {
-            let what = format_args!("the session's socket can't be made at {}", path.display());
-            context(what, &error)
-        })?;
-        Ok(Self { listener, path })
-    }
-
-    fn connected(self, by: Bound<'_, impl Clock>, stopped: &dyn Fn() -> bool) -> io::Result<Met> {
-        let path = self.path.display();
-        self.listener
-            .set_nonblocking(true)
-            .map_err(|error| context(format_args!("{path} can't be made non-blocking"), &error))?;
-        let stream = loop {
-            let awaited = format_args!("a sandbox connected to {path}");
-            unstopped(stopped, awaited, "its sandbox to connect")?;
-            match self.listener.accept() {
-                Ok((stream, _)) => break stream,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    if by.left().is_none() {
-                        return Err(io::Error::new(
-                            io::ErrorKind::TimedOut,
-                            format!(
-                                "no sandbox connected to {path} by the deadline: expected its \
-                                 sandbox to connect while the deadline lasts"
-                            ),
-                        ));
-                    }
-                    thread::sleep(POLL);
-                }
-                Err(error) => {
-                    let what = format_args!("a connection to {path} can't be accepted");
-                    return Err(context(what, &error));
-                }
-            }
-        };
-        // The socket goes at once, so that no second connection waits on it while the hello is
-        // read.
-        drop(self);
-        let connection = Connection::Unix(stream);
-        let hello = read_hello(&connection, by, stopped);
-        let hello = hello.map_err(|error| refuse(&connection, by, error))?;
-        let (Hello { gpus }, None) = hello else {
-            let message = "the hello presents an attestation on a socket of the sandbox's own, \
-                           which identifies it: expected none there";
-            let error = io::Error::new(io::ErrorKind::InvalidData, message);
-            return Err(refuse(&connection, by, error));
-        };
-        Ok(Met { connection, gpus })
-    }
-}
-
-impl Drop for SocketListener {
-    fn drop(&mut self) {
-        // Removing the socket keeps a second connection out; a socket already gone is fine.
-        let _ = fs::remove_file(&self.path);
-    }
 }
 
 #[derive(Debug)]
@@ -919,24 +875,6 @@ fn refuse(connection: &Connection, by: Bound<'_, impl Clock>, error: io::Error) 
     io::Error::new(io::ErrorKind::InvalidData, reason)
 }
 
-fn welcome(
-    connection: &Connection,
-    by: Bound<'_, impl Clock>,
-    grant: Option<RegistrationGrant>,
-) -> io::Result<()> {
-    let accepted = HelloReply::Accepted { grant };
-    frame::write(&mut Until { connection, by }, &accepted, &[]).map_err(|error| {
-        if !passed(&error) {
-            return context("the answer to the sandbox's hello can't be sent", &error);
-        }
-        io::Error::new(
-            io::ErrorKind::TimedOut,
-            "the deadline passed before the sandbox's hello was answered: expected time left to \
-             answer it",
-        )
-    })
-}
-
 struct Polled<'a, C> {
     connection: &'a Connection,
     by: Bound<'a, C>,
@@ -965,4 +903,66 @@ impl<C: Clock> Read for Polled<'_, C> {
             }
         }
     }
+}
+
+/// A connection that a meeting made, before the loop holds it.
+#[derive(Debug)]
+pub(crate) enum Connection {
+    Tcp(TcpStream),
+    Tls(tls::Stream),
+}
+
+impl Connection {
+    pub(crate) fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+        match self {
+            Self::Tcp(stream) => stream.set_nonblocking(nonblocking),
+            Self::Tls(stream) => stream.set_nonblocking(nonblocking),
+        }
+    }
+
+    pub(crate) fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        match self {
+            Self::Tcp(stream) => stream.set_write_timeout(timeout),
+            Self::Tls(stream) => stream.set_write_timeout(timeout),
+        }
+    }
+
+    /// The descriptor that the loop reads and writes, and what else must live as long, such as
+    /// TLS's relay.
+    pub(crate) fn into_parts(self) -> io::Result<(OwnedFd, Option<tls::Stream>)> {
+        match self {
+            Self::Tcp(stream) => Ok((stream.into(), None)),
+            Self::Tls(stream) => Ok((stream.descriptor()?, Some(stream))),
+        }
+    }
+}
+
+// Through a shared reference, as `TcpStream` reads and writes.
+impl Read for &Connection {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Connection::Tcp(stream) => (&mut &*stream).read(buf),
+            Connection::Tls(stream) => (&mut &*stream).read(buf),
+        }
+    }
+}
+
+impl io::Write for &Connection {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Connection::Tcp(stream) => (&mut &*stream).write(buf),
+            Connection::Tls(stream) => (&mut &*stream).write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Connection::Tcp(stream) => (&mut &*stream).flush(),
+            Connection::Tls(stream) => (&mut &*stream).flush(),
+        }
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    stdx::unpoisoned(mutex.lock())
 }

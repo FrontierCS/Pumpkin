@@ -22,7 +22,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use expect_test::expect;
-use gateway::{Arrival, Dialer, Put, Registration, Session, Sockets};
+use gateway::{Arrival, Dialer, Put, Registration, Remote, Sockets};
 use provider::{
     Console, Create, ImageRef, Listed, Meeting, Provider, Reservation, Role, RunTag, SandboxId,
     SandboxdRef, UnixTime,
@@ -73,8 +73,8 @@ pub struct Locals {
     pub unreachable_sandboxd: PathBuf,
 }
 
-// A started sandbox's session and what its reader hands over, or why it didn't start.
-type Started = Result<(Session<Machine>, Receiver<Arrival>), String>;
+// A started sandbox's session and what it hands over, or why it didn't start.
+type Started = Result<(Remote, Receiver<Arrival>), String>;
 
 // A wait that nothing can end sooner, such as a put to a `sandboxd` that has stopped reading, no
 // longer than any provider's startup, so that no outcome rests on its length.
@@ -358,7 +358,7 @@ fn outcome<T>(session: &Result<T, String>) -> String {
     }
 }
 
-fn put(mut session: Session<Machine>) -> String {
+fn put(mut session: Remote) -> String {
     // Many times what a Unix socket holds unread with the default buffers
     // (`net.core.wmem_default`), which the suite assumes of its host: buffers that held it all
     // would let the put succeed.
@@ -367,7 +367,7 @@ fn put(mut session: Session<Machine>) -> String {
         vec![0; 4 << 20],
     );
     let home = AbsolutePath::try_from("/pumpkin/home".to_owned()).unwrap();
-    match session.put(&home, [Put::File(path, file_mode(), &bytes)], soon()) {
+    match session.put(&home, [Put::File(path, file_mode(), bytes.clone())], soon()) {
         Ok(()) => "put".to_owned(),
         Err(error) => format!("{:?}: {error}", error.kind()),
     }
@@ -375,7 +375,8 @@ fn put(mut session: Session<Machine>) -> String {
 
 struct Suite<'a> {
     subject: &'a dyn Subject,
-    sockets: Sockets,
+    sockets: std::sync::Arc<Sockets>,
+    gateway: crate::gateway::Gateway,
     dialer: Dialer,
     run: RunTag,
     other: RunTag,
@@ -405,7 +406,8 @@ impl<'a> Suite<'a> {
             .map(|(run, roles)| reserved(&*provider, run, roles));
         Self {
             subject,
-            sockets: Sockets::create(dir.path().join("sockets")).unwrap(),
+            sockets: std::sync::Arc::new(Sockets::create(dir.path().join("sockets")).unwrap()),
+            gateway: crate::gateway::Gateway::new(),
             dialer: Dialer::new(crate::edge::client()),
             run,
             other,
@@ -465,7 +467,7 @@ impl<'a> Suite<'a> {
         match provider.meeting() {
             Meeting::Local(creator) => {
                 let socket = Name::try_from(socket.to_owned()).unwrap();
-                let (dial, registration) = self.sockets.issue(&socket).unwrap();
+                let (dial, registration) = self.gateway.issue(&self.sockets, &socket).unwrap();
                 Ok((creator.create(&create, dial)?.id, registration))
             }
             Meeting::Listen(creator) => {
@@ -516,7 +518,7 @@ impl<'a> Suite<'a> {
         let (id, registration) = (self.create(role, image, sandboxd, from_now(startup))).unwrap();
         // Nothing stops the start, whose `sandboxd` dials.
         let (sender, arrivals) = mpsc::channel();
-        let accepted = registration.accept((&Machine, by), None, false, sender, |a| a, || false);
+        let accepted = (self.gateway).accept(registration, by, crate::gateway::passive(), sender);
         let accepted = accepted.map_err(|error| error.to_string());
         let session = accepted.and_then(|mut session| {
             session

@@ -4,21 +4,18 @@
 //! [`run`] starts a child's sandbox on the run's one start path, hands it to its driver, and
 //! reports a lease's end once its sandbox is deleted, and a call's as it comes, before the delete,
 //! whose end the call's teardown reports ([`Event::CallTornDown`]); a sandbox that can't be
-//! deleted fails the run. A child's thread waits on an inbox of its own ([`Message`]), into which
-//! its session hands what its reader reads, and the loop the core's stop and its driver's orders.
+//! deleted fails the run. A child's thread waits on an inbox of its own ([`Message`]). Its
+//! session's arrivals go there, and the loop sends the core's stop and its driver's orders there.
 //! A stop takes effect before the child's command starts, as the thread takes what its inbox holds
 //! then, and while it waits.
 
 use std::iter;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
-use std::sync::mpsc::Sender;
-use std::thread::Scope;
 use std::time::Duration;
 
 use decision::{CallResult, Caller, Core, Event, JobId, Request};
-use gateway::{Arrival, IncomingModelRequest, Session, Trees};
-use provider::UnixTime;
+use gateway::{Arrival, IncomingModelRequest, Remote, Trees};
 use schema::sandbox::OpPayloadLimit;
 use stdx::time::Clock as _;
 
@@ -26,21 +23,18 @@ use super::log::Entry;
 use super::sandbox::{Sandboxes, Which};
 use super::{Asked, Clock, Host, Inbox, Input, Runtime};
 
-/// A child of the run, as its thread sees it, timed and synced by the host `H`, whose driver
+/// A child of the run, as its thread sees it, timed by the clock of the host `H`, whose driver
 /// takes orders of type `O`.
 pub(super) struct Child<'r, H: Host, O: Send + 'static> {
     pub(super) which: Which,
     pub(super) deadlines: Deadlines,
-    /// The run's hard end, as its sandbox's create takes it
-    /// ([`Create::hard_end`](provider::Create::hard_end)).
-    pub(super) hard_end: UnixTime,
     /// Its directory in the record, which exists and is empty.
     pub(super) dir: PathBuf,
-    pub(super) sandboxes: &'r Sandboxes<'r, H>,
+    pub(super) sandboxes: &'r Sandboxes<'r>,
     pub(super) clock: H::Clock,
     pub(super) inbox: <H::Clock as Clock>::Inbox<Message<O>>,
-    /// A sender into the loop's inbox, which outlives every child's thread, so a send can't fail.
-    pub(super) reports: Sender<Input<H::Clock>>,
+    /// What sends the loop the child's reports.
+    pub(super) reports: stdx::io::Events<Input>,
 }
 
 /// By when each of a child's steps is to be done, as times since the run started.
@@ -53,10 +47,8 @@ pub(super) struct Deadlines {
 }
 
 pub(super) enum Message<O> {
-    /// What its session's reader handed over ([`Registration::accept`]): its commands' exits and
-    /// its end, and the ops and model requests of a session that takes them.
-    ///
-    /// [`Registration::accept`]: gateway::Registration::accept
+    /// What its session handed over: its commands' exits and its end, and the ops and model
+    /// requests of a session that takes them.
     Session(Arrival),
     Stop,
     /// An order of the core's for its driver, or the core's reply to its op.
@@ -136,7 +128,7 @@ impl End {
 pub(super) fn run<H: Host, O: Send + 'static>(
     child: &mut Child<'_, H, O>,
     ops: Option<OpPayloadLimit>,
-    drive: impl FnOnce(&mut Child<'_, H, O>, &mut Session<H::Clock>) -> End,
+    drive: impl FnOnce(&mut Child<'_, H, O>, &mut Remote) -> End,
 ) {
     let which = child.which;
     let noun = which.noun();
@@ -146,28 +138,28 @@ pub(super) fn run<H: Host, O: Send + 'static>(
     if child.clock.now() >= child.deadlines.startup {
         let reason =
             format!("{noun} sandbox wasn't created: its start was due by a time that had passed");
-        return child.close(End::failed(which, reason), || Ok(()));
+        return child.close(End::failed(which, reason), || (Ok(()), None));
     }
-    let by = (&child.clock, child.deadlines.startup);
     let inbox = child.inbox.sender();
-    let started = (child.sandboxes).start(which, ops, by, child.hard_end, inbox, Message::Session);
+    let arrivals = Box::new(move |arrival| {
+        // A child whose thread has ended hears nothing more.
+        let _ = inbox.send(Message::Session(arrival));
+    });
+    let started = (child.sandboxes).start(which, ops, child.deadlines.startup, arrivals);
     let mut sandbox = match started {
         Ok(sandbox) => sandbox,
         Err(failure) => match failure.dispose(child.sandboxes) {
             Ok(reason) => {
                 let reason = format!("{noun} sandbox didn't start: {reason}");
-                return child.close(End::failed(which, reason), || Ok(()));
+                return child.close(End::failed(which, reason), || (Ok(()), None));
             }
             Err(reason) => return child.report(Report::Undeleted(reason)),
         },
     };
     let last = drive(child, &mut sandbox.session);
     child.close(last, || {
-        let (logged, deleted) = child.sandboxes.delete(sandbox);
-        for entry in logged {
-            child.log(entry);
-        }
-        deleted
+        let (deleted, edge) = child.sandboxes.delete(sandbox);
+        (deleted, Some(edge))
     });
 }
 
@@ -186,14 +178,23 @@ impl<H: Host, O: Send + 'static> Child<'_, H, O> {
     /// Reports `end` around `delete`, which deletes what the child's sandbox left: a call's end
     /// before it, so that the call's caller hears it as the delete runs, and the call's teardown
     /// after it; any other end after it. A failed delete is reported in place of what follows it.
-    pub(super) fn close(&self, end: End, delete: impl FnOnce() -> Result<(), String>) {
+    pub(super) fn close(
+        &self,
+        end: End,
+        delete: impl FnOnce() -> (Result<(), String>, Option<stdx::io::Edge<Input>>),
+    ) {
         let (before, after) = end.reports(self.clock.now());
         if let Some(report) = before {
             self.report(report);
         }
-        match delete() {
-            Ok(()) => self.event(after),
-            Err(reason) => self.report(Report::Undeleted(reason)),
+        let (deleted, edge) = delete();
+        let report = match deleted {
+            Ok(()) => Report::Event(self.clock.now(), after),
+            Err(reason) => Report::Undeleted(reason),
+        };
+        match edge {
+            Some(edge) => edge.send(Input::Child(report)),
+            None => self.report(report),
         }
     }
 
@@ -202,20 +203,20 @@ impl<H: Host, O: Send + 'static> Child<'_, H, O> {
     }
 
     pub(super) fn log(&self, entry: Entry) {
-        let _ = (self.reports).send(Input::Logged(entry));
+        self.reports.send(Input::Logged(entry));
     }
 
     pub(super) fn report(&self, report: Report) {
-        let _ = self.reports.send(Input::Child(report));
+        self.reports.send(Input::Child(report));
     }
 }
 
-impl<'r, H: Host + 'r> Runtime<'r, H> {
-    pub(super) fn report<'s>(
+impl<'r, H: Host + 'r> Runtime<'r, '_, H> {
+    pub(super) fn report(
         &mut self,
-        scope: Option<&'s Scope<'s, 'r>>,
         core: &Core<'_>,
         report: Report,
+        live: bool,
     ) -> Result<Option<(Duration, Event)>, String> {
         match report {
             Report::Event(at, Event::SharedFailed { target, reason }) => {
@@ -262,7 +263,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             }
             Report::Model { at, job, incoming } => {
                 let caller = Caller::Job(job);
-                self.model_request(scope, core, (caller, at), incoming)
+                self.model_request(live, core, (caller, at), incoming)
                     .map(|()| None)
             }
             Report::Undeleted(reason) => Err(reason),

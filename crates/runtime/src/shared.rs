@@ -3,7 +3,6 @@
 
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::thread::{self, Scope};
 use std::time::Duration;
 
 use decision::{CallResult, Event, JobId};
@@ -11,9 +10,9 @@ use gateway::Arrival;
 use schema::sandbox::{log_dir, out_dir};
 use schema::workflow::TargetId;
 use stdx::Context;
+use stdx::io::Events;
 use stdx::time::Clock as _;
 
-use crate::agent::Ready;
 use crate::call::job;
 use crate::child::{Child, End, Message, Report};
 use crate::sandbox::{Sandboxes, Started, Which, collect};
@@ -104,67 +103,52 @@ impl<'r, H: Host> Resident<'r, H> {
     }
 }
 
-impl<'r, H: Host + 'r> Runtime<'r, H> {
-    pub(super) fn start_residents<'s>(
-        &mut self,
-        scope: &'s Scope<'s, 'r>,
-        ready: &Sender<(Duration, Ready)>,
-    ) -> Result<(), String> {
+impl<'r, H: Host + 'r> Runtime<'r, '_, H> {
+    pub(super) fn start_residents(&mut self) -> Result<(), String> {
         for target in self.workflow().work_targets() {
             let which = Which::Shared(target);
             let by = self.placed.startup(target.role());
-            let hard_end = self.unix_hard_end;
             let (resident, rx) = Resident::open();
             self.residents.insert(target, resident);
-            let inbox = self.inbox.sender();
+            let inbox = self.events.clone();
             let clock = self.clock.clone();
-            let observed = clock.clone();
-            let ready = ready.clone();
             let sandboxes = self.sandboxes;
             let bodies = self.bodies;
             let dir = self.dir.join(which.record_dir(self.workflow()));
             let collect_end = self.teardown_end();
-            thread::Builder::new()
-                .name(which.name().to_string())
-                .stack_size(bodies.stack_bytes())
-                .spawn_scoped(scope, move || {
-                    let arrivals = move |arrival| Input::Shared(target, observed.now(), arrival);
-                    let by = (&clock, by);
-                    let started =
-                        sandboxes.start(which, None, by, hard_end, inbox.clone(), arrivals);
-                    let mut sandbox = match started {
-                        Ok(sandbox) => {
-                            let at = clock.now();
-                            let _ = inbox.send(Input::Logged(Entry::SharedStarted { target, at }));
-                            let _ = ready.send((at, Ready::Shared(target, Ok(()))));
-                            Some(sandbox)
-                        }
-                        Err(failure) => {
-                            let _ = ready.send((
-                                clock.now(),
-                                Ready::Shared(target, Err(failure.reason().to_owned())),
-                            ));
-                            if let Err(reason) = failure.dispose(sandboxes) {
-                                let _ = inbox.send(Input::Child(Report::Undeleted(reason)));
-                            }
-                            None
-                        }
-                    };
-                    drop(ready);
-                    serve(rx, bodies, sandbox.as_mut());
-                    if let Some(sandbox) = sandbox {
-                        let by = collect_end;
-                        if let Err(reason) = tear_down(sandbox, sandboxes, &dir, by, &inbox) {
-                            let _ = inbox.send(Input::Child(Report::Undeleted(reason)));
-                            return;
-                        }
+            let to_loop = self.events.clone();
+            let arrivals = Box::new(move |arrival| to_loop.send(Input::Shared(target, arrival)));
+            let thread = (&*which.name().to_string(), Some(bodies.stack_bytes()));
+            self.spawn(thread, move || {
+                let started = sandboxes.start(which, None, by, arrivals);
+                let mut sandbox = match started {
+                    Ok(sandbox) => {
+                        let at = clock.now();
+                        inbox.send(Input::Logged(Entry::SharedStarted { target, at }));
+                        Some(sandbox)
                     }
-                    let _ = inbox.send(Input::Child(Report::Event(
-                        clock.now(),
-                        Event::SharedTornDown { target },
-                    )));
-                })
-                .context("starting the shared role's worker")?;
+                    Err(failure) => {
+                        if let Err(reason) = failure.dispose(sandboxes) {
+                            inbox.send(Input::Child(Report::Undeleted(reason)));
+                        }
+                        None
+                    }
+                };
+                serve(rx, bodies, sandbox.as_mut());
+                let torn_down = Report::Event(clock.now(), Event::SharedTornDown { target });
+                match sandbox {
+                    Some(sandbox) => {
+                        let by = collect_end;
+                        let (deleted, edge) = tear_down(sandbox, sandboxes, &dir, by, &inbox);
+                        let report = match deleted {
+                            Ok(()) => torn_down,
+                            Err(reason) => Report::Undeleted(reason),
+                        };
+                        edge.send(Input::Child(report));
+                    }
+                    None => inbox.send(Input::Child(torn_down)),
+                }
+            })?;
         }
         Ok(())
     }
@@ -173,7 +157,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
 fn serve<H: Host>(
     orders: Receiver<Call<'_, H>>,
     bodies: &dyn crate::Bodies,
-    mut sandbox: Option<&mut Started<H::Clock>>,
+    mut sandbox: Option<&mut Started>,
 ) {
     let mut stdin = crate::body::Stdin::default();
     for (call, mut child) in orders {
@@ -184,20 +168,18 @@ fn serve<H: Host>(
             None => End::Call(call.job, Err("the shared sandbox never started".to_owned())),
         };
         // The shared sandbox outlives the call, which holds none of its own.
-        child.close(end, || Ok(()));
+        child.close(end, || (Ok(()), None));
     }
 }
 
-fn tear_down<H: Host>(
-    mut sandbox: Started<H::Clock>,
-    sandboxes: &Sandboxes<'_, H>,
+fn tear_down(
+    mut sandbox: Started,
+    sandboxes: &Sandboxes<'_>,
     dir: &Path,
     by: Duration,
-    inbox: &Sender<Input<H::Clock>>,
-) -> Result<(), String> {
-    let note = |text| {
-        let _ = inbox.send(Input::Logged(Entry::Note(text)));
-    };
+    inbox: &Events<Input>,
+) -> (Result<(), String>, stdx::io::Edge<Input>) {
+    let note = |text| inbox.send(Input::Logged(Entry::Note(text)));
     if let Err(error) = sandbox.session.freeze(by) {
         note(format!("freezing the shared sandbox failed: {error}"));
     }
@@ -208,9 +190,5 @@ fn tear_down<H: Host>(
             ));
         }
     }
-    let (entries, deleted) = sandboxes.delete(sandbox);
-    for entry in entries {
-        let _ = inbox.send(Input::Logged(entry));
-    }
-    deleted
+    sandboxes.delete(sandbox)
 }

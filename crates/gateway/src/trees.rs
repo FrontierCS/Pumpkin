@@ -1,250 +1,200 @@
-//! The session's transfers of trees, each on a stream of its own: a put sends a tree to the
-//! sandbox, and a collect receives one from it.
+//! A put's frames, which a session sends one after another at the sandbox's pace: the tree's
+//! entries, each file's bytes after its entry, and the tree's end.
 
+use std::collections::VecDeque;
 use std::fs;
-use std::io::{self, Read};
-use std::path::Path;
-use std::sync::mpsc::{Receiver, TryRecvError};
-use std::time::Duration;
+use std::io::{self, Read as _};
+use std::sync::mpsc::SyncSender;
 
 use schema::frame;
-use schema::ir::{AbsolutePath, Mode};
-use schema::sandbox::tree::{self, Limits, Modes};
-use schema::sandbox::{Entry, RelativePath, Root, ToSandbox};
-use stdx::time::Clock;
+use schema::sandbox::{Entry, RelativePath, ToSandbox};
 
-use crate::{Bound, Part, Put, Reply, Route, Shared, Trees, broke, context, out_of_turn};
+use crate::remote::ToThread;
+use crate::{Put, context};
 
-impl Trees {
-    /// As [`crate::Session::put`], by `by`, a time on `clock`, with `root` saying how `dir` is
-    /// made. [`Root::New`] requires a new directory.
-    pub fn put<'a>(
-        &self,
-        dir: &AbsolutePath,
-        root: Root,
-        entries: impl IntoIterator<Item = Put<'a>>,
-        (clock, by): (&impl Clock, Duration),
-    ) -> io::Result<()> {
-        self.shared.put(dir, root, entries, Bound { clock, by })
+// How many of a put's frames wait to be sent at most: one in flight, one behind it, so that a put
+// streams a file at the sandbox's pace and holds two frames of it.
+const PUT_FRAMES: usize = 2;
+
+pub(crate) struct PutState {
+    entries: VecDeque<Put>,
+    // Where the put asks for its next entries while the thread that hands them holds more, and
+    // whether it has asked.
+    more: Option<(SyncSender<ToThread>, bool)>,
+    // The file whose bytes go next, with how many are left.
+    file: Option<(RelativePath, Source, u64)>,
+    ended: bool,
+    // Why a host file read short or failed, after which the put ends at once.
+    failed: Option<io::Error>,
+    // How many of its frames wait in the session's queue.
+    queued: usize,
+}
+
+enum Source {
+    // With how many of its bytes have gone.
+    Bytes(Vec<u8>, usize),
+    Host(io::Take<fs::File>),
+}
+
+/// Where a put is when its reply comes.
+pub(crate) enum Step {
+    /// Its end is still to send: only a failure may come now.
+    Sending,
+    /// Its end was sent, after a host file's failure, if it had one, which is the put's.
+    Ended(Option<io::Error>),
+}
+
+impl PutState {
+    /// A put of `entries`, then of those that `more` hands it, if given, whose request is queued
+    /// as the first of its frames.
+    pub(crate) fn new(entries: Vec<Put>, more: Option<SyncSender<ToThread>>) -> Self {
+        Self {
+            entries: entries.into(),
+            more: more.map(|more| (more, false)),
+            file: None,
+            ended: false,
+            failed: None,
+            queued: 1,
+        }
     }
 
-    /// Collects as [`crate::Session::collect`] does, by `by`, a time on `clock`. Once `stopped`
-    /// returns true before a part of the tree, returns [`io::ErrorKind::Interrupted`] and keeps
-    /// the session open. Returns the tree's entries, each with its mode as the sandbox sent it,
-    /// which the host's umask may have narrowed in `into`.
-    pub fn collect(
-        &self,
-        path: &AbsolutePath,
-        into: &Path,
-        limits: Limits,
-        (clock, by): (&impl Clock, Duration),
-        stopped: &mut dyn FnMut() -> bool,
-    ) -> io::Result<Vec<Entry>> {
-        let by = Bound { clock, by };
-        self.shared.collect(path, into, limits, by, stopped)
+    pub(crate) fn replied(&mut self) -> Step {
+        if self.ended {
+            Step::Ended(self.failed.take())
+        } else {
+            Step::Sending
+        }
+    }
+
+    pub(crate) fn stop(&mut self) {
+        self.entries.clear();
+        self.more = None;
+        self.file = None;
+        self.ended = true;
+    }
+
+    /// Takes the next entries that it asked for, after which more follow if `more`.
+    pub(crate) fn hand(&mut self, entries: Vec<Put>, more: bool) {
+        let Some((_, asked)) = self.more.as_mut().filter(|(_, asked)| *asked) else {
+            unreachable!(
+                "a put was handed entries that it hadn't asked for, though its caller hands them \
+                 only as asked"
+            )
+        };
+        *asked = false;
+        if !more {
+            self.more = None;
+        }
+        self.entries.extend(entries);
+    }
+
+    /// Takes the send of one of its frames.
+    pub(crate) fn sent(&mut self) {
+        assert!(
+            self.queued > 0,
+            "a put's frame was sent that it never queued"
+        );
+        self.queued -= 1;
+    }
+
+    /// The put's next frame on `stream`, to queue: none while it holds [`PUT_FRAMES`] queued, or
+    /// waits for the entries that it asked for, or once its end has gone.
+    pub(crate) fn next(&mut self, stream: u32) -> Option<(ToSandbox, Vec<u8>)> {
+        if self.ended || self.queued >= PUT_FRAMES {
+            return None;
+        }
+        let frame = self.frame(stream)?;
+        self.queued += 1;
+        Some(frame)
+    }
+
+    fn frame(&mut self, stream: u32) -> Option<(ToSandbox, Vec<u8>)> {
+        if let Some((path, source, left)) = &mut self.file {
+            let chunk = frame::MAX_BODY_BYTES.min(usize::try_from(*left).unwrap_or(usize::MAX));
+            let read = match source {
+                Source::Bytes(bytes, sent) => {
+                    let chunk = bytes[*sent..*sent + chunk].to_vec();
+                    *sent += chunk.len();
+                    Ok(chunk)
+                }
+                Source::Host(file) => read_chunk(file, chunk, *left),
+            };
+            match read {
+                Ok(bytes) => {
+                    *left -= bytes.len() as u64;
+                    if *left == 0 {
+                        self.file = None;
+                    }
+                    return Some((ToSandbox::Data { stream }, bytes));
+                }
+                // The tree ends with the file short, which `sandboxd` fails; the file's error is
+                // the one to report.
+                Err(error) => {
+                    self.failed = Some(context(&*path, &error));
+                    self.stop();
+                    return Some((ToSandbox::End { stream }, Vec::new()));
+                }
+            }
+        }
+        let Some(put) = self.entries.pop_front() else {
+            if let Some((thread, asked)) = &mut self.more {
+                if !*asked {
+                    *asked = true;
+                    if let Err(error) = thread.try_send(ToThread::More(stream)) {
+                        unreachable!(
+                            "the put on stream {stream} can't ask for its next entries: {error}, \
+                             though its caller waits until the put's answer, and holds room for \
+                             one ask besides it"
+                        )
+                    }
+                }
+                return None;
+            }
+            self.ended = true;
+            return Some((ToSandbox::End { stream }, Vec::new()));
+        };
+        let entry = match put {
+            Put::Dir(path, mode) => Entry::Dir { path, mode },
+            Put::File(path, mode, bytes) => {
+                let size = bytes.len() as u64;
+                if size > 0 {
+                    self.file = Some((path.clone(), Source::Bytes(bytes, 0), size));
+                }
+                Entry::File { path, size, mode }
+            }
+            Put::Read(path, mode, file) => {
+                let size = match file.metadata() {
+                    Ok(metadata) => metadata.len(),
+                    Err(error) => {
+                        self.failed = Some(context(&path, &error));
+                        self.stop();
+                        return Some((ToSandbox::End { stream }, Vec::new()));
+                    }
+                };
+                if size > 0 {
+                    self.file = Some((path.clone(), Source::Host(file.take(size)), size));
+                }
+                Entry::File { path, size, mode }
+            }
+        };
+        Some((ToSandbox::Entry { stream, entry }, Vec::new()))
     }
 }
 
-impl Shared {
-    pub(crate) fn put<'a>(
-        &self,
-        dir: &AbsolutePath,
-        root: Root,
-        entries: impl IntoIterator<Item = Put<'a>>,
-        by: Bound<'_, impl Clock>,
-    ) -> io::Result<()> {
-        let (stream, replies) = self.open(Route::Reply, by)?;
-        let put = self.send_tree(stream, dir, root, entries, &replies, by);
-        self.close(stream);
-        put
-    }
-
-    pub(crate) fn collect(
-        &self,
-        path: &AbsolutePath,
-        into: &Path,
-        limits: Limits,
-        by: Bound<'_, impl Clock>,
-        stopped: &mut dyn FnMut() -> bool,
-    ) -> io::Result<Vec<Entry>> {
-        let (stream, parts) = self.open(Route::Tree, by)?;
-        let created = fs::create_dir(into).map_err(|error| context(into.display(), &error));
-        let collected = created.and_then(|()| {
-            let tree = tree::Writer::new(into.to_owned(), limits, Modes::Umasked);
-            let path = path.clone();
-            self.send(&ToSandbox::Collect { stream, path }, &[], by)?;
-            self.receive_tree(stream, &parts, tree, by, stopped)
-        });
-        // What `sandboxd` still sends of a tree cut short arrives on a closed stream, which the
-        // reader drops.
-        self.close(stream);
-        collected
-    }
-
-    fn send_tree<'a>(
-        &self,
-        stream: u32,
-        dir: &AbsolutePath,
-        root: Root,
-        entries: impl IntoIterator<Item = Put<'a>>,
-        replies: &Receiver<Result<(), String>>,
-        by: Bound<'_, impl Clock>,
-    ) -> io::Result<()> {
-        let dir = dir.clone();
-        self.send(&ToSandbox::Put { stream, dir, root }, &[], by)?;
-        for entry in entries {
-            // `sandboxd` replies before the end only to fail the tree, which then takes nothing
-            // more. A `done` is out of turn: this entry and the tree's end are still to send.
-            match replies.try_recv() {
-                Ok(Ok(())) => {
-                    let expected = "`failed`, or nothing before the tree's end";
-                    self.end(out_of_turn(stream, &Reply::Done, expected));
-                    return Err(self.ended());
-                }
-                Ok(Err(message)) => {
-                    self.send(&ToSandbox::End { stream }, &[], by)?;
-                    return Err(io::Error::other(message));
-                }
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => {}
+// Reads the next `chunk` bytes of a host file of which `left` are still to come.
+// A put reads its host files as it sends them, by synchronous reads: an operation of the loop's
+// waits for a need that a measurement shows.
+fn read_chunk(file: &mut io::Take<fs::File>, chunk: usize, left: u64) -> io::Result<Vec<u8>> {
+    let mut buffer = vec![0; chunk];
+    loop {
+        match file.read(&mut buffer) {
+            Ok(0) => return Err(io::Error::other(format!("{left} of its bytes are missing"))),
+            Ok(read) => {
+                buffer.truncate(read);
+                return Ok(buffer);
             }
-            match entry {
-                Put::Dir(path, mode) => {
-                    let entry = Entry::Dir { path, mode };
-                    self.send(&ToSandbox::Entry { stream, entry }, &[], by)?;
-                }
-                Put::File(path, mode, bytes) => {
-                    let size = bytes.len() as u64;
-                    let entry = Entry::File { path, size, mode };
-                    self.send(&ToSandbox::Entry { stream, entry }, &[], by)?;
-                    for chunk in bytes.chunks(frame::MAX_BODY_BYTES) {
-                        self.send(&ToSandbox::Data { stream }, chunk, by)?;
-                    }
-                }
-                Put::Read(path, mode, file) => {
-                    // The tree ends with the file short, which `sandboxd` fails; the file's
-                    // error is the one to report.
-                    if let Err(error) = self.send_file(stream, path, mode, file, by)? {
-                        self.send(&ToSandbox::End { stream }, &[], by)?;
-                        let _ = self.receive(replies, by)?;
-                        return Err(error);
-                    }
-                }
-            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
         }
-        self.send(&ToSandbox::End { stream }, &[], by)?;
-        self.done(replies, by)
-    }
-
-    // The outer error is the session's; the inner one is the file's, read short or failing to be
-    // read, after which the tree is to end at once.
-    fn send_file(
-        &self,
-        stream: u32,
-        path: RelativePath,
-        mode: Mode,
-        file: fs::File,
-        by: Bound<'_, impl Clock>,
-    ) -> io::Result<io::Result<()>> {
-        let size = match file.metadata() {
-            Ok(metadata) => metadata.len(),
-            Err(error) => return Ok(Err(context(&path, &error))),
-        };
-        let shown = path.clone();
-        let entry = Entry::File { path, size, mode };
-        self.send(&ToSandbox::Entry { stream, entry }, &[], by)?;
-        let (mut file, mut left) = (file.take(size), size);
-        let mut buffer =
-            vec![0; frame::MAX_BODY_BYTES.min(usize::try_from(size).unwrap_or(usize::MAX))];
-        while left > 0 {
-            let read = match file.read(&mut buffer) {
-                Ok(0) => {
-                    let error = io::Error::other(format!("{left} of its bytes are missing"));
-                    return Ok(Err(context(&shown, &error)));
-                }
-                Ok(read) => read,
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(error) => return Ok(Err(context(&shown, &error))),
-            };
-            self.send(&ToSandbox::Data { stream }, &buffer[..read], by)?;
-            left -= read as u64;
-        }
-        Ok(Ok(()))
-    }
-
-    fn receive_tree(
-        &self,
-        stream: u32,
-        parts: &Receiver<Result<Part, String>>,
-        mut tree: tree::Writer,
-        by: Bound<'_, impl Clock>,
-        stopped: &mut dyn FnMut() -> bool,
-    ) -> io::Result<Vec<Entry>> {
-        let mut entries = Vec::new();
-        loop {
-            if stopped() {
-                let cut = "stopped before the tree was whole";
-                return Err(io::Error::new(io::ErrorKind::Interrupted, cut));
-            }
-            // A deadline that has passed fails the collect at once, even with a part waiting.
-            // Else a tree sent faster than it is written could outlast it.
-            if by.left().is_none() {
-                return Err(match self.ended.get() {
-                    Some(_) => self.ended(),
-                    None => self.unanswered(),
-                });
-            }
-            match self.receive(parts, by)? {
-                Ok(Part::Entry(entry)) => {
-                    self.created(stream, tree.entry(&entry))?;
-                    entries.push(entry);
-                }
-                Ok(Part::Data(bytes)) => self.written(stream, tree.data(&bytes))?,
-                Ok(Part::End) => return self.written(stream, tree.finish()).map(|()| entries),
-                Err(message) => return Err(io::Error::other(message)),
-            }
-        }
-    }
-
-    // A malformed tree breaks the protocol. The writer fails with `InvalidData` where the parts
-    // don't fit together, as file data past its file's size, and no system error has that kind.
-    // Any other error fails this collect alone: a limit passed, `FileTooLarge`, is the request's
-    // own bound, not a break, and the host failing to write is no fault of the sandbox's.
-    fn written(&self, stream: u32, written: io::Result<()>) -> io::Result<()> {
-        match written {
-            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
-                Err(self.malformed(stream, &error))
-            }
-            written => written,
-        }
-    }
-
-    // Creating an entry fails with `NotFound`, `NotADirectory` or `AlreadyExists` where its parent
-    // is missing or a file, or its path is taken. In `into`, new and left to this collect, only the
-    // tree's own earlier entries can cause that, given that `into` is on a filesystem that neither
-    // folds case nor normalizes names: on one that does, a correct `sandboxd` that sends `A` and
-    // `a` would meet `AlreadyExists`, and end the session. Writing a file's bytes goes to a file
-    // already open, so a system error there is the host's.
-    fn created(&self, stream: u32, created: io::Result<()>) -> io::Result<()> {
-        match created {
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::NotFound
-                        | io::ErrorKind::NotADirectory
-                        | io::ErrorKind::AlreadyExists
-                ) =>
-            {
-                Err(self.malformed(stream, &error))
-            }
-            created => self.written(stream, created),
-        }
-    }
-
-    fn malformed(&self, stream: u32, error: &io::Error) -> io::Error {
-        let reason = broke(&format!(
-            "the tree it sent on stream {stream} is malformed: {error}"
-        ));
-        self.end(reason);
-        self.ended()
     }
 }
