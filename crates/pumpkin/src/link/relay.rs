@@ -7,8 +7,7 @@ use std::process::{ChildStderr, ChildStdout};
 use rustix::event::{self, PollFd, PollFlags, Timespec};
 use rustix::io::Errno;
 
-// `PIPE_BUF` on Linux: a write of at most this much to a pipe arrives whole, so that a chunk
-// passed on doesn't interleave with what another process writes to the same pipe.
+// `PIPE_BUF` on Linux, the most that a pipe takes whole in one write.
 // https://man7.org/linux/man-pages/man7/pipe.7.html
 const CHUNK_BYTES: usize = 4096;
 
@@ -16,11 +15,11 @@ const CHUNK_BYTES: usize = 4096;
 // https://man7.org/linux/man-pages/man7/pipe.7.html
 const PIPE_BYTES: usize = 65536;
 
-/// The standard output of `ssh`, each read of which first passes on what has arrived on `ssh`'s
-/// standard error.
+/// The standard output of `ssh`. Each read passes on what has arrived on `ssh`'s standard error,
+/// before and after it reads the output.
 pub(super) struct Relaying {
     stdout: ChildStdout,
-    /// `None` once `ssh` has closed it.
+    /// `None` once `ssh` has closed it, or once reading it has failed.
     stderr: Option<ChildStderr>,
 }
 
@@ -32,27 +31,27 @@ impl Relaying {
         }
     }
 
-    /// Passes on what `ssh` wrote to its standard error and this process hasn't, once `ssh` has
-    /// ended.
-    pub(super) fn rest(&mut self) {
-        // It takes only what is in the pipe, as a process that `ssh` started may hold it open.
+    /// Passes on what has arrived on `ssh`'s standard error, without waiting for more.
+    pub(super) fn passed_on(&mut self) {
+        // At most what the pipe holds, so that a writer that keeps up can't hold this here.
         for _ in 0..PIPE_BYTES / CHUNK_BYTES {
             let Some(stderr) = &self.stderr else {
                 return;
             };
             let mut polled = [PollFd::new(stderr, PollFlags::IN)];
-            let ready = event::poll(&mut polled, Some(&Timespec::default()));
-            if !matches!(ready, Ok(1..)) || self.relayed().is_err() {
-                return;
+            match event::poll(&mut polled, Some(&Timespec::default())) {
+                Ok(0) => return,
+                Ok(_) => self.relayed(),
+                Err(Errno::INTR) => {}
+                Err(error) => return self.unread(&error.into()),
             }
         }
     }
 
-    /// Passes on one chunk of what `ssh` wrote to its standard error, waiting for it if none has
-    /// arrived.
-    fn relayed(&mut self) -> io::Result<()> {
+    /// Passes on one chunk of what has arrived on `ssh`'s standard error, which is ready to read.
+    fn relayed(&mut self) {
         let Some(stderr) = &mut self.stderr else {
-            return Ok(());
+            return;
         };
         let mut chunk = [0; CHUNK_BYTES];
         match stderr.read(&mut chunk) {
@@ -61,13 +60,16 @@ impl Relaying {
             // waits on a full pipe.
             Ok(count) => crate::to_stderr(&chunk[..count]),
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) => {
-                self.stderr = None;
-                let error = format!("reading its standard error failed: {error}");
-                return Err(io::Error::other(error));
-            }
+            Err(error) => self.unread(&error),
         }
-        Ok(())
+    }
+
+    /// Stops reading `ssh`'s standard error, which failed with `error`, and says so.
+    fn unread(&mut self, error: &io::Error) {
+        self.stderr = None;
+        crate::say(format_args!(
+            "reading the standard error of `ssh` failed: {error}"
+        ));
     }
 }
 
@@ -84,16 +86,24 @@ impl Read for Relaying {
             match event::poll(&mut polled, None) {
                 Ok(_) => {}
                 Err(Errno::INTR) => continue,
-                Err(error) => return Err(error.into()),
+                Err(error) => {
+                    self.unread(&error.into());
+                    break;
+                }
             }
             let [output, error] = polled.map(|polled| !polled.revents().is_empty());
             if error {
-                self.relayed()?;
+                self.passed_on();
             }
             if output {
                 break;
             }
         }
-        self.stdout.read(buf)
+        let read = self.stdout.read(buf);
+        // `sshd` sends what the remote command wrote to its standard error after what it wrote to
+        // its output at the same time, so a line said just before an answer can arrive after it.
+        // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/channels.c#L3269-L3275
+        self.passed_on();
+        read
     }
 }

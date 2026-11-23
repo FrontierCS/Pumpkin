@@ -2118,16 +2118,20 @@ fn ls_answered_there() {
     );
 }
 
-// `pumpkin` leaves the standard streams it is given as they were, though its `ssh` makes its own
-// non-blocking: a stream left so would fail the writes of each process that shares it, as under
-// `2>&1`.
+// Its `ssh` makes its own standard error non-blocking. A stream left so fails the writes of each
+// process that shares it, as under `2>&1`.
 #[test]
 fn ls_leaves_its_streams_blocking() {
     let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     connect(&scratch, &client);
     served(&scratch);
-    write_record(&scratch, "20261107-120000-1b8a0001", true, Some(returned(7.0)));
+    write_record(
+        &scratch,
+        "20261107-120000-1b8a0001",
+        true,
+        Some(returned(7.0)),
+    );
     move_runs(&scratch, "home/.pumpkin/runs");
     let (mut reader, writer) = io::pipe().unwrap();
     let mut ls = on_client(&scratch, &client, &["ls"]);

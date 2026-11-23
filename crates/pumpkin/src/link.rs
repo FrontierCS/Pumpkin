@@ -683,14 +683,14 @@ impl Link {
     /// [`Hello::Absent`].
     pub(crate) fn open(mut ssh: Command) -> Result<Option<Self>, Unanswered> {
         // Never this process's own standard error. OpenSSH makes each of its standard streams that
-        // isn't a terminal non-blocking, and blocking again only as it closes it, which a killed
-        // `ssh` never does. A write to a stream left so fails with `WouldBlock`, in each process
-        // that shares it, as under `2>&1`.
+        // isn't a terminal non-blocking, and blocking again only as it closes it, which an `ssh`
+        // killed, or ended by a fatal error, never does. A write to a stream left so fails with
+        // `WouldBlock`, in each process that shares it, as under `2>&1`.
         // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/ssh.c#L2234-L2251
         // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/channels.c#L514-L540
         // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/channels.c#L636-L645
-        let child =
-            stdx::process::spawn(&mut ssh, Stdio::piped(), Stdio::piped(), Stdio::piped());
+        // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/clientloop.c#L2901-L2908
+        let child = stdx::process::spawn(&mut ssh, Stdio::piped(), Stdio::piped(), Stdio::piped());
         let mut child = child.map_err(Unanswered::Failed)?;
         let streams = (child.stdin.take(), child.stdout.take(), child.stderr.take());
         let (Some(stdin), Some(stdout), Some(stderr)) = streams else {
@@ -807,6 +807,6 @@ impl Drop for Link {
         // What it was asked is answered or given up on, and a `serve` still there ends with it.
         let _ = self.child.kill();
         let _ = self.child.wait();
-        self.stdout.get_mut().rest();
+        self.stdout.get_mut().passed_on();
     }
 }
