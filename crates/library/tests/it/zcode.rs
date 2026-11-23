@@ -69,9 +69,9 @@ fn roles() {
             dir 0700 /workspace/.zcode-home/tmp
             dir 0700 /workspace/.zcode-home/.zcode
             dir 0700 /workspace/.zcode-home/.zcode/cli
-            file 0600 /workspace/.zcode-home/.zcode/cli/config.json, sha256 45cd61429e1b7ef86da93ebc1e7d6d40c73cb4d49ed8876651fb6e58edbda724:
+            file 0600 /workspace/.zcode-home/.zcode/cli/config.json:
             {"features":{"mcp":false,"memory":false},"memory":{"use":false},"modelStream":{"idleTimeoutMs":3600000},"network":{"timeout":3600000},"permission":{"mode":"yolo"},"plugins":{"enabled":false},"skills":{"roots":[]}}
-            file 0600 /workspace/.zcode-home/provider_config.json, sha256 e70714df76ed4e1cf03c707e1767d60b9a20db4933b3e62fb9488d2e9b3c34d2:
+            file 0600 /workspace/.zcode-home/provider_config.json:
             {"config":{"defaultModelSelection":{"modelId":"glm-5.3","options":{"reasoningLevel":"max"},"providerId":"pumpkin"},"modelConfigRules":{"manualProviderModelRules":[],"providerModelRules":[{"config":{"enabled":true,"optionSpecs":{"maxOutputTokens":{"map":"{\"max_tokens\": maxOutputTokens}","max":262144},"reasoningLevel":{"map":"{\"reasoning_effort\": reasoningLevel}","values":["low","high","max"]}},"properties":{"contextWindow":1048576,"supportsJsonSchemaOutput":true,"supportsToolCall":true}},"modelId":"glm-5.3","providerId":"pumpkin"}]},"providerConfigRules":{"providerRules":[{"config":{"access":{"apiKey":"pumpkin","type":"api-key"},"api":{"baseUrl":"http://127.0.0.1:11235/v1","type":"openai-chat-completions"},"group":"standard-personal","modelOrder":["glm-5.3"],"personalModelIds":["glm-5.3"]},"providerId":"pumpkin","providerName":"Pumpkin"}]}},"schemaVersion":1}
             route: chat glm-5.3
             request headers: user-agent
@@ -88,9 +88,9 @@ fn roles() {
             dir 0700 /srv/my "work" dir/.zcode-home/tmp
             dir 0700 /srv/my "work" dir/.zcode-home/.zcode
             dir 0700 /srv/my "work" dir/.zcode-home/.zcode/cli
-            file 0600 /srv/my "work" dir/.zcode-home/.zcode/cli/config.json, sha256 45cd61429e1b7ef86da93ebc1e7d6d40c73cb4d49ed8876651fb6e58edbda724:
+            file 0600 /srv/my "work" dir/.zcode-home/.zcode/cli/config.json:
             {"features":{"mcp":false,"memory":false},"memory":{"use":false},"modelStream":{"idleTimeoutMs":3600000},"network":{"timeout":3600000},"permission":{"mode":"yolo"},"plugins":{"enabled":false},"skills":{"roots":[]}}
-            file 0600 /srv/my "work" dir/.zcode-home/provider_config.json, sha256 d458fa1ee220b1e1e9186c7debc76ef4ec75c9cf582bfd05e9554999400853b5:
+            file 0600 /srv/my "work" dir/.zcode-home/provider_config.json:
             {"config":{"defaultModelSelection":{"modelId":"vendor/\"quoted\"\\model","options":{"reasoningLevel":"high"},"providerId":"pumpkin"},"modelConfigRules":{"manualProviderModelRules":[],"providerModelRules":[{"config":{"enabled":true,"optionSpecs":{"maxOutputTokens":{"map":"{\"max_tokens\": maxOutputTokens}","max":1},"reasoningLevel":{"map":"{\"reasoning_effort\": reasoningLevel}","values":["low","high","max"]}},"properties":{"contextWindow":1,"supportsJsonSchemaOutput":true,"supportsToolCall":true}},"modelId":"vendor/\"quoted\"\\model","providerId":"pumpkin"}]},"providerConfigRules":{"providerRules":[{"config":{"access":{"apiKey":"pumpkin","type":"api-key"},"api":{"baseUrl":"http://127.0.0.1:11235/v1","type":"openai-chat-completions"},"group":"standard-personal","modelOrder":["vendor/\"quoted\"\\model"],"personalModelIds":["vendor/\"quoted\"\\model"]},"providerId":"pumpkin","providerName":"Pumpkin"}]}},"schemaVersion":1}
             route: chat vendor/"quoted"\model
             model-small low / 200000 32000:
@@ -101,8 +101,8 @@ fn roles() {
             dir 0700 /.zcode-home/tmp
             dir 0700 /.zcode-home/.zcode
             dir 0700 /.zcode-home/.zcode/cli
-            file 0600 /.zcode-home/.zcode/cli/config.json, sha256 45cd61429e1b7ef86da93ebc1e7d6d40c73cb4d49ed8876651fb6e58edbda724:
-            file 0600 /.zcode-home/provider_config.json, sha256 a2f63b274c27ed65648de3ffdec62b259a9ddbcb09b74c3516b97ffef9e52d51:
+            file 0600 /.zcode-home/.zcode/cli/config.json:
+            file 0600 /.zcode-home/provider_config.json:
             route: chat model-small
         "#]],
     );

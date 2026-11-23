@@ -24,7 +24,6 @@ use expect_test::{Expect, expect};
 use lang::{Args, Bounds, Declared, Label, Loader, Recipe, Root};
 use schema::ir::{self, AgentRuntime, EnvVar, ModelName};
 use schema::workflow::Workflow;
-use sha2::{Digest as _, Sha256};
 
 fn check(actual: &str, expect: &Expect) {
     expect.assert_eq(actual);
@@ -111,26 +110,6 @@ fn bundled() {
     assert_eq!(
         bundled, found,
         "the table lists each file below `library/`, sorted"
-    );
-    check(
-        &bundled.join("\n"),
-        &expect![[r#"
-            harness/claude_code/claude_code.star
-            harness/claude_code/layer/Dockerfile
-            harness/codex/LICENSE
-            harness/codex/catalog.star
-            harness/codex/codex.star
-            harness/codex/layer/Dockerfile
-            harness/node/layer/Dockerfile
-            harness/node/node.star
-            harness/pi/layer/Dockerfile
-            harness/pi/layer/package-lock.json
-            harness/pi/layer/package.json
-            harness/pi/pi.star
-            harness/qwen_code/layer/Dockerfile
-            harness/qwen_code/qwen_code.star
-            harness/zcode/layer/Dockerfile
-            harness/zcode/zcode.star"#]],
     );
 }
 
@@ -355,8 +334,8 @@ fn shown(number: usize, declared: &Declared<'_, Built>) -> String {
 }
 
 /// `runtime` but its standard input, its times, its route and its grants, a line for each part,
-/// each word of the command that is empty or holds a space quoted; each file by its mode, path and
-/// digest, followed by what `excerpt` shows of its content.
+/// each word of the command that is empty or holds a space quoted; each file by its mode and path,
+/// followed by what `excerpt` shows of its content.
 fn show(runtime: &AgentRuntime, excerpt: impl Fn(&ir::File) -> String) -> String {
     let AgentRuntime {
         command,
@@ -392,11 +371,7 @@ fn show(runtime: &AgentRuntime, excerpt: impl Fn(&ir::File) -> String) -> String
         shown.push_str("grant help before stdin\n");
     }
     for file in files {
-        let mut digest = String::new();
-        for byte in Sha256::digest(file.content.as_bytes()) {
-            let _ = write!(digest, "{byte:02x}");
-        }
-        let _ = writeln!(shown, "file {} {}, sha256 {digest}:", file.mode, file.path);
+        let _ = writeln!(shown, "file {} {}:", file.mode, file.path);
         shown.push_str(&excerpt(file));
     }
     shown

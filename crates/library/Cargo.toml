@@ -15,7 +15,6 @@ lang = { path = "../lang" }
 recipe = { path = "../recipe" }
 schema = { path = "../schema" }
 serde_json.workspace = true
-sha2.workspace = true
 test-support = { path = "../test-support" }
 
 [lints]

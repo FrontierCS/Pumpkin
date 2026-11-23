@@ -462,7 +462,6 @@ dependencies = [
  "recipe",
  "schema",
  "serde_json",
- "sha2",
  "test-support",
 ]
 
