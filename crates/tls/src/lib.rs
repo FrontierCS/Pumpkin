@@ -28,7 +28,8 @@ use rustls::{
 };
 use stdx::Deadline;
 
-/// The most bytes the relay reads from either side at once: a TLS record's most plaintext.
+/// The most bytes the relay reads from the session's socket at once: a TLS record's most
+/// plaintext.
 const CHUNK_BYTES: usize = 16 * 1024;
 
 /// How long the relay of a session that has ended still sends what it holds, and its
@@ -143,7 +144,7 @@ impl Server {
 }
 
 fn provider() -> Arc<CryptoProvider> {
-    // `ring`'s, as the workspace's other TLS uses.
+    // `ring`, the one backend that the workspace builds `rustls` with.
     Arc::new(rustls::crypto::ring::default_provider())
 }
 
