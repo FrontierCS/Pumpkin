@@ -155,8 +155,7 @@ task authors rely on.
 `ec2-boot`, small static binaries, depend on it. Its manifest holds this.
 
 **Architecture Invariant:** only `Workflow::parse` makes a `workflow::Workflow`, and only
-`Workflow::place` makes a `Placed`, whose workflow only `Placed::built` replaces, with the same
-roles and needs and its images built, so code that takes one need not check again what they
+`Workflow::place` makes a `Placed`, so code that takes one need not check again what they
 established. The types' private fields hold this.
 
 **Architecture Invariant:** the IR holds no defaults. An absent field means what its doc says,

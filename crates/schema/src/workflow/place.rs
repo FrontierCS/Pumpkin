@@ -1,6 +1,6 @@
 //! Placing a parsed workflow's roles on providers, in classes of sandbox: [`Workflow::place`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU64;
 
 use super::errors::{Errors, Reported};
@@ -10,39 +10,39 @@ use crate::ir::{Gpu, Name, Needs};
 impl Workflow {
     /// Places each role in the smallest class that a provider of `offered`, by name, offers, as
     /// `classes` gives them: the least memory, then CPU, then the first by provider's and class's
-    /// name; and gives back each provider it places a role on. A class fits a role whose CPU and
-    /// memory it offers at least, every CPU flag it needs, and exactly the GPUs and CPU model it
-    /// needs, so a class with GPUs, or a stated CPU model, goes only to roles that need them.
+    /// name; and gives back each provider it places a role on, dropping the others. A class fits
+    /// a role whose CPU and memory it offers at least, every CPU flag it needs, and exactly the
+    /// GPUs and CPU model it needs, so a class with GPUs, or a stated CPU model, goes only to roles
+    /// that need them.
     ///
     /// Fails with each role that fits no class, [at](super::ParseError::at) its needs, saying why.
-    pub fn place<'o, P>(
+    pub fn place<P>(
         self,
-        offered: &'o BTreeMap<Name, P>,
-        classes: impl Fn(&'o P) -> &'o BTreeMap<Name, Class>,
-    ) -> Result<(Placed, ByProvider<&'o P>), ParseErrors> {
-        let offered: Vec<(Placement, &P)> = (offered.iter())
+        offered: BTreeMap<Name, P>,
+        classes: impl Fn(&P) -> &BTreeMap<Name, Class>,
+    ) -> Result<(Placed, ByProvider<P>), ParseErrors> {
+        let offers: Vec<Placement> = (offered.iter())
             .flat_map(|(provider, offering)| {
-                (classes(offering).iter()).map(move |(class, declared)| {
-                    let placement = Placement {
-                        provider: provider.clone(),
-                        class: class.clone(),
-                        declared: declared.clone(),
-                    };
-                    (placement, offering)
+                (classes(offering).iter()).map(move |(class, declared)| Placement {
+                    provider: provider.clone(),
+                    class: class.clone(),
+                    declared: declared.clone(),
                 })
             })
             .collect();
         let mut errors = Errors::default();
         // Every role is placed before any error is returned, so that each role that fits no
         // class is reported.
-        let fitted: Vec<Result<&(Placement, &P), Reported>> = (self.roles.iter())
-            .map(|sandbox| smallest(&mut errors, sandbox, &offered))
+        let fitted: Vec<Result<&Placement, Reported>> = (self.roles.iter())
+            .map(|sandbox| smallest(&mut errors, sandbox, &offers))
             .collect();
-        let fitted: Vec<&(Placement, &P)> = errors.finish(fitted.into_iter().collect())?;
-        let providers = (fitted.iter())
-            .map(|(placement, offering)| (placement.provider.clone(), *offering))
+        let fitted: Vec<&Placement> = errors.finish(fitted.into_iter().collect())?;
+        let placed_on: BTreeSet<&Name> =
+            fitted.iter().map(|placement| &placement.provider).collect();
+        let providers = (offered.into_iter())
+            .filter(|(provider, _)| placed_on.contains(provider))
             .collect();
-        let placements = fitted.into_iter().map(|(placement, _)| placement.clone());
+        let placements = fitted.into_iter().cloned();
         let placed = Placed {
             workflow: self,
             placements: ByRole(placements.collect()),
@@ -53,28 +53,25 @@ impl Workflow {
 
 /// The smallest of `offered` that `sandbox`'s role fits, as [`Workflow::place`] says; otherwise
 /// reports why each doesn't fit it, at the role's needs in the IR.
-fn smallest<'p, P>(
+fn smallest<'p>(
     errors: &mut Errors,
     sandbox: &Sandbox,
-    offered: &'p [(Placement, P)],
-) -> Result<&'p (Placement, P), Reported> {
+    offered: &'p [Placement],
+) -> Result<&'p Placement, Reported> {
     let Sandbox {
         name, needs, at, ..
     } = sandbox;
     let (mut fits, mut misfits) = (Vec::new(), Vec::new());
-    for offer in offered {
-        let (placement, _) = offer;
+    for placement in offered {
         match misfit(needs, &placement.declared.offers) {
-            None => fits.push(offer),
+            None => fits.push(placement),
             Some(why) => misfits.push(format!(
                 "`{}`'s `{}` {why}",
                 placement.provider, placement.class
             )),
         }
     }
-    let smallest = fits
-        .into_iter()
-        .min_by_key(|(placement, _)| size(placement));
+    let smallest = fits.into_iter().min_by_key(|placement| size(placement));
     if let Some(smallest) = smallest {
         return Ok(smallest);
     }

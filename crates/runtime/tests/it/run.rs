@@ -133,7 +133,7 @@ pub(crate) fn placed_on(
         .map(|(provider, ready)| (Name::try_from((*provider).to_owned()).unwrap(), *ready))
         .collect();
     let workflow = Workflow::parse(ir).map_err(|errors| errors.to_string())?;
-    let placed = workflow.place(&offered, |ready| &ready.classes);
+    let placed = workflow.place(offered, |ready| &ready.classes);
     let (placed, _) = placed.map_err(|errors| errors.to_string())?;
     Ok(placed)
 }

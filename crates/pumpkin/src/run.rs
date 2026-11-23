@@ -3,7 +3,6 @@
 //! providers that they are placed on, builds the task and executes the run.
 
 use std::collections::BTreeMap;
-use std::convert::Infallible;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
@@ -180,7 +179,7 @@ pub(crate) fn driver_run(args: Vec<OsString>) -> Result<Exit, String> {
     caught.context("setting the handlers of SIGINT, SIGTERM and SIGHUP failed")?;
     let pushed = placed_on.iter().filter(|(_, connected)| connected.pushes());
     let names: Vec<String> = pushed.map(|(name, _)| format!("`{name}`")).collect();
-    let Ok(on) = placed.by_provider(|name| Ok::<_, Infallible>(placed_on.get(name).provider()));
+    let on = placed_on.as_ref().map(Connected::provider);
     let kept = Recorded {
         args: &words,
         prices: &prices,
@@ -290,22 +289,44 @@ fn prepared<'e>(
     let engine = &*engine.insert(crate::engine(context, reader)?);
     // The engine's own provider is reached here, so that an engine that can't run sandboxes is
     // refused before any image is built.
-    let offers = providers.make(|name, kind| Offer::new(name, kind, engine))?;
-    let placed = place(entry, task.workflow().clone(), &offers, config)?;
+    let offers = (providers.into_by_name().into_iter())
+        .map(|(name, kind)| {
+            let offer = Offer::new(&name, kind, engine)?;
+            Ok((name, offer))
+        })
+        .collect::<Result<_, String>>()?;
+    let (_, offered) = place(
+        entry,
+        task.workflow().clone(),
+        offers,
+        Offer::classes,
+        config,
+    )?;
     // Each provider that a role is placed on is reached here, so that one that can't be reached is
     // refused before any image is built. A provider that no role is placed on is never reached.
-    let placed_on = offers.placed(&placed, |name, offer| Connected::new(name, offer, engine))?;
-    Ok(task
-        .build(engine, &mut ())
-        .map(|(workflow, _, sources)| Prepared {
-            placed: placed.built(workflow),
-            placed_on,
-            sources,
-            gateway,
-            servings,
-            budgets,
-            prices,
-        }))
+    let reached = (offered.into_iter())
+        .map(|(name, offer)| {
+            let connected = Connected::new(&name, offer, engine)?;
+            Ok((name, connected))
+        })
+        .collect::<Result<_, String>>()?;
+    let (workflow, _, sources) = match task.build(engine, &mut ()) {
+        Ok(built) => built,
+        Err(problems) => return Ok(Err(problems)),
+    };
+    // Only `Workflow::place` makes a `Placed`, so the workflow with its images built is placed
+    // again, on the providers reached. A build changes no role's needs, so each role is placed
+    // where it was.
+    let (placed, placed_on) = place(entry, workflow, reached, Connected::classes, config)?;
+    Ok(Ok(Prepared {
+        placed,
+        placed_on,
+        sources,
+        gateway,
+        servings,
+        budgets,
+        prices,
+    }))
 }
 
 /// A provider that the configuration names, as the roles are placed: the machine's engine,
@@ -375,6 +396,10 @@ impl<'e> Connected<'e> {
         }
     }
 
+    fn classes(&self) -> &BTreeMap<Name, Class> {
+        &self.provider().ready().classes
+    }
+
     /// Whether publishing what its sandboxes run pushes it from the machine's engine, which may
     /// take minutes: the engine's own sandboxes run what it has.
     fn pushes(&self) -> bool {
@@ -385,16 +410,18 @@ impl<'e> Connected<'e> {
     }
 }
 
-/// `workflow`, the task's at `path`, placed in the classes that `offers`, `config`'s providers,
-/// offer; or, once it has said why each role that fits none fits none, how many there are.
-fn place(
+/// `workflow`, the task's at `path`, placed in the classes that `classes` gives of each of
+/// `offered`, some of `config`'s providers. It comes with each provider that it places a role on.
+/// Otherwise, once it has said why each role that fits none fits none, it gives how many there
+/// are.
+fn place<P>(
     path: &Path,
     workflow: Workflow,
-    offers: &config::Providers<Offer<'_>>,
+    offered: BTreeMap<Name, P>,
+    classes: impl Fn(&P) -> &BTreeMap<Name, Class>,
     config: &Path,
-) -> Result<Placed, String> {
-    let placed = workflow.place(offers.by_name(), Offer::classes);
-    let (placed, _) = placed.map_err(|errors| {
+) -> Result<(Placed, ByProvider<P>), String> {
+    workflow.place(offered, classes).map_err(|errors| {
         let path = path.display();
         for error in errors.as_slice() {
             say(format_args!("{path}: {error}"));
@@ -404,8 +431,7 @@ fn place(
             config.display()
         );
         closing_problems(has, errors.as_slice().len())
-    })?;
-    Ok(placed)
+    })
 }
 
 /// What the driver fails with, refused `error` before the record is begun: once it has said
