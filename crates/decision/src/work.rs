@@ -1,6 +1,6 @@
 //! Each agent owns its submission and finalize grace. The final body receives every submission,
-//! in declaration order, once all agents and jobs are torn down and all leases have ended. The
-//! run finishes once the final call is torn down too.
+//! in declaration order, once all agents and jobs are torn down, all leases have ended and the
+//! work targets' sandboxes are deleted. The run finishes once the final call is torn down too.
 
 use alloc::vec::Vec;
 use core::time::Duration;

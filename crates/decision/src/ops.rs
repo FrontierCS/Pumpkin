@@ -19,10 +19,9 @@
 //! - A status names one of the caller's jobs, and a session's function one of the caller's leases
 //!   of that session.
 //!
-//! A refused op changes nothing. An op that passes changes the core's state and calls for
-//! [`Action`]s, which follow its reply: a call becomes a job, a lease, a command or a
-//! transfer is started and metered by the `leases` module. Each reply gives the time left: the
-//! agent's until its deadline, a call's until its timeout.
+//! A refused op changes nothing. An op that passes changes the core's state, and the [`Action`]s
+//! it calls for follow its reply. Each reply gives the time left: the agent's until its deadline,
+//! a call's until its timeout.
 
 use alloc::borrow::ToOwned;
 use alloc::format;
@@ -47,7 +46,8 @@ use super::{Action, Caller, Core, Direction, JobId, LeaseId, OpId, PayloadRef, P
 pub(super) enum Working {
     /// The agent during its work, before the finalize grace.
     Agent { id: AgentId, deadline: Duration },
-    /// A call, while its command runs, which its timeout ends at `end`.
+    /// A call, while its body runs, until `end`: its timeout, or, for a job function's call, its
+    /// holder's work end if that comes first.
     Job {
         job: JobId,
         role: RoleId,
@@ -618,7 +618,6 @@ fn rerun((session, lease): (&Name, u64), timeout: Option<NonZeroU64>, argv: &Arg
     )
 }
 
-// Refuses a payload over `max_bytes`.
 pub(crate) fn fits(name: &Name, payload: &PayloadRef, max_bytes: NonZeroU64) -> Result<(), String> {
     if payload.size <= max_bytes.get() {
         Ok(())

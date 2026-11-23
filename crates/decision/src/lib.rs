@@ -3,10 +3,8 @@
 //! [`Core`] holds a run's state, does no I/O and reads no clock, so the same [`Event`]s give the
 //! same [`Action`]s; [`Core`] says how a runtime drives it.
 //!
-//! The core runs a workflow's two phases ([`schema::ir::Workflow`]). Its [`Action`]s ask the
-//! runtime to start the agents, answer ops, run calls, open, drive and close leases, collect
-//! outputs and destroy sandboxes, and [`Event`]s report what the runtime observed.
-//! [`Action::Finish`] carries the run's [`Outcome`], or [`Action::Abandon`] ends it without one.
+//! The core runs a workflow's two phases ([`schema::ir::Workflow`]). [`Action::Finish`] carries
+//! the run's [`Outcome`], or [`Action::Abandon`] ends it without one.
 
 // Without `std`, the core can name none of its files, network, processes, environment, threads
 // or clock; `alloc` gives it what else it uses, such as `Vec` and `String`. It still reaches the
@@ -152,7 +150,7 @@ pub enum Event {
         target: TargetId,
         reason: String,
     },
-    /// The worker finished and deleted any shared sandbox its provider identified.
+    /// The work target's sandbox is deleted, if its provider identified one.
     SharedTornDown {
         target: TargetId,
     },
@@ -373,8 +371,9 @@ pub struct Outcome {
 /// How long a run of `placed` may last from its start: its hard end, which [`Core::start`]
 /// sets, after the deadline.
 ///
-/// It includes the longest agent startup, the work duration, the longest finalize grace and
-/// one more agent startup for collecting, plus the final target's startup and timeout.
+/// It includes the longest startup of an agent or a work target, the work duration, the longest
+/// finalize grace and one more such startup for collecting, plus the final target's startup and
+/// timeout.
 pub fn lasts(placed: &Placed) -> Duration {
     let workflow = placed.workflow();
     let final_call = workflow.final_call();
@@ -446,8 +445,7 @@ enum Phase {
 }
 
 impl<'w> Core<'w> {
-    /// Starts the run at time 0 and returns its first actions. The workflow's deadline counts
-    /// from the release of the commands ([`Event::WorkStarted`]). Its hard end is [`lasts`].
+    /// Starts the run at time 0 and returns its first actions. Its hard end is [`lasts`].
     pub fn start(placed: &'w Placed) -> (Self, Vec<Action>) {
         let workflow = placed.workflow();
         let core = Self {
@@ -476,7 +474,7 @@ impl<'w> Core<'w> {
     ///
     /// The time acts before the event: an `at` that reaches the hard end, an agent's work end,
     /// or a lease's end abandons the run, ends that agent's work or closes the lease first.
-    /// A report that a job's command has ended, or that the job has, closes the leases it holds.
+    /// A report that a job's body has ended, or that the job has, closes the leases it holds.
     #[expect(clippy::too_many_lines, reason = "one arm per event")]
     pub fn handle(&mut self, at: Duration, event: Event) -> Vec<Action> {
         self.now = self.now.max(at);
@@ -640,7 +638,7 @@ impl<'w> Core<'w> {
             Phase::Finished | Phase::Abandoned => return,
         }
         self.phase = Phase::Abandoned;
-        // Abandon stops the workers. A late service failure has no call left to stop.
+        // Abandon stops every call and work target. A late `SharedFailed` has no call left to stop.
         self.shared.clear();
         // Abandon stops every runner. A later expiry or job report has no lease left to close.
         drop(self.leases.close_where(self.now, |_| true));

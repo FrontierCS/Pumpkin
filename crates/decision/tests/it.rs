@@ -12,7 +12,7 @@
 //!   [replace]`, `.get <lease> <from> <to>`, `.status <lease>` and `.close <lease>`, each an op
 //!   from the agent, `-` for a command without a timeout;
 //! - an event after `@<role>`, from that agent, or an op after `@<job>`, from that call;
-//! - `agent_torn_down`, the end of the agent's teardown;
+//! - `agent_torn_down`, `shared_failed <target> <reason>` and `shared_torn_down <target>`;
 //! - `call_started <job>`, `call_timed_out <job>`, `call_returned <job> [+<n>] [<name>=<value>]…`,
 //!   the body's return in its order, `call_failed <job> [+<n>] <reason>`, with `+<n>` if the route
 //!   barred `n` of the call's model requests over budget, and `call_torn_down <job>`;
@@ -110,12 +110,31 @@ fn check(edit: impl FnOnce(&mut Value), script: &str, expect: &Expect) {
             }
             event => {
                 let event = run.event(event);
+                let asked = match &event {
+                    Event::OpArrived { op, .. } => Some(*op),
+                    _ => None,
+                };
                 let actions = core.handle(at, event);
+                assert_replies(line, asked, &actions);
                 run.note(line, &actions, core.tick_due());
             }
         }
     }
     expect.assert_eq(&run.transcript);
+}
+
+fn assert_replies(line: &str, asked: Option<OpId>, actions: &[Action]) {
+    let replied: Vec<OpId> = (actions.iter())
+        .filter_map(|action| match action {
+            Action::Reply { op, .. } => Some(*op),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        replied,
+        Vec::from_iter(asked),
+        "`{line}`: an op gets exactly one reply, and no other event gets one"
+    );
 }
 
 /// The classes of one provider, each of which offers what every role of the fixture needs:
@@ -271,7 +290,6 @@ impl Run<'_> {
                     arguments,
                 })
             }
-            // `now <function> <bytes> <effect>…`, or `now <function> <bytes> failed|unread`.
             "now" => self.now(&words[1..]),
             "status" => self.op(Request::Status {
                 job: words[1].parse().unwrap(),

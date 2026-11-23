@@ -31,8 +31,8 @@ pub(super) struct Lease {
     pub(super) opened: Duration,
     /// How long it lasts from when its runner is ready.
     pub(super) life: Duration,
-    /// Which one it is among the grant's leases that have not ended, below the grant's
-    /// `instances` ([`Leases::open`]).
+    /// Which one it is among its holder's leases of the grant that have not ended, below the
+    /// grant's `instances` ([`Leases::open`]).
     pub(super) instance: u32,
     pub(super) state: State,
     /// The commands and transfers accepted, even if one fails to start; they share one numbering.
