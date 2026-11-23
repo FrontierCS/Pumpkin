@@ -88,7 +88,6 @@ pub(crate) fn deployment(
 /// What [`take`] removes from a controller's settings, but `[deployment]`.
 pub(crate) struct Taken {
     pub(crate) version: Version,
-    /// Whether the settings drain.
     pub(crate) draining: bool,
 }
 

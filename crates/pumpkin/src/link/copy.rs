@@ -13,7 +13,7 @@ use stdx::Context as _;
 
 use super::{Ask, Link, Request, Unanswered};
 
-// Keep the ceiling set from the largest controller record measured for the original copy.
+// Set from the largest controller record measured:
 // https://github.com/FrontierCS/Pumpkin/pull/121
 const RECORD_ENTRIES: usize = 100_000;
 
@@ -24,7 +24,8 @@ pub(crate) struct CopyRequest {
 }
 
 /// That the client holds a whole copy of run `id`'s record, for the member that its link acts for.
-/// If that member is the run's, the controller keeps its record `crate::job::KEPT` from then.
+/// If that member is the run's, the controller keeps its record `retention::KEPT_DAYS` days from
+/// then.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct CopiedRequest {
     pub(crate) id: String,

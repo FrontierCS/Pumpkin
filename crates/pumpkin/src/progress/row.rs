@@ -49,7 +49,6 @@ pub(super) enum Stage {
         under: String,
     },
     Finished {
-        /// Whether the run returned a result.
         result: bool,
     },
 }

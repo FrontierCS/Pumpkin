@@ -93,7 +93,6 @@ struct Answers {
     /// The controller's health, or why there is none.
     health: Result<Health, String>,
     listing: Listing,
-    /// The runs that couldn't be listed.
     unlisted: Vec<Unlisted>,
     /// When the listing was asked for, as `serve` makes its rows then.
     asked: UnixTime,

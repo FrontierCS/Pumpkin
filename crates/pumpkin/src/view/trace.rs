@@ -12,8 +12,7 @@
 //! request whose files can't be read is a step with what the log says of it, and a note.
 //!
 //! [`Exchanges`] holds what a run's log says of each request, for every caller; a `Trace` is one
-//! caller's. `ask` says what a request of the page asks for, `json` and `stats` answer it, `diff`
-//! compares two requests, and `ops` holds what the log says of the ops a run brokered.
+//! caller's.
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
