@@ -197,7 +197,7 @@ pub(crate) enum Command {
     View(View),
     Job(Job),
     Boot,
-    Install(aws::ParameterArn),
+    Install(crate::host::Target),
     CheckDeployment(aws::ParameterArn),
     BootAll,
     Idle,

@@ -1,7 +1,7 @@
 //! What a job takes of a controller's settings across the envelopes that make them. The settings
 //! name the version of the envelope that made them, as `envelope = "M.m"`. Their `[deployment]` is
-//! the host's ([`deployment`]), and a job leaves it out. They may hold keys that this build doesn't
-//! know. They may say `draining = true`, which refuses each job that starts while they do.
+//! the host's ([`deployment`]), and a job leaves it out unread. They may hold keys that this build
+//! doesn't know. They may say `draining = true`, which refuses each job that starts while they do.
 //!
 //! A minor adds only keys that a release of an older minor may safely ignore. A key that every
 //! release must honour needs a major. So does any removal or change of what a release relies on. A
@@ -11,9 +11,9 @@
 
 use std::fmt;
 
-use aws::ParameterArn;
 use serde::Deserialize;
 
+use super::Source;
 use crate::controller::Name;
 use crate::{config, say};
 
@@ -51,8 +51,8 @@ const DEPLOYMENT: &str = "deployment";
 pub(crate) struct Deployment {
     /// The `name` that the deployment was applied with.
     pub(crate) name: Name,
-    /// The SSM parameter of the members' keys.
-    pub(crate) members: ParameterArn,
+    /// The list of the members' keys: an SSM parameter, or a file of the host's.
+    pub(crate) members: Source,
 }
 
 /// Parses `value`, the text of a controller's settings named as `named`, as TOML's tables.
@@ -72,47 +72,50 @@ pub(crate) fn deployment(
 ) -> Result<(Version, Deployment), String> {
     let version = envelope(settings, named)?;
     let Some(deployment) = settings.remove(DEPLOYMENT) else {
-        return Err(format!(
-            "{named} hold no `[deployment]`: the controller's admin applies this release's \
-             deploy/aws, which writes it"
-        ));
+        return Err(no_deployment(named));
     };
     let deployment = deployment.try_into().map_err(|error: toml::de::Error| {
         let error = error.to_string();
         format!(
             "{named} hold a `[deployment]` that is refused: {}: write its `name` and `members` \
-             as deploy/aws does",
+             as deploy/aws or deploy/docker's README does",
             error.trim_end()
         )
     })?;
     Ok((version, deployment))
 }
 
-/// What [`take`] removes from a controller's settings.
+/// What [`take`] removes from a controller's settings, but `[deployment]`.
 pub(crate) struct Taken {
     pub(crate) version: Version,
-    /// The host's table, which a job reads none of.
-    pub(crate) deployment: Deployment,
     /// Whether the settings drain.
     pub(crate) draining: bool,
 }
 
 /// Removes the version of the envelope, `[deployment]` and `draining` from `settings`, a
-/// controller's settings named as `named`, and returns them. Fails as [`deployment`] does. Fails
-/// too if `draining` isn't a boolean.
+/// controller's settings named as `named`, and returns the version and `draining`. Fails unless
+/// the version is one that this build takes, and the settings hold a `[deployment]`. Fails too if
+/// `draining` isn't a boolean.
 pub(crate) fn take(settings: &mut toml::Table, named: &str) -> Result<Taken, String> {
-    let (version, deployment) = deployment(settings, named)?;
+    let version = envelope(settings, named)?;
+    // Unread, as the table is the host's, so that a change to it needs no new envelope.
+    if settings.remove(DEPLOYMENT).is_none() {
+        return Err(no_deployment(named));
+    }
     let draining = match settings.remove("draining") {
         None => false,
         Some(value) => value.as_bool().ok_or_else(|| {
             format!("{named} hold `draining = {value}`: expected `true` or `false`")
         })?,
     };
-    Ok(Taken {
-        version,
-        deployment,
-        draining,
-    })
+    Ok(Taken { version, draining })
+}
+
+fn no_deployment(named: &str) -> String {
+    format!(
+        "{named} hold no `[deployment]`: the controller's admin applies this release's \
+         deploy/aws, which writes it, or writes it as deploy/docker's README says"
+    )
 }
 
 /// Why a job is refused while `named`, a controller's settings, drain.

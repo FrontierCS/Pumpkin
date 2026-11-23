@@ -1,4 +1,4 @@
-<svg width="860px" height="560px" xmlns="http://www.w3.org/2000/svg">
+<svg width="860px" height="830px" xmlns="http://www.w3.org/2000/svg">
   <style>
     .fg { fill: #AAAAAA }
     .bg { fill: #000000 }
@@ -26,59 +26,89 @@
 </tspan>
     <tspan x="10px" y="64px"><tspan>`install` makes the user `pumpkin`, lingering, in Docker's group. It installs this `pumpkin-admin`,</tspan>
 </tspan>
-    <tspan x="10px" y="82px"><tspan>the host file /etc/pumpkin/controller.toml, the units that run `boot-all`, `idle` and `members`, and</tspan>
+    <tspan x="10px" y="82px"><tspan>the host file /etc/pumpkin/controller.toml, the units that run `boot-all`, `members` and, on `ec2`,</tspan>
 </tspan>
-    <tspan x="10px" y="100px"><tspan>sshd's settings. Those admit only the members' keys for `pumpkin`.</tspan>
+    <tspan x="10px" y="100px"><tspan>`idle`, and sshd's settings, which admit only the members' keys.</tspan>
 </tspan>
     <tspan x="10px" y="118px">
 </tspan>
-    <tspan x="10px" y="136px"><tspan>It copies the members' keys first, and changes nothing else if the copy fails. It needs Docker and</tspan>
+    <tspan x="10px" y="136px"><tspan>It copies the members' keys first, and changes nothing else if the copy fails. It needs Docker</tspan>
 </tspan>
-    <tspan x="10px" y="154px"><tspan>AWS CLI v2 installed first. It writes a file only where it differs, reloads only what changed, and</tspan>
+    <tspan x="10px" y="154px"><tspan>installed first, and AWS CLI v2 to read SSM. It writes a file only where it differs, reloads only</tspan>
 </tspan>
-    <tspan x="10px" y="172px"><tspan>says each change, so a second run says nothing.</tspan>
+    <tspan x="10px" y="172px"><tspan>what changed, and says each change, so a second run says nothing.</tspan>
 </tspan>
     <tspan x="10px" y="190px">
 </tspan>
-    <tspan x="10px" y="208px"><tspan class="fg-bright-green bold">Usage:</tspan><tspan> </tspan><tspan class="fg-bright-cyan bold">pumpkin-admin install</tspan><tspan> </tspan><tspan class="fg-bright-cyan bold">--settings</tspan><tspan class="fg-cyan"> </tspan><tspan class="fg-cyan">&lt;arn&gt;</tspan>
+    <tspan x="10px" y="208px"><tspan class="fg-bright-green bold">Usage:</tspan><tspan> </tspan><tspan class="fg-bright-cyan bold">pumpkin-admin install</tspan><tspan> </tspan><tspan class="fg-bright-cyan bold">--settings</tspan><tspan class="fg-cyan"> </tspan><tspan class="fg-cyan">&lt;settings&gt;</tspan><tspan> </tspan><tspan class="fg-cyan">&lt;target&gt;</tspan>
 </tspan>
     <tspan x="10px" y="226px">
 </tspan>
-    <tspan x="10px" y="244px"><tspan class="fg-bright-green bold">Options:</tspan>
+    <tspan x="10px" y="244px"><tspan class="fg-bright-green bold">Arguments:</tspan>
 </tspan>
-    <tspan x="10px" y="262px"><tspan>      </tspan><tspan class="fg-bright-cyan bold">--settings</tspan><tspan class="fg-cyan"> </tspan><tspan class="fg-cyan">&lt;arn&gt;</tspan>
+    <tspan x="10px" y="262px"><tspan>  </tspan><tspan class="fg-cyan">&lt;target&gt;</tspan>
 </tspan>
-    <tspan x="10px" y="280px"><tspan>          The ARN of the SSM parameter that holds the controller's settings. The host file names it</tspan>
+    <tspan x="10px" y="280px"><tspan>          What the controller runs on</tspan>
 </tspan>
     <tspan x="10px" y="298px">
 </tspan>
-    <tspan x="10px" y="316px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">-h</tspan><tspan>, </tspan><tspan class="fg-bright-cyan bold">--help</tspan>
+    <tspan x="10px" y="316px"><tspan>          Possible values:</tspan>
 </tspan>
-    <tspan x="10px" y="334px"><tspan>          Print help</tspan>
+    <tspan x="10px" y="334px"><tspan>          - </tspan><tspan class="fg-bright-cyan bold">ec2</tspan><tspan>:    An EC2 instance that deploy/aws made. It stops once idle, and a client starts it</tspan>
 </tspan>
-    <tspan x="10px" y="352px">
+    <tspan x="10px" y="352px"><tspan>            again</tspan>
 </tspan>
-    <tspan x="10px" y="370px"><tspan class="fg-bright-green bold">Examples:</tspan>
+    <tspan x="10px" y="370px"><tspan>          - </tspan><tspan class="fg-bright-cyan bold">docker</tspan><tspan>: The container that deploy/docker makes. It never stops by itself</tspan>
 </tspan>
-    <tspan x="10px" y="388px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">sudo ./pumpkin/bin/pumpkin-admin install --settings</tspan><tspan> \</tspan>
+    <tspan x="10px" y="388px">
 </tspan>
-    <tspan x="10px" y="406px"><tspan>    </tspan><tspan class="fg-bright-cyan bold">arn:aws:ssm:us-west-1:123456789012:parameter/pumpkin-alice/settings</tspan>
+    <tspan x="10px" y="406px"><tspan class="fg-bright-green bold">Options:</tspan>
 </tspan>
-    <tspan x="10px" y="424px"><tspan>          Install this release on the controller host, as root</tspan>
+    <tspan x="10px" y="424px"><tspan>      </tspan><tspan class="fg-bright-cyan bold">--settings</tspan><tspan class="fg-cyan"> </tspan><tspan class="fg-cyan">&lt;settings&gt;</tspan>
 </tspan>
-    <tspan x="10px" y="442px">
+    <tspan x="10px" y="442px"><tspan>          Where the controller's settings are: on `ec2`, the ARN of their SSM parameter; on</tspan>
 </tspan>
-    <tspan x="10px" y="460px"><tspan>The settings name the members' list in their `[deployment] members`. The list</tspan>
+    <tspan x="10px" y="460px"><tspan>          `docker`, the absolute path of their file. The host file names it</tspan>
 </tspan>
-    <tspan x="10px" y="478px"><tspan>holds a line `&lt;member&gt; &lt;key&gt;` for each key. A member's name is 1 to 32 of a-z,</tspan>
+    <tspan x="10px" y="478px">
 </tspan>
-    <tspan x="10px" y="496px"><tspan>0-9 and `-`, and starts with a letter. The key is the line of the member's</tspan>
+    <tspan x="10px" y="496px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">-h</tspan><tspan>, </tspan><tspan class="fg-bright-cyan bold">--help</tspan>
 </tspan>
-    <tspan x="10px" y="514px"><tspan>~/.config/pumpkin/ssh/key.pub. A list with any other line, or a key twice, is</tspan>
+    <tspan x="10px" y="514px"><tspan>          Print help</tspan>
 </tspan>
-    <tspan x="10px" y="532px"><tspan>refused whole.</tspan>
+    <tspan x="10px" y="532px">
 </tspan>
-    <tspan x="10px" y="550px">
+    <tspan x="10px" y="550px"><tspan class="fg-bright-green bold">Examples:</tspan>
+</tspan>
+    <tspan x="10px" y="568px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">sudo ./pumpkin/bin/pumpkin-admin install ec2 --settings</tspan><tspan> \</tspan>
+</tspan>
+    <tspan x="10px" y="586px"><tspan>    </tspan><tspan class="fg-bright-cyan bold">arn:aws:ssm:us-west-1:123456789012:parameter/pumpkin-alice/settings</tspan>
+</tspan>
+    <tspan x="10px" y="604px"><tspan>          Install this release on the controller's EC2 instance, as root</tspan>
+</tspan>
+    <tspan x="10px" y="622px">
+</tspan>
+    <tspan x="10px" y="640px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">pumpkin-admin install docker --settings /etc/pumpkin/conf/settings.toml</tspan>
+</tspan>
+    <tspan x="10px" y="658px"><tspan>          Install it in the controller's container, as its image does at every</tspan>
+</tspan>
+    <tspan x="10px" y="676px"><tspan>          start</tspan>
+</tspan>
+    <tspan x="10px" y="694px">
+</tspan>
+    <tspan x="10px" y="712px"><tspan>The settings name the members' list in their `[deployment] members`: an SSM</tspan>
+</tspan>
+    <tspan x="10px" y="730px"><tspan>parameter's ARN, or a file's absolute path. The list holds a line</tspan>
+</tspan>
+    <tspan x="10px" y="748px"><tspan>`&lt;member&gt; &lt;key&gt;` for each key. A member's name is 1 to 32 of a-z, 0-9 and `-`,</tspan>
+</tspan>
+    <tspan x="10px" y="766px"><tspan>and starts with a letter. The key is the line of the member's</tspan>
+</tspan>
+    <tspan x="10px" y="784px"><tspan>~/.config/pumpkin/ssh/key.pub. A list with any other line, or a key twice, is</tspan>
+</tspan>
+    <tspan x="10px" y="802px"><tspan>refused whole.</tspan>
+</tspan>
+    <tspan x="10px" y="820px">
 </tspan>
   </text>
 

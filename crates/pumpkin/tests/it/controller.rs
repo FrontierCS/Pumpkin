@@ -780,7 +780,24 @@ fn target_refusals() {
         misnamed.replace("cpu_millis", "cpus_millis")
     );
     scratch.write("misnamed.toml", &misnamed);
-    for named in ["../both.toml", "../misnamed.toml"] {
+    // Both or neither of `region` and `address`, and an address that `ssh` would take as an option.
+    let named = fs::read_to_string(&config).unwrap();
+    let region = "region = \"us-west-1\"";
+    let finds = [
+        ("twice.toml", format!("{region}\naddress = \"lab:2222\"")),
+        ("unfound.toml", String::new()),
+        (
+            "optional.toml",
+            "address = \"-oProxyCommand=true:22\"".to_owned(),
+        ),
+    ];
+    for (file, find) in &finds {
+        scratch.write(file, &named.replace(region, find));
+    }
+    let files = ["../both.toml", "../misnamed.toml"];
+    let finds = finds.iter().map(|(file, _)| format!("../{file}"));
+    for named in files.into_iter().map(str::to_owned).chain(finds) {
+        let named = named.as_str();
         let mut refused = on_client(
             &scratch,
             &client,
@@ -847,6 +864,27 @@ fn target_refusals() {
             12 | classes = { a100 = { gpu = "A100-80GB", gpu_model = "NVIDIA A100-SXM4-80GB", cpus_millis = 8000, memory_bytes = 68719476736, startup_seconds = 1800 } }
                |                                                                              ^^^^^^^^^^^
             unknown field `cpus_millis`, expected one of `gpu`, `gpu_model`, `cpu_millis`, `memory_bytes`, `startup_seconds`, `usd_per_hour`
+            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --config ../twice.toml
+            exit status: Some(1)
+            pumpkin: ../twice.toml: TOML parse error at line 1, column 1
+              |
+            1 | [controller]
+              | ^^^^^^^^^^^^
+            `[controller]` names both or neither of `region` and `address`: name the `region` of a controller that deploy/aws made, or the `address` of one elsewhere
+            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --config ../unfound.toml
+            exit status: Some(1)
+            pumpkin: ../unfound.toml: TOML parse error at line 1, column 1
+              |
+            1 | [controller]
+              | ^^^^^^^^^^^^
+            `[controller]` names both or neither of `region` and `address`: name the `region` of a controller that deploy/aws made, or the `address` of one elsewhere
+            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --config ../optional.toml
+            exit status: Some(1)
+            pumpkin: ../optional.toml: TOML parse error at line 3, column 11
+              |
+            3 | address = "-oProxyCommand=true:22"
+              |           ^^^^^^^^^^^^^^^^^^^^^^^^
+            `-oProxyCommand=true:22` is not a controller's address: give its host and the port of its `sshd`, such as `lab.example.org:2222` or `192.0.2.1:2222`
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --runs runs
             exit status: Some(1)
             pumpkin: `--runs` names this machine's, but its configuration sends runs to controller `alice`: leave it out

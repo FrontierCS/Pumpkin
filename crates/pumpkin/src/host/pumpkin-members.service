@@ -1,5 +1,5 @@
 [Unit]
-Description=Copy the keys of the Pumpkin controller's members from SSM
+Description=Copy the keys of the Pumpkin controller's members from the list that its settings name
 Wants=network-online.target
 After=network-online.target
 

@@ -18,6 +18,7 @@ use clap::{CommandFactory as _, FromArgMatches as _, Parser};
 
 use super::notes::ADMIN;
 use super::{Command, Program, Refusal, first_word, flagged, noted, printed};
+use crate::host::{Kind, Target};
 use crate::iam::{self, Principal};
 
 /// The name that makes `pumpkin` run as `pumpkin-admin`. An install holds a link to `pumpkin` by
@@ -43,17 +44,19 @@ enum Parsed {
     ///
     /// `install` makes the user `pumpkin`, lingering, in Docker's group. It installs this
     /// `pumpkin-admin`, the host file /etc/pumpkin/controller.toml, the units that run `boot-all`,
-    /// `idle` and `members`, and sshd's settings. Those admit only the members' keys for `pumpkin`.
+    /// `members` and, on `ec2`, `idle`, and sshd's settings, which admit only the members' keys.
     ///
     /// It copies the members' keys first, and changes nothing else if the copy fails. It needs
-    /// Docker and AWS CLI v2 installed first. It writes a file only where it differs, reloads only
-    /// what changed, and says each change, so a second run says nothing.
+    /// Docker installed first, and AWS CLI v2 to read SSM. It writes a file only where it differs,
+    /// reloads only what changed, and says each change, so a second run says nothing.
     Install {
-        /// The ARN of the SSM parameter that holds the controller's settings. The host file names
-        /// it.
-        #[arg(long, value_name = "arn")]
-        #[arg(value_parser = |arn: &str| ParameterArn::try_from(arn.to_owned()))]
-        settings: ParameterArn,
+        /// What the controller runs on.
+        #[arg(value_name = "target")]
+        target: Kind,
+        /// Where the controller's settings are: on `ec2`, the ARN of their SSM parameter; on
+        /// `docker`, the absolute path of their file. The host file names it.
+        #[arg(long, value_name = "settings")]
+        settings: String,
     },
     /// Check the controller's deployment, with read-only calls on AWS.
     ///
@@ -125,7 +128,14 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command,
     let parsed = Parsed::from_arg_matches(&matches);
     let parsed = parsed.map_err(|error| refusal(error.format(&mut cli)))?;
     Ok(match parsed {
-        Parsed::Install { settings } => Command::Install(settings),
+        Parsed::Install { target, settings } => {
+            let target = Target::new(target, settings).map_err(|error| {
+                let error = format!("invalid value for '--settings <settings>': {error}\n");
+                let error = clap::Error::raw(clap::error::ErrorKind::ValueValidation, error);
+                refusal(error.with_cmd(&cli))
+            })?;
+            Command::Install(target)
+        }
         Parsed::Check { settings } => Command::CheckDeployment(settings),
         Parsed::Policy { principal } => Command::Print(iam::policy(principal).into()),
         Parsed::BootAll => Command::BootAll,

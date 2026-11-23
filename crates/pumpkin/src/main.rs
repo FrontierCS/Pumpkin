@@ -100,7 +100,7 @@ fn main() -> Exit {
         Ok(cli::Command::View(flags)) => view::view(flags),
         Ok(cli::Command::Job(flags)) => job::job(flags),
         Ok(cli::Command::Boot) => job::boot(),
-        Ok(cli::Command::Install(settings)) => host::install(&settings),
+        Ok(cli::Command::Install(target)) => host::install(&target),
         Ok(cli::Command::CheckDeployment(settings)) => deployment::check(&settings),
         Ok(cli::Command::Members) => host::members(),
         Ok(cli::Command::CheckMembers(dir)) => keydir::check(&dir),

@@ -14,24 +14,25 @@ mod viewing;
 
 use std::fmt;
 use std::fs::{self, File, TryLockError};
+use std::net::SocketAddr;
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use ::aws::Region;
 pub(crate) use commands::{cancel, here, reap, run, wait};
 pub(crate) use listing::{ls, scratch};
-use location::{Found, Location};
-use serde::Deserialize;
+use location::{Found, Located, Location};
+use serde::{Deserialize, Serialize};
 use stdx::Context as _;
 use stdx::process::Environment;
 pub(crate) use viewing::{Unviewed, Viewing};
 
-use self::aws::{Located, find, kept};
+use self::aws::{find, kept};
 pub(crate) use self::aws::{instances, live, tag, tagged};
+use crate::config::{self, Find};
 use crate::workspace::Workspace;
-use crate::{config, next, say};
+use crate::{next, say};
 
 /// The controller's user, which runs every Pumpkin process there.
 pub(crate) const USER: &str = "pumpkin";
@@ -52,7 +53,8 @@ const AGAIN: [Duration; 6] = [
 // https://github.com/ansible/ansible/blob/2a4acd774aec2625b09cca2284cb2a08654e4cdd/lib/ansible/plugins/connection/ssh.py#L550-L610
 const OPENINGS: u32 = 8;
 
-/// A controller's name: the `name` that `deploy/aws` was applied with.
+/// A controller's name: the `name` of its settings' `[deployment]`, as `deploy/aws` was applied
+/// with it.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(try_from = "String")]
 pub(crate) struct Name(String);
@@ -70,8 +72,8 @@ impl TryFrom<String> for Name {
             && bytes.iter().all(allowed);
         if !fits {
             return Err(format!(
-                "`{}` is not a controller's name: give the `name` that `deploy/aws` was applied \
-                 with, 1 to 16 of a-z, 0-9 and `-`, starting with a letter and ending with no `-`",
+                "`{}` is not a controller's name: give the `name` of its settings' `[deployment]`, \
+                 1 to 16 of a-z, 0-9 and `-`, starting with a letter and ending with no `-`",
                 name.escape_debug()
             ));
         }
@@ -82,6 +84,62 @@ impl TryFrom<String> for Name {
 impl fmt::Display for Name {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
+    }
+}
+
+/// Where a controller's `sshd` listens, as `[controller] address` names it: a host, by its name
+/// or its IP address, and a port.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub(crate) struct Address {
+    /// A name of letters, digits, `.` and `-` that starts with a letter or a digit, or an IP
+    /// address, without brackets, so never an option of `ssh`.
+    host: String,
+    port: u16,
+}
+
+impl TryFrom<String> for Address {
+    type Error = String;
+
+    fn try_from(address: String) -> Result<Self, Self::Error> {
+        let parsed = match address.parse::<SocketAddr>() {
+            // An address's scope, as of a link-local IPv6 address, is no part of a host.
+            Ok(SocketAddr::V6(socket)) if socket.scope_id() != 0 => None,
+            Ok(socket) => Some((socket.ip().to_string(), socket.port())),
+            Err(_) => address.rsplit_once(':').and_then(|(host, port)| {
+                let bytes = host.as_bytes();
+                let allowed =
+                    |byte: &u8| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-');
+                let fits = bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+                    && bytes.iter().all(allowed);
+                fits.then_some((host.to_owned(), port.parse().ok()?))
+            }),
+        };
+        match parsed {
+            Some((host, port)) if port != 0 => Ok(Self { host, port }),
+            _ => Err(format!(
+                "`{}` is not a controller's address: give its host and the port of its `sshd`, \
+                 such as `lab.example.org:2222` or `192.0.2.1:2222`",
+                address.escape_debug()
+            )),
+        }
+    }
+}
+
+impl From<Address> for String {
+    fn from(address: Address) -> Self {
+        address.to_string()
+    }
+}
+
+impl fmt::Display for Address {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self { host, port } = self;
+        if host.contains(':') {
+            write!(f, "[{host}]:{port}")
+        } else {
+            write!(f, "{host}:{port}")
+        }
     }
 }
 
@@ -119,7 +177,7 @@ fn private(path: &Path) -> Result<File, String> {
 }
 
 pub(crate) struct Reached {
-    region: Region,
+    find: Find,
     name: Name,
     alias: String,
     kept: PathBuf,
@@ -131,14 +189,20 @@ impl Reached {
     pub(crate) fn reach(settings: &config::Controller) -> Result<Self, String> {
         let config::Controller {
             name,
-            region,
+            find,
             modal: _,
         } = settings;
-        let alias = format!("{name}.{}", region.as_str());
+        let alias = match find {
+            // By the controller's name, rather than the instance that the tag finds, so that the
+            // tag that names the controller can't lead this machine's key to another instance.
+            Find::Ec2 { region } => format!("{name}.{}", region.as_str()),
+            // As `ssh` names a host at a port other than 22 in `known_hosts`.
+            Find::Address(address) => format!("[{}]:{}", address.host, address.port),
+        };
         let location = Location::new(Workspace::find()?.controller().join(&alias))?;
         let kept = kept()?;
         Ok(Self {
-            region: region.clone(),
+            find: find.clone(),
             name: name.clone(),
             alias,
             kept,
@@ -151,9 +215,16 @@ impl Reached {
         self.location.recent()?;
         match self.location.found()? {
             Some(found) => Ok(found),
-            None => self
-                .location
-                .repair(&self.name, None, || find(&self.region, &self.name)),
+            None => self.location.repair(&self.name, None, || self.locate()),
+        }
+    }
+
+    /// Where the controller is: the instance that EC2 finds by its tag, which this starts if it is
+    /// stopped, or the address that the configuration names.
+    fn locate(&self) -> Result<Located, String> {
+        match &self.find {
+            Find::Ec2 { region } => find(region, &self.name),
+            Find::Address(address) => Ok(Located::Address(address.clone())),
         }
     }
 
@@ -162,7 +233,7 @@ impl Reached {
         format!(
             "{said}: verify the host key for controller `{}` with its administrator. If its key changed as expected, unpin the old key: ssh-keygen -R {} -f {}",
             self.name,
-            self.alias,
+            next::quoted(&self.alias),
             next::quoted(&hosts.to_string_lossy())
         )
     }
@@ -171,22 +242,29 @@ impl Reached {
     fn key_refused(&self) -> Result<String, String> {
         let public = self.kept.join("key.pub");
         let line = fs::read_to_string(&public).context(public.display())?;
+        let list = match self.find {
+            Find::Ec2 { .. } => "in deploy/aws's `members`, and to apply",
+            Find::Address(_) => "to the controller's members' list",
+        };
         Ok(format!(
             "controller `{}` refused this machine's key: ask its admin to add this line under \
-             your name in deploy/aws's `members`, and to apply: \"{}\". If the key is listed \
-             already, run the command again in a minute, once the controller has copied the list",
+             your name {list}: \"{}\". If the key is listed already, run the command again in a \
+             minute, once the controller has copied the list",
             self.name,
             line.trim_end()
         ))
     }
 
     fn repair(&self, previous: &Found, said: &str) -> Result<Found, String> {
-        self.location.repair(&self.name, Some(previous), || {
-            let probe = aws::answers(previous.at.address);
-            find(&self.region, &self.name).map_err(|error| match probe {
-                Ok(()) => format!("{said}; finding the controller again: {error}"),
-                Err(probe) => format!("{said}; SSH at its last private address: {probe}: {}; finding the controller again: {error}", aws::unanswered(&probe)),
-            })
+        self.location.repair(&self.name, Some(previous), || match &previous.at {
+            Located::Ec2 { address, .. } => {
+                let probe = aws::answers(*address);
+                self.locate().map_err(|error| match probe {
+                    Ok(()) => format!("{said}; finding the controller again: {error}"),
+                    Err(probe) => format!("{said}; SSH at its last private address: {probe}: {}; finding the controller again: {error}", aws::unanswered(&probe)),
+                })
+            }
+            Located::Address(_) => self.locate(),
         })
     }
 
@@ -195,9 +273,15 @@ impl Reached {
     }
 
     fn remote(&self, ssh: &mut Command, at: &Located, remote: &str) {
-        ssh.args(self.ssh_options())
-            .arg(format!("{USER}@{}", at.address))
-            .arg(remote);
+        ssh.args(self.ssh_options());
+        let host = match at {
+            Located::Ec2 { address, .. } => address.to_string(),
+            Located::Address(Address { host, port }) => {
+                ssh.args(["-o".to_owned(), format!("Port={port}")]);
+                host.clone()
+            }
+        };
+        ssh.arg(format!("{USER}@{host}")).arg(remote);
     }
 
     fn ssh_options(&self) -> Vec<String> {
@@ -208,8 +292,6 @@ impl Reached {
             "-o".to_owned(),
             format!("UserKnownHostsFile={known_hosts}"),
             "-o".to_owned(),
-            // By the controller's name, rather than the instance that the tag finds, so that the
-            // tag that names the controller can't lead this machine's key to another instance.
             format!("HostKeyAlias={}", self.alias),
         ]);
         let options = [
