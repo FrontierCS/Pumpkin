@@ -1734,6 +1734,10 @@ fn step(arg: &str) -> Step {
         ["sleep", seconds] => return Step::Sleep(seconds.parse().unwrap()),
         ["await_file", path] => return Step::File((*path).to_owned()),
         ["await_log", kind] => return Step::Logged(format!(r#""kind":"{kind}""#)),
+        ["await_log", kind, field] if field.contains('=') => {
+            let (name, value) = field.split_once('=').unwrap();
+            return Step::Logged(format!(r#""kind":"{kind}","{name}":{value}"#));
+        }
         ["await_log", kind, caller] => {
             return Step::Logged(format!(r#""caller":"{caller}","kind":"{kind}""#));
         }

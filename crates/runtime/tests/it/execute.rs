@@ -2339,8 +2339,12 @@ fn abandoned() {
         queued: 0,
         at: PAST_THE_HARD_END,
     };
-    // Past the abandon, nothing orders the agent's teardown among the call's reports.
-    let racing = [Also::Racing(r#""kind":"agent_torn_down""#)];
+    // The move at the agent's delete wakes the tick beside the agent's last records, and past the
+    // abandon nothing orders the agent's teardown among the call's reports.
+    let racing = [
+        Also::Racing(r#""kind":"agent_torn_down""#),
+        Also::Racing(r#""sandbox":"agent-0""#),
+    ];
     let shown = executed(
         &SimHost::new().slow_sync(slow),
         "abandoned",
@@ -2366,13 +2370,13 @@ fn abandoned() {
         {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"0","seq":10}
         {"at_ns":"0","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":11}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_collected"},"seq":12}
-        {"actions":[],"at_ns":"6500000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":13}
-        {"actions":[{"kind":"abandon"}],"at_ns":"6500000000","event":{"kind":"tick"},"observed_ns":"6500000000","seq":14}
-        {"actions":[],"at_ns":"6500000000","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":15}
-        {"actions":[],"at_ns":"6500000000","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"6500000000","seq":16}
-        {"at_ns":"6500000000","note":"the run failed: the run was still going at its hard end, 6 s after it started: expected it to end within its deadline, its finalize grace, its final call's timeout and its sandboxes' startups","seq":17}
+        {"actions":[{"kind":"abandon"}],"at_ns":"6500000000","event":{"kind":"tick"},"observed_ns":"6500000000","seq":13}
+        {"actions":[],"at_ns":"6500000000","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":14}
+        {"actions":[],"at_ns":"6500000000","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"6500000000","seq":15}
+        {"at_ns":"6500000000","note":"the run failed: the run was still going at its hard end, 6 s after it started: expected it to end within its deadline, its finalize grace, its final call's timeout and its sandboxes' startups","seq":16}
         log.jsonl, at no fixed place:
         {"actions":[],"at_ns":"6500000000","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"6500000000"}
+        {"actions":[],"at_ns":"6500000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"}}
         its last record came once the hard end had passed"#]].assert_eq(&shown);
 }
 
@@ -3436,6 +3440,7 @@ fn model_provider_down_at_the_deadline() {
         // Its stream's first event has come, so the request is under way, once the sleep moves
         // the clock to the 2 s deadline.
         "ask m-large stall",
+        "await_log model_request_started request=1",
         "sleep 2",
     ];
     // The stalled request ends as the deadline ends the agent's route, beside the agent's
@@ -3490,8 +3495,15 @@ fn model_provider_down_at_the_deadline() {
 
 #[test]
 fn model_stream_cut() {
-    // The sleep moves the clock to the 1 s deadline once the stream's first event has come.
-    let argv = ["ops", "call submit slow", "ask m-large stall", "sleep 1"];
+    // The sleep moves the clock to the 1 s deadline once the stream's first event has come and
+    // the request's start is logged.
+    let argv = [
+        "ops",
+        "call submit slow",
+        "ask m-large stall",
+        "await_log model_request_started",
+        "sleep 1",
+    ];
     // The clock reaches the slow judge's 1 s timeout once its command has started, and the cut is
     // logged, so that the cut's times are the deadline's.
     let host = SimHost::new();
@@ -4255,7 +4267,7 @@ fn commands_past_the_startup() {
             {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
             {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"4000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
             {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_started"},"observed_ns":"0","seq":4}
-            {"actions":[],"at_ns":"2000000000","event":{"argv":["ops","sleep 2"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"2000000000","seq":5}
+            {"actions":[],"at_ns":"0","event":{"argv":["ops","await_log target_run","sleep 2"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"0","seq":5}
             {"actions":[],"at_ns":"2000000000","event":{"command":0,"end":{"exited":{"code":0}},"job":0,"kind":"command_ended"},"observed_ns":"2000000000","seq":6}
             {"actions":[],"at_ns":"2000000000","event":{"argv":["print","two"],"command":1,"job":0,"kind":"target_run"},"observed_ns":"2000000000","seq":7}
             {"actions":[],"at_ns":"2000000000","event":{"command":1,"end":{"exited":{"code":0}},"job":0,"kind":"command_ended"},"observed_ns":"2000000000","seq":8}
