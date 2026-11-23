@@ -5,6 +5,7 @@
 //! `rust-toolchain.toml` pins:
 //! <https://github.com/rust-lang/rustup/blob/bb60b1e89cc01a682dd16f2854329030938d3fe3/src/config.rs#L810-L812>.
 
+use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::fs::{self, Permissions};
 use std::os::unix::fs::{PermissionsExt as _, symlink};
@@ -31,7 +32,7 @@ pub(crate) struct Release {
     version: &'static str,
     url: &'static str,
     sha256: &'static str,
-    /// The tool's path in the file, if the file is a tar archive.
+    /// The tool's path in the file, if the file is an archive, a zip or a tar.
     member: Option<&'static str>,
 }
 
@@ -79,7 +80,36 @@ pub(crate) const MUTANTS: Release = Release {
     member: Some("cargo-mutants"),
 };
 
-const RELEASES: [Release; 5] = [BUILDIFIER, TSC, ZIG, NEXTEST, MUTANTS];
+/// Terraform, which `ci` checks `deploy/aws` with, at the oldest version that the module's
+/// `versions.tf` allows. Its SHA-256 is the one in the signed `SHA256SUMS` file that its release
+/// publishes beside it.
+pub(crate) const TERRAFORM: Release = Release {
+    name: "terraform",
+    version: "1.15.9",
+    url: "https://releases.hashicorp.com/terraform/1.15.9/terraform_1.15.9_linux_amd64.zip",
+    sha256: "76edd0b22d2f27d3d2e097cd793209646f719cf60f02ff3af626b07361137da1",
+    member: Some("terraform"),
+};
+
+/// Terraform's AWS provider, at the oldest version that `deploy/aws/versions.tf` allows. Its
+/// SHA-256 is from its release's signed `SHA256SUMS` too.
+const AWS_PROVIDER: Release = Release {
+    name: "terraform-provider-aws",
+    version: "6.72.0",
+    url: "https://releases.hashicorp.com/terraform-provider-aws/6.72.0/terraform-provider-aws_6.72.0_linux_amd64.zip",
+    sha256: "2ffb6b2caaf320b61b406cff192d6e4303b64e32990b69384a056fe5af3d015b",
+    member: Some("terraform-provider-aws_v6.72.0_x5"),
+};
+
+const RELEASES: [Release; 7] = [
+    BUILDIFIER,
+    TSC,
+    ZIG,
+    NEXTEST,
+    MUTANTS,
+    TERRAFORM,
+    AWS_PROVIDER,
+];
 
 /// The name of the link to xtask that cc-rs runs as the musl C compiler ([`musl_cc`]).
 const MUSL_CC: &str = "x86_64-linux-musl-cc";
@@ -105,6 +135,32 @@ pub(crate) fn musl_cc(build: &mut Command) -> Result<()> {
         .env("ZIG_GLOBAL_CACHE_DIR", dir.join("cache"))
         .env("CC_x86_64_unknown_linux_musl", cc);
     Ok(())
+}
+
+/// A directory that holds the pinned AWS provider in the layout of Terraform's `-plugin-dir`, from
+/// which `terraform init` installs it without a registry.
+pub(crate) fn terraform_plugins() -> Result<PathBuf> {
+    let provider = fetched(AWS_PROVIDER)?;
+    // The directory belongs to the checkout, as the musl C compiler's does.
+    let plugins = target_dir()?.join("terraform-plugins");
+    let dir = plugins
+        .join("registry.terraform.io/hashicorp/aws")
+        .join(AWS_PROVIDER.version);
+    fs::create_dir_all(&dir)
+        .map_err(|error| format!("making {} failed: {error}", dir.display()))?;
+    // In the unpacked layout, the platform's directory holds what the provider's zip holds, which
+    // `init` hashes as the registry does, so that it matches the hash in a lock file that a
+    // registry's `init` wrote. `init` links the directory into the module's `.terraform`:
+    // https://github.com/hashicorp/web-unified-docs/blob/45e8f63984f52111e8efbb7610095c195d31427a/content/terraform/v1.15.x/docs/cli/config/config-file.mdx#L259-L270
+    let Some(entry) = provider.parent() else {
+        unreachable!(
+            "{} has no parent, though `fetched` returns the release's cache entry joined with \
+             its member, which names a file at the top of the zip",
+            provider.display()
+        )
+    };
+    replace(&dir.join("linux_amd64"), |made| symlink(entry, made))?;
+    Ok(plugins)
 }
 
 /// Runs the pinned Zig's C compiler with this process's arguments, if xtask runs as
@@ -191,7 +247,7 @@ fn rustup(args: &[&str]) -> Command {
 
 /// The pinned `release` in the cache that all of one user's checkouts share. The first call
 /// fetches it with `curl`. It keeps the file only if its SHA-256 is the pin's, unpacks it if it is
-/// a tar, and makes it read-only.
+/// an archive, and makes it read-only.
 pub(crate) fn fetched(release: Release) -> Result<PathBuf> {
     let Release {
         name,
@@ -326,14 +382,23 @@ pub(crate) fn sha256(bytes: &[u8]) -> String {
     hex
 }
 
-/// Unpacks the tar `archive` into `dir` and then removes the archive.
+/// Unpacks `archive` into `dir` and then removes the archive. The archive is a zip if its name
+/// ends in `.zip`, and a tar otherwise.
 pub(crate) fn unpack(archive: &Path, dir: &Path) -> Result<()> {
-    let mut tar = stdx::process::command("tar", Environment::Inherited);
-    tar.args(["--extract", "--file"])
-        .arg(archive)
-        .arg("--directory")
-        .arg(dir);
-    ran(&mut tar, step(STEP_TIMEOUT))?;
+    let mut unpack = if archive.extension() == Some(OsStr::new("zip")) {
+        // Info-ZIP's unzip has no long options: `-q` keeps it quiet, and `-d` names the directory.
+        let mut unzip = stdx::process::command("unzip", Environment::Inherited);
+        unzip.arg("-q").arg(archive).arg("-d").arg(dir);
+        unzip
+    } else {
+        let mut tar = stdx::process::command("tar", Environment::Inherited);
+        tar.args(["--extract", "--file"])
+            .arg(archive)
+            .arg("--directory")
+            .arg(dir);
+        tar
+    };
+    ran(&mut unpack, step(STEP_TIMEOUT))?;
     fs::remove_file(archive)
         .map_err(|error| format!("removing {} failed: {error}", archive.display()).into())
 }

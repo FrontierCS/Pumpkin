@@ -41,7 +41,7 @@ aws iam create-open-id-connect-provider --url https://oidc.modal.com --client-id
 
 ## Per team
 
-Terraform 1.11 or later, and the AWS CLI with administrator credentials for the account. The
+Terraform 1.15.9 or later, and the AWS CLI with administrator credentials for the account. The
 module is this directory. A root of the admin's own calls it, pinned by a Pumpkin release's tag, so
 a release's `pumpkin-admin install` and its module agree. The root holds what is the deployment's:
 the provider's configuration with its region and tags, the backend, and the lock file that
@@ -50,7 +50,7 @@ a repository, write `main.tf` (`variables.tf` says each of the module's values a
 
 ```hcl
 terraform {
-  required_version = ">= 1.11"
+  required_version = ">= 1.15.9"
   required_providers {
     aws = { source = "hashicorp/aws", version = "6.72.0" }
   }
