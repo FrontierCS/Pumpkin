@@ -237,12 +237,6 @@ impl Sandbox {
     }
 }
 
-fn umask() -> u32 {
-    let status = fs::read_to_string("/proc/self/status").unwrap();
-    let line = status.lines().find_map(|line| line.strip_prefix("Umask:"));
-    u32::from_str_radix(line.unwrap().trim(), 8).unwrap()
-}
-
 fn absolute(path: &Path) -> AbsolutePath {
     AbsolutePath::try_from(path.to_str().unwrap().to_owned()).unwrap()
 }
@@ -427,6 +421,8 @@ fn put_run_collect(sandbox: &mut Sandbox) -> Vec<String> {
 // A tree keeps each entry's mode within the host's umask, but a directory's owner always has
 // all three bits and no set-ID or sticky bit: the receiver can always remove what it got.
 fn modes_and_stdin() {
+    // The umask that the collected modes are within: this test's, whatever the machine's.
+    rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o027));
     check(
         Meeting::Socket,
         |sandbox| {
@@ -470,19 +466,12 @@ fn modes_and_stdin() {
                 "private/key",
                 "prompt",
                 "shut",
+                "open",
+                "open/shared",
             ] {
                 let metadata = fs::metadata(collected.join(path)).unwrap();
                 let mode = metadata.permissions().mode() & 0o7777;
                 lines.push(format!("collected {path}: {mode:o}"));
-            }
-            // The host writes within its umask, whatever it is.
-            let umask = umask();
-            for (path, put) in [("open", 0o777), ("open/shared", 0o666)] {
-                let metadata = fs::metadata(collected.join(path)).unwrap();
-                let within = metadata.permissions().mode() & 0o7777 == put & !umask;
-                lines.push(format!(
-                    "collected {path}: {put:o} within the umask: {within}"
-                ));
             }
             let removed = fs::remove_dir_all(&collected);
             lines.push(format!("the collected tree removed: {removed:?}"));
@@ -508,14 +497,14 @@ fn modes_and_stdin() {
             777 in/open
             666 in/open/shared
             2
-            collected tools: 755
-            collected tools/tool: 755
+            collected tools: 750
+            collected tools/tool: 750
             collected private: 700
             collected private/key: 600
-            collected prompt: 444
+            collected prompt: 440
             collected shut: 700
-            collected open: 777 within the umask: true
-            collected open/shared: 666 within the umask: true
+            collected open: 750
+            collected open/shared: 640
             the collected tree removed: Ok(())
             in/tools replaced: Ok(()), holds ["again"]
             then Ended { reason: "the owner dropped the session" }
@@ -1095,8 +1084,9 @@ fn wait_at_a_full_control_socket() {
     // Linux lets one connection through a backlog of zero. The next waits for an accept.
     let _queued = UnixStream::connect(&socket).unwrap();
     let binary = test_support::sandboxd();
+    // Quiet, so that `docker` writes nothing to stderr as it pulls an image the engine lacks.
     let output = test_support::docker()
-        .args(["run", "--rm", "--network", "none", "--volume"])
+        .args(["run", "--quiet", "--rm", "--network", "none", "--volume"])
         .arg(format!("{}:/pumpkin/sandboxctl:ro", dir.path().display()))
         .arg("--volume")
         .arg(format!("{}:/sandboxctl:ro", binary.display()))
@@ -1223,7 +1213,7 @@ fn reading_while_collecting() {
             // Far more than a connection buffers, so that a `sandboxd` that read nothing while it
             // collected would hold the put's write up until its deadline.
             let tree = pattern(4 * MAX_BODY_BYTES);
-            fs::write(sandbox.root.join("out/tree"), &tree).unwrap();
+            collected_file(&sandbox.root.join("out/tree"), &tree);
             let (mut gateway, sandboxd) = accepting_gateway(&sandbox.socket("fake.sock"));
             let frames = collect_and_put(&sandbox.root, &tree);
             let sent = (frames.iter())
@@ -1259,7 +1249,7 @@ fn collects_one_file() {
     check(
         Meeting::Socket,
         |sandbox| {
-            fs::write(sandbox.root.join("out/result.json"), "{}").unwrap();
+            collected_file(&sandbox.root.join("out/result.json"), b"{}");
             let (mut gateway, sandboxd) = accepting_gateway(&sandbox.socket("fake.sock"));
             let collect = ToSandbox::Collect {
                 stream: 1,
@@ -1290,6 +1280,12 @@ fn collects_one_file() {
             sandboxd: exit status: 0
             left running: 0"#]],
     );
+}
+
+// Writes `bytes` at `path` with mode 0o664 whatever the test's umask, as a collect reports it.
+fn collected_file(path: &Path, bytes: &[u8]) {
+    fs::write(path, bytes).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o664)).unwrap();
 }
 
 fn collect_and_put<'a>(root: &Path, bytes: &'a [u8]) -> Vec<(ToSandbox, &'a [u8])> {
