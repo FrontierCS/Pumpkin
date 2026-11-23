@@ -121,6 +121,27 @@ resource "terraform_data" "pumpkin_release" {
   input = var.pumpkin_release
 }
 
+locals {
+  controller_user_data_values = {
+    install_script  = base64gzip(file("${path.module}/../controller/install.sh"))
+    docker_key      = base64gzip(file("${path.module}/../controller/docker.asc"))
+    aws_cli_version = local.controller_versions.aws_cli
+    aws_cli_sha256  = local.controller_versions.aws_cli_sha256
+    uv_version      = local.controller_versions.uv
+    uv_sha256       = local.controller_versions.uv_sha256
+    pumpkin_release = var.pumpkin_release
+    settings_arn    = aws_ssm_parameter.settings.arn
+  }
+  controller_user_data = templatefile("${path.module}/controller.yaml", merge(
+    local.controller_user_data_values, { volume_id = aws_ebs_volume.controller.id }
+  ))
+  # The same with a volume ID of a volume ID's length, so that a plan measures it before the volume
+  # exists: an EBS volume's ID is `vol-` and 17 hexadecimal digits.
+  controller_user_data_measured = templatefile("${path.module}/controller.yaml", merge(
+    local.controller_user_data_values, { volume_id = "vol-00000000000000000" }
+  ))
+}
+
 resource "aws_instance" "controller" {
   ami                    = data.aws_ssm_parameter.ubuntu.insecure_value
   instance_type          = var.controller_instance_type
@@ -134,17 +155,7 @@ resource "aws_instance" "controller" {
   # What every controller installs is deploy/controller's, beside this module in the package that
   # a root fetches whole
   # (https://github.com/hashicorp/web-unified-docs/blob/4ec2d604280fff09cfca1d2648fed5cb51f81f14/content/terraform/v1.16.x/docs/language/modules/sources.mdx#L484-L487).
-  user_data = templatefile("${path.module}/controller.yaml", {
-    install_script  = base64gzip(file("${path.module}/../controller/install.sh"))
-    docker_key      = base64gzip(file("${path.module}/../controller/docker.asc"))
-    aws_cli_version = local.controller_versions.aws_cli
-    aws_cli_sha256  = local.controller_versions.aws_cli_sha256
-    uv_version      = local.controller_versions.uv
-    uv_sha256       = local.controller_versions.uv_sha256
-    pumpkin_release = var.pumpkin_release
-    settings_arn    = aws_ssm_parameter.settings.arn
-    volume_id       = aws_ebs_volume.controller.id
-  })
+  user_data = local.controller_user_data
 
   # The first boot's install reads the settings and the members' keys.
   depends_on = [aws_iam_role_policy.controller]
@@ -177,6 +188,15 @@ resource "aws_instance" "controller" {
     # On the release, not on the user data, so that a change to the rest of the user data replaces
     # nothing.
     replace_triggered_by = [terraform_data.pumpkin_release]
+    # EC2 takes 16 KiB of user data, counted before base64 ("User data is limited to 16 KB, in raw
+    # form, before it is base64-encoded":
+    # https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/user-data.html), and refuses a launch past
+    # it after the old instance is gone. Base64 of 16,383 bytes is at most 21,844 characters, which
+    # `length` counts where it can't count bytes.
+    precondition {
+      condition     = length(base64encode(local.controller_user_data_measured)) <= 21844
+      error_message = "The controller's user data passes EC2's 16 KiB: shorten deploy/aws/controller.yaml or deploy/controller/."
+    }
   }
 }
 
