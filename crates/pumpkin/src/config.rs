@@ -638,24 +638,15 @@ pub(crate) fn remove_unknown(tables: &mut toml::Table) -> Result<Vec<String>, St
     Ok(names)
 }
 
-/// What a configuration that names `[controller]`, the table `single`, is to change: each
-/// controller is named in a table of its own, by the name that `[controller]` holds, and so is
-/// each table below it.
+/// The edit that a configuration with `[controller]`, the table `single`, needs.
 fn single_controller(single: &toml::Value) -> String {
     let name = single.get("name").and_then(toml::Value::as_str);
     let name = name.filter(|name| crate::controller::Name::try_from((*name).to_owned()).is_ok());
-    let (table, removed) = match name {
-        Some(name) => (
-            name.to_owned(),
-            format!(", and remove its `name = \"{name}\"`"),
-        ),
-        None => ("<name>".to_owned(), ", and remove its `name`".to_owned()),
-    };
+    let name = name.unwrap_or("<name>");
     format!(
-        "`[controller]` is a single unnamed table, and a configuration names each controller in \
-         `[controllers.<name>]`: rename `[controller]` to `[controllers.{table}]`, and each table \
-         below it, such as `[controller.modal]`, to the same below `[controllers.{table}]`, such as \
-         `[controllers.{table}.modal]`{removed}"
+        "a configuration names each controller in `[controllers.<name>]`, not `[controller]`: \
+         rename `[controller]` to `[controllers.{name}]`, `[controller.modal]` to \
+         `[controllers.{name}.modal]` and so on, and remove `name`"
     )
 }
 

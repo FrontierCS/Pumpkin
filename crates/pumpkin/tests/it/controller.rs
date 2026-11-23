@@ -898,7 +898,7 @@ fn target_refusals() {
             unknown field `cpus_millis`, expected one of `gpu`, `gpu_model`, `cpu_millis`, `memory_bytes`, `startup_seconds`, `usd_per_hour`
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --config ../single.toml
             exit status: Some(1)
-            pumpkin: ../single.toml: `[controller]` is a single unnamed table, and a configuration names each controller in `[controllers.<name>]`: rename `[controller]` to `[controllers.alice]`, and each table below it, such as `[controller.modal]`, to the same below `[controllers.alice]`, such as `[controllers.alice.modal]`, and remove its `name = "alice"`
+            pumpkin: ../single.toml: a configuration names each controller in `[controllers.<name>]`, not `[controller]`: rename `[controller]` to `[controllers.alice]`, `[controller.modal]` to `[controllers.alice.modal]` and so on, and remove `name`
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --config ../twice.toml
             exit status: Some(1)
             pumpkin: ../twice.toml: `[controllers.alice]` names both or neither of `region` and `address`: name the `region` of a controller that deploy/aws made, or the `address` of one elsewhere

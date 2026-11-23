@@ -21,7 +21,7 @@ use expect_test::{Expect, expect};
 use gateway::Dialer;
 use provider::{
     Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation,
-    Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted, Unreserved,
+    Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
 use route::Serving;
 use runtime::{Host, ModelRoutes, Reaped, Record, Recorded, Run, System, TokenPrices, new_id};
@@ -123,7 +123,7 @@ impl Provider for Interrupting<'_> {
         self.sim.ready()
     }
 
-    fn reserve(&self, run: &RunTag, phases: &[Vec<Role>]) -> Result<Reservation, Unreserved> {
+    fn reserve(&self, run: &RunTag, phases: &[Vec<Role>]) -> Result<Reservation, String> {
         self.sim.reserve(run, phases)
     }
 
@@ -322,8 +322,7 @@ fn executed_ir<H: Shown>(
     let on = providers_of(&placed, |name| named(&interrupting, name));
     let prices = prices();
     let (models, recorded) = kept(&placed, &servings, &prices);
-    let (prepared, dir) = (placed.clone(), runs.path());
-    let run = Run::prepare(host, prepared, on, dir, id, models, recorded, &mut waits).unwrap();
+    let run = Run::prepare(host, placed.clone(), on, runs.path(), id, models, recorded).unwrap();
     let (record, tag) = (run.dir().to_owned(), RunTag::try_from(run.id().to_owned()));
     let sockets = record.join("sockets");
     let partial = record.with_file_name(format!(".{}.partial", run.id()));
@@ -3341,7 +3340,7 @@ fn holds_until_its_end() {
             servings: &servings,
             budgets,
         };
-        Run::prepare(&System, placed, on, &dir, id, models, recorded, &mut waits)
+        Run::prepare(&System, placed, on, &dir, id, models, recorded)
     };
     let prepared = |run: &Result<Run<'_, System>, String>| match run {
         Ok(_) => "prepared".to_owned(),
@@ -3374,7 +3373,7 @@ fn holds_until_its_end() {
     lines.push(format!("the second: {}", execute(second.unwrap())));
     lines.push(format!("then a third: {}", prepared(&prepare("third"))));
     expect![[r#"
-        a second, beside it: refused: waits for room on provider `simulated`, the run needs 16 simulated CPUs, and 16 of the 16 are held
+        a second, beside it: refused: reserving on provider `simulated`: the run needs 16 simulated CPUs, and 16 of the 16 are held: run it once others end
         the first: finished, showing [score=0]
         then the second: prepared
         the second: was interrupted by SIGTERM
@@ -4171,17 +4170,7 @@ fn execute_agents(
         record: &record,
     };
     let on = providers_of(&placed, |_| &provider);
-    let run = Run::prepare(
-        host,
-        placed,
-        on,
-        dir.path(),
-        tag.clone(),
-        models,
-        recorded,
-        &mut waits,
-    )
-    .unwrap();
+    let run = Run::prepare(host, placed, on, dir.path(), tag.clone(), models, recorded).unwrap();
     sim.records(&record, host.time());
     let outcome = thread::scope(|scope| {
         if let Some(At::Logged(event)) = at {
@@ -5237,9 +5226,4 @@ fn failed_deletion_of_an_unnamed_shared_instance_prevents_the_judge() {
     };
     assert!(reason.contains("cleaning up work sandboxes before the final call"));
     assert!(!record.join("jobs/0").exists());
-}
-
-// A wait for room, which a test ends at once, saying what held it.
-fn waits(held: &str) -> Result<(), String> {
-    Err(format!("waits for room {held}"))
 }

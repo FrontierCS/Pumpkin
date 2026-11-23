@@ -23,7 +23,7 @@ use std::num::NonZeroU64;
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
-use provider::{Reservation, Role, RunTag, Unreserved};
+use provider::{Reservation, Role, RunTag};
 use schema::ir::{CpuFlag, MILLIS_PER_CPU, Name, Resources};
 use serde::{Deserialize, Serialize};
 use stdx::Context;
@@ -253,14 +253,14 @@ pub(crate) fn reserve(
     cpus: &Cpus,
     run: &RunTag,
     phases: &[Vec<Role>],
-) -> Result<Reservation, Unreserved> {
+) -> Result<Reservation, String> {
     // The run is laid out on every core first, to tell a run that can never fit this machine from
     // one that waits for another's cores.
-    let needed = fits(cpus, phases).map_err(Unreserved::Failed)?;
+    let needed = fits(cpus, phases)?;
     let all: Vec<&Vec<u32>> = cpus.cores.iter().collect();
     let count = all.len();
-    let ledger = open_ledger(&cpus.ledger).map_err(Unreserved::Failed)?;
-    let held = held(&ledger).map_err(Unreserved::Failed)?;
+    let ledger = open_ledger(&cpus.ledger)?;
+    let held = held(&ledger)?;
     let in_use: BTreeSet<u32> = held
         .values()
         .flat_map(|cpus| cpus.0.iter().copied())
@@ -270,26 +270,26 @@ pub(crate) fn reserve(
         .collect();
     let Some((laid_out, _)) = lay_out(&free, phases) else {
         let runs: Vec<&str> = held.keys().map(String::as_str).collect();
-        let (s, verb) = if runs.len() == 1 {
-            ("", "holds")
+        let (s, them) = if runs.len() == 1 {
+            ("", "it ends")
         } else {
-            ("s", "hold")
+            ("s", "they end")
         };
-        return Err(Unreserved::Busy(format!(
+        return Err(format!(
             "the run's roles need {needed} whole cores at once, to hold their CPUs ({}), and \
-             run{s} {} {verb} {} of the {count} that sandboxes get",
+             run{s} {} hold {} of the {count} that this machine gives sandboxes: run it once \
+             {them}, or give its roles fewer CPUs",
             needs(phases),
             runs.join(", "),
             count - free.len()
-        )));
+        ));
     };
     let mut shares = BTreeMap::new();
     for (key, cpus) in laid_out {
         let twice = shares.insert(key.clone(), cpus);
         assert!(twice.is_none(), "instance `{key}` is named twice");
     }
-    let entry =
-        write_entry(&ledger, run, &EntryJson { roles: shares }).map_err(Unreserved::Failed)?;
+    let entry = write_entry(&ledger, run, &EntryJson { roles: shares })?;
     // The entry's own lock holds the cores from here, so the ledger is free to the next run.
     drop(ledger);
     Ok(Reservation::new(entry))

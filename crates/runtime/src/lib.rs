@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use decision::{Action, Caller, Core, Event, JobId, LeaseId, OpId, Outcome, Request, lasts};
 use gateway::{Arrival, Dialer, Listener, RefusedOp, Trees};
-use provider::{Provider, Reservation, RunTag, UnixTime, Unreserved};
+use provider::{Provider, Reservation, RunTag, UnixTime};
 use route::Serving;
 use schema::ir::{Label, ModelName};
 use schema::sandbox::op::OpReply;
@@ -90,10 +90,11 @@ pub struct Recorded<'a> {
     pub sources: &'a BTreeMap<Label, String>,
 }
 
-/// Fails if a provider could never hold the roles that `placed` places on it.
+/// Fails if a provider could never hold the roles that `placed` places on it, whatever other runs
+/// hold.
 ///
-/// It names the provider and says why, as [`Provider::fits`] does, and holds nothing. Such a run
-/// never fits, however long it waits. `providers` holds each provider that `placed` names.
+/// It names the provider and says why, as [`Provider::fits`] does, and holds nothing. `providers`
+/// holds each provider that `placed` names.
 // A request that no resources could ever satisfy is refused as it is made, as Slurm fails a job
 // whose request has a fundamental flaw:
 // https://github.com/SchedMD/slurm/blob/4e8cf4192ade61024f04a1d466d4f97456d178bf/src/slurmctld/job_mgr.c#L5588-L5599
@@ -131,21 +132,12 @@ pub struct Run<'r, H> {
 
 impl<'r, H: Host> Run<'r, H> {
     /// Reserves room on each provider, then begins the record under `runs`, so that a run that
-    /// doesn't fit leaves no record. While a provider has no room beside other runs, it calls
-    /// `room` with what holds it, then tries again: `room` paces the tries.
+    /// doesn't fit leaves no record.
     ///
     /// # Errors
     ///
     /// Fails, before any record is made, if a role's route has no serving, a provider can't
-    /// reserve, `room` fails, a signal is noted as it waits for room, `runs` isn't safe from other
-    /// users, or `id` is taken.
-    // A run that fits once others end waits for them, as Slurm keeps a job queued while the nodes
-    // it needs are busy:
-    // https://github.com/SchedMD/slurm/blob/4e8cf4192ade61024f04a1d466d4f97456d178bf/src/slurmctld/job_mgr.c#L5573-L5584
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "each is a part of the run that its record begins with"
-    )]
+    /// reserve, `runs` isn't safe from other users, or `id` is taken.
     pub fn prepare(
         host: &'r H,
         placed: Placed,
@@ -154,7 +146,6 @@ impl<'r, H: Host> Run<'r, H> {
         id: RunTag,
         models: ModelRoutes<'_>,
         recorded: Recorded<'r>,
-        room: &mut dyn FnMut(&str) -> Result<(), String>,
     ) -> Result<Self, String> {
         let Recorded {
             args,
@@ -166,21 +157,8 @@ impl<'r, H: Host> Run<'r, H> {
         let capacity = Capacity::of(placed.workflow())?;
         let reserved = placed.by_provider(|name| {
             let phases = capacity.phases(&placed, name);
-            loop {
-                match providers.get(name).reserve(&id, &phases) {
-                    Ok(reserved) => return Ok(reserved),
-                    Err(Unreserved::Failed(error)) => {
-                        return Err(format!("reserving on provider `{name}`: {error}"));
-                    }
-                    Err(Unreserved::Busy(held)) => room(&format!("on provider `{name}`, {held}"))?,
-                }
-                if let Some(signal) = interruption::signal() {
-                    return Err(format!(
-                        "{} came while the run waited for room on provider `{name}`",
-                        signal.name()
-                    ));
-                }
-            }
+            (providers.get(name).reserve(&id, &phases))
+                .context(format_args!("reserving on provider `{name}`"))
         })?;
         let (dir, lock) = record::create(host, runs, id.as_str(), args)?;
         record::write_ir(host, &dir, placed.workflow())?;

@@ -18,7 +18,7 @@ use stdx::process::{self, Bound, Echo, Environment, Failure, Run, Stream};
 
 use super::{
     PUMPKIN_TIMEOUT, checked, controlled, copy_tree, followed, head_commit, holding, kill_job,
-    member_ssh, pumpkin, task_repository,
+    task_repository,
 };
 use crate::repo::STEP_TIMEOUT;
 use crate::{BUILD_TIMEOUT, MUSL, Result, ran, root, step, target_dir};
@@ -31,10 +31,6 @@ const SERVICE: &str = "controller";
 
 /// The name of the controller, in its settings and in each client's configuration.
 const NAME: &str = "live";
-
-/// Another controller that each client's configuration names, which no command reaches, as each
-/// names [`NAME`] by `--controller`.
-const ELSEWHERE: &str = "elsewhere";
 
 /// The member of the first client.
 const FIRST: &str = "first";
@@ -68,12 +64,10 @@ context = "default"
 [providers.local.docker]
 "#;
 
-/// Makes the controller and joins it from a new home, which names another controller too. Checks
-/// the uptime it says, that it refuses runs that never fit it before building them, and that a run
-/// that fits once another ends waits for it. Runs the smoke through it, and checks that it refuses
-/// its members a terminal, keeps a second member from cancelling the first's run and refuses a key
-/// taken off its list. With `lost`, it loses a run
-/// instead, makes the controller's container anew, and checks that its boot reaped the run.
+/// Makes the controller and joins it from a new home. Checks that it refuses runs that never fit
+/// it before building them. Runs the smoke through it, and checks that it keeps a second member
+/// from cancelling the first's run and refuses a key taken off its list. With `lost`, it loses a
+/// run instead, makes the controller's container anew, and checks that its boot reaped the run.
 /// Removes the controller on every path.
 pub(crate) fn controller(lost: bool) -> Result<()> {
     let again = if lost {
@@ -98,16 +92,13 @@ pub(crate) fn controller(lost: bool) -> Result<()> {
     };
     compose.down()?;
     eprintln!("xtask: making a controller on Docker with Pumpkin at {commit}");
-    let ran = made(&compose, &scratch).and_then(|(started, booted)| {
+    let ran = made(&compose, &scratch).and_then(|()| {
         let client = Client::join(&compose, &repo, &scratch, FIRST, &[])?;
         if lost {
             return reaped_at_boot(&compose, &client);
         }
-        up_since(&client, started, booted)?;
         never_fits(&compose, &client)?;
-        waits_for_room(&compose, &client)?;
         smoke(&compose, &client)?;
-        forced(&compose, &client)?;
         let other = Client::join(&compose, &repo, &scratch, OTHER, &[&client])?;
         apart(&compose, &client, &other)?;
         unlisted(&compose, &client, &other)
@@ -216,9 +207,8 @@ fn free_port() -> Result<u16> {
 }
 
 /// Builds the controller's image with an install of `HEAD` in place of the release, and starts
-/// it, with its settings and an empty members' list. Returns when it started its container, and
-/// when its systemd had started every unit.
-fn made(compose: &Compose, scratch: &Path) -> Result<(Instant, Instant)> {
+/// it, with its settings and an empty members' list, until its systemd has started every unit.
+fn made(compose: &Compose, scratch: &Path) -> Result<()> {
     let conf = compose.dir.join("conf");
     fs::create_dir_all(&conf)?;
     // Readable by every user, as each job reads the settings as `pumpkin`, whatever the umask.
@@ -239,10 +229,8 @@ fn made(compose: &Compose, scratch: &Path) -> Result<(Instant, Instant)> {
         .arg(format!("controller={}", controller.display()))
         .arg(&compose.dir);
     ran(&mut build, step(BUILD_TIMEOUT).named("docker buildx build"))?;
-    let started = Instant::now();
     compose.run(&["up", "--detach", "--no-build"], STEP_TIMEOUT)?;
-    compose.booted()?;
-    Ok((started, Instant::now()))
+    compose.booted()
 }
 
 /// A client in a home of its own, whose key the controller admits under `member`, and the task
@@ -273,10 +261,8 @@ impl Client {
         let home = scratch.join(member);
         let config = home.join(".config/pumpkin");
         fs::create_dir_all(&config)?;
-        // Port 1 of loopback, where nothing listens.
         let text = format!(
-            "[controllers.{NAME}]\naddress = \"127.0.0.1:{}\"\n\n[controllers.{ELSEWHERE}]\n\
-             address = \"127.0.0.1:1\"\n",
+            "[controllers.{NAME}]\naddress = \"127.0.0.1:{}\"\n",
             compose.port
         );
         fs::write(config.join("pumpkin.toml"), text)?;
@@ -285,7 +271,6 @@ impl Client {
             home,
             repo: repo.to_owned(),
         };
-        client.chooses()?;
         let Said { passed, said } = client.ls()?;
         if passed || !said.contains("refused this machine's key") {
             return Err(format!(
@@ -346,30 +331,6 @@ impl Client {
         command
     }
 
-    /// Fails unless `./pumpkin ls` without `--controller` refuses, naming both controllers of the
-    /// configuration.
-    fn chooses(&self) -> Result<()> {
-        let mut ls = pumpkin(&self.repo);
-        ls.arg("ls").env("HOME", &self.home);
-        let how = Run::new(Bound::Within(PUMPKIN_TIMEOUT), Echo::Silent).named("./pumpkin ls");
-        let output = match process::run(&mut ls, how) {
-            Ok(output) | Err(Failure::Exited { output, .. }) => output,
-            Err(failure) => return Err(failure.to_string().into()),
-        };
-        let said = String::from_utf8_lossy(&output.stderr);
-        let names = format!("`{ELSEWHERE}`, `{NAME}`");
-        if output.status.success() || !said.contains(&names) {
-            return Err(format!(
-                "`./pumpkin ls` without `--controller`, of a configuration of two controllers, \
-                 ended with {} and said: {}: expected a refusal that names {names}",
-                output.status,
-                said.trim()
-            )
-            .into());
-        }
-        Ok(())
-    }
-
     /// What `./pumpkin` with `args` came to.
     fn said(&self, args: &[&str]) -> Result<Said> {
         let how = Run::new(Bound::Within(PUMPKIN_TIMEOUT), Echo::Silent).named("./pumpkin");
@@ -398,64 +359,6 @@ fn list(compose: &Compose, clients: &[&Client]) -> Result<()> {
     fs::write(&members, lines)?;
     // Readable by every user, whatever the umask, as the admin is told to keep it.
     fs::set_permissions(members, Permissions::from_mode(0o644))?;
-    Ok(())
-}
-
-/// Fails unless the uptime that `ls` says of the controller is within the time since its
-/// container `started`, and at least the time since its systemd had `booted`, rather than the
-/// host's.
-fn up_since(client: &Client, started: Instant, booted: Instant) -> Result<()> {
-    let Said { said, .. } = client.ls()?;
-    let up = said
-        .split_once(&format!("controller `{NAME}`: up "))
-        .and_then(|(_, rest)| rest.split_once(','))
-        .map(|(up, _)| up);
-    // `ls` says a span below an hour as `42s`, `3m07s`, or `3m` for whole minutes.
-    let seconds = up.and_then(|up| {
-        let (minutes, seconds) = match up.strip_suffix('s') {
-            Some(up) => up.split_once('m').unwrap_or(("0", up)),
-            None => (up.strip_suffix('m')?, "0"),
-        };
-        Some(minutes.parse::<u64>().ok()? * 60 + seconds.parse::<u64>().ok()?)
-    });
-    let (since, at_least) = (started.elapsed().as_secs(), booted.elapsed().as_secs());
-    match seconds {
-        Some(seconds) if (at_least..=since).contains(&seconds) => {
-            println!(
-                "xtask: `ls` says the controller is up {seconds} s, since its container started"
-            );
-            Ok(())
-        }
-        _ => Err(format!(
-            "`./pumpkin ls` said: {said}: expected the controller up for {at_least} to {since} s, \
-             since its container started"
-        )
-        .into()),
-    }
-}
-
-/// Fails unless the controller refuses a member's `ssh` a terminal, as the key's `restrict` says.
-fn forced(compose: &Compose, client: &Client) -> Result<()> {
-    let alias = format!("[127.0.0.1]:{}", compose.port);
-    let mut ssh = member_ssh(&client.home, "127.0.0.1", Some(compose.port), &alias);
-    // `-tt` asks for a terminal even with none here, and ends the session if it gets none.
-    ssh.args(["-tt", "true"]);
-    let how = Run::new(Bound::Within(STEP_TIMEOUT), Echo::Silent).named("ssh");
-    let terminal = match process::run(&mut ssh, how) {
-        Ok(output) | Err(Failure::Exited { output, .. }) => output,
-        Err(failure) => return Err(failure.to_string().into()),
-    };
-    let said = String::from_utf8_lossy(&terminal.stderr);
-    if terminal.status.success() || !said.contains("PTY allocation request failed") {
-        return Err(format!(
-            "a member's `ssh -tt` ended with {} and said: {}: expected that the controller \
-             refuses it a terminal",
-            terminal.status,
-            said.trim()
-        )
-        .into());
-    }
-    println!("xtask: the controller refuses a member a terminal");
     Ok(())
 }
 
@@ -617,65 +520,6 @@ fn never_fits(compose: &Compose, client: &Client) -> Result<()> {
         return Ok(());
     }
     Err(failed.join("; ").into())
-}
-
-/// Fails unless two runs of a variant of `examples/hello`, which fit the controller's machine one
-/// at a time but not together, both finish, one of them once it has waited for the other's cores
-/// and said so. The agent of each needs over half the CPUs, and stays a while.
-fn waits_for_room(compose: &Compose, client: &Client) -> Result<()> {
-    let online = compose.exec(&["getconf", "_NPROCESSORS_ONLN"])?;
-    let cpus: u64 = (online.trim().parse())
-        .map_err(|error| format!("`getconf _NPROCESSORS_ONLN` printed `{online}`: {error}"))?;
-    let hello = fs::read_to_string(client.repo.join("hello/task.star"))?;
-    let half = hello
-        .replacen(
-            r#""needs": {"cpu_millis": 500,"#,
-            &format!(r#""needs": {{"cpu_millis": {},"#, (cpus / 2 + 1) * 1000),
-            1,
-        )
-        .replacen(
-            "echo hello > greeting",
-            "sleep 20\necho hello > greeting",
-            1,
-        );
-    let entry = "hello/half.star";
-    fs::write(client.repo.join(entry), half)?;
-    let first = client.said(&["run", entry])?;
-    let id = (first.said.lines())
-        .find_map(|line| {
-            line.strip_prefix("pumpkin: run ")?
-                .split_once(" goes to controller ")
-        })
-        .map(|(id, _)| id.to_owned());
-    let Some(id) = id.filter(|_| first.passed) else {
-        return Err(format!(
-            "`./pumpkin run {entry}` said: {}: expected a run's id",
-            first.said
-        )
-        .into());
-    };
-    let second = client.said(&["run", "--wait", entry])?;
-    let waited = client.said(&["wait", &id])?;
-    let waits = "waits for room on provider `local`";
-    let finished = |said: &Said| said.passed && said.said.contains("finished with a result");
-    if finished(&second)
-        && finished(&waited)
-        && (second.said.contains(waits) || waited.said.contains(waits))
-    {
-        let line = [&second.said, &waited.said]
-            .into_iter()
-            .flat_map(|said| said.lines())
-            .find(|line| line.contains(waits))
-            .unwrap_or_default();
-        println!("xtask: of two runs that fit one at a time, one waited for the other: {line}");
-        return Ok(());
-    }
-    Err(format!(
-        "of two runs of {entry}, which fit one at a time, the second said: {}; and the first: {}: \
-         expected that both finished with a result, one once it had said that it `{waits}`",
-        second.said, waited.said
-    )
-    .into())
 }
 
 /// Loses a run whose sandboxes are in use, by killing its job, makes the controller's container

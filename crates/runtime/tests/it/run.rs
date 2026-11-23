@@ -67,7 +67,7 @@ fn check(
             };
             let budgets = runtime::budgets(placed.workflow(), &unpriced)?;
             let models = ModelRoutes { servings, budgets };
-            Run::prepare(&System, placed, on, &dir, id, models, recorded, &mut waits)
+            Run::prepare(&System, placed, on, &dir, id, models, recorded)
         });
         let record = fs::read_dir(&dir)
             .ok()
@@ -270,7 +270,7 @@ fn prepare() {
             ir.json is the IR: true
             record.json: {"args":["--config","/pumpkin.toml"],"pumpkin":"<this build>","record_version":"pumpkin.record/v1"}
             refused: the clock reads before 1970-01-01: set the system clock; runs directory made: false
-            refused: reserving on provider `simulated`: the run needs 1100 simulated CPUs, of the 1024 there are; runs directory made: false"#]],
+            refused: reserving on provider `simulated`: the run needs 1100 simulated CPUs, and 0 of the 1024 are held: run it once others end; runs directory made: false"#]],
     );
 }
 
@@ -297,16 +297,7 @@ fn prepared_in(dir: &Path, runs: &str) -> String {
         budgets,
     };
     let id = new_id(UNIX_EPOCH + Duration::from_secs(1_767_225_599)).unwrap();
-    let prepared = Run::prepare(
-        &System,
-        placed,
-        on,
-        &dir.join(runs),
-        id,
-        models,
-        recorded,
-        &mut waits,
-    );
+    let prepared = Run::prepare(&System, placed, on, &dir.join(runs), id, models, recorded);
     let shown = match prepared {
         Ok(run) => format!(
             "{runs}: begun in {}/<id>",
@@ -414,7 +405,7 @@ fn reserves_the_leases_of_every_concurrent_target_instance() {
     check(
         [(0, ir, None)],
         &expect![
-            "refused: reserving on provider `simulated`: the run needs 1056 simulated CPUs, of the 1024 there are; runs directory made: false"
+            "refused: reserving on provider `simulated`: the run needs 1056 simulated CPUs, and 0 of the 1024 are held: run it once others end; runs directory made: false"
         ],
     );
 }
@@ -977,9 +968,4 @@ fn reads_a_growing_log() {
         …/20261114-120000-00000001/log.jsonl: Is a directory (os error 21)
         None Some((2s, Some(2s))) [Unread { line: 2, part: Event, reason: "missing field `job`" }, Unread { line: 4, part: Event, reason: "missing field `job`" }]"#]]
     .assert_eq(&read.join("\n"));
-}
-
-// A wait for room, which a test ends at once, saying what held it.
-fn waits(held: &str) -> Result<(), String> {
-    Err(format!("waits for room {held}"))
 }

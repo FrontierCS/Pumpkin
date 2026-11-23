@@ -45,17 +45,6 @@ pub(crate) const IDLE: Duration = Duration::from_mins(1);
 
 const UPTIME: &str = "/proc/uptime";
 
-/// The file in which systemd, as a container's PID 1, names the container's manager. It is
-/// missing outside a container.
-// systemd writes it from its `container` variable, and `systemd-detect-virt` reads it:
-// https://github.com/systemd/systemd/blob/db11bab38ccf1ed257f310d29070843d4c58ea01/src/core/main.c#L1359-L1372
-// https://github.com/systemd/systemd/blob/db11bab38ccf1ed257f310d29070843d4c58ea01/src/basic/virt.c#L744-L750
-const CONTAINER: &str = "/run/systemd/container";
-
-/// The status of the controller's PID 1, whose 22nd field is when it started, in clock ticks
-/// since the machine booted, as proc(5) says.
-const INIT_STAT: &str = "/proc/1/stat";
-
 /// Answers a client's link on the standard input and output, as the module says, for `member`.
 pub(crate) fn serve(member: &Member) -> Result<Exit, String> {
     let home = crate::home("run `serve` as the controller's user, whose home holds the runs")?;
@@ -295,49 +284,8 @@ pub(crate) fn up_seconds() -> Result<u64, String> {
     })
 }
 
-/// The whole seconds that the controller has been up: since the machine booted, or, in a
-/// container, since its PID 1 started, as `docker ps` counts a container's.
-// The age of PID 1, as procps counts a process's for `ps -o etimes`: the ticks since boot, less
-// the ticks at its start, in whole seconds:
-// https://gitlab.com/procps-ng/procps/-/blob/4ddcef2fd843170c8e2d59a83042978f41037a2b/library/pids.c#L287
-// https://gitlab.com/procps-ng/procps/-/blob/4ddcef2fd843170c8e2d59a83042978f41037a2b/library/pids.c#L1449-L1450
-fn controller_up_seconds() -> Result<u64, String> {
-    if !Path::new(CONTAINER).try_exists().context(CONTAINER)? {
-        return up_seconds();
-    }
-    let uptime = fs::read_to_string(UPTIME).context(UPTIME)?;
-    // Linux writes the seconds with two decimals.
-    let hundredths = uptime.split(' ').next().and_then(|seconds| {
-        let (whole, hundredths) = seconds.split_once('.')?;
-        let hundredths: u64 = hundredths.parse().ok().filter(|_| hundredths.len() == 2)?;
-        Some(whole.parse::<u64>().ok()? * 100 + hundredths)
-    });
-    let hundredths = hundredths.ok_or_else(|| {
-        format!(
-            "{UPTIME} holds `{}`: expected the seconds since the machine booted, with two \
-             decimals, first, as Linux writes them",
-            uptime.trim().escape_debug()
-        )
-    })?;
-    let stat = fs::read_to_string(INIT_STAT).context(INIT_STAT)?;
-    // The second field, the command's name, is in parentheses and may hold spaces and
-    // parentheses.
-    let after_name = stat.rsplit_once(')').map(|(_, fields)| fields);
-    let started = after_name.and_then(|fields| fields.split_whitespace().nth(22 - 3));
-    let started: u64 = started.and_then(|ticks| ticks.parse().ok()).ok_or_else(|| {
-        format!(
-            "{INIT_STAT} holds `{}`: expected PID 1's start in clock ticks as its 22nd field, as \
-             Linux writes it",
-            stat.trim().escape_debug()
-        )
-    })?;
-    let ticks_per_second = rustix::param::clock_ticks_per_second();
-    let ticks = hundredths.saturating_mul(ticks_per_second) / 100;
-    Ok(ticks.saturating_sub(started) / ticks_per_second)
-}
-
 fn health(home: &Path) -> Result<Health, String> {
-    let up_seconds = controller_up_seconds()?;
+    let up_seconds = up_seconds()?;
     let Disk {
         size_bytes,
         free_bytes,
