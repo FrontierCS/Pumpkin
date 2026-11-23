@@ -484,11 +484,11 @@ sandboxes left, or fails.
 `Run::prepare` makes the record only once each provider has reserved, and the run holds each
 `Reservation` until its end has deleted its sandboxes.
 
-**Architecture Invariant:** every wait of a run ends by the run's clock, its `Host`'s, so that a
-simulated host decides every outcome that time decides. The gateway's sessions and the model
-route take that clock, and each request, model response and start's wait takes its deadline as a
-time on it, which the gateway reads again every `Clock::look` as it waits. The loop ends a model
-route as the core stops its requests. A wait that still runs by the machine's clock, such as a
+**Architecture Invariant:** every deadline of a run is a time on the run's clock, its `Host`'s, so
+that a simulated host decides every outcome that time decides. The gateway's sessions and the
+model route take that clock, and each request, model response and start's wait takes its deadline
+as a time on it, which the gateway reads again every `Clock::look` as it waits. The loop ends a
+model route as the core stops its requests. A wait on the machine's clock within one, such as a
 dial or an upstream's connect, takes the time left as it begins or a bound of its own.
 
 ### `crates/pumpkin`

@@ -59,8 +59,8 @@ impl<C: Clock> Session<C> {
 
     /// Reserves a command's process handle without starting it. The sender may run on another
     /// thread while the owner handles arrivals. Its deadline, a time on the session's clock, bounds
-    /// sending the command and awaiting confirmation. Dropping the sender releases its unused stream. Dropping the
-    /// session ends the connection even if the sender still exists.
+    /// sending the command and awaiting confirmation. Dropping the sender releases its unused
+    /// stream. Dropping the session ends the connection even if the sender still exists.
     pub fn prepare_start(
         &mut self,
         by: Duration,

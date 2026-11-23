@@ -35,8 +35,7 @@ impl<C: Clock> Bound<'_, C> {
         Some(self.clock.look().map_or(left, |look| left.min(look)))
     }
 
-    // The deadline by the machine's clock at the time left now, for a socket's waits: a dial's,
-    // and its TLS's.
+    // The deadline by the machine's clock at the time left now.
     pub(crate) fn deadline(self) -> Deadline {
         Deadline::after(self.left().unwrap_or_default())
     }
@@ -80,14 +79,15 @@ impl<C: Clock> Write for Until<'_, C> {
         loop {
             // Set before each write, since the socket's timeout bounds each call on its own. A
             // deadline that has passed fails here, not in the socket, whose `None` would mean no
-            // timeout at all. A write that times out has written nothing, so it is made again,
-            // once the clock says time is left.
+            // timeout at all. A write that times out has written nothing. Where the clock looks
+            // again, it is made again once the clock says time is left. Else the timeout ends the
+            // write, as it may end up to a kernel tick before the deadline.
             let Some(wait) = self.by.wait() else {
                 return Err(io::ErrorKind::TimedOut.into());
             };
             self.connection.set_write_timeout(Some(wait))?;
             match (&mut &*self.connection).write(buf) {
-                Err(error) if passed(&error) => {}
+                Err(error) if passed(&error) && self.by.clock.look().is_some() => {}
                 written => return written,
             }
         }

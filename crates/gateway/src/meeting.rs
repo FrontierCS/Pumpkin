@@ -333,7 +333,7 @@ fn admit(registry: &Arc<Mutex<Registry>>, stream: TcpStream, peer: IpAddr, timeo
 fn register(registry: &Mutex<Registry>, stream: TcpStream, peer: IpAddr, timeout: Duration) {
     let by = Bound {
         clock: &Machine,
-        by: Machine.now() + timeout,
+        by: Machine.now().saturating_add(timeout),
     };
     let set = stdx::net::set_options(&stream)
         .map_err(|error| context("the connection's TCP options can't be set", &error));
@@ -350,7 +350,7 @@ fn register(registry: &Mutex<Registry>, stream: TcpStream, peer: IpAddr, timeout
     if let Some((connection, error)) = unopened {
         let by = Bound {
             clock: &Machine,
-            by: Machine.now() + timeout,
+            by: Machine.now().saturating_add(timeout),
         };
         refuse(&connection, by, error);
     }
@@ -569,9 +569,10 @@ impl Dialed {
 
     fn dial(&self, by: Bound<'_, Machine>, stopped: &dyn Fn() -> bool) -> Result<Met, DialError> {
         let endpoint = &self.endpoint;
-        let stream = self.connect(by.deadline(), stopped)?;
+        let deadline = by.deadline();
+        let stream = self.connect(deadline, stopped)?;
         unstopped(stopped, self.awaited(), LISTENING).map_err(DialError::Never)?;
-        let secured = self.client.connect(stream, endpoint.host(), by.deadline());
+        let secured = self.client.connect(stream, endpoint.host(), deadline);
         let connection = match secured {
             Ok(stream) => Connection::Tls(stream),
             // TLS's own failures are `InvalidData`, a certificate that isn't the endpoint's among

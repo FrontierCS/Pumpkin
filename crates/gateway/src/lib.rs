@@ -239,8 +239,8 @@ pub struct ModelRequest {
     pub body: Vec<u8>,
 }
 
-/// The response to a model request, streaming to its client by the deadline, a time on `clock`,
-/// that [`respond`](IncomingModelRequest::respond) gave.
+/// The response to a model request, streaming to its client by the deadline, a time on its clock,
+/// `C`, that [`respond`](IncomingModelRequest::respond) gave.
 ///
 /// A response that hasn't ended by then ends the session at its next frame, or as it drops.
 /// [`end`](Self::end) ends it whole; [`cut`](Self::cut), or dropping it unended, cuts it short, so

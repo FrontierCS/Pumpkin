@@ -1,7 +1,7 @@
 //! A run's host: what the run reads of time and waits on, and what makes its record last.
 //!
-//! Every wait of a run ends by the run's clock. A session's requests, a model response's frames
-//! and a start's wait for its sandbox take their deadlines as times on it. What a run still waits
+//! Every deadline of a run is a time on the run's clock. A session's requests, a model response's
+//! frames and a start's wait for its sandbox take their deadlines as times on it. What a run waits
 //! on by the machine's time, whatever its host:
 //! - within a start's wait for its sandbox, each dial, its TLS and its hello, and the private
 //!   listener's wait for a check, which take the time left as they begin;
