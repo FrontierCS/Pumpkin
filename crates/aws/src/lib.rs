@@ -264,7 +264,6 @@ pub struct Repository {
     name: RepositoryName,
     /// Its URI, `<registry>/<name>`, which every image in it is named under.
     uri: String,
-    /// The calls on it.
     #[serde(skip)]
     ecr: &'static Ecr,
 }
@@ -311,9 +310,6 @@ pub enum Bound {
 
 /// The `aws` command line, AWS CLI v2, found on `PATH`, run in one region, given only the
 /// environment that finds its own configuration.
-///
-/// Production code reaches AWS only through it, but for the ECR login that an EC2 sandbox's entry
-/// makes with its instance's own `aws`.
 #[derive(Debug)]
 pub struct Cli {
     region: Region,
@@ -431,9 +427,8 @@ impl Cli {
         Ok(output.map_err(|failure| failure.to_string())?.stdout)
     }
 
-    /// Runs `call` with `args`, its options, killed at `bound`, and returns what it prints on
-    /// standard output. Returns `None` if AWS reports that what it names doesn't exist
-    /// (`ResourceNotFoundException`).
+    /// As [`run`](Self::run) does, but returns `None` if AWS reports that what it names doesn't
+    /// exist (`ResourceNotFoundException`).
     pub fn run_found(
         &self,
         call: &'static Call,
@@ -550,10 +545,6 @@ impl Cli {
         ))
     }
 
-    /// Pushes `image` from `pusher`'s engine to `repository`, tagged with its digest's
-    /// hexadecimal digits, logged in to the repository's registry as [`ECR_USER`] with the
-    /// password that `aws ecr get-login-password` gives, which only that push gets
-    /// (`engine::Pusher::push`).
     fn push(
         &self,
         pusher: &Pusher<'_>,
