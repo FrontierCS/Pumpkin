@@ -16,12 +16,14 @@
 //! ([`installing`]) and links again.
 
 pub(crate) mod copy;
+mod relay;
 pub(crate) mod store;
 
 use std::io::{self, BufReader, Read, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 
 use members::Member;
+use relay::Relaying;
 use schema::frame::{self, MAX_BODY_BYTES};
 use schema::ir::Sha256Digest;
 use serde::de::DeserializeOwned;
@@ -669,29 +671,35 @@ pub(crate) enum Unanswered {
 }
 
 /// An `ssh` that runs [`command`], and its standard input and output, until the link is dropped,
-/// which ends the `ssh`.
+/// which ends the `ssh`. What `ssh` writes to its standard error, this process writes to its own.
 pub(crate) struct Link {
     child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    stdout: BufReader<Relaying>,
 }
 
 impl Link {
     /// Runs `ssh`, an `ssh` that runs [`command`], and reads its hello: `None` if it is
     /// [`Hello::Absent`].
     pub(crate) fn open(mut ssh: Command) -> Result<Option<Self>, Unanswered> {
+        // Never this process's own standard error. OpenSSH makes each of its standard streams that
+        // isn't a terminal non-blocking, and blocking again only as it closes it, which a killed
+        // `ssh` never does. A write to a stream left so fails with `WouldBlock`, in each process
+        // that shares it, as under `2>&1`.
+        // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/ssh.c#L2234-L2251
+        // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/channels.c#L514-L540
+        // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/channels.c#L636-L645
         let child =
-            stdx::process::spawn(&mut ssh, Stdio::piped(), Stdio::piped(), Stdio::inherit());
+            stdx::process::spawn(&mut ssh, Stdio::piped(), Stdio::piped(), Stdio::piped());
         let mut child = child.map_err(Unanswered::Failed)?;
-        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
-            unreachable!(
-                "the child's standard input or output is missing, though both are piped just above"
-            )
+        let streams = (child.stdin.take(), child.stdout.take(), child.stderr.take());
+        let (Some(stdin), Some(stdout), Some(stderr)) = streams else {
+            unreachable!("one of the child's standard streams is missing, though each is piped")
         };
         let mut link = Self {
             child,
             stdin,
-            stdout: BufReader::new(stdout),
+            stdout: BufReader::new(Relaying::new(stdout, stderr)),
         };
         match link.received("its hello")? {
             Hello::Serving => Ok(Some(link)),
@@ -799,5 +807,6 @@ impl Drop for Link {
         // What it was asked is answered or given up on, and a `serve` still there ends with it.
         let _ = self.child.kill();
         let _ = self.child.wait();
+        self.stdout.get_mut().rest();
     }
 }

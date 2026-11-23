@@ -336,8 +336,10 @@ fn kill_job(settings: &Settings, repo: &Path, id: &str) -> Result<()> {
             &host,
             &kill,
         ]);
-    process::run(&mut ssh, step(STEP_TIMEOUT).named("ssh"))
-        .map_err(|failure| failure.to_string())?;
+    // Its output captured, as `ssh` makes its standard streams non-blocking, and leaves them so
+    // when killed at the bound.
+    let how = Run::new(Bound::Within(STEP_TIMEOUT), Echo::Line).named("ssh");
+    process::run(&mut ssh, how).map_err(|failure| failure.to_string())?;
     Ok(())
 }
 

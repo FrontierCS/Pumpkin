@@ -1,7 +1,7 @@
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::fs::{self, File, Permissions};
-use std::io::{BufRead as _, BufReader, Read};
+use std::io::{self, BufRead as _, BufReader, Read};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
@@ -10,6 +10,7 @@ use std::sync::LazyLock;
 use std::time::{Duration, SystemTime};
 
 use expect_test::{Expect, expect};
+use rustix::fs::{OFlags, fcntl_getfl};
 use schema::ir::Sha256Digest;
 use serde_json::json;
 use stdx::process::Environment;
@@ -201,10 +202,11 @@ const KEY: &str = "sk-client-stand-in";
 // stream. Each before-N action runs just before the Nth connection. A client home with a
 // `.member` is a key that the admin lists under that member, so the command runs as the
 // controller's forced command runs it. A `refused` file refuses every key, as `sshd` refuses a key
-// that is unlisted.
+// that is unlisted. As OpenSSH does, it makes its standard error non-blocking, and leaves it so.
 const SSH: &str = r#"#!/bin/sh
 dir=${0%/*}
 printf '%s\n' "$@" >> "$dir/argv"
+dd oflag=nonblock count=0 status=none >&2
 while :; do
     case $1 in
         -E) diagnostics=$2; shift 2 ;;
@@ -2113,6 +2115,41 @@ fn ls_answered_there() {
               20261106-120000-1b8a0003 -     failed            -  -               -  -
               20261106-130300-2c9b0007 alice unstarted       <t>                  -  -: its job ended before the run started: to see why: pumpkin wait 20261106-130300-2c9b0007
               2 runs: 1 failed, 1 unstarted"#]],
+    );
+}
+
+// `pumpkin` leaves the standard streams it is given as they were, though its `ssh` makes its own
+// non-blocking: a stream left so would fail the writes of each process that shares it, as under
+// `2>&1`.
+#[test]
+fn ls_leaves_its_streams_blocking() {
+    let scratch = Scratch::new();
+    let client = set_up_client(&scratch);
+    connect(&scratch, &client);
+    served(&scratch);
+    write_record(&scratch, "20261107-120000-1b8a0001", true, Some(returned(7.0)));
+    move_runs(&scratch, "home/.pumpkin/runs");
+    let (mut reader, writer) = io::pipe().unwrap();
+    let mut ls = on_client(&scratch, &client, &["ls"]);
+    ls.stdout(writer.try_clone().unwrap())
+        .stderr(writer.try_clone().unwrap());
+    let status = ls.status().unwrap();
+    let flags = fcntl_getfl(&writer).unwrap();
+    // The command holds copies of the pipe's write end, which would keep the pipe from its end.
+    drop((ls, writer));
+    let mut printed = String::new();
+    reader.read_to_string(&mut printed).unwrap();
+    let blocking = !flags.contains(OFlags::NONBLOCK);
+    check(
+        &scratch,
+        &format!("{status}\n{printed}blocking: {blocking}"),
+        &[],
+        &expect![[r#"
+            exit status: 0
+            pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
+            20261107-120000-1b8a0001 finished          -  -               -  -: score=7 metrics={"solved":3}
+            1 run: 1 finished
+            blocking: true"#]],
     );
 }
 
