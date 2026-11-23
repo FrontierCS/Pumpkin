@@ -57,18 +57,19 @@ fn live_driver(dir: &Path) -> Option<i64> {
 }
 
 // An emulator such as Rosetta, as Lima registers it, gives the driver the executable's path as its
-// `argv[0]`, as this command does, in place of the name that `run` gives it.
+// `argv[0]`, as this command does.
 #[test]
-fn known_by_its_first_argument() {
+fn known_by_its_command() {
     let scratch = Scratch::new();
-    let driver = scratch.pumpkin(&["pumpkin-driver", "1"]);
+    let id = "20261123-120000-0a000001";
+    let driver = scratch.pumpkin(&["driver", "1", id, "operator", "--", "run", "task.star"]);
     check(
         &scratch,
         [driver],
         false,
         &[],
         &expect![[r#"
-            $ pumpkin pumpkin-driver 1
+            $ pumpkin driver 1 20261123-120000-0a000001 operator -- run task.star
             exit status: Some(1)
             pumpkin: `run` ended before its driver asked to end with it"#]],
     );

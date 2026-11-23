@@ -5,7 +5,8 @@
 //! the first line is the summary. They say what each command and option means, and the guides in
 //! `docs/` say how the commands fit together. `-h` or `--help` before `--` prints the help of the
 //! command that the line names, as `pumpkin help` does, which also prints the topics, such as
-//! [`CONFIG`]. The commands that [`RARE`] names are hidden from clap's list and listed apart.
+//! [`CONFIG`]. The commands that [`RARE`] names are hidden from clap's list and listed apart. The
+//! driver's command, which `pumpkin run` starts, is hidden and has no help.
 //! `pumpkin-admin`'s command line is [`admin`]'s. What a command does is left to its own module.
 
 pub(crate) mod admin;
@@ -29,6 +30,7 @@ use schema::ir::Sha256Digest;
 
 pub(crate) use self::exit::Exit;
 use self::notes::{ADMIN, CONFIG, Layout, NOTES, Notes, section};
+use crate::Reader;
 use crate::ending::Printed;
 use crate::star::Entry;
 
@@ -140,6 +142,9 @@ enum Parsed {
         #[command(subcommand)]
         action: Action,
     },
+    /// Drive a run that `pumpkin run` starts.
+    #[command(hide = true)]
+    Driver(Driver),
 }
 
 // Hidden from clap's list of commands, so `command` lists them apart.
@@ -155,7 +160,7 @@ enum Action {
     /// /etc/pumpkin/controller.toml, names.
     Job {
         /// The job's id, which its run takes.
-        #[arg(value_name = "id", value_parser = |id: &str| RunTag::try_from(id.to_owned()))]
+        #[arg(value_name = "id", value_parser = run_tag)]
         id: RunTag,
         /// The SHA-256 of the manifest of the job's tree in the controller's store.
         #[arg(long, value_name = "sha256")]
@@ -180,9 +185,9 @@ enum Action {
 }
 
 /// What a command line asks for. `Job`, `Boot` and `Serve` are the controller's own side,
-/// `pumpkin controller <action>`. `Install`, `CheckDeployment`, `BootAll`, `Idle`, `Members` and
-/// `CheckMembers` are `pumpkin-admin`'s. `Help` and `Print` are for the standard output: `Print`
-/// holds the version, a topic or a policy.
+/// `pumpkin controller <action>`. `Driver` is the process that `run` starts. `Install`,
+/// `CheckDeployment`, `BootAll`, `Idle`, `Members` and `CheckMembers` are `pumpkin-admin`'s.
+/// `Help` and `Print` are for the standard output: `Print` holds the version, a topic or a policy.
 pub(crate) enum Command {
     Run(Run),
     Wait(Wait),
@@ -194,6 +199,7 @@ pub(crate) enum Command {
     View(View),
     Job(Job),
     Boot,
+    Driver(Driver),
     Install(aws::ParameterArn),
     CheckDeployment(aws::ParameterArn),
     BootAll,
@@ -203,6 +209,34 @@ pub(crate) enum Command {
     Serve(Member),
     Help(Help),
     Print(StyledStr),
+}
+
+impl Command {
+    /// The `run` that this command line asks for, if it asks for one.
+    pub(crate) fn into_run(self) -> Option<Run> {
+        match self {
+            Self::Run(run) => Some(run),
+            Self::Wait(_)
+            | Self::Ls(_)
+            | Self::Cancel(_)
+            | Self::Reap(_)
+            | Self::Check(_)
+            | Self::Fmt(_)
+            | Self::View(_)
+            | Self::Job(_)
+            | Self::Boot
+            | Self::Driver(_)
+            | Self::Install(_)
+            | Self::CheckDeployment(_)
+            | Self::BootAll
+            | Self::Idle
+            | Self::Members
+            | Self::CheckMembers(_)
+            | Self::Serve(_)
+            | Self::Help(_)
+            | Self::Print(_) => None,
+        }
+    }
 }
 
 /// The help of `program`, of a command that `name` names, or of the controller's `action`.
@@ -533,11 +567,34 @@ pub(crate) struct Job {
     pub(crate) run: Run,
 }
 
+#[derive(Args)]
+pub(crate) struct Driver {
+    /// The process ID of the `run` that starts the driver.
+    #[arg(value_name = "run-pid")]
+    pub(crate) run_pid: u32,
+    /// The run's id, which `run` mints.
+    #[arg(value_name = "id", value_parser = run_tag)]
+    pub(crate) id: RunTag,
+    #[arg(value_name = "reader", value_parser = reader)]
+    pub(crate) reader: Reader,
+    /// `run` with its arguments.
+    #[arg(last = true, required = true, value_name = "command")]
+    pub(crate) run: Vec<OsString>,
+}
+
+fn reader(word: &str) -> Result<Reader, &'static str> {
+    Reader::from_word(word).ok_or("it is neither `operator` nor `follower`: name one")
+}
+
 #[derive(Clone)]
 /// A run named by its record's path, which has a `/`, or by its id or a prefix of it.
 pub(crate) enum RunName {
     Record(String),
     Prefix(String),
+}
+
+fn run_tag(id: &str) -> Result<RunTag, String> {
+    RunTag::try_from(id.to_owned())
 }
 
 fn tree(hex: &str) -> Result<Sha256Digest, &'static str> {
@@ -617,15 +674,17 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command,
     command_of(&mut cli, parsed).map_err(refusal)
 }
 
-/// The first word of `args` that isn't a flag, and the name of `cli`'s command that it names, if
-/// any. `args` are a command line of `cli` without the program's name.
+/// The first word of `args` that isn't a flag, and the name of `cli`'s listed command that it
+/// names, if any. `args` are a command line of `cli` without the program's name.
 // clap's error doesn't name the command it was found in; the first word does, as only `-h`,
-// `--help`, `-V` and `--version` may come before it.
+// `--help`, `-V` and `--version` may come before it. A command that no list shows has no help to
+// print or to point to.
 fn first_word(cli: &clap::Command, args: &[OsString]) -> (Option<usize>, Option<String>) {
     let first = args
         .iter()
         .position(|arg| !arg.as_bytes().starts_with(b"-"));
     let named = first.and_then(|at| cli.find_subcommand(&args[at]));
+    let named = named.filter(|command| listed(command));
     (first, named.map(|command| command.get_name().to_owned()))
 }
 
@@ -678,42 +737,22 @@ fn command_of(cli: &mut clap::Command, parsed: Parsed) -> Result<Command, clap::
             tree,
             run: job_run(cli, command)?,
         }),
+        Parsed::Driver(driver) => Command::Driver(driver),
         Parsed::Help { topic } => return help_of(cli, topic.as_deref()),
     })
 }
 
 fn job_run(cli: &mut clap::Command, command: Vec<OsString>) -> Result<Run, clap::Error> {
     // The job's command is a whole command line of its own, so it is parsed as one.
-    match parse(command).map_err(|refusal| refusal.error)? {
-        Command::Run(run) => Ok(run),
-        Command::Wait(_)
-        | Command::Ls(_)
-        | Command::Cancel(_)
-        | Command::Reap(_)
-        | Command::Check(_)
-        | Command::Fmt(_)
-        | Command::View(_)
-        | Command::Job(_)
-        | Command::Boot
-        | Command::Install(_)
-        | Command::CheckDeployment(_)
-        | Command::BootAll
-        | Command::Idle
-        | Command::Members
-        | Command::CheckMembers(_)
-        | Command::Serve(_)
-        | Command::Help(_)
-        | Command::Print(_) => {
-            let problem = "the job's command isn't `run`: give one";
-            let controller = cli.find_subcommand_mut("controller");
-            Err(
-                match controller.and_then(|it| it.find_subcommand_mut("job")) {
-                    Some(job) => job.error(ErrorKind::InvalidValue, problem),
-                    None => cli.error(ErrorKind::InvalidValue, problem),
-                },
-            )
+    let parsed = parse(command).map_err(|refusal| refusal.error)?;
+    parsed.into_run().ok_or_else(|| {
+        let problem = "the job's command isn't `run`: give one";
+        let controller = cli.find_subcommand_mut("controller");
+        match controller.and_then(|it| it.find_subcommand_mut("job")) {
+            Some(job) => job.error(ErrorKind::InvalidValue, problem),
+            None => cli.error(ErrorKind::InvalidValue, problem),
         }
-    }
+    })
 }
 
 fn help_of(cli: &mut clap::Command, topic: Option<&str>) -> Result<Command, clap::Error> {

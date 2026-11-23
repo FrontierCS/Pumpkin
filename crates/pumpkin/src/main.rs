@@ -6,14 +6,12 @@
 //! goes to the standard output ([`print()`]).
 
 use std::io::{self, Write as _};
-use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use std::{env, fmt, fs};
 
 use anstream::{AutoStream, ColorChoice};
 use clap::builder::StyledStr;
-use driver::ARGV0;
 use engine::{ContextName, Engine};
 use provider::UnixTime;
 use runtime::{ReadError, Record};
@@ -70,11 +68,8 @@ fn main() -> Exit {
     let shared_write = Mode::from_raw_mode(0o022);
     let started = umask(shared_write);
     umask(started | shared_write);
-    let mut args = env::args_os().peekable();
+    let mut args = env::args_os();
     let argv0 = args.next();
-    if (args.next_if(|first| first.as_bytes() == ARGV0.to_bytes())).is_some() {
-        return finish(driver_run(args.collect()));
-    }
     // One executable runs as the command that its name gives. BusyBox runs the applet that its
     // `argv[0]`'s last component names. cargo-zigbuild runs as `ar` by its name, and xtask runs as
     // the musl C compiler by its name:
@@ -97,6 +92,7 @@ fn main() -> Exit {
         Ok(cli::Command::View(flags)) => view::view(flags),
         Ok(cli::Command::Job(flags)) => job::job(flags),
         Ok(cli::Command::Boot) => job::boot(),
+        Ok(cli::Command::Driver(driver)) => driver_run(driver),
         Ok(cli::Command::Install(settings)) => host::install(&settings),
         Ok(cli::Command::CheckDeployment(settings)) => deployment::check(&settings),
         Ok(cli::Command::Members) => host::members(),
