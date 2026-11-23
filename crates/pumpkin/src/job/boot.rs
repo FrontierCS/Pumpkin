@@ -31,6 +31,7 @@ pub(crate) fn boot() -> Result<Exit, String> {
     // images that the job has built, which no IR that the boot reads names yet.
     let reap = cli::Reap {
         runs: None,
+        controller: None,
         modal_config: None,
     };
     crate::reap(reap, crate::Reaper::Boot)

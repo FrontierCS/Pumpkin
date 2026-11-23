@@ -25,7 +25,7 @@ use expect_test::expect;
 use gateway::{Arrival, Dialer, Put, Registration, Session, Sockets};
 use provider::{
     Console, Create, ImageRef, Listed, Meeting, Provider, Reservation, Role, RunTag, SandboxId,
-    SandboxdRef, UnixTime,
+    SandboxdRef, UnixTime, Unreserved,
 };
 use schema::ir::{AbsolutePath, Argv, Env, Image, Name, Resources, User};
 use schema::sandbox::{Launch, RelativePath, file_mode};
@@ -654,8 +654,10 @@ pub fn reserve_with_room(
     loop {
         match provider.reserve(run, phases) {
             Ok(held) => return held,
-            Err(error) if room.remaining().is_none() => panic!("{error}"),
-            Err(_) => thread::sleep(Duration::from_millis(100)),
+            Err(Unreserved::Busy(_)) if room.remaining().is_some() => {
+                thread::sleep(Duration::from_millis(100));
+            }
+            Err(error) => panic!("{error}"),
         }
     }
 }

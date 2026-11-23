@@ -107,9 +107,9 @@ reads `none` as the command's path. It refuses the key, as it should.
 Each is the module's output of that name. `terraform output` reads it where the root gives it as
 an `output` of its own.
 
-- `terraform output -raw client_config` is the `[controller]` table of each member's
+- `terraform output -raw client_config` is the `[controllers.<name>]` table of each member's
   `~/.config/pumpkin/pumpkin.toml`, beside its `[upstreams]` and, for runs on Modal,
-  `[controller.modal]`, the Modal provider's profile and classes, and nothing else; `pumpkin help
+  `[controllers.<name>.modal]`, the Modal provider's profile and classes, and nothing else; `pumpkin help
   config` says what each does, with an example, and which programs a member's machine, Linux on
   x86-64, needs.
 - `terraform output -raw client_policy_arn` is the managed IAM policy that a member's machine
@@ -131,7 +131,7 @@ An apply that changes a class or the AMI makes a new version of its templates, w
 controller's settings name from its next job on. The controller's policy allows only the
 templates' current instance types. So an apply that changes a class's type is a cutover that a
 running job would meet: follow the drain runbook under "Versions". A Modal class or profile needs
-no apply: it is the client's `[controller.modal]`, which each job takes.
+no apply: it is the client's `[controllers.<name>.modal]`, which each job takes.
 
 With `variables.tf`'s defaults, the controller costs about $0.94 an hour while it runs in
 us-west-1, less in us-east-1 and us-west-2; stopped, about $110 a month for its volume at

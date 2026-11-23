@@ -132,7 +132,7 @@ pub(crate) fn job(job: cli::Job) -> Result<Exit, String> {
     // Record that the unit ran even if its start receipt could not be written.
     point(&dir.join(OWN), &dir.join(format!(".{OWN}")))?;
     let settings = crate::host::target()?.settings();
-    let assembled = assemble(&settings, &sent)?;
+    let (assembled, controller) = assemble(&settings, &sent)?;
     let path = dir.join("pumpkin.toml");
     fs::write(&path, assembled).context(path.display())?;
     let Some(config) = path.to_str().map(str::to_owned) else {
@@ -150,7 +150,8 @@ pub(crate) fn job(job: cli::Job) -> Result<Exit, String> {
     if let Err(error) = prune(&home, &path, &jobs) {
         say(format_args!("the prune at the job's start failed: {error}"));
     }
-    build_first(&id, &home, &path, &jobs, &run.entry, &run.args.0)?;
+    let task = (&run.entry, &run.args.0);
+    build_first(&id, &home, &path, &jobs, task, &controller)?;
     let run = cli::Run {
         config: Some(config),
         wait: cli::Waiting(None),
@@ -320,7 +321,7 @@ fn point(link: &Path, staged: &Path) -> Result<(), String> {
 /// `sent`, if any. It holds the client's `[upstreams]`, each `key_file` its file in `sent`.
 ///
 /// Fails if the settings drain.
-fn assemble(settings: &Source, sent: &Path) -> Result<String, String> {
+fn assemble(settings: &Source, sent: &Path) -> Result<(String, crate::controller::Name), String> {
     let value = settings.read(&JOB.settings)?;
     let named = format!("the controller's settings, {settings},");
     let mut tables = settings::tables(&value, &named)?;
@@ -343,6 +344,7 @@ fn assemble(settings: &Source, sent: &Path) -> Result<String, String> {
         Err(error) => return Err(format!("{}: {error}", config.display())),
     };
     let config::Sent {
+        controller,
         mut upstreams,
         modal,
     } = toml::from_str(&text).map_err(|error| {
@@ -370,7 +372,8 @@ fn assemble(settings: &Source, sent: &Path) -> Result<String, String> {
     }
     upstreams.keys_in(sent);
     let upstreams = toml::Value::try_from(upstreams).map_err(|error| written(&error))?;
-    configuration(tables, &named, envelope, private, modal.as_ref(), upstreams)
+    let assembled = configuration(tables, &named, envelope, private, modal.as_ref(), upstreams)?;
+    Ok((assembled, controller))
 }
 
 /// A job's configuration, as TOML. It holds `tables`, the controller's settings named as `named`,
@@ -436,7 +439,7 @@ fn take_modal(
         .collect();
     if modal.is_empty() {
         return Err(format!(
-            "{named} name no Modal provider, whose `images` the client's `[controller.modal]` \
+            "{named} name no Modal provider, whose `images` the client's controller's `modal` \
              needs: list the profile's workspace in deploy/aws's `modal_workspaces`, and apply it"
         ));
     }
@@ -619,21 +622,25 @@ fn jobs_named(jobs: &Path) -> String {
     format!("locking {} failed", jobs.display())
 }
 
-/// Builds the images of the task whose entry is `entry`, given `args`, for job `id`. It builds on
-/// the engine of the configuration at `config`. The job's `Admission` admits each build. The
-/// job's command then finds each image by its tag. If the job built one, it lets go of the build
-/// slot that the admission took, and prunes. The job holds what it holds until it ends. Gives the
-/// task's problems, or each build that failed, said.
+/// Builds the images of the task whose entry and args `task` gives, for job `id`. It builds on the
+/// engine of the configuration at `config`. The job's `Admission` admits each build. The job's
+/// command then finds each image by its tag. If the job built one, it lets go of the build slot
+/// that the admission took, and prunes. The job holds what it holds until it ends. Gives the
+/// task's problems, or each build that failed, said. Fails before the first build, naming the
+/// controller by the client's name for it, `controller`, if the task's roles never fit the
+/// configuration's providers.
 fn build_first(
     id: &RunTag,
     home: &Path,
     config: &Path,
     jobs: &Path,
-    entry: &star::Entry,
-    args: &lang::Args,
+    task: (&star::Entry, &lang::Args),
+    controller: &crate::controller::Name,
 ) -> Result<(), String> {
+    let (entry, args) = task;
     let mut admission = Admission {
         id,
+        controller,
         home,
         jobs,
         slots: Workspace::find()?.slots(),
@@ -641,6 +648,8 @@ fn build_first(
     };
     let built = star::checked(entry, args, |task| {
         let engine = engine(config)?;
+        // Before a build slot is waited for and anything is built.
+        crate::run::never_fits_controller(task.workflow(), config, &engine, controller)?;
         let tags = match task.build(&engine, &mut admission) {
             Ok((_, tags, _)) => tags,
             Err(problems) => return Ok(Err(problems)),
@@ -670,6 +679,8 @@ fn build_first(
 /// names the records that their members haven't copied, which no prune removes.
 struct Admission<'j> {
     id: &'j RunTag,
+    /// The client's name for the controller, which the commands that a refusal names name.
+    controller: &'j crate::controller::Name,
     home: &'j Path,
     jobs: &'j Path,
     slots: PathBuf,
@@ -732,7 +743,7 @@ impl engine::Admit for Admission<'_> {
             let used = (used_bytes.saturating_mul(100))
                 .checked_div(disk.size_bytes)
                 .unwrap_or(100);
-            let uncopied = records::uncopied(self.home, self.jobs);
+            let uncopied = records::uncopied(self.home, self.jobs, self.controller);
             return Err(format!(
                 "the controller's volume is {used}% used, past the {REFUSED_PERCENT}% at which a \
                  build is refused, though the prune has removed what no job holds: free space \

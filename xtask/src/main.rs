@@ -95,7 +95,7 @@ mod flags {
             cmd live {
                 /// `docker`, `controller`, `ec2` or `modal`.
                 required target: String
-                /// With `modal`, the model of the GPU, of a class of `[controller.modal]`, that
+                /// With `modal`, the model of the GPU, of a class of the controller's `modal`, that
                 /// the smoke's GPU runner needs.
                 optional --gpu-model model: String
                 /// With `ec2` or `modal`, kills the run's job on the controller once the agent

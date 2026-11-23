@@ -580,7 +580,8 @@ impl Piped {
 
     /// Returns the answer to a request for `target`, and its body.
     pub(super) fn ask(&mut self, target: &str, deflate: bool) -> (Value, Vec<u8>) {
-        let asking = json!({ "type": "view", "target": target, "deflate": deflate });
+        let asking =
+            json!({ "type": "view", "target": target, "deflate": deflate, "controller": "alice" });
         schema::frame::write(&mut self.stdin, &asking, &[]).unwrap();
         let (answer, _) = schema::frame::read::<Value>(&mut self.stdout)
             .unwrap()
@@ -692,7 +693,7 @@ fn answers_over_a_pipe() {
             /api/nothing: 404 Not Found
             /api/runs/<ended>: 200 OK, as `pumpkin view` answers but for its `again`, {"command":"pumpkin run --runs <scratch>/runs <scratch>/task.star"}
             /api/runs/<ended>/since?log=0: 200 OK, as `pumpkin view` answers but for its `again`, {"command":"pumpkin run --runs <scratch>/runs <scratch>/task.star"}
-            cancel: {"error":"the view on a controller answers no cancel: cancel run <live> from the page that `pumpkin view` serves, or run: pumpkin cancel <live>"}
+            cancel: {"error":"the view on a controller answers no cancel: cancel run <live> from the page that `pumpkin view` serves, or run: pumpkin cancel --controller alice <live>"}
             the live run, after a line more: live true, 1 record, from where the last poll ended
             once its standard input ends: exit status: 0"#]],
     );

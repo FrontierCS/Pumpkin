@@ -4,8 +4,8 @@ output "settings_parameter_arn" {
 }
 
 output "client_config" {
-  description = "The `[controller]` table of each member's machine's `pumpkin.toml`, beside its `[upstreams]`."
-  value       = "[controller]\nname = ${jsonencode(var.name)}\nregion = ${jsonencode(local.region)}\n"
+  description = "The `[controllers.<name>]` table of each member's machine's `pumpkin.toml`, beside its `[upstreams]`."
+  value       = "[controllers.${var.name}]\nregion = ${jsonencode(local.region)}\n"
 }
 
 # What a member's machine needs to reach the controller: find it by its tag and start it, then

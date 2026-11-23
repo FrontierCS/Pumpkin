@@ -98,9 +98,10 @@ pub(super) fn collect(home: &Path, jobs: &Path) -> Result<(), String> {
 /// prune removes them (`retention::records::uncopied`). It counts the records whose jobs in `home`
 /// have ended, as their directories in `jobs` are gone. It says how many there are, the room they
 /// take, and the command that copies the oldest. It adds nothing if there are none. If it can't
-/// tell, it adds nothing and says why.
-pub(super) fn uncopied(home: &Path, jobs: &Path) -> String {
-    match uncopied_in(home, jobs) {
+/// tell, it adds nothing and says why. The command names the controller as `controller`, the
+/// client's name for it.
+pub(super) fn uncopied(home: &Path, jobs: &Path, controller: &crate::controller::Name) -> String {
+    match uncopied_in(home, jobs, controller) {
         Ok(Some(uncopied)) => format!("; {uncopied}"),
         Ok(None) => String::new(),
         Err(error) => {
@@ -112,7 +113,11 @@ pub(super) fn uncopied(home: &Path, jobs: &Path) -> String {
     }
 }
 
-fn uncopied_in(home: &Path, jobs: &Path) -> Result<Option<String>, String> {
+fn uncopied_in(
+    home: &Path,
+    jobs: &Path,
+    controller: &crate::controller::Name,
+) -> Result<Option<String>, String> {
     let runs = PathBuf::from(crate::default_runs()?);
     let mut records = Vec::new();
     for id in ids(&home.join(JOBS))? {
@@ -129,7 +134,7 @@ fn uncopied_in(home: &Path, jobs: &Path) -> Result<Option<String>, String> {
          member copies it, then {KEPT_DAYS} days; to copy the oldest: {}",
         counted(uncopied.len(), "ended run"),
         size(uncopied_bytes),
-        next::of_run("wait", None, oldest)
+        next::of_run("wait", &next::At::Controller(controller.clone()), oldest)
     )))
 }
 

@@ -66,16 +66,17 @@ The build downloads the release, and the start runs its install. `docker compose
 journalctl --unit=pumpkin-install` shows what the install said. `docker compose exec controller
 bash` is the admin's shell there.
 
-Each member's `~/.config/pumpkin/pumpkin.toml` names the controller by the host and the port that
-reach `sshd`, beside its `[upstreams]`, but no `[controller.modal]`, which needs an EC2
+Each member's `~/.config/pumpkin/pumpkin.toml` names the controller by its name and by the host
+and the port that reach `sshd`, beside its `[upstreams]`, but no `modal`, which needs an EC2
 controller. A task repository's `.pumpkinversion` pins this release or a later one, as an earlier
 release's jobs read only an EC2 controller's settings:
 
 ```toml
-[controller]
-name = "lab"
+[controllers.lab]
 address = "lab.example.org:2222"
 ```
+
+A machine that names other controllers beside it names this one with `--controller lab`.
 
 ## Members
 

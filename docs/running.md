@@ -21,8 +21,8 @@ tar, xz, `flock` from util-linux and TLS certificates.
 To build a checkout for development, run `cargo xtask build` from it and use its
 `.pumpkin/bin/pumpkin`.
 
-The repository's `.pumpkin/` beside `./pumpkin` holds its runs in `.pumpkin/runs/` and the state
-its builds and providers keep. The directory ignores itself in Git. The shared release cache,
+The repository's `.pumpkin/` beside `./pumpkin` holds its runs in `.pumpkin/runs/`, the copies of
+each controller's runs in `.pumpkin/runs/<name>/`, and the state its builds and providers keep. The directory ignores itself in Git. The shared release cache,
 Docker engine's images, records written to an explicit `--runs` directory, files `fmt`
 rewrites, and the controller's client SSH keys in `~/.config/pumpkin/ssh/` live elsewhere.
 
@@ -31,7 +31,8 @@ rewrites, and the controller's client SSH keys in `~/.config/pumpkin/ssh/` live 
 `~/.config/pumpkin/pumpkin.toml` (or the file that `--config` names) says what a machine's runs
 may use: its Docker engine, the providers that sandboxes may be placed on, the upstreams that
 model routes reach, with each model's prices, and the files that hold their keys. A machine whose
-runs go to a controller names `[controller]` in place of the engine and the providers.
+runs go to controllers names each in `[controllers.<name>]` in place of the engine and the
+providers.
 `pumpkin help config` is the reference, with an example of a machine whose runs go to EC2 and
 Modal and of one whose runs go to a controller; the [README](../README.md#run-it) gives one whose
 runs stay on its own Docker engine.

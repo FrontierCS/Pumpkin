@@ -23,7 +23,7 @@ use std::num::NonZeroU64;
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
-use provider::{Reservation, Role, RunTag};
+use provider::{Reservation, Role, RunTag, Unreserved};
 use schema::ir::{CpuFlag, MILLIS_PER_CPU, Name, Resources};
 use serde::{Deserialize, Serialize};
 use stdx::Context;
@@ -232,24 +232,35 @@ struct EntryJson {
     roles: BTreeMap<String, CpuList>,
 }
 
+/// The whole cores that `phases` take at once, laid out on every core, as no other run held any.
+/// Fails if they need more than there are: such a run never fits.
+pub(crate) fn fits(cpus: &Cpus, phases: &[Vec<Role>]) -> Result<usize, String> {
+    let all: Vec<&Vec<u32>> = cpus.cores.iter().collect();
+    let Some((_, needed)) = lay_out(&all, phases) else {
+        let cpus_count: usize = cpus.cores.iter().map(Vec::len).sum();
+        return Err(format!(
+            "the roles that run at once need more whole cores than the {} that sandboxes get, \
+             {cpus_count} CPUs in all, as each sandbox holds whole cores for its CPUs ({}): \
+             change their needs, or run it where sandboxes are larger",
+            all.len(),
+            needs(phases)
+        ));
+    };
+    Ok(needed)
+}
+
 pub(crate) fn reserve(
     cpus: &Cpus,
     run: &RunTag,
     phases: &[Vec<Role>],
-) -> Result<Reservation, String> {
+) -> Result<Reservation, Unreserved> {
     // The run is laid out on every core first, to tell a run that can never fit this machine from
     // one that waits for another's cores.
+    let needed = fits(cpus, phases).map_err(Unreserved::Failed)?;
     let all: Vec<&Vec<u32>> = cpus.cores.iter().collect();
     let count = all.len();
-    let Some((_, needed)) = lay_out(&all, phases) else {
-        return Err(format!(
-            "the run's roles need more whole cores at once than the {count} that this machine \
-             gives sandboxes, to hold their CPUs ({}): give them fewer CPUs",
-            needs(phases)
-        ));
-    };
-    let ledger = open_ledger(&cpus.ledger)?;
-    let held = held(&ledger)?;
+    let ledger = open_ledger(&cpus.ledger).map_err(Unreserved::Failed)?;
+    let held = held(&ledger).map_err(Unreserved::Failed)?;
     let in_use: BTreeSet<u32> = held
         .values()
         .flat_map(|cpus| cpus.0.iter().copied())
@@ -259,26 +270,26 @@ pub(crate) fn reserve(
         .collect();
     let Some((laid_out, _)) = lay_out(&free, phases) else {
         let runs: Vec<&str> = held.keys().map(String::as_str).collect();
-        let (s, them) = if runs.len() == 1 {
-            ("", "it ends")
+        let (s, verb) = if runs.len() == 1 {
+            ("", "holds")
         } else {
-            ("s", "they end")
+            ("s", "hold")
         };
-        return Err(format!(
+        return Err(Unreserved::Busy(format!(
             "the run's roles need {needed} whole cores at once, to hold their CPUs ({}), and \
-             run{s} {} hold {} of the {count} that this machine gives sandboxes: run it once \
-             {them}, or give its roles fewer CPUs",
+             run{s} {} {verb} {} of the {count} that sandboxes get",
             needs(phases),
             runs.join(", "),
             count - free.len()
-        ));
+        )));
     };
     let mut shares = BTreeMap::new();
     for (key, cpus) in laid_out {
         let twice = shares.insert(key.clone(), cpus);
         assert!(twice.is_none(), "instance `{key}` is named twice");
     }
-    let entry = write_entry(&ledger, run, &EntryJson { roles: shares })?;
+    let entry =
+        write_entry(&ledger, run, &EntryJson { roles: shares }).map_err(Unreserved::Failed)?;
     // The entry's own lock holds the cores from here, so the ledger is free to the next run.
     drop(ledger);
     Ok(Reservation::new(entry))

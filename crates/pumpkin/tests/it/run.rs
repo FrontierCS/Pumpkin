@@ -735,7 +735,7 @@ fn configurations() {
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/missing.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config undocked.toml
             exit status: Some(1)
-            pumpkin: undocked.toml: `[docker]` is missing: name it, or `[controller]`, as `pumpkin help config` says
+            pumpkin: undocked.toml: `[docker]` is missing: name it, or `[controllers.<name>]`, as `pumpkin help config` says
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/undocked.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config nameless.toml
             exit status: Some(1)

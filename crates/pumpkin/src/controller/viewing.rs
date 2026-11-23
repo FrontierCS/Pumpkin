@@ -198,8 +198,12 @@ impl Viewing {
         };
         // What is left of the exchange would be read as the next one's, so a link that fails is
         // dropped, which ends its `ssh`.
-        let target = target.to_owned();
-        match linked.ask(&self.reached, ViewRequest { target, deflate }) {
+        let request = ViewRequest {
+            target: target.to_owned(),
+            deflate,
+            controller: self.reached.name.clone(),
+        };
+        match linked.ask(&self.reached, request) {
             Ok(Ok(viewed)) => {
                 self.linked = Some(linked);
                 Over::Viewed(viewed)

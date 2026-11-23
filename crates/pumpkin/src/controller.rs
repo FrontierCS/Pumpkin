@@ -53,10 +53,11 @@ const AGAIN: [Duration; 6] = [
 // https://github.com/ansible/ansible/blob/2a4acd774aec2625b09cca2284cb2a08654e4cdd/lib/ansible/plugins/connection/ssh.py#L550-L610
 const OPENINGS: u32 = 8;
 
-/// A controller's name: the `name` of its settings' `[deployment]`, as `deploy/aws` was applied
-/// with it.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(try_from = "String")]
+/// A controller's name, as a client's `[controllers.<name>]` names it: the `name` of its settings'
+/// `[deployment]`, as `deploy/aws` was applied with it. It starts with a letter, so it is never a
+/// run's id, which starts with a digit.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(try_from = "String", into = "String")]
 pub(crate) struct Name(String);
 
 impl TryFrom<String> for Name {
@@ -81,14 +82,26 @@ impl TryFrom<String> for Name {
     }
 }
 
+impl From<Name> for String {
+    fn from(name: Name) -> Self {
+        name.0
+    }
+}
+
+impl AsRef<Path> for Name {
+    fn as_ref(&self) -> &Path {
+        Path::new(&self.0)
+    }
+}
+
 impl fmt::Display for Name {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
     }
 }
 
-/// Where a controller's `sshd` listens, as `[controller] address` names it: a host, by its name
-/// or its IP address, and a port.
+/// Where a controller's `sshd` listens, as `[controllers.<name>] address` names it: a host, by its
+/// name or its IP address, and a port.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(try_from = "String", into = "String")]
 pub(crate) struct Address {
@@ -141,6 +154,15 @@ impl fmt::Display for Address {
             write!(f, "{host}:{port}")
         }
     }
+}
+
+/// The directory of this machine's copies of the records of controller `name`'s runs, `<name>` in
+/// the default runs directory, so that no two controllers' copies, nor this machine's own runs,
+/// share one.
+// As git keeps the branches of each remote apart, in `refs/remotes/<name>/`:
+// https://github.com/git/git/blob/f7de81456940dd6f3274e461149bba12965de609/Documentation/glossary-content.adoc#L615-L622
+pub(crate) fn copies(name: &Name) -> Result<PathBuf, String> {
+    Ok(PathBuf::from(crate::default_runs()?).join(name))
 }
 
 /// When a pause of `pause` ends, as a message says it: `now`, or `in <seconds> s`.

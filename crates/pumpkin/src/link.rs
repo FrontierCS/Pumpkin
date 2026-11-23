@@ -204,10 +204,12 @@ pub(crate) enum Boot {
 
 /// The runs, and the jobs yet to start one, whose ids start with one of `prefixes`, or all with
 /// none, as `ls` lists them, with those that ended before [`crate::progress::listed_since`] by
-/// `serve`'s clock named only as older.
+/// `serve`'s clock named only as older. Their commands to run next name `controller`, the client's
+/// name for the controller.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ListRequest {
     pub(crate) prefixes: Vec<String>,
+    pub(crate) controller: crate::controller::Name,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -546,6 +548,8 @@ impl ReapRequest {
 pub(crate) struct ViewRequest {
     pub(crate) target: String,
     pub(crate) deflate: bool,
+    /// The client's name for the controller, which the reply's commands to run next name.
+    pub(crate) controller: crate::controller::Name,
 }
 
 #[derive(Serialize, Deserialize)]

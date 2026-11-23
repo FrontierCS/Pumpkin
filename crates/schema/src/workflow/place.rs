@@ -83,8 +83,8 @@ fn smallest<'p>(
     Err(errors.report(
         at.token("needs"),
         format!(
-            "`{name}` fits no class of sandbox, as {why}: offer a class that meets its needs, or \
-             change its needs"
+            "`{name}` fits no class of sandbox, as {why}: change its needs, or run it where \
+             sandboxes are larger"
         ),
     ))
 }

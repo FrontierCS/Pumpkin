@@ -2,7 +2,6 @@
 //! answers with its health and the rows of its runs and of its jobs yet to start one, made where
 //! the records are, and `ls` adds the rows of the copies of its runs here that it lacks.
 
-use std::path::PathBuf;
 use std::time::Duration;
 
 use provider::UnixTime;
@@ -15,7 +14,7 @@ use crate::cli::Exit;
 use crate::link::{Boot, Health, HealthRequest, ListRequest, Listed};
 use crate::progress::{Entry, Listing, Unlisted};
 use crate::workspace::Workspace;
-use crate::{config, say};
+use crate::{config, next, say};
 
 // How long a listing may take before `ls` says when it was made: a person reads the rows of a
 // listing as they are now.
@@ -42,8 +41,9 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<Exit, S
         asked,
     } = answered(&mut reached, prefixes)?;
     crate::said_beside(&listing, &unlisted);
-    let runs = PathBuf::from(crate::default_runs()?);
-    let (here, unlisted_here) = crate::listed_in(&runs, prefixes, since, now, None)?;
+    let at = next::At::Controller(reached.name.clone());
+    let runs = super::copies(&reached.name)?;
+    let (here, unlisted_here) = crate::listed_in(&runs, prefixes, since, now, &at)?;
     crate::said_beside(&here, &unlisted_here);
     // The controller's word on a run wins over a copy's.
     for (id, entry) in here.runs {
@@ -56,7 +56,7 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<Exit, S
         |refused| refused,
         |health| said(&reached.name, &health, jobs),
     ));
-    let lines = crate::progress::lines(&listing, None);
+    let lines = crate::progress::lines(&listing, &at);
     crate::print(lines.as_bytes()).context("printing the runs failed")?;
     said_when(asked);
     let unlisted = unlisted.len() + unlisted_here.len();
@@ -75,7 +75,14 @@ fn answered(reached: &mut Reached, prefixes: &[String]) -> Result<Answers, Strin
             let health = linked.ask(reached, HealthRequest {})?;
             let asked = crate::unix_now();
             let prefixes = prefixes.to_vec();
-            let listed = linked.ask(reached, ListRequest { prefixes })?;
+            let controller = reached.name.clone();
+            let listed = linked.ask(
+                reached,
+                ListRequest {
+                    prefixes,
+                    controller,
+                },
+            )?;
             Ok((health, listed, asked))
         })?;
     answers(&reached.name, health, listed, asked)
