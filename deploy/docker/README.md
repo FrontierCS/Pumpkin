@@ -8,7 +8,7 @@ on the Docker provider alone, on the container's own engine.
 | What | Why |
 | --- | --- |
 | one privileged container, `pumpkin-controller-1`, with a private cgroup namespace and tmpfs at `/run`, `/run/lock` and `/tmp`, as kind runs a node | systemd as its PID 1, which runs the jobs' units and the engine |
-| Ubuntu 24.04 with systemd, `sshd` and what every controller installs by `deploy/controller/install.sh`: Docker's packages at exact versions, and the rest from a snapshot of Ubuntu's archive | builds with the containerd image store |
+| Ubuntu 24.04 with systemd, `sshd` and what every controller installs by `deploy/controller/install.sh`: Docker's packages at exact versions, and the rest from a snapshot of Ubuntu's archive, with the fixes that its security pocket held at the build | builds with the containerd image store |
 | a Docker engine of the container's own, never the host's | the sandboxes' mounts, the ledger of CPUs and the prune of images mean what they mean on EC2, and touch nothing of the host's |
 | the release that `PUMPKIN_RELEASE` pins, checked by its SHA-256, whose `pumpkin-admin install docker` runs at every start, before `sshd` (`pumpkin-admin install --help` says what it does) | the user `pumpkin`, lingering, `sshd`'s settings, the members' keys and the boot's reap; no idle stop, as nothing would start the container again |
 | the volumes `pumpkin_docker`, `pumpkin_containerd`, `pumpkin_home` and `pumpkin_host-key` | the engine's images and build cache, the store, the trees, the installs and the records, and the host key, kept from one container to the next |
@@ -91,9 +91,14 @@ host anew once one is no longer trusted.
 1. Set `draining = true` in `conf/settings.toml`. Each job that starts is refused, and the jobs
    that run go on to their ends. `pumpkin ls` shows them.
 2. Once none runs, check out the new release's tag, set its line in `.env`, and run
-   `docker compose up --detach --build`. The volumes keep the runs' records and the host key. A job
-   that still runs is lost, and the next start's boot reaps it.
+   `docker compose build --no-cache` and `docker compose up --detach`. The volumes keep the runs'
+   records and the host key. A job that still runs is lost, and the next start's boot reaps it.
 3. Set `draining = false`.
+
+A build with its cache keeps the last build's packages. Only a build without it takes the
+security fixes that Ubuntu has published since, as Docker's guide says
+([best practices](https://github.com/docker/docs/blob/8ee67d493eb4901b1d27b8d4c1a901f467a071cd/content/manuals/build/building/best-practices.md?plain=1#L107-L118)).
+These steps at the same release take them between releases.
 
 The volume `pumpkin_home` holds the runs' records. Back it up with the container stopped, as
 Docker's documentation backs up a volume

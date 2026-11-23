@@ -1,10 +1,12 @@
 #!/bin/sh
 # What every Pumpkin controller installs on Ubuntu 24.04, whichever its target: Docker's packages
 # from Docker's repository, at the versions pinned here, with the containerd image store; the rest
-# from the snapshot of Ubuntu's archive pinned here; and a Pumpkin release, checked by its SHA-256.
-# deploy/aws's first boot and deploy/docker's image run it, as root, beside `docker.asc`.
+# from the snapshot of Ubuntu's archive pinned here, and from its live security pocket; and a
+# Pumpkin release, checked by its SHA-256. deploy/aws's first boot and deploy/docker's image run
+# it, as root, beside `docker.asc`.
 #
-#   install.sh sources                 point apt at the snapshot and at Docker's repository
+#   install.sh sources                 point apt at the snapshot, the security pocket and
+#                                      Docker's repository
 #   install.sh docker [<package>...]   install Docker's packages, and each <package>
 #   install.sh release <line> <dir>    unpack into <dir> the release that <line>, a
 #                                      `.pumpkinversion` line, pins
@@ -36,11 +38,21 @@ case "${1-}" in
 sources)
     install -D --mode=0644 "$here/docker.asc" /etc/apt/keyrings/docker.asc
     # Over HTTPS, for every suite, as the image's sources name the archive's and the security
-    # pocket's.
+    # pocket's. The security pocket is the live one, as a snapshot holds no fix past its date.
+    # Ubuntu's guide to snapshots says to check that pocket so as not to install a vulnerable
+    # package. Canonical serves it over HTTPS:
+    # https://github.com/canonical/ubuntu-server-documentation/blob/978ccbd1fe74f4d88216382ebf9c2eb695c684a0/docs/how-to/software/snapshot-service.md?plain=1#L243-L250
+    # https://bugs.launchpad.net/ubuntu/+bug/1464064/comments/46
     cat > /etc/apt/sources.list.d/ubuntu.sources <<SOURCES
 Types: deb
 URIs: https://snapshot.ubuntu.com/ubuntu/$SNAPSHOT/
-Suites: noble noble-updates noble-backports noble-security
+Suites: noble noble-updates noble-backports
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+Types: deb
+URIs: https://security.ubuntu.com/ubuntu/
+Suites: noble-security
 Components: main restricted universe multiverse
 Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
 SOURCES

@@ -32,11 +32,16 @@ EOF
 FROM scratch AS pumpkin
 COPY --from=download /pumpkin/ /
 
-# systemd and `sshd`, then the Docker engine that every controller's install takes.
+# The base's packages upgraded to the security pocket's fixes, then systemd and `sshd`, then the
+# Docker engine that every controller's install takes. Ubuntu's image turns periodic apt off, so
+# the container takes a fix only from a build. kind's node image upgrades its base so:
+# https://git.launchpad.net/livecd-rootfs/tree/live-build/functions?id=f492363dc196a54b49af881b94e7a1e4f8a45f27#n1021
+# https://github.com/kubernetes-sigs/kind/blob/01c9d928bd68f2d22778a943af0d3bef26912ade/images/base/files/usr/local/bin/clean-install#L28-L30
 FROM ubuntu
 RUN <<EOF
 set -o errexit
 apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get upgrade --yes
 DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
     systemd systemd-sysv dbus libpam-systemd openssh-server
 /usr/local/lib/pumpkin-controller/install.sh docker
