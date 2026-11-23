@@ -17,9 +17,11 @@ on the Docker provider alone, on the container's own engine.
 
 ## Trust
 
-The container is privileged, so a member who is root in it is root on the host. Each member is
-root in it, as each member's build runs as `pumpkin`, whose `docker` group is root, as on EC2. Run
-it on a machine or a VM that is the team's alone.
+The container is privileged, so whatever is root in it is root on the host. Each member is root in
+it, as each member's build runs as `pumpkin`, whose `docker` group is root, as on EC2. A sandbox
+that escapes its container on the container's engine is root in it too, and so on the host: on EC2
+such an escape reaches one instance, here the whole host. Run it on a machine or a VM that is the
+team's alone, and holds nothing else.
 
 ## Set up
 
@@ -27,12 +29,21 @@ Docker Engine with Compose v2 and Buildx, on a host with cgroup v2. Check out th
 release's tag, and in it write:
 
 - `.env`, with the release's `.pumpkinversion` line, and the address to publish `sshd` at if not
-  port 2222 of every address:
+  port 2222 of every address, as GitLab's compose file publishes its `sshd`
+  ([README](https://gitlab.com/gitlab-org/omnibus-gitlab/-/blob/9b9a2e883910b2f996fd23f4845435e0cdc71550/doc/docker/README.md#L143-L146)):
 
   ```sh
   PUMPKIN_RELEASE="<tag> <commit> <sha256>"
-  PUMPKIN_PORT=2222
+  PUMPKIN_PORT=192.0.2.10:2222
   ```
+
+  An address before the port publishes it there alone, as GitLab's README shows
+  ([README](https://gitlab.com/gitlab-org/omnibus-gitlab/-/blob/9b9a2e883910b2f996fd23f4845435e0cdc71550/doc/docker/README.md#L339-L353)).
+  Docker writes its own rules for a published port, ahead of a firewall such as ufw, which then
+  doesn't block it
+  ([docker run](https://github.com/docker/cli/blob/7287ab389066e1e8eefa94e240d013fd93d37ea0/docs/reference/commandline/run.md#L349-L352)).
+  So on a host with a public address, name the address of the network that the members reach it
+  on.
 
 - `conf/settings.toml`, the jobs' settings, of envelope 1.1, readable by every user, as each
   job reads it as `pumpkin`. `[deployment]` is the host's: the
@@ -63,8 +74,9 @@ docker compose up --detach --build
 ```
 
 The build downloads the release, and the start runs its install. `docker compose exec controller
-journalctl --unit=pumpkin-install` shows what the install said. `docker compose exec controller
-bash` is the admin's shell there.
+journalctl --unit=pumpkin-install` shows what the install said. `sshd` starts only once the install
+has succeeded: once `conf/` is fixed after one that failed, run `docker compose restart`. `docker
+compose exec controller bash` is the admin's shell there.
 
 Each member's `~/.config/pumpkin/pumpkin.toml` names the controller by its name and by the host
 and the port that reach `sshd`, beside its `[upstreams]`, but no `modal`, which needs an EC2
@@ -83,7 +95,40 @@ A machine that names other controllers beside it names this one with `--controll
 A machine's first `pumpkin` command makes its key. The controller refuses it, and the command
 prints the line to send the admin. Add it to `conf/members` under the member's name. The controller
 copies the list within a minute. The client pins the host key that the controller shows first, and
-the volume keeps it, so an upgrade keeps it too.
+the volume keeps it, so an upgrade keeps it too. Give each member the key's fingerprint, which
+
+```sh
+docker compose exec controller ssh-keygen -l -f /etc/ssh/keys/ssh_host_ed25519_key.pub
+```
+
+prints, to compare with the one their client pinned:
+
+```sh
+ssh-keygen -l -F '[lab.example.org]:2222' -f ~/.config/pumpkin/ssh/known_hosts
+```
+
+Taking a member's key off the list refuses it within a minute. The member was root on the host,
+though, so a member who is no longer trusted may have left anything there: make the host anew,
+with the records restored from a backup made before, and give the members the new host key's
+fingerprint. Each member's client then refuses the new key, and says how to unpin the old one.
+
+## Back up
+
+The volume `pumpkin_home` holds the runs' records, which members copy only as they wait for a run.
+Back it up with the container stopped, as Docker's documentation backs up a volume
+([volumes](https://docs.docker.com/engine/storage/volumes/#back-up-restore-or-migrate-data-volumes)):
+
+```sh
+docker compose stop
+docker run --rm --volume pumpkin_home:/home:ro --volume "$PWD":/backup ubuntu:24.04 \
+    tar --create --gzip --file=/backup/pumpkin_home.tar.gz --directory=/ home
+docker compose start
+```
+
+To restore it into a new host's volume, before its first start, unpack it with
+`--volume pumpkin_home:/home` and `tar --extract --gzip --file=/backup/pumpkin_home.tar.gz
+--directory=/`. The other volumes need no backup: the engine's images are built again, and a new
+host key is made.
 
 ## Upgrade
 

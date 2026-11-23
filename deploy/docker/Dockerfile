@@ -70,8 +70,9 @@ EOF
 RUN systemctl enable pumpkin-host-key.service
 
 # The install, at every start, from the settings in the directory that compose mounts. It enables
-# the boot's reap, which then runs after it. `sshd` starts after it, as a new container has none
-# of `sshd`'s settings and the members' keys until it has run.
+# the boot's reap, which then runs after it. `sshd` starts only once it has succeeded, as a new
+# container has none of `sshd`'s settings and the members' keys until it has run, and an `sshd`
+# without them would admit the keys that the kept home's `authorized_keys` holds.
 COPY <<EOF /etc/systemd/system/pumpkin-install.service
 [Unit]
 Description=Install the Pumpkin controller's host software from /opt/pumpkin
@@ -84,6 +85,7 @@ ExecStartPost=/usr/bin/systemctl start --no-block pumpkin-boot.service
 
 [Install]
 WantedBy=multi-user.target
+RequiredBy=ssh.service
 EOF
 RUN systemctl enable pumpkin-install.service
 
