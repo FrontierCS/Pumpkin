@@ -185,6 +185,14 @@ impl Shared {
                 let cut = "stopped before the tree was whole";
                 return Err(io::Error::new(io::ErrorKind::Interrupted, cut));
             }
+            // A deadline that has passed fails the collect at once, even with a part waiting.
+            // Else a tree sent faster than it is written could outlast it.
+            if by.left().is_none() {
+                return Err(match self.ended.get() {
+                    Some(_) => self.ended(),
+                    None => self.unanswered(),
+                });
+            }
             match self.receive(parts, by)? {
                 Ok(Part::Entry(entry)) => {
                     self.created(stream, tree.entry(&entry))?;

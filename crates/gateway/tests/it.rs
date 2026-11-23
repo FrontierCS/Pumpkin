@@ -61,13 +61,16 @@ const PAUSE: Duration = Duration::from_millis(30);
 // that peer's only outcome.
 const HELLO_BOUND: Duration = Duration::from_millis(50);
 
-// What the fake sandbox writes in its case's directory once it has stalled, which a `Still` of the
-// case takes as its event.
+// What a case writes in its directory at its event, which a `Still` of the case reads: the fake
+// sandbox's stall, or what the case's action marks.
 const STALLED: &str = "stalled";
 
 fn short() -> Duration {
     Machine.now() + Duration::from_millis(100)
 }
+
+// The thread that sends `start_late`'s start, and that looks late.
+const LATE: &str = "late";
 
 // What a `Still` reads once its event has come. A request whose deadline is `EVENT` ends on the
 // event. A deadline from `hung()` is later, so no event ends it.
@@ -83,9 +86,18 @@ const LOOK: Duration = Duration::from_millis(10);
 struct Still(Arc<dyn Fn() -> bool + Send + Sync>);
 
 impl Still {
-    // Its event is the fake sandbox's stall, which it marks by writing `marker`.
+    // Its event is the case's, which `marker` marks. A thread named `LATE` looks late: its first
+    // read is the start's write, and its second, the wait for `done`, waits for the event.
     fn until_stalled(marker: PathBuf) -> Self {
-        Self(Arc::new(move || marker.exists()))
+        thread_local!(static READS: Cell<u32> = const { Cell::new(0) });
+        Self(Arc::new(move || {
+            let earlier = READS.replace(READS.get() + 1);
+            let late = thread::current().name() == Some(LATE) && earlier == 1;
+            while late && !marker.exists() {
+                thread::sleep(LOOK);
+            }
+            marker.exists()
+        }))
     }
 
     // Its event is its second read.
@@ -696,6 +708,19 @@ fn late_reply(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -> 
     then_freeze(session, replied)
 }
 
+// The sandbox answers the start, then sends an op. The owner takes the op, then marks the event,
+// which passes the start's deadline before the start's thread looks.
+fn start_late(session: &mut Session, arrivals: &Receiver<Arrival>, dir: &Path) -> String {
+    let (_, send) = session.prepare_start(EVENT).unwrap();
+    let late = thread::Builder::new().name(LATE.to_owned());
+    let started = late.spawn(move || send(launch(), EVENT)).unwrap();
+    let op = next_op(arrivals);
+    fs::write(dir.join(STALLED), "").unwrap();
+    let started = outcome(started.join().unwrap());
+    let replied = outcome(session.reply(op, no_grants(), hung()));
+    format!("start: {started}; reply: {replied}")
+}
+
 fn collect_until_stalled(session: &mut Session, _: &Receiver<Arrival>, dir: &Path) -> String {
     let limits = Limits {
         bytes: u64::MAX,
@@ -1241,6 +1266,11 @@ fn deadlines() {
                 (late_reply, |s| {
                     vec![done(s), op(0, json!({ "kind": "ops" }), 0), await_reply()]
                 }),
+                // An answer that came before the deadline passed is taken, though its request
+                // looks only after.
+                (start_late, |s| {
+                    vec![done(s), op(0, json!({ "kind": "ops" }), 0), await_reply()]
+                }),
                 // A session that has ended gives its own reason, though the deadline has passed
                 // too.
                 (after_the_end, |s| vec![done(s)]),
@@ -1256,6 +1286,7 @@ fn deadlines() {
             TimedOut: the sandbox didn't answer before the request's deadline: expected its answer while the deadline lasts
             TimedOut: the request's deadline passed before it was sent: expected time left to send it; then ConnectionAborted: the request's deadline passed before it was sent: expected time left to send it
             TimedOut: the request's deadline passed before it was sent: expected time left to send it; then ConnectionAborted: the request's deadline passed before it was sent: expected time left to send it
+            start: ok; reply: ok; the sandbox heard op 0: {"kind":"ops","role":"agent","remaining_seconds":0,"resources":{"cpu_millis":1,"memory_bytes":1},"grants":[]}
             ok; then ConnectionAborted: the sandbox ended the session; then by a passed deadline ConnectionAborted: the sandbox ended the session
             ConnectionAborted: the sandbox ended the session; arrived ["a/"]"#]],
     );

@@ -19,7 +19,8 @@
 //! [`Clock`], so a slow link makes it wait, never fail. A wait blocks no longer than the clock's
 //! [`Clock::look`] before it reads the clock again. A request whose deadline passes fails with
 //! [`io::ErrorKind::TimedOut`] and ends the session; so does a sandbox that closes its connection,
-//! at once. A frame may also wait behind another writer's, until that writer's deadline.
+//! at once. A request takes an answer already waiting, however late it looks. A frame may also
+//! wait behind another writer's, until that writer's deadline.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufReader, Read, Write};
@@ -27,7 +28,7 @@ use std::net::{Shutdown, TcpStream};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -511,16 +512,15 @@ impl Shared {
     fn receive<R>(&self, replies: &Receiver<R>, by: Bound<'_, impl Clock>) -> io::Result<R> {
         // The gateway bounds no wait of its own. A slow link is latency, which only the operation
         // the request serves knows how long to wait out, as its deadline says; a sandbox that is
-        // gone closes its connection, which ends the session at once. A deadline that has passed
-        // fails at once, even with a frame waiting, so that a tree sent faster than it is written
-        // ends by it too.
+        // gone closes its connection, which ends the session at once. A reply already waiting wins
+        // over a passed deadline, as in `std`'s channel, for a thread that looks late:
+        // https://github.com/rust-lang/rust/blob/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/sync/mpmc/array.rs#L375-L388
         loop {
             let Some(wait) = by.wait() else {
-                return Err(self.timed_out(
-                    "the sandbox didn't answer before the request's deadline: expected its \
-                     answer while the deadline lasts"
-                        .to_owned(),
-                ));
+                return replies.try_recv().map_err(|error| match error {
+                    TryRecvError::Empty => self.unanswered(),
+                    TryRecvError::Disconnected => self.ended(),
+                });
             };
             match replies.recv_timeout(wait) {
                 Ok(reply) => return Ok(reply),

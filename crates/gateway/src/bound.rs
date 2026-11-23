@@ -6,7 +6,7 @@ use std::time::Duration;
 use stdx::Deadline;
 use stdx::time::{self, Clock};
 
-use crate::{Connection, ModelResponse, Session};
+use crate::{Connection, ModelResponse, Session, Shared};
 
 // The deadline `by`, a time on `clock`.
 pub(crate) struct Bound<'a, C> {
@@ -57,6 +57,17 @@ impl<C: Clock> ModelResponse<C> {
             clock: &self.clock,
             by: self.by,
         }
+    }
+}
+
+impl Shared {
+    // Ends the session for a request that its deadline passed without an answer.
+    pub(crate) fn unanswered(&self) -> io::Error {
+        self.timed_out(
+            "the sandbox didn't answer before the request's deadline: expected its answer while \
+             the deadline lasts"
+                .to_owned(),
+        )
     }
 }
 
