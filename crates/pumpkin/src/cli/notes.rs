@@ -577,9 +577,9 @@ pumpkin.toml is the machine's configuration, which `pumpkin run` reads, and
 the file that --config names, by default $HOME/.config/pumpkin/pumpkin.toml. It
 is TOML, with the tables below. Every key is required unless it says what its
 absence means. [gateway] and the [upstreams.<name>] tables may be left out. Any
-other key is refused. On a machine whose runs go to the person's controller,
-[controller] takes the place of [docker], [providers.<name>.<kind>] and
-[gateway].
+other key is refused. On a machine whose runs go to the person's controllers,
+[controllers.<name>] takes the place of [docker], [providers.<name>.<kind>]
+and [gateway].
 
 Example, of a machine whose runs go to EC2 and Modal:
   [docker]
@@ -628,20 +628,22 @@ Example, of a machine whose runs go to EC2 and Modal:
   upstream_name = \"provider/model-a\"
   usd_per_mtok = { input = 1.25, cached = 0.125, output = 10 }
 
-Example, of a machine whose runs go to the person's controller, and Modal:
-  [controller]
-  name = \"alice\"
+Example, of a machine whose runs go to the person's controllers, one with Modal:
+  [controllers.alice]
   region = \"us-west-1\"
 
-  [controller.modal]
+  [controllers.alice.modal]
   profile = \"pumpkin\"
 
-  [controller.modal.classes.a100]
+  [controllers.alice.modal.classes.a100]
   gpu = \"A100-80GB\"
   gpu_model = \"NVIDIA A100-SXM4-80GB\"
   cpu_millis = 8000
   memory_bytes = 68719476736
   startup_seconds = 1800
+
+  [controllers.lab]
+  address = \"lab.example.org:2222\"
 
 [docker] is the machine's Docker engine:
   context       The context that reaches it, as `docker context ls` lists it.
@@ -744,19 +746,23 @@ every model it allows.
 
 On a controller, each job reads its configuration from the controller's
 settings, which deploy/aws writes, or the admin of a controller on Docker. The
-job sets [gateway] itself. The client sends [upstreams] and [controller.modal].
+job sets [gateway] itself. The client sends [upstreams] and the controller's
+modal.
 The settings name `envelope`, the version of the envelope that wrote them.
 deploy/aws's README says which versions a job takes. The admin sets
 `draining = true` for a cutover. Each job is then refused as it starts, and the
 jobs that run go on to their ends.
 
-[controller] is the person's controller, which deploy/aws or deploy/docker
-makes. `run`, `wait`, `ls`, `cancel`, `view` and `reap` go to it, as each one's
-help says.
-Each run is sent the [upstreams.<name>] tables, their keys, [controller.modal]
-and Modal's configuration file. They go into a directory of the run's own in
-the controller's tmpfs, which the run's end removes. The job runs the client's
-install with the controller's settings and [controller.modal].
+[controllers.<name>] is a controller of the person's, which deploy/aws or
+deploy/docker makes. <name> is its name, as its settings' [deployment] name it.
+`run`, `wait`, `ls`, `cancel`, `view` and `reap` go to the one that
+--controller names, as each one's help says. Without --controller, they go to
+the configuration's one controller, and refuse if it names several. Copies of
+a controller's runs' records are in <name> in the runs directory.
+Each run is sent the [upstreams.<name>] tables, their keys, the controller's
+modal and Modal's configuration file. They go into a directory of the run's own
+in the controller's tmpfs, which the run's end removes. The job runs the
+client's install with the controller's settings and modal.
 The client uses ssh, ssh-keygen and git from PATH, and AWS CLI v2 for `region`.
 It sends the task's files and starts its job over SSH. It uses up to four
 connections for large task uploads. The first command creates a key. The
@@ -764,8 +770,6 @@ controller admits the key once its admin lists it under the person's name in
 the controller's members' list. Until then, each command is refused with the
 line to send the admin. The client keeps that key and the pinned host key in
 $HOME/.config/pumpkin/ssh/.
-  name          The name of the controller, as its settings' [deployment] name
-                it.
   region        The region that deploy/aws was applied in, for a controller
                 that deploy/aws made. The client finds it there by its tag,
                 starts it if it is stopped, and reaches it at its private
@@ -776,8 +780,8 @@ $HOME/.config/pumpkin/ssh/.
                 client never starts it. A configuration names `region` or
                 `address`, not both.
 
-[controller.modal] is the Modal provider that the controller's runs may place
-roles on, if any, on a controller that deploy/aws made. It takes the settings
+[controllers.<name>.modal] is the Modal provider that the controller's runs may
+place roles on, if any, on a controller that deploy/aws made. It takes the settings
 of a provider of kind modal, but `images`, which the module's settings give,
 and `dials_from`, which each run sets:
   profile       As modal's. The profile is in Modal's configuration file,

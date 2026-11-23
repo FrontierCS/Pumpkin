@@ -2,7 +2,10 @@
 //! own providers, or [`Client`] for one whose runs go to a controller.
 //!
 //! `pumpkin help config` is the home of what each key means and which are optional; this module
-//! refuses any other key, and a file that mixes the two forms.
+//! refuses any other key, and a file that mixes the two forms. A client's configuration names each
+//! of its controllers in a table of its own, `[controllers.<name>]`, as cargo names each registry
+//! in `[registries.<name>]` and takes one by `--registry`
+//! ([config.md](https://github.com/rust-lang/cargo/blob/4bc8f24d3e899462e43621aab981f6383a370365/src/doc/src/reference/config.md#L870-L910)).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -26,8 +29,8 @@ pub(crate) struct Config {
     pub(crate) upstreams: Upstreams,
 }
 
-/// A machine whose runs go to a controller: its `[controller]`, and the `[upstreams]` and
-/// `[controller.modal]` that each job is sent.
+/// A machine whose runs go to a controller: the one of its `[controllers.<name>]` that a command
+/// goes to, and the `[upstreams]` and that controller's `modal` that each job is sent.
 pub(crate) struct Client {
     pub(crate) controller: Controller,
     pub(crate) upstreams: Upstreams,
@@ -37,7 +40,14 @@ pub(crate) struct Client {
 
 enum Target {
     Machine(Config),
-    Controller(Client),
+    Controllers(Controllers),
+}
+
+/// A client's configuration: each controller that it names, at least one, by its name.
+struct Controllers {
+    by_name: BTreeMap<crate::controller::Name, Controller>,
+    upstreams: Upstreams,
+    path: PathBuf,
 }
 
 // No table that a controller's settings hold has `deny_unknown_fields`. So a job can ignore a key
@@ -49,11 +59,10 @@ struct Tables {
     gateway: Option<Gateway>,
     #[serde(default)]
     upstreams: Upstreams,
-    controller: Option<Controller>,
+    controllers: Option<BTreeMap<crate::controller::Name, ControllerTable>>,
 }
 
-#[derive(Deserialize)]
-#[serde(try_from = "ControllerTable")]
+/// A controller that a client names, `[controllers.<name>]`.
 pub(crate) struct Controller {
     pub(crate) name: crate::controller::Name,
     pub(crate) find: Find,
@@ -76,18 +85,14 @@ pub(crate) enum Find {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ControllerTable {
-    name: crate::controller::Name,
     region: Option<aws::Region>,
     address: Option<crate::controller::Address>,
     modal: Option<ClientModal>,
 }
 
-impl TryFrom<ControllerTable> for Controller {
-    type Error = String;
-
-    fn try_from(table: ControllerTable) -> Result<Self, Self::Error> {
+impl Controller {
+    fn of(name: crate::controller::Name, table: ControllerTable) -> Result<Self, String> {
         let ControllerTable {
-            name,
             region,
             address,
             modal,
@@ -96,12 +101,11 @@ impl TryFrom<ControllerTable> for Controller {
             (Some(region), None) => Find::Ec2 { region },
             (None, Some(address)) => Find::Address(address),
             (Some(_), Some(_)) | (None, None) => {
-                return Err(
-                    "`[controller]` names both or neither of `region` and `address`: name the \
-                     `region` of a controller that deploy/aws made, or the `address` of one \
+                return Err(format!(
+                    "`[controllers.{name}]` names both or neither of `region` and `address`: name \
+                     the `region` of a controller that deploy/aws made, or the `address` of one \
                      elsewhere"
-                        .to_owned(),
-                );
+                ));
             }
         };
         Ok(Self { name, find, modal })
@@ -117,12 +121,13 @@ pub(crate) struct ClientModal {
     classes: BTreeMap<Name, modal::SandboxClass>,
 }
 
-/// What a client sends of its configuration with each job, which the job reads: its upstreams,
-/// each with its key in a file of its own beside this, named by [`key_file`], and its Modal
-/// provider's `profile` and `classes`.
+/// What a client sends of its configuration with each job, which the job reads: its name for the
+/// controller, which the job's refusals name, its upstreams, each with its key in a file of its own
+/// beside this, named by [`key_file`], and its Modal provider's `profile` and `classes`.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Sent {
+    pub(crate) controller: crate::controller::Name,
     #[serde(default)]
     pub(crate) upstreams: Upstreams,
     pub(crate) modal: Option<SentModal>,
@@ -381,7 +386,7 @@ fn address<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<GatewayA
 }
 
 /// The machine's configuration in the file at `path`. Fails, naming the file, if it isn't one, as
-/// when it names `[controller]`.
+/// when it names `[controllers]`.
 pub(crate) fn read(path: &Path) -> Result<Config, String> {
     parse(path, &text(path)?)
 }
@@ -401,7 +406,7 @@ fn text(path: &Path) -> Result<String, String> {
 pub(crate) fn upstreams(path: &Path) -> Result<Upstreams, String> {
     match target(path, &text(path)?)? {
         Target::Machine(Config { upstreams, .. })
-        | Target::Controller(Client { upstreams, .. }) => Ok(upstreams),
+        | Target::Controllers(Controllers { upstreams, .. }) => Ok(upstreams),
     }
 }
 
@@ -409,41 +414,112 @@ pub(crate) fn upstreams(path: &Path) -> Result<Upstreams, String> {
 pub(crate) fn parse(path: &Path, text: &str) -> Result<Config, String> {
     match target(path, text)? {
         Target::Machine(config) => Ok(config),
-        Target::Controller(_) => Err(format!(
-            "{}: it names `[controller]`, and so no Docker engine of this machine's: name a \
+        Target::Controllers(_) => Err(format!(
+            "{}: it names `[controllers]`, and so no Docker engine of this machine's: name a \
              configuration with `[docker]` with `--config`",
             path.display()
         )),
     }
 }
 
-/// The client's configuration at `config`, or at the default path, and `None` for a machine whose
-/// runs don't go to a controller: the file can't be read, or doesn't name `[controller]`. Fails,
-/// naming the file, if it names `[controller]` but isn't a client's configuration.
-pub(crate) fn client(config: Option<&str>) -> Result<Option<Client>, String> {
-    let path = match config {
-        Some(config) => PathBuf::from(config),
+/// The client's configuration at `config`, or at the default path, with the controller that
+/// `controller` names, or the one it names if it names one alone. `None` for a machine whose runs
+/// don't go to a controller: the file can't be read, or names no `[controllers]`, and `controller`
+/// is `None`. Fails, naming the file, if it names `[controllers]` but isn't a client's
+/// configuration, if it names several and `controller` is `None`, or if it names none that
+/// `controller` names.
+pub(crate) fn client(
+    config: Option<&str>,
+    controller: Option<&crate::controller::Name>,
+) -> Result<Option<Client>, String> {
+    let path = match (config, controller) {
+        (Some(config), _) => PathBuf::from(config),
+        (None, Some(_)) => crate::default_config()?,
         // Without `HOME` there is no default one to send runs anywhere.
-        None => match crate::default_config() {
+        (None, None) => match crate::default_config() {
             Ok(path) => path,
             Err(_) => return Ok(None),
         },
     };
-    // What can't be read is left to the command that reads it, which says why.
-    let Ok(text) = fs::read_to_string(&path) else {
-        return Ok(None);
+    let text = match (fs::read_to_string(&path), controller) {
+        (Ok(text), _) => text,
+        (Err(error), Some(name)) => {
+            return Err(format!(
+                "the configuration {} can't be read ({error}): write one there that names \
+                 `[controllers.{name}]`, as `pumpkin help config` says",
+                path.display()
+            ));
+        }
+        // What can't be read is left to the command that reads it, which says why.
+        (Err(_), None) => return Ok(None),
     };
-    match target(&path, &text) {
-        Ok(Target::Controller(client)) => Ok(Some(client)),
-        Ok(Target::Machine(_)) => Ok(None),
+    let target = match target(&path, &text) {
+        Ok(target) => target,
         Err(error) => {
             let raw = toml::from_str::<toml::Table>(&text);
-            if raw.is_ok_and(|raw| raw.contains_key("controller")) {
+            let named = |raw: &toml::Table| {
+                ["controllers", "controller"]
+                    .iter()
+                    .any(|key| raw.contains_key(*key))
+            };
+            if controller.is_some() || raw.is_ok_and(|raw| named(&raw)) {
                 return Err(error);
             }
-            Ok(None)
+            return Ok(None);
         }
+    };
+    match (target, controller) {
+        (Target::Controllers(controllers), named) => chosen(controllers, named).map(Some),
+        (Target::Machine(_), None) => Ok(None),
+        (Target::Machine(_), Some(name)) => Err(format!(
+            "{}: it names no `[controllers]`, so no controller `{name}`, as its runs go to its own \
+             providers: leave out `--controller`, or name `[controllers.{name}]` there",
+            path.display()
+        )),
     }
+}
+
+/// The client of the controller of `controllers` that `name` names, or of its one controller
+/// without a name. Fails, listing the names, if it names several and `name` is `None`, or none
+/// that `name` names.
+// As kubectl and docker take a context by `--context`. With several and no flag, no default is
+// guessed, and no variable of the environment names one.
+// https://github.com/kubernetes/cli-runtime/blob/e328bc3797cf67493003ce68c56c98d405cc63e4/pkg/genericclioptions/config_flags.go#L418
+// https://github.com/docker/cli/blob/7287ab389066e1e8eefa94e240d013fd93d37ea0/cli/flags/common.go#L74-L75
+fn chosen(
+    controllers: Controllers,
+    name: Option<&crate::controller::Name>,
+) -> Result<Client, String> {
+    let Controllers {
+        mut by_name,
+        upstreams,
+        path,
+    } = controllers;
+    let names: Vec<String> = by_name.keys().map(|name| format!("`{name}`")).collect();
+    let picked = match name {
+        Some(name) => by_name.remove(name),
+        None if by_name.len() == 1 => by_name.into_values().next(),
+        None => None,
+    };
+    let Some(controller) = picked else {
+        return Err(match name {
+            Some(name) => format!(
+                "{}: it names no controller `{name}`: name one of {} with `--controller`",
+                path.display(),
+                names.join(", ")
+            ),
+            None => format!(
+                "{}: it names several controllers, {}: name one with `--controller`",
+                path.display(),
+                names.join(", ")
+            ),
+        });
+    };
+    Ok(Client {
+        controller,
+        upstreams,
+        path,
+    })
 }
 
 fn target(path: &Path, text: &str) -> Result<Target, String> {
@@ -456,7 +532,7 @@ fn target(path: &Path, text: &str) -> Result<Target, String> {
             providers,
             gateway,
             mut upstreams,
-            controller,
+            controllers,
         },
         unknown,
     ) = parsed.map_err(shown).context(path.display())?;
@@ -469,7 +545,7 @@ fn target(path: &Path, text: &str) -> Result<Target, String> {
     for upstream in upstreams.0.values_mut() {
         upstream.key_file = dir.join(&upstream.key_file);
     }
-    if let Some(controller) = controller {
+    if let Some(controllers) = controllers {
         let beside: Vec<&str> = [
             ("`[docker]`", docker.is_some()),
             ("`[providers]`", providers.is_some()),
@@ -480,23 +556,34 @@ fn target(path: &Path, text: &str) -> Result<Target, String> {
         .collect();
         if !beside.is_empty() {
             return Err(format!(
-                "{}: it names `[controller]` beside {}: a machine's runs go either to its \
-                 controller or to its own providers, so keep `[controller]`, beside \
+                "{}: it names `[controllers]` beside {}: a machine's runs go either to its \
+                 controllers or to its own providers, so keep `[controllers]`, beside \
                  `[upstreams]`, or remove it",
                 path.display(),
                 beside.join(" and ")
             ));
         }
-        return Ok(Target::Controller(Client {
-            controller,
+        if controllers.is_empty() {
+            return Err(format!(
+                "{}: `[controllers]` names no controller: name each in `[controllers.<name>]`, \
+                 as `pumpkin help config` says",
+                path.display()
+            ));
+        }
+        let controllers = (controllers.into_iter())
+            .map(|(name, table)| Ok((name.clone(), Controller::of(name, table)?)))
+            .collect::<Result<_, String>>()
+            .context(path.display())?;
+        return Ok(Target::Controllers(Controllers {
+            by_name: controllers,
             upstreams,
             path: path.to_owned(),
         }));
     }
     let missing = |table: &str| {
         format!(
-            "{}: `[{table}]` is missing: name it, or `[controller]`, as `pumpkin help config` \
-             says",
+            "{}: `[{table}]` is missing: name it, or `[controllers.<name>]`, as `pumpkin help \
+             config` says",
             path.display()
         )
     };
@@ -518,7 +605,13 @@ fn known(path: &Path, text: &str, unknown: &[Vec<Step>]) -> Result<(), String> {
         return Ok(());
     }
     let document = toml::from_str(text).map_err(|error| error.to_string().trim_end().to_owned());
-    let names = removed(&mut document.context(path.display())?, unknown);
+    let mut document = document.context(path.display())?;
+    if let toml::Value::Table(tables) = &document
+        && let Some(single) = tables.get("controller")
+    {
+        return Err(format!("{}: {}", path.display(), single_controller(single)));
+    }
+    let names = removed(&mut document, unknown);
     let them = if names.len() == 1 { "it" } else { "them" };
     Err(format!(
         "{}: no table of a configuration takes {}: remove {them}, as `pumpkin help config` says \
@@ -543,6 +636,27 @@ pub(crate) fn remove_unknown(tables: &mut toml::Table) -> Result<Vec<String>, St
     };
     *tables = document;
     Ok(names)
+}
+
+/// What a configuration that names `[controller]`, the table `single`, is to change: each
+/// controller is named in a table of its own, by the name that `[controller]` holds, and so is
+/// each table below it.
+fn single_controller(single: &toml::Value) -> String {
+    let name = single.get("name").and_then(toml::Value::as_str);
+    let name = name.filter(|name| crate::controller::Name::try_from((*name).to_owned()).is_ok());
+    let (table, removed) = match name {
+        Some(name) => (
+            name.to_owned(),
+            format!(", and remove its `name = \"{name}\"`"),
+        ),
+        None => ("<name>".to_owned(), ", and remove its `name`".to_owned()),
+    };
+    format!(
+        "`[controller]` is a single unnamed table, and a configuration names each controller in \
+         `[controllers.<name>]`: rename `[controller]` to `[controllers.{table}]`, and each table \
+         below it, such as `[controller.modal]`, to the same below `[controllers.{table}]`, such as \
+         `[controllers.{table}.modal]`{removed}"
+    )
 }
 
 // A step from a value into one it holds. It goes by a table's key, by an array's index, or into the
@@ -657,16 +771,24 @@ impl Client {
                 classes: classes.clone(),
             }
         });
-        (Sent { upstreams, modal }, keys)
+        let controller = self.controller.name.clone();
+        let sent = Sent {
+            controller,
+            upstreams,
+            modal,
+        };
+        (sent, keys)
     }
 
-    /// The contents of Modal's configuration file, `~/.modal.toml`. `None` if `[controller.modal]`
-    /// is absent or the file doesn't exist.
+    /// The contents of Modal's configuration file, `~/.modal.toml`. `None` if the controller has
+    /// no `modal` or the file doesn't exist.
     pub(crate) fn modal_file(&self) -> Result<Option<Vec<u8>>, String> {
         if self.controller.modal.is_none() {
             return Ok(None);
         }
-        let path = crate::home("remove `[controller.modal]`")?.join(".modal.toml");
+        let name = &self.controller.name;
+        let path =
+            crate::home(&format!("remove `[controllers.{name}.modal]`"))?.join(".modal.toml");
         if !path.try_exists().context(path.display())? {
             return Ok(None);
         }

@@ -69,9 +69,9 @@ locals {
 # them takes effect at the next job. Their `[deployment]` names the deployment and the members'
 # parameter. The host's members unit reads it every minute, and each job leaves it out. They name
 # the controller's Docker engine, the EC2 provider `aws`, and, with a pull role, the `images` of
-# the Modal provider `modal`. A job drops `images` if its client sends no `[controller.modal]`.
-# With `draining`, each job is refused as it starts. Nothing else is here: the rest is each job's
-# own or its client's. The advanced tier holds 8 KB.
+# the Modal provider `modal`. A job drops `images` if its client sends no
+# `[controllers.<name>.modal]`. With `draining`, each job is refused as it starts. Nothing else is
+# here: the rest is each job's own or its client's. The advanced tier holds 8 KB.
 resource "aws_ssm_parameter" "settings" {
   name = "/${local.prefix}/settings"
   type = "String"
@@ -163,7 +163,7 @@ resource "aws_instance" "controller" {
     encrypted   = true
   }
 
-  # The tag by which `pumpkin` finds the controller of `[controller] name`.
+  # The tag by which `pumpkin` finds the controller of `[controllers.<name>]`.
   tags = { Name = "${local.prefix}-controller", "pumpkin:controller" = var.name }
 
   # cloud-init runs the user data at the instance's first boot alone. So a new `pumpkin_release`

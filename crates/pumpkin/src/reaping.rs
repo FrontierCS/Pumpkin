@@ -32,11 +32,10 @@ pub(crate) const STOPPING: &str = "it ends once its sandboxes are deleted";
 pub(crate) fn cancel(flags: cli::CancelRun) -> Result<Exit, String> {
     let cli::CancelRun {
         cancel: flags,
+        controller,
         any_member,
     } = flags;
-    if let (cli::RunName::Prefix(prefix), None) = (&flags.run, &flags.runs)
-        && let Some(client) = config::client(None)?
-    {
+    if let Some((client, prefix)) = crate::client_of(&flags.run, flags.runs.as_ref(), controller)? {
         return controller::cancel(&client, prefix, any_member);
     }
     let cli::Cancel {
@@ -45,7 +44,7 @@ pub(crate) fn cancel(flags: cli::CancelRun) -> Result<Exit, String> {
         modal_config,
     } = flags;
     let (record, named) = found(run, runs)?;
-    let named = named.as_deref();
+    let named = &next::At::runs(named.as_deref());
     if signalled(&record)? {
         say(format_args!(
             "stopping run {}, recorded in {}: {STOPPING}",
@@ -126,15 +125,19 @@ pub(crate) enum Reaper {
 /// the id of each that had left something; leaves each live run to its driver. The exit status is
 /// `reap`'s, but 0 for [`Reaper::Boot`] though a provider can't be reached.
 pub(crate) fn reap(flags: cli::Reap, reaper: Reaper) -> Result<Exit, String> {
-    let cli::Reap { runs, modal_config } = flags;
+    let cli::Reap {
+        runs,
+        controller,
+        modal_config,
+    } = flags;
     if reaper == Reaper::Command
         && runs.is_none()
-        && let Some(client) = config::client(None)?
+        && let Some(client) = config::client(None, controller.as_ref())?
     {
         return controller::reap(&client);
     }
     let (runs, named) = runs_dir(runs)?;
-    let named = named.as_deref();
+    let named = &next::At::runs(named.as_deref());
     let mut swept = ReapedRuns::default();
     sweep(Path::new(&runs), modal_config, reaper, |reaping| {
         swept.said(reaping, named, reaper)
@@ -247,8 +250,8 @@ impl RunReaped {
 
     /// Says what the reap of a cancelled run did, as [`Self::say`] does: whether each of its
     /// providers was reached, or why the reap failed.
-    pub(crate) fn said(self, runs: Option<&str>, reaper: Reaper) -> Result<bool, String> {
-        self.say(runs, reaper);
+    pub(crate) fn said(self, at: &next::At, reaper: Reaper) -> Result<bool, String> {
+        self.say(at, reaper);
         match self.failed {
             Some(failed) => Err(failed),
             None => Ok(self.unreached.is_empty()),
@@ -256,9 +259,9 @@ impl RunReaped {
     }
 
     /// Says what the reap removed, and of each provider that it couldn't reach, what may remain
-    /// and what to do, as `reaper` has it, naming `runs` as commands name the runs directory. Says
-    /// nothing of [`Self::failed`].
-    fn say(&self, runs: Option<&str>, reaper: Reaper) {
+    /// and what to do, as `reaper` has it, naming the runs where `at` says. Says nothing of
+    /// [`Self::failed`].
+    fn say(&self, at: &next::At, reaper: Reaper) {
         let Self {
             id,
             record,
@@ -276,7 +279,7 @@ impl RunReaped {
                      removed, as it can't be reached: {error}; once it can be, `{}` removes \
                      them, and if it is gone for good, remove the record, {record}, to stop \
                      reaping it",
-                    next::reap(runs),
+                    next::reap(at),
                 )),
                 Reaper::Boot => say(format_args!(
                     "run {id}'s sandboxes on provider `{name}`, if it left any, end by the run's \
@@ -325,17 +328,17 @@ pub(crate) struct ReapedRuns {
 }
 
 impl ReapedRuns {
-    /// Says what came of a run, `reaping`, as `reaper` has it, naming `runs` as commands name the
-    /// runs directory; prints the id of a run that had left something, now removed; and counts it.
+    /// Says what came of a run, `reaping`, as `reaper` has it, naming the runs where `at` says;
+    /// prints the id of a run that had left something, now removed; and counts it.
     pub(crate) fn said(
         &mut self,
         reaping: Reaping,
-        runs: Option<&str>,
+        at: &next::At,
         reaper: Reaper,
     ) -> Result<(), String> {
         match reaping {
             Reaping::Reaped(run) => {
-                run.say(runs, reaper);
+                run.say(at, reaper);
                 if let Some(failed) = &run.failed {
                     say(failed);
                     self.unreaped.push(run.id);
@@ -364,7 +367,7 @@ impl ReapedRuns {
     }
 
     /// Says what the runs came to, and returns the exit status that it makes.
-    pub(crate) fn report(self, named: Option<&str>, reaper: Reaper) -> Exit {
+    pub(crate) fn report(self, at: &next::At, reaper: Reaper) -> Exit {
         let Self {
             unreaped,
             unreached,
@@ -381,7 +384,7 @@ impl ReapedRuns {
             say(format_args!(
                 "{runs} can't be reaped, as said above: fix what each says, and reap again"
             ));
-            advise("reap again", &next::reap(named));
+            advise("reap again", &next::reap(at));
             return Exit::Failure;
         }
         if !unreached.is_empty() && reaper != Reaper::Boot {
@@ -390,7 +393,7 @@ impl ReapedRuns {
                 "{runs} ran on a provider that can't be reached, as said above: what each left \
              there may remain"
             ));
-            advise("reap again once it can be reached", &next::reap(named));
+            advise("reap again once it can be reached", &next::reap(at));
             return Exit::Partial;
         }
         Exit::Success

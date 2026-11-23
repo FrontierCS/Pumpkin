@@ -17,8 +17,8 @@ use stdx::Deadline;
 use stdx::process::{self, Bound, Echo, Environment, Failure, Run, Stream};
 
 use super::{
-    PUMPKIN_TIMEOUT, checked, copy_tree, followed, head_commit, holding, kill_job, member_ssh,
-    pumpkin, task_repository,
+    PUMPKIN_TIMEOUT, checked, controlled, copy_tree, followed, head_commit, holding, kill_job,
+    member_ssh, pumpkin, task_repository,
 };
 use crate::repo::STEP_TIMEOUT;
 use crate::{BUILD_TIMEOUT, MUSL, Result, ran, root, step, target_dir};
@@ -29,8 +29,12 @@ const PROJECT: &str = "pumpkin-live";
 /// The service of `deploy/docker/compose.yaml`.
 const SERVICE: &str = "controller";
 
-/// The name of the controller, in its settings.
+/// The name of the controller, in its settings and in each client's configuration.
 const NAME: &str = "live";
+
+/// Another controller that each client's configuration names, which no command reaches, as each
+/// names [`NAME`] by `--controller`.
+const ELSEWHERE: &str = "elsewhere";
 
 /// The member of the first client.
 const FIRST: &str = "first";
@@ -64,9 +68,11 @@ context = "default"
 [providers.local.docker]
 "#;
 
-/// Makes the controller and joins it from a new home. Checks the uptime it says, runs the smoke
-/// through it, and checks that it refuses its members a terminal, keeps a second member from
-/// cancelling the first's run and refuses a key taken off its list. With `lost`, it loses a run
+/// Makes the controller and joins it from a new home, which names another controller too. Checks
+/// the uptime it says, that it refuses runs that never fit it before building them, and that a run
+/// that fits once another ends waits for it. Runs the smoke through it, and checks that it refuses
+/// its members a terminal, keeps a second member from cancelling the first's run and refuses a key
+/// taken off its list. With `lost`, it loses a run
 /// instead, makes the controller's container anew, and checks that its boot reaped the run.
 /// Removes the controller on every path.
 pub(crate) fn controller(lost: bool) -> Result<()> {
@@ -98,6 +104,8 @@ pub(crate) fn controller(lost: bool) -> Result<()> {
             return reaped_at_boot(&compose, &client);
         }
         up_since(&client, started, booted)?;
+        never_fits(&compose, &client)?;
+        waits_for_room(&compose, &client)?;
         smoke(&compose, &client)?;
         forced(&compose, &client)?;
         let other = Client::join(&compose, &repo, &scratch, OTHER, &[&client])?;
@@ -265,8 +273,10 @@ impl Client {
         let home = scratch.join(member);
         let config = home.join(".config/pumpkin");
         fs::create_dir_all(&config)?;
+        // Port 1 of loopback, where nothing listens.
         let text = format!(
-            "[controller]\nname = \"{NAME}\"\naddress = \"127.0.0.1:{}\"\n",
+            "[controllers.{NAME}]\naddress = \"127.0.0.1:{}\"\n\n[controllers.{ELSEWHERE}]\n\
+             address = \"127.0.0.1:1\"\n",
             compose.port
         );
         fs::write(config.join("pumpkin.toml"), text)?;
@@ -275,6 +285,7 @@ impl Client {
             home,
             repo: repo.to_owned(),
         };
+        client.chooses()?;
         let Said { passed, said } = client.ls()?;
         if passed || !said.contains("refused this machine's key") {
             return Err(format!(
@@ -328,10 +339,35 @@ impl Client {
         Ok(key.trim_end().to_owned())
     }
 
+    /// `./pumpkin` with `args`, a command and its arguments, of controller [`NAME`].
     fn pumpkin(&self, args: &[&str]) -> Command {
-        let mut command = pumpkin(&self.repo);
-        command.args(args).env("HOME", &self.home);
+        let mut command = controlled(&self.repo, NAME, args);
+        command.env("HOME", &self.home);
         command
+    }
+
+    /// Fails unless `./pumpkin ls` without `--controller` refuses, naming both controllers of the
+    /// configuration.
+    fn chooses(&self) -> Result<()> {
+        let mut ls = pumpkin(&self.repo);
+        ls.arg("ls").env("HOME", &self.home);
+        let how = Run::new(Bound::Within(PUMPKIN_TIMEOUT), Echo::Silent).named("./pumpkin ls");
+        let output = match process::run(&mut ls, how) {
+            Ok(output) | Err(Failure::Exited { output, .. }) => output,
+            Err(failure) => return Err(failure.to_string().into()),
+        };
+        let said = String::from_utf8_lossy(&output.stderr);
+        let names = format!("`{ELSEWHERE}`, `{NAME}`");
+        if output.status.success() || !said.contains(&names) {
+            return Err(format!(
+                "`./pumpkin ls` without `--controller`, of a configuration of two controllers, \
+                 ended with {} and said: {}: expected a refusal that names {names}",
+                output.status,
+                said.trim()
+            )
+            .into());
+        }
+        Ok(())
     }
 
     /// What `./pumpkin` with `args` came to.
@@ -491,7 +527,7 @@ fn smoke(compose: &Compose, client: &Client) -> Result<()> {
             "`./pumpkin run` of run {id} ended with {status}, as it said above"
         ));
     }
-    let record = client.repo.join(".pumpkin/runs").join(&id);
+    let record = client.repo.join(".pumpkin/runs").join(NAME).join(&id);
     failed.extend(checked(&record, false));
     let left = left(compose, &id)?;
     if !left.is_empty() {
@@ -505,6 +541,141 @@ fn smoke(compose: &Compose, client: &Client) -> Result<()> {
         return Ok(());
     }
     Err(failed.join("; ").into())
+}
+
+/// How long a run that never fits may take to be refused: its tree's upload, its job's start, and
+/// the job's connect of the Docker provider and placement of the roles, each a matter of seconds.
+const REFUSED_BY: Duration = Duration::from_secs(30);
+
+/// Fails unless the controller refuses, within `REFUSED_BY` and before building anything, each of
+/// two variants of `examples/hello` that never fit its machine, though no other run holds a CPU:
+/// one whose agent needs a CPU more than the machine has, and one whose agent and counter, which
+/// run at once, each need over half of them.
+fn never_fits(compose: &Compose, client: &Client) -> Result<()> {
+    let online = compose.exec(&["getconf", "_NPROCESSORS_ONLN"])?;
+    let cpus: u64 = (online.trim().parse())
+        .map_err(|error| format!("`getconf _NPROCESSORS_ONLN` printed `{online}`: {error}"))?;
+    let hello = fs::read_to_string(client.repo.join("hello/task.star"))?;
+    let needs = r#""needs": {"cpu_millis": 500,"#;
+    let needing = |count: usize, cpus: u64| {
+        hello.replacen(
+            needs,
+            &format!(r#""needs": {{"cpu_millis": {},"#, cpus * 1000),
+            count,
+        )
+    };
+    let probes = [
+        ("wide", needing(1, cpus + 1), "fits no class of sandbox"),
+        ("pair", needing(2, cpus / 2 + 1), "need more whole cores"),
+    ];
+    let images = || compose.exec(&["docker", "image", "ls", "--all", "--quiet"]);
+    let before = images()?;
+    let mut failed = Vec::new();
+    for (name, task, refusal) in probes {
+        let entry = format!("hello/{name}.star");
+        fs::write(client.repo.join(&entry), task)?;
+        let asked = Instant::now();
+        let Said { passed, said } = client.said(&["run", "--wait", &entry])?;
+        let took = asked.elapsed();
+        let named = format!("controller `{NAME}`");
+        // The controller user's home holds the job's tree and configuration, which are no member's.
+        let internal = said.contains("/home/pumpkin/");
+        if passed
+            || !said.contains(refusal)
+            || !said.contains(&named)
+            || internal
+            || took > REFUSED_BY
+        {
+            failed.push(format!(
+                "`./pumpkin run --wait {entry}` took {} s and said: {said}: expected a refusal \
+                 within {} s that names {named}, says `{refusal}` and no path of the \
+                 controller's",
+                took.as_secs(),
+                REFUSED_BY.as_secs()
+            ));
+        } else {
+            let line = said
+                .lines()
+                .find(|line| line.contains(refusal))
+                .unwrap_or_default();
+            println!(
+                "xtask: the controller refused {entry}, which never fits it, in {} ms: {line}",
+                took.as_millis()
+            );
+        }
+    }
+    let after = images()?;
+    if after != before {
+        failed.push(format!(
+            "the controller's engine held images {} before the runs that never fit, and {} \
+             after: expected that they built nothing",
+            before.split_whitespace().collect::<Vec<_>>().join(", "),
+            after.split_whitespace().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    if failed.is_empty() {
+        return Ok(());
+    }
+    Err(failed.join("; ").into())
+}
+
+/// Fails unless two runs of a variant of `examples/hello`, which fit the controller's machine one
+/// at a time but not together, both finish, one of them once it has waited for the other's cores
+/// and said so. The agent of each needs over half the CPUs, and stays a while.
+fn waits_for_room(compose: &Compose, client: &Client) -> Result<()> {
+    let online = compose.exec(&["getconf", "_NPROCESSORS_ONLN"])?;
+    let cpus: u64 = (online.trim().parse())
+        .map_err(|error| format!("`getconf _NPROCESSORS_ONLN` printed `{online}`: {error}"))?;
+    let hello = fs::read_to_string(client.repo.join("hello/task.star"))?;
+    let half = hello
+        .replacen(
+            r#""needs": {"cpu_millis": 500,"#,
+            &format!(r#""needs": {{"cpu_millis": {},"#, (cpus / 2 + 1) * 1000),
+            1,
+        )
+        .replacen(
+            "echo hello > greeting",
+            "sleep 20\necho hello > greeting",
+            1,
+        );
+    let entry = "hello/half.star";
+    fs::write(client.repo.join(entry), half)?;
+    let first = client.said(&["run", entry])?;
+    let id = (first.said.lines())
+        .find_map(|line| {
+            line.strip_prefix("pumpkin: run ")?
+                .split_once(" goes to controller ")
+        })
+        .map(|(id, _)| id.to_owned());
+    let Some(id) = id.filter(|_| first.passed) else {
+        return Err(format!(
+            "`./pumpkin run {entry}` said: {}: expected a run's id",
+            first.said
+        )
+        .into());
+    };
+    let second = client.said(&["run", "--wait", entry])?;
+    let waited = client.said(&["wait", &id])?;
+    let waits = "waits for room on provider `local`";
+    let finished = |said: &Said| said.passed && said.said.contains("finished with a result");
+    if finished(&second)
+        && finished(&waited)
+        && (second.said.contains(waits) || waited.said.contains(waits))
+    {
+        let line = [&second.said, &waited.said]
+            .into_iter()
+            .flat_map(|said| said.lines())
+            .find(|line| line.contains(waits))
+            .unwrap_or_default();
+        println!("xtask: of two runs that fit one at a time, one waited for the other: {line}");
+        return Ok(());
+    }
+    Err(format!(
+        "of two runs of {entry}, which fit one at a time, the second said: {}; and the first: {}: \
+         expected that both finished with a result, one once it had said that it `{waits}`",
+        second.said, waited.said
+    )
+    .into())
 }
 
 /// Loses a run whose sandboxes are in use, by killing its job, makes the controller's container

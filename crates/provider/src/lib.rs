@@ -54,12 +54,19 @@ pub trait Provider: Sweep + Send + Sync {
     /// [`Reservation`] is dropped or its process ends: `phases` are the run's roles, those of a
     /// phase running at once, [`instances`](Role::instances) of each. A shared host gives each
     /// create its [instance](Create::instance)'s share; a host of its own holds nothing. Fails,
-    /// holding nothing, if the run's needs don't fit beside other runs', saying what does.
+    /// holding nothing, with [`Unreserved::Busy`] if the run's needs fit only once other runs end.
     ///
     /// # Panics
     ///
     /// If a role is in more than one phase.
-    fn reserve(&self, run: &RunTag, phases: &[Vec<Role>]) -> Result<Reservation, String>;
+    fn reserve(&self, run: &RunTag, phases: &[Vec<Role>]) -> Result<Reservation, Unreserved>;
+
+    /// Fails, saying why, if [`reserve`](Self::reserve) of `phases` would fail were no other run
+    /// to hold anything: a run that fails it never fits, and one that passes it fits once other
+    /// runs end. Holds nothing. A provider that gives each sandbox a host of its own fits any.
+    fn fits(&self, _phases: &[Vec<Role>]) -> Result<(), String> {
+        Ok(())
+    }
 
     /// Publishes `image`, a role's, so that this provider's sandboxes can run it.
     fn publish_image(&self, image: &Image) -> Result<ImageRef, String>;
@@ -110,6 +117,23 @@ pub trait Creator<D, C = Created>: Sync {
     /// Fails if it can't be created or started by `create.by`, deleting what it made or saying
     /// what is left; [`list`](Sweep::list) finds what it can't name once the platform holds it.
     fn create(&self, create: &Create, dial: D) -> Result<C, String>;
+}
+
+/// Why [`Provider::reserve`] held nothing, each with what it says of why.
+#[derive(Debug)]
+pub enum Unreserved {
+    /// Other runs hold what the run needs, which it fits once they end: which runs, and what.
+    Busy(String),
+    /// Anything else, such as needs that never fit.
+    Failed(String),
+}
+
+impl fmt::Display for Unreserved {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Busy(why) | Self::Failed(why) => f.write_str(why),
+        }
+    }
 }
 
 /// What a provider holds for a run ([`Provider::reserve`]), until it is dropped.

@@ -1,6 +1,7 @@
 //! What `cargo xtask live` reads of `pumpkin`'s configuration when it sends runs to the person's
-//! controller. A smoke run on one of its providers reads the controller's region. A run on Modal
-//! also reads the profile that reaches the workspace, and the GPU of a class there.
+//! controller that `deploy/aws` made, the one of its `[controllers.<name>]` that names a `region`.
+//! A smoke run on one of its providers reads the controller's name and region. A run on Modal also
+//! reads the profile that reaches the workspace, and the GPU of a class there.
 
 use std::error::Error;
 use std::path::Path;
@@ -31,8 +32,8 @@ pub(crate) struct Modal {
 
 impl Settings {
     /// Reads `text`, the configuration at `path`, for a smoke run on `provider`, whose GPU
-    /// runner, on Modal, needs `gpu_model`, which must be the model of one of the classes of
-    /// `[controller.modal]`.
+    /// runner, on Modal, needs `gpu_model`, which must be the model of one of the classes of the
+    /// controller's `modal`.
     pub(crate) fn parse(
         text: &str,
         path: &Path,
@@ -42,27 +43,40 @@ impl Settings {
         let shown = path.display();
         let table: toml::Table = toml::from_str(text)
             .map_err(|error| format!("{shown} isn't a configuration: {error}"))?;
-        let Some(controller) = table.get("controller").and_then(toml::Value::as_table) else {
-            return Err(format!(
-                "{shown} names no `[controller]`, which a live run goes through: name the one \
-                 `deploy/aws` made, as the README says"
-            )
-            .into());
+        let controllers = table.get("controllers").and_then(toml::Value::as_table);
+        let regional: Vec<(&String, &toml::Table, String)> = (controllers.into_iter().flatten())
+            .filter_map(|(name, controller)| {
+                let controller = controller.as_table()?;
+                Some((name, controller, self::text(controller, "region")?))
+            })
+            .collect();
+        let (name, controller, region) = match &regional[..] {
+            [one] => one.clone(),
+            [] => {
+                return Err(format!(
+                    "{shown} names no `[controllers.<name>]` with a `region`, which a live run \
+                     goes through: name the one `deploy/aws` made, as the README says"
+                )
+                .into());
+            }
+            several => {
+                let names: Vec<String> = several
+                    .iter()
+                    .map(|(name, ..)| format!("`{name}`"))
+                    .collect();
+                return Err(format!(
+                    "{shown} names several controllers with a `region`, {}: keep there the one \
+                     that a live run goes through",
+                    names.join(", ")
+                )
+                .into());
+            }
         };
-        let text = |table: &toml::Table, key: &str| {
-            table
-                .get(key)
-                .and_then(toml::Value::as_str)
-                .map(str::to_owned)
-        };
-        let name = text(controller, "name")
-            .ok_or_else(|| format!("{shown}'s `[controller]` names no `name`: name it"))?;
-        let region = text(controller, "region")
-            .ok_or_else(|| format!("{shown}'s `[controller]` names no `region`: name it"))?;
         let modal = match provider {
             Provider::Ec2 => None,
-            Provider::Modal => Some(Modal::parse(controller, path, gpu_model)?),
+            Provider::Modal => Some(Modal::parse(name, controller, path, gpu_model)?),
         };
+        let name = name.clone();
         Ok(Self {
             name,
             region,
@@ -72,23 +86,25 @@ impl Settings {
 }
 
 impl Modal {
-    /// Reads `controller`, the `[controller]` table of the configuration at `path`, for a smoke
-    /// run on Modal whose GPU runner needs `gpu_model`.
+    /// Reads `controller`, the `[controllers.<name>]` table of the configuration at `path`, of
+    /// controller `name`, for a smoke run on Modal whose GPU runner needs `gpu_model`.
     fn parse(
+        name: &str,
         controller: &toml::Table,
         path: &Path,
         gpu_model: Option<&str>,
     ) -> Result<Self, Box<dyn Error>> {
         let shown = path.display();
+        let table = format!("[controllers.{name}.modal]");
         let Some(modal) = controller.get("modal").and_then(toml::Value::as_table) else {
             return Err(format!(
-                "{shown} names no `[controller.modal]`, which a live run on Modal needs: name the \
+                "{shown} names no `{table}`, which a live run on Modal needs: name the \
                  workspace's profile and classes there, as the README says"
             )
             .into());
         };
         let profile = text(modal, "profile")
-            .ok_or_else(|| format!("{shown}'s `[controller.modal]` names no `profile`: name it"))?;
+            .ok_or_else(|| format!("{shown}'s `{table}` names no `profile`: name it"))?;
         let classes = modal.get("classes").and_then(toml::Value::as_table);
         let mut models: Vec<String> = (classes.into_iter().flatten())
             .filter_map(|(_, class)| class.as_table().and_then(|class| text(class, "gpu_model")))
@@ -98,16 +114,15 @@ impl Modal {
         let offered = models.join("`, `");
         let Some(gpu_model) = gpu_model else {
             return Err(format!(
-                "a live run on Modal needs the model of a GPU that a class of \
-                 `[controller.modal]` has, the cheapest best: give one of `{offered}` with \
-                 `--gpu-model`"
+                "a live run on Modal needs the model of a GPU that a class of `{table}` has, the \
+                 cheapest best: give one of `{offered}` with `--gpu-model`"
             )
             .into());
         };
         if !models.iter().any(|model| model == gpu_model) {
             return Err(format!(
-                "no class of {shown}'s `[controller.modal]` has the GPU `{gpu_model}`: give one \
-                 of `{offered}`"
+                "no class of {shown}'s `{table}` has the GPU `{gpu_model}`: give one of \
+                 `{offered}`"
             )
             .into());
         }

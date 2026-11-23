@@ -54,7 +54,7 @@
 </tspan>
     <tspan x="10px" y="316px"><tspan>          - </tspan><tspan class="fg-bright-cyan bold">modal-pull</tspan><tspan>:  The role that Modal assumes to import the roles' images</tspan>
 </tspan>
-    <tspan x="10px" y="334px"><tspan>          - </tspan><tspan class="fg-bright-cyan bold">client</tspan><tspan>:      What a machine whose configuration names `[controller]` needs</tspan>
+    <tspan x="10px" y="334px"><tspan>          - </tspan><tspan class="fg-bright-cyan bold">client</tspan><tspan>:      What a machine whose configuration names `[controllers.&lt;name&gt;]` needs</tspan>
 </tspan>
     <tspan x="10px" y="352px"><tspan>          - </tspan><tspan class="fg-bright-cyan bold">check</tspan><tspan>:       What `pumpkin-admin check` needs to read the deployment</tspan>
 </tspan>

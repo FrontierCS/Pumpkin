@@ -29,7 +29,7 @@ use engine::{Platform, Pusher};
 use identity::Documents;
 use provider::{
     Admits, Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready,
-    Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
+    Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted, Unreserved,
 };
 use schema::ec2_boot::{BOOT_IN_IMAGE, SANDBOXD_IN_IMAGE};
 use schema::ir::{self, CpuFlag, CpuModel, Image, Name};
@@ -353,7 +353,7 @@ impl Provider for Ec2<'_> {
 
     // Each sandbox is an instance of its own, which no other run shares, so a run holds nothing
     // beforehand: a create that EC2 has no capacity for fails.
-    fn reserve(&self, _run: &RunTag, _phases: &[Vec<Role>]) -> Result<Reservation, String> {
+    fn reserve(&self, _run: &RunTag, _phases: &[Vec<Role>]) -> Result<Reservation, Unreserved> {
         Ok(Reservation::new(()))
     }
 

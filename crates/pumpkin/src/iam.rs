@@ -19,7 +19,7 @@ pub(crate) enum Principal {
     Sandbox,
     /// The role that Modal assumes to import the roles' images.
     ModalPull,
-    /// What a machine whose configuration names `[controller]` needs.
+    /// What a machine whose configuration names `[controllers.<name>]` needs.
     Client,
     /// What `pumpkin-admin check` needs to read the deployment.
     Check,

@@ -6,6 +6,44 @@
 //! A run is run again from its task's source, with the arguments that started it, as its record
 //! keeps them ([`runtime::Record::args`]).
 
+use crate::controller::Name;
+
+/// Where the runs are that a command to run next names: by the flag that names them, or by none.
+#[derive(Clone, Debug)]
+pub(crate) enum At {
+    /// Where a command without `--runs` or `--controller` finds them.
+    Default,
+    /// The runs directory at an absolute path, by `--runs`.
+    Runs(String),
+    /// A controller's runs, by `--controller`.
+    Controller(Name),
+}
+
+impl At {
+    /// The runs directory `runs`, an absolute path, or the default without one.
+    pub(crate) fn runs(runs: Option<&str>) -> Self {
+        runs.map_or(Self::Default, |runs| Self::Runs(runs.to_owned()))
+    }
+
+    /// The flag that names where the runs are, with its value, as two words; none for the
+    /// default.
+    pub(crate) fn flag(&self) -> Option<[String; 2]> {
+        match self {
+            Self::Default => None,
+            Self::Runs(runs) => Some(["--runs".to_owned(), runs.clone()]),
+            Self::Controller(name) => Some(["--controller".to_owned(), name.to_string()]),
+        }
+    }
+
+    /// The runs directory that `--runs` names, if it does.
+    pub(crate) fn dir(&self) -> Option<&str> {
+        match self {
+            Self::Runs(runs) => Some(runs),
+            Self::Default | Self::Controller(_) => None,
+        }
+    }
+}
+
 /// The command that runs a run again, given `args`, the arguments of the `pumpkin run` that
 /// started it, each a word, as its record keeps them.
 pub(crate) fn run_again(args: &[String]) -> String {
@@ -22,20 +60,25 @@ pub(crate) fn again(command: &str, flags: &[String], operands: &[String]) -> Str
     )
 }
 
-/// `pumpkin <command>` of the run `id`, in `runs`, an absolute path, or in the default runs
-/// directory without one: `wait` or `cancel`.
-pub(crate) fn of_run(command: &str, runs: Option<&str>, id: &str) -> String {
-    match runs {
-        Some(runs) => format!("pumpkin {command} --runs {} {id}", quoted(runs)),
+/// `pumpkin <command>` of the run `id`, or of the runs that `id` gives the prefixes of, where `at`
+/// says: `wait`, `cancel` or `ls`.
+pub(crate) fn of_run(command: &str, at: &At, id: &str) -> String {
+    match at.flag() {
+        Some([flag, value]) => format!("pumpkin {command} {flag} {} {id}", quoted(&value)),
         None => format!("pumpkin {command} {id}"),
     }
 }
 
-/// `pumpkin reap` of `runs`, an absolute path, or of the default runs directory without one.
-pub(crate) fn reap(runs: Option<&str>) -> String {
-    match runs {
-        Some(runs) => format!("pumpkin reap --runs {}", quoted(runs)),
-        None => "pumpkin reap".to_owned(),
+/// `pumpkin reap` of the runs where `at` says.
+pub(crate) fn reap(at: &At) -> String {
+    of_runs("reap", at)
+}
+
+/// `pumpkin <command>` of the runs where `at` says, such as `ls`.
+pub(crate) fn of_runs(command: &str, at: &At) -> String {
+    match at.flag() {
+        Some([flag, value]) => format!("pumpkin {command} {flag} {}", quoted(&value)),
+        None => format!("pumpkin {command}"),
     }
 }
 

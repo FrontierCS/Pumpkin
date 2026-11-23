@@ -36,10 +36,10 @@ EC2 instance or a container on a Docker host, which runs the runs a machine send
 
 `pumpkin` (`crates/pumpkin`) is the operator's command line, and its `main.rs` dispatches the
 commands. `run` builds a task's images and starts its driver. Read its path through the driver
-first. A machine whose configuration names `[controller]` sends each run over `ssh` to the same
-executable there, whose `controller serve` starts the run as a job in a systemd unit of its own.
-Under the name `pumpkin-admin`, a hard link, the executable installs and checks the controller's
-host.
+first. A machine whose configuration names a controller in `[controllers.<name>]` sends each run
+over `ssh` to the same executable there, whose `controller serve` starts the run as a job in a
+systemd unit of its own. Under the name `pumpkin-admin`, a hard link, the executable installs and
+checks the controller's host.
 
 `sandboxd` (`crates/sandboxd`) is the supervisor in every sandbox, a static binary. Under the name
 `sandboxctl`, it is the shim through which code in the sandbox makes ops. `ec2-boot`
@@ -139,11 +139,11 @@ API and those its entry lists.
 
 ### `crates/provider`, `crates/engine`, `crates/aws`
 
-`provider` is the interface that every provider implements. `Provider` reserves what a run's roles
-need, publishes their images, says how the sandboxes meet the gateway (`Meeting`), and creates
-them. `Sweep`, its part that lists and deletes a run's sandboxes, is all a reap needs. `engine` is
-the operator's Docker engine, which builds every image, whichever provider runs it. `aws` is AWS's
-command line as Pumpkin runs it (`Cli`).
+`provider` is the interface that every provider implements. `Provider` says whether a run's roles
+could ever fit (`Provider::fits`), reserves what they need, publishes their images, says how the
+sandboxes meet the gateway (`Meeting`), and creates them. `Sweep`, its part that lists and deletes
+a run's sandboxes, is all a reap needs. `engine` is the operator's Docker engine, which builds
+every image, whichever provider runs it. `aws` is AWS's command line as Pumpkin runs it (`Cli`).
 
 **Architecture Invariant:** runs that share a provider never reach each other's sandboxes. Every
 sandbox carries its run's `RunTag`, and a provider lists and deletes only the sandboxes that carry

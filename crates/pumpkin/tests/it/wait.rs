@@ -129,7 +129,7 @@ fn waits() {
               20261107-120300-3d0c0003
             $ pumpkin wait notes --runs runs
             exit status: Some(1)
-            pumpkin: runs/notes has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
+            pumpkin: no run in runs matches `notes`: name an id, a unique prefix of an id or of its random digits, or a record's path
             $ pumpkin wait runs/notes
             exit status: Some(1)
             pumpkin: runs/notes has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made

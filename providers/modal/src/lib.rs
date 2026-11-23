@@ -30,7 +30,7 @@ use aws::{Cli, Region, Repository, RepositoryName, RoleArn};
 use engine::{Platform, Pusher};
 use provider::{
     Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation,
-    Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
+    Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted, Unreserved,
 };
 use schema::ir::{self, GpuModel, Image, Name};
 use schema::sandbox::{Endpoint, Listening};
@@ -356,11 +356,16 @@ impl Provider for Modal<'_> {
     // Each sandbox has resources of its own, which no other run shares, so a run holds nothing
     // beforehand. A role whose memory Modal can't give is refused here, before anything is
     // published for it, not at each of its creates.
-    fn reserve(&self, _run: &RunTag, phases: &[Vec<Role>]) -> Result<Reservation, String> {
+    fn reserve(&self, _run: &RunTag, phases: &[Vec<Role>]) -> Result<Reservation, Unreserved> {
+        self.fits(phases).map_err(Unreserved::Failed)?;
+        Ok(Reservation::new(()))
+    }
+
+    fn fits(&self, phases: &[Vec<Role>]) -> Result<(), String> {
         for role in phases.iter().flatten() {
             memory_mib(role)?;
         }
-        Ok(Reservation::new(()))
+        Ok(())
     }
 
     /// Publishes `image`, a role's, as [`Provider::publish_image`] asks: the engine must have it,

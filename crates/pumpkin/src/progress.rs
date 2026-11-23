@@ -184,8 +184,8 @@ impl State {
 /// started last, nearest the line of totals that follows them, each live run with a line for
 /// each of its calls and leases that hasn't ended, and a column of each run's member if one
 /// names one. The totals line ends with the command that lists the runs left out, unless there
-/// are none; `runs` is their runs directory, as commands name it.
-pub(crate) fn lines(listing: &Listing, runs: Option<&str>) -> String {
+/// are none, naming where `at` says.
+pub(crate) fn lines(listing: &Listing, at: &next::At) -> String {
     let mut lines = String::new();
     let mut totals = Totals::default();
     let mut older = Vec::new();
@@ -234,7 +234,7 @@ pub(crate) fn lines(listing: &Listing, runs: Option<&str>) -> String {
         parts.push(format!(
             "{} that ended over a day ago {are} listed: to list {them}: {}",
             crate::counted(older.len(), "run"),
-            next::of_run("ls", runs, &prefixes(&older).join(" "))
+            next::of_run("ls", at, &prefixes(&older).join(" "))
         ));
     }
     if !parts.is_empty() {
@@ -366,7 +366,7 @@ pub(crate) struct Columns {
     pub(crate) rest: String,
 }
 
-fn columns(id: &str, listed: &Listed, state: State, now: UnixTime, runs: Option<&str>) -> Columns {
+fn columns(id: &str, listed: &Listed, state: State, now: UnixTime, named: &next::At) -> Columns {
     let column = |state: &str, time: &str, bound: &str, usd: &str, rest: &str| Columns {
         state: state.to_owned(),
         time: time.to_owned(),
@@ -385,7 +385,7 @@ fn columns(id: &str, listed: &Listed, state: State, now: UnixTime, runs: Option<
         Listed::Unstarted => {
             let why = format!(
                 "-: its job ended before the run started: to see why: {}",
-                next::of_run("wait", runs, id)
+                next::of_run("wait", named, id)
             );
             return column(state, "-", "", "-", &why);
         }
@@ -414,7 +414,7 @@ fn columns(id: &str, listed: &Listed, state: State, now: UnixTime, runs: Option<
             );
         };
         let at = now.since(progress.started);
-        let cancel = next::of_run("cancel", runs, id);
+        let cancel = next::of_run("cancel", named, id);
         let (name, time, bound, doing) = shown(phase(progress, at), at, &cancel);
         return column(&name, &time, &bound, &usd, &format!("{task}: {doing}"));
     };
@@ -433,10 +433,10 @@ fn columns(id: &str, listed: &Listed, state: State, now: UnixTime, runs: Option<
 
 /// The lines under a live run that has begun its log, each ending in a newline: one for each of
 /// its calls and leases that hasn't ended.
-fn under(id: &str, progress: &Progress, now: UnixTime, runs: Option<&str>) -> String {
+fn under(id: &str, progress: &Progress, now: UnixTime, named: &next::At) -> String {
     let mut lines = String::new();
     let at = now.since(progress.started);
-    let cancel = next::of_run("cancel", runs, id);
+    let cancel = next::of_run("cancel", named, id);
     for child in children(progress, at) {
         let (name, time, bound, doing) = shown(child, at, &cancel);
         let _ = writeln!(

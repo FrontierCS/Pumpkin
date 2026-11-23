@@ -1,4 +1,4 @@
-<svg width="860px" height="974px" xmlns="http://www.w3.org/2000/svg">
+<svg width="860px" height="1046px" xmlns="http://www.w3.org/2000/svg">
   <style>
     .fg { fill: #AAAAAA }
     .bg { fill: #000000 }
@@ -32,11 +32,11 @@
 </tspan>
     <tspan x="10px" y="118px">
 </tspan>
-    <tspan x="10px" y="136px"><tspan>With `[controller]` in the configuration, `run` sends the task to the controller, which builds and</tspan>
+    <tspan x="10px" y="136px"><tspan>With `[controllers.&lt;name&gt;]` in the configuration, `run` sends the task to the controller, which</tspan>
 </tspan>
-    <tspan x="10px" y="154px"><tspan>runs it. `run` then prints the id at once and returns before the build. `pumpkin wait` follows the</tspan>
+    <tspan x="10px" y="154px"><tspan>builds and runs it. `run` then prints the id at once and returns before the build. `pumpkin wait`</tspan>
 </tspan>
-    <tspan x="10px" y="172px"><tspan>build and the run. `--runs` and `--sandboxd` are refused.</tspan>
+    <tspan x="10px" y="172px"><tspan>follows the build and the run. `--runs` and `--sandboxd` are refused.</tspan>
 </tspan>
     <tspan x="10px" y="190px">
 </tspan>
@@ -76,55 +76,63 @@
 </tspan>
     <tspan x="10px" y="514px">
 </tspan>
-    <tspan x="10px" y="532px"><tspan>      </tspan><tspan class="fg-bright-cyan bold">--sandboxd</tspan><tspan class="fg-cyan"> </tspan><tspan class="fg-cyan">&lt;path&gt;</tspan>
+    <tspan x="10px" y="532px"><tspan>      </tspan><tspan class="fg-bright-cyan bold">--controller</tspan><tspan class="fg-cyan"> </tspan><tspan class="fg-cyan">&lt;name&gt;</tspan>
 </tspan>
-    <tspan x="10px" y="550px"><tspan>          The static sandboxd that every sandbox runs, with the static ec2-boot beside it (default:</tspan>
+    <tspan x="10px" y="550px"><tspan>          The controller of the configuration's `[controllers.&lt;name&gt;]` to reach (default: its one</tspan>
 </tspan>
-    <tspan x="10px" y="568px"><tspan>          the one beside `pumpkin`, where `cargo xtask build` puts both)</tspan>
+    <tspan x="10px" y="568px"><tspan>          controller)</tspan>
 </tspan>
     <tspan x="10px" y="586px">
 </tspan>
-    <tspan x="10px" y="604px"><tspan>      </tspan><tspan class="fg-bright-cyan bold">--wait</tspan>
+    <tspan x="10px" y="604px"><tspan>      </tspan><tspan class="fg-bright-cyan bold">--sandboxd</tspan><tspan class="fg-cyan"> </tspan><tspan class="fg-cyan">&lt;path&gt;</tspan>
 </tspan>
-    <tspan x="10px" y="622px"><tspan>          Follow the run to its end and exit as `pumpkin wait` does</tspan>
+    <tspan x="10px" y="622px"><tspan>          The static sandboxd that every sandbox runs, with the static ec2-boot beside it (default:</tspan>
 </tspan>
-    <tspan x="10px" y="640px">
+    <tspan x="10px" y="640px"><tspan>          the one beside `pumpkin`, where `cargo xtask build` puts both)</tspan>
 </tspan>
-    <tspan x="10px" y="658px"><tspan>      </tspan><tspan class="fg-bright-cyan bold">--outcome</tspan>
+    <tspan x="10px" y="658px">
 </tspan>
-    <tspan x="10px" y="676px"><tspan>          Print the run's outcome.json on the standard output once it ends, even if it failed to</tspan>
+    <tspan x="10px" y="676px"><tspan>      </tspan><tspan class="fg-bright-cyan bold">--wait</tspan>
 </tspan>
-    <tspan x="10px" y="694px"><tspan>          start</tspan>
+    <tspan x="10px" y="694px"><tspan>          Follow the run to its end and exit as `pumpkin wait` does</tspan>
 </tspan>
     <tspan x="10px" y="712px">
 </tspan>
-    <tspan x="10px" y="730px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">-h</tspan><tspan>, </tspan><tspan class="fg-bright-cyan bold">--help</tspan>
+    <tspan x="10px" y="730px"><tspan>      </tspan><tspan class="fg-bright-cyan bold">--outcome</tspan>
 </tspan>
-    <tspan x="10px" y="748px"><tspan>          Print help</tspan>
+    <tspan x="10px" y="748px"><tspan>          Print the run's outcome.json on the standard output once it ends, even if it failed to</tspan>
 </tspan>
-    <tspan x="10px" y="766px">
+    <tspan x="10px" y="766px"><tspan>          start</tspan>
 </tspan>
-    <tspan x="10px" y="784px"><tspan class="fg-bright-green bold">Examples:</tspan>
+    <tspan x="10px" y="784px">
 </tspan>
-    <tspan x="10px" y="802px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">pumpkin run tasks/bench/task.star --arg model=model-a</tspan>
+    <tspan x="10px" y="802px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">-h</tspan><tspan>, </tspan><tspan class="fg-bright-cyan bold">--help</tspan>
 </tspan>
-    <tspan x="10px" y="820px"><tspan>          Start a run of a task, and print its id</tspan>
+    <tspan x="10px" y="820px"><tspan>          Print help</tspan>
 </tspan>
     <tspan x="10px" y="838px">
 </tspan>
-    <tspan x="10px" y="856px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">pumpkin run tasks/bench/task.star --arg model=model-a --wait --outcome</tspan><tspan> \</tspan>
+    <tspan x="10px" y="856px"><tspan class="fg-bright-green bold">Examples:</tspan>
 </tspan>
-    <tspan x="10px" y="874px"><tspan>    </tspan><tspan class="fg-bright-cyan bold">&gt; outcome.json</tspan>
+    <tspan x="10px" y="874px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">pumpkin run tasks/bench/task.star --arg model=model-a</tspan>
 </tspan>
-    <tspan x="10px" y="892px"><tspan>          Start a run, follow it to its end, and save its outcome.json</tspan>
+    <tspan x="10px" y="892px"><tspan>          Start a run of a task, and print its id</tspan>
 </tspan>
     <tspan x="10px" y="910px">
 </tspan>
-    <tspan x="10px" y="928px"><tspan>How a run is placed and how it outlives a logout:</tspan>
+    <tspan x="10px" y="928px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">pumpkin run tasks/bench/task.star --arg model=model-a --wait --outcome</tspan><tspan> \</tspan>
 </tspan>
-    <tspan x="10px" y="946px"><tspan>https://github.com/FrontierCS/Pumpkin/blob/main/docs/running.md#running</tspan>
+    <tspan x="10px" y="946px"><tspan>    </tspan><tspan class="fg-bright-cyan bold">&gt; outcome.json</tspan>
 </tspan>
-    <tspan x="10px" y="964px">
+    <tspan x="10px" y="964px"><tspan>          Start a run, follow it to its end, and save its outcome.json</tspan>
+</tspan>
+    <tspan x="10px" y="982px">
+</tspan>
+    <tspan x="10px" y="1000px"><tspan>How a run is placed and how it outlives a logout:</tspan>
+</tspan>
+    <tspan x="10px" y="1018px"><tspan>https://github.com/FrontierCS/Pumpkin/blob/main/docs/running.md#running</tspan>
+</tspan>
+    <tspan x="10px" y="1036px">
 </tspan>
   </text>
 

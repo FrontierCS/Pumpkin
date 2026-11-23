@@ -17,7 +17,7 @@ use stdx::process::Environment;
 use tempfile::TempDir;
 
 use super::http::Response;
-use crate::workspace;
+use crate::{next, workspace};
 
 /// The most bytes of a cancel's output that the page reads: a cancel says a few lines.
 const SAID_MAX_BYTES: u64 = 64 * 1024;
@@ -44,11 +44,10 @@ enum Said {
 const SAID: &str = "said";
 
 impl Cancels {
-    /// Starts `pumpkin cancel` of run `id`, with `--runs` `runs` if given, and answers with what it
-    /// has said.
+    /// Starts `pumpkin cancel` of run `id`, where `at` says, and answers with what it has said.
     ///
     /// Refuses with `409` if a cancel of the run is still going.
-    pub(super) fn start(&mut self, id: &RunTag, runs: Option<&str>) -> Response {
+    pub(super) fn start(&mut self, id: &RunTag, at: &next::At) -> Response {
         let under_way = match self.by_run.get_mut(id.as_str()) {
             Some(cancel) => cancel.reaped().map(|ended| ended.is_none()),
             None => Ok(false),
@@ -67,7 +66,7 @@ impl Cancels {
             Ok(false) => {}
             Err(error) => return Response::refused("500 Internal Server Error", &error),
         }
-        match self.started(id, runs) {
+        match self.started(id, at) {
             Ok(()) => self.said(id).with_status("202 Accepted"),
             Err(error) => Response::refused("500 Internal Server Error", &error),
         }
@@ -99,7 +98,7 @@ impl Cancels {
         }
     }
 
-    fn started(&mut self, id: &RunTag, runs: Option<&str>) -> Result<(), String> {
+    fn started(&mut self, id: &RunTag, at: &next::At) -> Result<(), String> {
         let scratch = crate::controller::scratch()?;
         let path = scratch.path().join(SAID);
         let said = File::create(&path).context(path.display())?;
@@ -107,10 +106,10 @@ impl Cancels {
         let exe = workspace::exe("expected it to run `pumpkin cancel`")?;
         let mut command = stdx::process::command(exe, Environment::Inherited);
         command.arg("cancel");
-        // Named when the runs are here, as without `--runs` a machine whose runs go to a
-        // controller cancels the run there.
-        if let Some(runs) = runs {
-            command.args(["--runs", runs]);
+        // Named always, as without `--runs` a machine whose runs go to a controller cancels the
+        // run there, and without `--controller` one with several controllers refuses.
+        if let Some(flag) = at.flag() {
+            command.args(flag);
         }
         command.arg(id.as_str());
         let child = stdx::process::spawn(&mut command, Stdio::null(), said.into(), also.into())?;

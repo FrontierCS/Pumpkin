@@ -121,8 +121,7 @@ pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> 
     if lost {
         return self::lost(&settings, &repo, again);
     }
-    let mut run = pumpkin(&repo);
-    run.args(["run", "--wait"]);
+    let mut run = controlled(&repo, &settings.name, &["run", "--wait"]);
     if let Some(modal) = &settings.modal {
         run.args(["--arg", &format!("gpu_model={}", modal.gpu_model)]);
     }
@@ -135,13 +134,12 @@ pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> 
             "`./pumpkin run` of run {id} ended with {status}, as it said above"
         ));
     }
-    let record = repo.join(".pumpkin/runs").join(&id);
+    let record = repo.join(".pumpkin/runs").join(&settings.name).join(&id);
     failed.extend(checked(&record, settings.modal.is_some()));
     let left = left(&settings, &id)?;
     if !left.is_empty() {
         failed.push(format!("left after the run: {}", left.join(", ")));
-        let mut cancel = pumpkin(&repo);
-        cancel.args(["cancel", &id]);
+        let mut cancel = controlled(&repo, &settings.name, &["cancel", &id]);
         let cancelled = process::run(&mut cancel, step(PUMPKIN_TIMEOUT).named("./pumpkin cancel"));
         match cancelled {
             Ok(_) => eprintln!("xtask: `./pumpkin cancel {id}` passed"),
@@ -174,11 +172,7 @@ const LOST_BY: Duration = Duration::from_mins(94 + 2 + 10);
 const LOST_EVERY: Duration = Duration::from_mins(1);
 
 fn lost(settings: &Settings, repo: &Path, again: &str) -> Result<()> {
-    let pumpkin = |args: &[&str]| {
-        let mut command = pumpkin(repo);
-        command.args(args);
-        command
-    };
+    let pumpkin = |args: &[&str]| controlled(repo, &settings.name, args);
     let gpu = settings
         .modal
         .as_ref()
@@ -492,6 +486,16 @@ fn task_repository(dir: &str) -> Result<PathBuf> {
 fn pumpkin(repo: &Path) -> Command {
     let mut command = process::command(repo.join("pumpkin"), Environment::Cargo);
     command.current_dir(repo).env_remove("PUMPKIN_WORKSPACE");
+    command
+}
+
+/// `./pumpkin` in `repo` with `args`, a command and its arguments, of controller `name`, which
+/// `--controller` names after the command.
+fn controlled(repo: &Path, name: &str, args: &[&str]) -> Command {
+    let mut command = pumpkin(repo);
+    if let Some((first, rest)) = args.split_first() {
+        command.arg(first).args(["--controller", name]).args(rest);
+    }
     command
 }
 

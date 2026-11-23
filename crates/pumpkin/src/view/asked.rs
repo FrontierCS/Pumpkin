@@ -104,7 +104,7 @@ pub(super) fn allowed(
     asked: &Asked,
     request: &Request,
     port: u16,
-    named: Option<&str>,
+    at: &next::At,
 ) -> Result<(), Response> {
     let refused = |status, message: String| Err(Response::refused(status, &message));
     // What changes something, and what else does it.
@@ -113,14 +113,16 @@ pub(super) fn allowed(
             format!("the cancel of run {}", id.as_str()),
             format!(
                 "cancel it from the page that `pumpkin view` serves, or run: {}",
-                next::of_run("cancel", named, id.as_str())
+                next::of_run("cancel", at, id.as_str())
             ),
         ),
         Asked::Start => (
             "the controller's start".to_owned(),
-            "start it from the page that `pumpkin view` serves, or run a command that reaches it, \
-             which starts it: pumpkin ls"
-                .to_owned(),
+            format!(
+                "start it from the page that `pumpkin view` serves, or run a command that reaches \
+                 it, which starts it: {}",
+                next::of_runs("ls", at)
+            ),
         ),
         Asked::Runs { .. }
         | Asked::Run { .. }

@@ -42,7 +42,7 @@ use std::time::Duration;
 
 use provider::{
     Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation,
-    Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
+    Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted, Unreserved,
 };
 use schema::frame;
 use schema::ir::{AbsolutePath, Argv, CpuModel, Image, Mode, Name, Sha256Digest};
@@ -620,7 +620,7 @@ impl Provider for Sim {
         &self.ready
     }
 
-    fn reserve(&self, run: &RunTag, phases: &[Vec<Role>]) -> Result<Reservation, String> {
+    fn reserve(&self, run: &RunTag, phases: &[Vec<Role>]) -> Result<Reservation, Unreserved> {
         let needs = |phase: &Vec<Role>| -> u64 {
             (phase.iter())
                 .map(|role| {
@@ -645,12 +645,17 @@ impl Provider for Sim {
             .reserved
             .retain(|reserved| reserved.live.strong_count() > 0);
         let held: u64 = state.reserved.iter().map(|reserved| reserved.cpus).sum();
-        if held.saturating_add(needed) > state.cpus {
-            return Err(format!(
-                "the run needs {needed} simulated CPUs, and {held} of the {} are held: run it \
-                 once others end",
+        if needed > state.cpus {
+            return Err(Unreserved::Failed(format!(
+                "the run needs {needed} simulated CPUs, of the {} there are",
                 state.cpus
-            ));
+            )));
+        }
+        if held.saturating_add(needed) > state.cpus {
+            return Err(Unreserved::Busy(format!(
+                "the run needs {needed} simulated CPUs, and {held} of the {} are held",
+                state.cpus
+            )));
         }
         let live = Arc::new(());
         state.reserved.push(Reserved {
