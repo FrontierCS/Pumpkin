@@ -13,8 +13,9 @@ use std::path::{Path, PathBuf};
 use engine::ContextName;
 use gateway::GatewayAddress;
 use route::{Headers, Key, Serving, UpstreamUrl};
-use runtime::TokenPrices;
+use runtime::{Budgets, TokenPrices};
 use schema::ir::{Api, ApiRoute, ModelName, ModelRoute, Name};
+use schema::workflow::{ByRole, Workflow};
 use serde::{Deserialize, Deserializer, Serialize, de};
 use stdx::Context;
 
@@ -188,10 +189,35 @@ impl<T> Providers<T> {
     }
 }
 
+/// What the model routes of a workflow get of a configuration's upstreams.
+pub(crate) struct Models {
+    /// The upstream for each entry of each role's route, in the route's order.
+    pub(crate) servings: ByRole<Vec<Serving>>,
+    pub(crate) budgets: Budgets,
+    pub(crate) prices: BTreeMap<ModelName, TokenPrices>,
+}
+
 impl Upstreams {
+    /// What the model routes of `workflow` get of these upstreams. Fails unless an upstream
+    /// serves every model of each entry of each role's route, and prices every kind of token of
+    /// each model that a budget counts.
+    pub(crate) fn models(&self, workflow: &Workflow) -> Result<Models, String> {
+        let servings = workflow.by_role(|(role, _)| match workflow.model(role) {
+            Some(route) => self.serving(route),
+            None => Ok(Vec::new()),
+        })?;
+        let prices = self.prices();
+        let budgets = runtime::budgets(workflow, &prices)?;
+        Ok(Models {
+            servings,
+            budgets,
+            prices,
+        })
+    }
+
     /// The upstream for each entry of `route`, in its order: the one that serves every model the
     /// entry allows. Fails if there is none.
-    pub(crate) fn serving(&self, route: &ModelRoute) -> Result<Vec<Serving>, String> {
+    fn serving(&self, route: &ModelRoute) -> Result<Vec<Serving>, String> {
         route
             .as_slice()
             .iter()
@@ -199,7 +225,7 @@ impl Upstreams {
             .collect()
     }
 
-    pub(crate) fn prices(&self) -> BTreeMap<ModelName, TokenPrices> {
+    fn prices(&self) -> BTreeMap<ModelName, TokenPrices> {
         let models = self.0.values().flat_map(|upstream| &upstream.models);
         let priced = models.filter_map(|model| Some((model.name.clone(), model.usd_per_mtok?)));
         priced.collect()
@@ -309,14 +335,26 @@ fn address<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<GatewayA
 /// The machine's configuration in the file at `path`. Fails, naming the file, if it isn't one, as
 /// when it names `[controller]`.
 pub(crate) fn read(path: &Path) -> Result<Config, String> {
-    let text = fs::read_to_string(path).map_err(|error| {
+    parse(path, &text(path)?)
+}
+
+fn text(path: &Path) -> Result<String, String> {
+    fs::read_to_string(path).map_err(|error| {
         format!(
             "the configuration {} can't be read ({error}): write one there, as \
              `pumpkin help config` says, or name another file with `--config`",
             path.display()
         )
-    })?;
-    parse(path, &text)
+    })
+}
+
+/// The upstreams of the configuration in the file at `path`, whether its runs stay on this machine
+/// or go to a controller. Fails, naming the file, if it isn't a configuration.
+pub(crate) fn upstreams(path: &Path) -> Result<Upstreams, String> {
+    match target(path, &text(path)?)? {
+        Target::Machine(Config { upstreams, .. })
+        | Target::Controller(Client { upstreams, .. }) => Ok(upstreams),
+    }
 }
 
 /// The machine's configuration that `text`, the file at `path`, holds, failing as [`read`] does.

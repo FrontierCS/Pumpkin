@@ -566,7 +566,8 @@ fn width(text: &str) -> usize {
 }
 
 pub(super) const CONFIG: &str = "\
-pumpkin.toml is the machine's configuration, which `pumpkin run` reads. It is
+pumpkin.toml is the machine's configuration, which `pumpkin run` reads, and
+`pumpkin check` too, for the model routes. It is
 the file that --config names, by default $HOME/.config/pumpkin/pumpkin.toml. It
 is TOML, with the tables below. Every key is required unless it says what its
 absence means. [gateway] and the [upstreams.<name>] tables may be left out. Any

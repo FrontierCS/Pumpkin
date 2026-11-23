@@ -1,4 +1,4 @@
-<svg width="852px" height="578px" xmlns="http://www.w3.org/2000/svg">
+<svg width="852px" height="668px" xmlns="http://www.w3.org/2000/svg">
   <style>
     .fg { fill: #AAAAAA }
     .bg { fill: #000000 }
@@ -28,59 +28,69 @@
 </tspan>
     <tspan x="10px" y="82px"><tspan>gets the same `--arg`s. It then checks each image's recipe and the workflow, and lints the files it</tspan>
 </tspan>
-    <tspan x="10px" y="100px"><tspan>read. It says every problem in every task, and prints nothing when it finds none. It reads only</tspan>
+    <tspan x="10px" y="100px"><tspan>read. With the machine's configuration, where there is one, it checks that an upstream serves each</tspan>
 </tspan>
-    <tspan x="10px" y="118px"><tspan>files below each task's root. It reaches no Docker engine, network or configuration, so an image's</tspan>
+    <tspan x="10px" y="118px"><tspan>model of each role's route, and prices each model that a budget counts. It says every problem in</tspan>
 </tspan>
-    <tspan x="10px" y="136px"><tspan>build can still fail.</tspan>
+    <tspan x="10px" y="136px"><tspan>every task, and prints nothing when it finds none. It reads only files below each task's root and</tspan>
 </tspan>
-    <tspan x="10px" y="154px">
+    <tspan x="10px" y="154px"><tspan>the configuration. It reaches no Docker engine or network, so an image's build can still fail.</tspan>
 </tspan>
-    <tspan x="10px" y="172px"><tspan class="fg-bright-green bold">Usage:</tspan><tspan> </tspan><tspan class="fg-bright-cyan bold">pumpkin check</tspan><tspan> </tspan><tspan class="fg-cyan">[OPTIONS]</tspan><tspan> </tspan><tspan class="fg-cyan">&lt;entry&gt;...</tspan>
+    <tspan x="10px" y="172px">
 </tspan>
-    <tspan x="10px" y="190px">
+    <tspan x="10px" y="190px"><tspan class="fg-bright-green bold">Usage:</tspan><tspan> </tspan><tspan class="fg-bright-cyan bold">pumpkin check</tspan><tspan> </tspan><tspan class="fg-cyan">[OPTIONS]</tspan><tspan> </tspan><tspan class="fg-cyan">&lt;entry&gt;...</tspan>
 </tspan>
-    <tspan x="10px" y="208px"><tspan class="fg-bright-green bold">Arguments:</tspan>
+    <tspan x="10px" y="208px">
 </tspan>
-    <tspan x="10px" y="226px"><tspan>  </tspan><tspan class="fg-cyan">&lt;entry&gt;...</tspan>
+    <tspan x="10px" y="226px"><tspan class="fg-bright-green bold">Arguments:</tspan>
 </tspan>
-    <tspan x="10px" y="244px"><tspan>          A task's entry file, below the nearest directory that holds PUMPKIN.star</tspan>
+    <tspan x="10px" y="244px"><tspan>  </tspan><tspan class="fg-cyan">&lt;entry&gt;...</tspan>
 </tspan>
-    <tspan x="10px" y="262px">
+    <tspan x="10px" y="262px"><tspan>          A task's entry file, below the nearest directory that holds PUMPKIN.star</tspan>
 </tspan>
-    <tspan x="10px" y="280px"><tspan class="fg-bright-green bold">Options:</tspan>
+    <tspan x="10px" y="280px">
 </tspan>
-    <tspan x="10px" y="298px"><tspan>      </tspan><tspan class="fg-bright-cyan bold">--arg</tspan><tspan class="fg-cyan"> </tspan><tspan class="fg-cyan">&lt;name&gt;=&lt;value&gt;</tspan>
+    <tspan x="10px" y="298px"><tspan class="fg-bright-green bold">Options:</tspan>
 </tspan>
-    <tspan x="10px" y="316px"><tspan>          Set the arg that an `arg()` call declares as &lt;name&gt;</tspan>
+    <tspan x="10px" y="316px"><tspan>      </tspan><tspan class="fg-bright-cyan bold">--arg</tspan><tspan class="fg-cyan"> </tspan><tspan class="fg-cyan">&lt;name&gt;=&lt;value&gt;</tspan>
 </tspan>
-    <tspan x="10px" y="334px">
+    <tspan x="10px" y="334px"><tspan>          Set the arg that an `arg()` call declares as &lt;name&gt;</tspan>
 </tspan>
-    <tspan x="10px" y="352px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">-h</tspan><tspan>, </tspan><tspan class="fg-bright-cyan bold">--help</tspan>
+    <tspan x="10px" y="352px">
 </tspan>
-    <tspan x="10px" y="370px"><tspan>          Print help</tspan>
+    <tspan x="10px" y="370px"><tspan>      </tspan><tspan class="fg-bright-cyan bold">--config</tspan><tspan class="fg-cyan"> </tspan><tspan class="fg-cyan">&lt;file&gt;</tspan>
 </tspan>
-    <tspan x="10px" y="388px">
+    <tspan x="10px" y="388px"><tspan>          The machine's configuration, which `pumpkin help config` describes, to check the model</tspan>
 </tspan>
-    <tspan x="10px" y="406px"><tspan class="fg-bright-green bold">Examples:</tspan>
+    <tspan x="10px" y="406px"><tspan>          routes against (default: `$HOME/.config/pumpkin/pumpkin.toml`, if it exists)</tspan>
 </tspan>
-    <tspan x="10px" y="424px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">pumpkin check tasks/bench/task.star --arg model=model-a</tspan>
+    <tspan x="10px" y="424px">
 </tspan>
-    <tspan x="10px" y="442px"><tspan>          Check a task with its arg `model` set to `model-a`</tspan>
+    <tspan x="10px" y="442px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">-h</tspan><tspan>, </tspan><tspan class="fg-bright-cyan bold">--help</tspan>
 </tspan>
-    <tspan x="10px" y="460px">
+    <tspan x="10px" y="460px"><tspan>          Print help</tspan>
 </tspan>
-    <tspan x="10px" y="478px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">pumpkin check tasks/*/task.star --arg model=model-a</tspan>
+    <tspan x="10px" y="478px">
 </tspan>
-    <tspan x="10px" y="496px"><tspan>          Check every task in `tasks`, each with the same arg</tspan>
+    <tspan x="10px" y="496px"><tspan class="fg-bright-green bold">Examples:</tspan>
 </tspan>
-    <tspan x="10px" y="514px">
+    <tspan x="10px" y="514px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">pumpkin check tasks/bench/task.star --arg model=model-a</tspan>
 </tspan>
-    <tspan x="10px" y="532px"><tspan>The lint's rules:</tspan>
+    <tspan x="10px" y="532px"><tspan>          Check a task with its arg `model` set to `model-a`</tspan>
 </tspan>
-    <tspan x="10px" y="550px"><tspan>https://github.com/FrontierCS/Pumpkin/blob/main/docs/language.md#formatting-and-the-lint</tspan>
+    <tspan x="10px" y="550px">
 </tspan>
-    <tspan x="10px" y="568px">
+    <tspan x="10px" y="568px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">pumpkin check tasks/*/task.star --arg model=model-a</tspan>
+</tspan>
+    <tspan x="10px" y="586px"><tspan>          Check every task in `tasks`, each with the same arg</tspan>
+</tspan>
+    <tspan x="10px" y="604px">
+</tspan>
+    <tspan x="10px" y="622px"><tspan>The lint's rules:</tspan>
+</tspan>
+    <tspan x="10px" y="640px"><tspan>https://github.com/FrontierCS/Pumpkin/blob/main/docs/language.md#formatting-and-the-lint</tspan>
+</tspan>
+    <tspan x="10px" y="658px">
 </tspan>
   </text>
 

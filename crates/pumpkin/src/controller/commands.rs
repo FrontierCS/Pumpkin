@@ -64,10 +64,9 @@ pub(crate) fn run(client: &config::Client, flags: cli::Run) -> Result<Exit, Stri
     let id = runtime::new_id(SystemTime::now())?;
     let name = &client.controller.name;
     let tree = tree(&entry, &args)?;
-    // The job refuses a budget that the prices sent with it can't count: refused here, before
-    // anything is sent.
-    let prices = client.upstreams.prices();
-    runtime::budgets(&tree.workflow, &prices).context(client.path.display())?;
+    // The job refuses a model that the upstreams sent with it don't serve, or a budget that their
+    // prices can't count: refused here, before anything is sent.
+    (client.upstreams.models(&tree.workflow)).context(client.path.display())?;
     say(format_args!(
         "run {} goes to controller `{name}`",
         id.as_str()

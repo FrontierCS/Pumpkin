@@ -1,6 +1,6 @@
 //! `check`: a task's source, read below the root of its repository, evaluated and checked with
-//! no engine and no configuration, then linted by the formatter beside `pumpkin`, the real one;
-//! nothing said on success, and else every problem at its place.
+//! no engine, then linted by the formatter beside `pumpkin`, the real one; nothing said on
+//! success, and else every problem at its place.
 
 use std::ffi::OsStr;
 use std::fs;

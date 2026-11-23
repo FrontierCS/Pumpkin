@@ -377,36 +377,68 @@ fn check(flags: cli::Check) -> Result<Exit, String> {
     let cli::Check {
         entries,
         args: cli::TaskArgs(args),
+        config,
     } = flags;
     let formatter = style::Formatter::beside()?;
+    let upstreams = check_upstreams(config.as_deref())?;
     let mut failed = Vec::new();
     for entry in &entries {
-        let checked = match star::check(entry, &args, &formatter) {
-            Ok(Ok(())) => continue,
-            Ok(Err(problems)) => task_problems(entry, &problems),
-            Err(error) => format!("{entry}: {error}"),
+        let models = |workflow: &schema::workflow::Workflow| match &upstreams {
+            Some((path, upstreams)) => {
+                (upstreams.models(workflow).map(drop)).context(path.display())
+            }
+            None => Ok(()),
         };
-        say(checked);
+        match star::check(entry, &args, &formatter, models) {
+            Ok(Ok(star::Checked {
+                lint: Ok(()),
+                models: Ok(()),
+            })) => continue,
+            Ok(Ok(star::Checked { lint, models })) => {
+                if let Err(problems) = lint {
+                    say(task_problems(entry, &problems));
+                }
+                if let Err(error) = models {
+                    say(format_args!("{entry}: {error}"));
+                }
+            }
+            Ok(Err(problems)) => say(task_problems(entry, &problems)),
+            Err(error) => say(format_args!("{entry}: {error}")),
+        }
         failed.push(entry);
     }
     if failed.is_empty() {
         return Ok(Exit::Success);
     }
-    let again = source_again("check", &failed, &args)?;
+    let mut flags = arg_flags(&args).collect::<Vec<String>>();
+    if let Some(config) = &config {
+        flags.extend([
+            "--config".to_owned(),
+            absolute_utf8(config, "the configuration")?,
+        ]);
+    }
+    let entries: Result<Vec<String>, String> = (failed.iter())
+        .map(|entry| absolute_utf8(entry.path(), "the entry"))
+        .collect();
+    let again = next::again("check", &flags, &entries?);
     let them = if failed.len() == 1 { "it" } else { "them" };
     Err(format!("to check {them} again: {again}"))
 }
 
-fn source_again(
-    command: &str,
-    entries: &[&star::Entry],
-    args: &lang::Args,
-) -> Result<String, String> {
-    let flags = arg_flags(args).collect::<Vec<String>>();
-    let entries: Result<Vec<String>, String> = (entries.iter())
-        .map(|entry| absolute_utf8(entry.path(), "the entry"))
-        .collect();
-    Ok(next::again(command, &flags, &entries?))
+/// The configuration whose upstreams `check` checks each workflow's model routes against, and its
+/// path: the file that `config` names, or else the default one, unless there is none.
+fn check_upstreams(config: Option<&str>) -> Result<Option<(PathBuf, config::Upstreams)>, String> {
+    let path = match config {
+        Some(config) => PathBuf::from(config),
+        None => match default_config() {
+            // A file that can't be looked up is read, which says why.
+            Ok(path) if path.try_exists().unwrap_or(true) => path,
+            // A machine with no configuration, or no `HOME`, has no upstreams to check against.
+            Ok(_) | Err(_) => return Ok(None),
+        },
+    };
+    let upstreams = config::upstreams(&path)?;
+    Ok(Some((path, upstreams)))
 }
 
 fn arg_flags(args: &lang::Args) -> impl Iterator<Item = String> {
