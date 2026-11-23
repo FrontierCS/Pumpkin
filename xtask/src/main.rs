@@ -34,6 +34,7 @@ mod release;
 mod repo;
 mod settings;
 mod star;
+mod terraform;
 mod tidy;
 mod tools;
 mod wait;
@@ -432,6 +433,7 @@ fn ci() -> Result<()> {
     ran(fmt()?.arg("--check"), step(STEP_TIMEOUT))?;
     let repo = Repo { root: root() };
     tidy::check(&repo)?;
+    terraform::check()?;
     figure::check(root(), &metadata()?)?;
     let mut clippy = cargo(&["clippy", "--workspace", "--all-targets", "--locked"]);
     ran(

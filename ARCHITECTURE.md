@@ -613,11 +613,11 @@ model provider's HTTP server. A helper that one crate's tests use stays in that 
 ### `xtask`
 
 The contributor tasks, which `cargo xtask --help` says. `ci` runs the checks every change passes,
-among them the checks of Rust files, of documents and their figures (`tidy`), of `.star` files
-(`star`), of the figure of the crates (`figure`) and of the types of the page that `view` serves
-(`page`). `live` runs those that reach a real environment. `build` builds `pumpkin` and lays out the
-files it needs beside it. `release` packages and checks that build and publishes its archive,
-launcher and pin on GitHub. `tools` pins the contributor tools and fetches each one on first use.
+among them the checks of Rust files, of documents and their figures (`tidy`), of the Terraform
+module `deploy/aws` (`terraform`), of `.star` files (`star`), of the figure of the crates
+(`figure`) and of the types of the page that `view` serves (`page`). `live` runs those that reach a
+real environment. `build` builds `pumpkin` and lays out the files it needs beside it. `release`
+packages and checks that build and publishes its archive, launcher and pin on GitHub. `tools` pins the contributor tools and fetches each one on first use.
 All checkouts of one user share the cache it fetches into. The cache keys each tool by the SHA-256
 of its release file.
 
