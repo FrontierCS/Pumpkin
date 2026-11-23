@@ -83,7 +83,8 @@ impl runtime::Bodies for Bodies<'_> {
                 Ok(Vec::new())
             }
             "again" => {
-                target.run(&argv(&["ops", "sleep 2"]))?;
+                // Its sleep moves the clock once the run has logged its start.
+                target.run(&argv(&["ops", "await_log target_run", "sleep 2"]))?;
                 target.run(&argv(&["print", "two"]))?;
                 let printed =
                     target.get(&AbsolutePath::from_static("/pumpkin/log/1/command.stdout"))?;

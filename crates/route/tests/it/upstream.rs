@@ -9,15 +9,16 @@ use std::net::{Ipv4Addr, Shutdown, TcpListener};
 use std::num::NonZeroU64;
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::Duration;
 use std::{fs, iter, slice, thread};
 
 use expect_test::{Expect, expect};
 use gateway::{Arrival, IncomingModelRequest};
 use route::{Admission, Answer as Told, Apart, Keep, Key, Route, Upstream, UpstreamUrl};
 use schema::ir::{Api, ModelBudget};
-use stdx::Deadline;
+use stdx::time::Machine;
 use test_support::http::{read_request, write_chunk};
-use test_support::{HUNG, TestDir};
+use test_support::{HUNG, TestDir, hung};
 
 use super::kept::{
     CHAT_ANSWER, CHAT_STREAM, MESSAGES_CUT, MESSAGES_STREAM, RESPONSES_CUT, RESPONSES_STREAM,
@@ -252,8 +253,7 @@ fn exchanged(cases: &[Case]) -> String {
     }
     let sandbox = thread::spawn(move || fake_sandbox(&socket, requests, Some(&parts), hangs_up));
     let (sender, arrivals) = mpsc::channel();
-    let by = Deadline::after(HUNG);
-    let accepted = registration.accept(by, None, true, sender, |arrival| arrival, || false);
+    let accepted = registration.accept((&Machine, hung()), None, true, sender, |a| a, || false);
     let session = accepted.unwrap();
     let mut outcomes = Vec::new();
     for (case, entry) in cases.iter().zip(&made) {
@@ -304,7 +304,7 @@ fn serve_case(
     arrivals: &Receiver<Arrival>,
     held: &Receiver<()>,
 ) -> Vec<(Option<Told>, String)> {
-    let by = Deadline::after(HUNG);
+    let by = hung();
     let incoming = next_model_request(arrivals);
     let first = if case.answer == Some(Answer::Holds) {
         thread::scope(|scope| {
@@ -328,7 +328,7 @@ fn serve_one(
     entry: &(Route, Upstream),
     incoming: IncomingModelRequest,
     admission: Admission<'_>,
-    by: Deadline,
+    by: Duration,
 ) -> (Option<Told>, String) {
     let kept = Kept::default();
     let mut told = None;
@@ -337,7 +337,7 @@ fn serve_one(
         slice::from_ref(entry),
         incoming,
         |_| admission,
-        by,
+        (&Machine, by),
         &kept,
         || {},
         answered,

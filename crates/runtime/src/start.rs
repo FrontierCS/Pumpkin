@@ -11,6 +11,7 @@ use decision::{Caller, Core, JobId, LeaseId, PayloadRef};
 use schema::ir::{ArgumentValue, Name};
 use schema::workflow::{AgentId, JobFunctionId, SessionId};
 use stdx::Context;
+use stdx::time::Clock as _;
 
 use crate::child::{Child, Deadlines, End, Message, Report};
 use crate::sandbox::Which;

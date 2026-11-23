@@ -26,7 +26,7 @@ use std::{fs, iter, panic};
 use expect_test::{Expect, expect};
 use gateway::{
     Arrival, Dialer, GatewayAddress, IncomingModelRequest, IncomingOp, Listener, Process, Put,
-    Registration, Session, Sockets, Unattested,
+    Registration, Sockets, Unattested,
 };
 use schema::frame;
 use schema::ir::{AbsolutePath, Argv, Env, Name, Resources};
@@ -39,7 +39,10 @@ use schema::sandbox::{
 };
 use serde_json::{Value, json};
 use stdx::Deadline;
+use stdx::time::{self, Clock as _, Machine};
 use test_support::{HUNG, TestDir, hung};
+
+type Session = gateway::Session<Machine>;
 
 type Action = fn(&mut Session, &Receiver<Arrival>, &Path) -> String;
 
@@ -57,8 +60,8 @@ const PAUSE: Duration = Duration::from_millis(30);
 // passed, so no outcome rests on a margin.
 const HELLO_BOUND: Duration = Duration::from_millis(50);
 
-fn short() -> Deadline {
-    Deadline::after(Duration::from_millis(100))
+fn short() -> Duration {
+    Machine.now() + Duration::from_millis(100)
 }
 
 fn check(scenario: impl FnOnce(&Path) -> Vec<String>, expect: &Expect) {
@@ -178,14 +181,14 @@ fn connect(
     });
     let (sender, arrivals) = mpsc::channel();
     let session = registration
-        .accept(hung(), ops, models, sender, |arrival| arrival, || false)
+        .accept((&Machine, hung()), ops, models, sender, |a| a, || false)
         .unwrap();
     let second = UnixStream::connect(&socket).unwrap_err().kind();
     assert_eq!(second, std::io::ErrorKind::NotFound, "a second connection");
     (session, arrivals, sandbox)
 }
 
-fn opened(dir: &Path, opening: Opening, by: Deadline) -> String {
+fn opened(dir: &Path, opening: Opening, by: Duration) -> String {
     let (_sockets, registration, socket) = issued(dir);
     let mut connection = UnixStream::connect(socket).unwrap();
     opening(&mut connection);
@@ -204,7 +207,7 @@ fn opened(dir: &Path, opening: Opening, by: Deadline) -> String {
         answer
     });
     let (sender, _arrivals) = mpsc::channel();
-    let accepted = registration.accept(by, None, false, sender, |arrival| arrival, || false);
+    let accepted = registration.accept((&Machine, by), None, false, sender, |a| a, || false);
     let outcome = outcome(accepted.and_then(|mut session| session.freeze(hung())));
     format!("heard {}; {outcome}", sandbox.join().unwrap())
 }
@@ -278,7 +281,7 @@ fn note(message: ToSandbox, body: &[u8]) -> Option<String> {
 }
 
 fn await_hang_up(connection: &mut UnixStream, message: &Value, body: &[u8]) {
-    let hung = hung();
+    let hung = Deadline::after(HUNG);
     while frame::write(connection, message, body).is_ok() {
         assert!(
             hung.remaining().is_some(),
@@ -292,7 +295,7 @@ fn send_unended(connection: &mut UnixStream) {
     let (message, _) = done(0);
     frame::write(&mut unended, &message, &vec![0; frame::MAX_BODY_BYTES]).unwrap();
     unended.pop();
-    let hung = hung();
+    let hung = Deadline::after(HUNG);
     for byte in unended {
         if connection.write_all(&[byte]).is_err() {
             return;
@@ -529,7 +532,7 @@ fn answer_model(incoming: IncomingModelRequest) -> String {
     let path = request.path.clone();
     let mut headers = vec![("content-type".to_owned(), "text/plain".to_owned())];
     let by = match path.as_str() {
-        "/late" => Deadline::after(Duration::ZERO),
+        "/late" => Duration::ZERO,
         "/stale" => short(),
         "/long" => {
             headers.push(("x-long".to_owned(), "x".repeat(frame::MAX_MESSAGE_BYTES)));
@@ -537,6 +540,7 @@ fn answer_model(incoming: IncomingModelRequest) -> String {
         }
         _ => hung(),
     };
+    let by = (&Machine, by);
     let answered = incoming.respond(200, headers, by).and_then(|mut response| {
         if path == "/stale" {
             return response.send(&vec![0; 8 << 20]);
@@ -563,7 +567,7 @@ fn answer_on_a_thread(_: &mut Session, _: &Receiver<Arrival>, dir: &Path) -> Str
         panic!("a model request was to arrive");
     };
     let answer = thread::spawn(move || {
-        let mut response = incoming.respond(200, Vec::new(), hung())?;
+        let mut response = incoming.respond(200, Vec::new(), (&Machine, hung()))?;
         response.send(&vec![0; 8 << 20])
     });
     // Time for the answer to fill the buffers and wait on the sandbox, so that the session ends
@@ -583,18 +587,18 @@ fn then_freeze(session: &mut Session, first: std::io::Result<()>) -> String {
     )
 }
 
-fn freezes(session: &mut Session, by: Deadline) -> String {
+fn freezes(session: &mut Session, by: Duration) -> String {
     let first = session.freeze(by);
     then_freeze(session, first)
 }
 
 fn after_the_end(session: &mut Session, _: &Receiver<Arrival>, _: &Path) -> String {
     let ended = freezes(session, hung());
-    let late = outcome(session.freeze(Deadline::after(Duration::ZERO)));
+    let late = outcome(session.freeze(Duration::ZERO));
     format!("{ended}; then by a passed deadline {late}")
 }
 
-fn put_large(session: &mut Session, by: Deadline) -> std::io::Result<()> {
+fn put_large(session: &mut Session, by: Duration) -> std::io::Result<()> {
     let dir = AbsolutePath::try_from("/in".to_owned()).unwrap();
     let file = RelativePath::try_from("big".to_owned()).unwrap();
     // More than the socket's buffers hold, so that the put waits on a sandbox that reads nothing.
@@ -617,7 +621,7 @@ fn put_after_op(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -
 fn late_reply(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -> String {
     session.freeze(hung()).unwrap();
     let op = next_op(arrivals);
-    let replied = session.reply(op, no_grants(), Deadline::after(Duration::ZERO));
+    let replied = session.reply(op, no_grants(), Duration::ZERO);
     then_freeze(session, replied)
 }
 
@@ -1153,7 +1157,7 @@ fn deadlines() {
                 // A deadline that has passed before a request or a reply starts, which sends
                 // nothing.
                 (
-                    |session, _, _| freezes(session, Deadline::after(Duration::ZERO)),
+                    |session, _, _| freezes(session, Duration::ZERO),
                     |_| Vec::new(),
                 ),
                 (late_reply, |s| {
@@ -1258,8 +1262,9 @@ fn stopped() {
                 let (sender, _) = mpsc::channel();
                 let by = hung();
                 let stopped = || first || !socket.exists();
-                let accepted = registration.accept(by, None, false, sender, |a| a, stopped);
-                let returned = by.remaining().map_or("past", |_| "before");
+                let accepted =
+                    registration.accept((&Machine, by), None, false, sender, |a| a, stopped);
+                let returned = time::left(&Machine, by).map_or("past", |_| "before");
                 let accepted = outcome(accepted.map(drop));
                 let accepted = accepted.replace(&dir.display().to_string(), "<dir>");
                 format!("returned {returned} its deadline: {accepted}")
@@ -1280,7 +1285,7 @@ fn stopped() {
 fn hellos() {
     check(
         |dir| {
-            let cases: [(&str, Opening, Deadline); 14] = [
+            let cases: [(&str, Opening, Duration); 14] = [
                 (
                     "this version",
                     |c| frame::write(c, &hello(), &[]).unwrap(),
@@ -1399,7 +1404,7 @@ fn listen(hello_timeout: Duration) -> (Listener, SocketAddr) {
     let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
     let address = GatewayAddress::try_from(loopback).unwrap();
     let listener = Listener::bind(&address, hello_timeout).unwrap();
-    let (PrivateDial { gateway }, _) = listener.issue(hung());
+    let (PrivateDial { gateway }, _) = listener.issue(Deadline::after(HUNG));
     (listener, gateway)
 }
 
@@ -1455,7 +1460,7 @@ fn admitting(unattested: Unattested, attestation: &'static str, from: Ipv4Addr) 
 /// A registration whose check admits `attestation` from the loopback, where each hello comes from.
 fn admitted(listener: &Listener, address: SocketAddr, attestation: &'static str) -> Registration {
     admitting(
-        issue(listener, address, hung()),
+        issue(listener, address, Deadline::after(HUNG)),
         attestation,
         Ipv4Addr::LOCALHOST,
     )
@@ -1503,17 +1508,17 @@ fn twice(address: SocketAddr, said: &Sender<String>, name: &'static str) -> [Joi
     })
 }
 
-fn accept_and_freeze(registration: Registration, by: Deadline) -> String {
+fn accept_and_freeze(registration: Registration, by: Duration) -> String {
     let (sender, _arrivals) = mpsc::channel();
-    let accepted = registration.accept(by, None, false, sender, |arrival| arrival, || false);
+    let accepted = registration.accept((&Machine, by), None, false, sender, |a| a, || false);
     outcome(accepted.and_then(|mut session| session.freeze(hung())))
 }
 
 fn refusals(listener: &Listener, address: SocketAddr) -> Vec<String> {
     let late = admitted(listener, address, "late");
-    let waited = accept_and_freeze(late, Deadline::after(Duration::ZERO));
+    let waited = accept_and_freeze(late, Duration::ZERO);
     drop(admitted(listener, address, "dropped"));
-    let unspent = issue(listener, address, hung());
+    let unspent = issue(listener, address, Deadline::after(HUNG));
     let elsewhere = admitting(unspent, "elsewhere", Ipv4Addr::new(192, 0, 2, 1));
 
     // Its check never comes, and no hello waits for it, as its deadline has passed.
@@ -1542,7 +1547,7 @@ fn refusals(listener: &Listener, address: SocketAddr) -> Vec<String> {
         .map(|(name, hello)| format!("{name}: {}", present(address, hello)))
         .collect();
     // Its accept tells why its check refused the last hello that no check admitted.
-    let elsewhere = accept_and_freeze(elsewhere, Deadline::after(Duration::ZERO));
+    let elsewhere = accept_and_freeze(elsewhere, Duration::ZERO);
     lines.extend([
         format!("an accept by a passed deadline: {waited}"),
         format!("  of another, once its check refused a hello: {elsewhere}"),
@@ -1566,7 +1571,7 @@ fn awaited(listener: &Listener, address: SocketAddr) -> Vec<String> {
     let sandbox = sandbox(address, hello.clone(), PAUSE, answer, (said, "awaited"));
     let ops = Some(OpPayloadLimit::NONE);
     let (sender, arrivals) = mpsc::channel();
-    let accepted = registration.accept(hung(), ops, false, sender, |arrival| arrival, || false);
+    let accepted = registration.accept((&Machine, hung()), ops, false, sender, |a| a, || false);
     let mut session = accepted.unwrap();
     let frozen = outcome(session.freeze(hung()));
     let mut lines = vec![format!("{}; freeze: {frozen}", heard.recv().unwrap())];
@@ -1603,7 +1608,7 @@ fn early(listener: &Listener, address: SocketAddr) -> Vec<String> {
 
 fn unchecked(listener: &Listener, address: SocketAddr) -> Vec<String> {
     let (said, heard) = mpsc::channel();
-    let [checked, withdrawn] = [(); 2].map(|()| issue(listener, address, hung()));
+    let [checked, withdrawn] = [(); 2].map(|()| issue(listener, address, Deadline::after(HUNG)));
     let hellos = ["checked", "withdrawn"].map(|name| {
         let said = (said.clone(), name);
         sandbox(address, attesting(name), Duration::ZERO, named, said)
@@ -1650,9 +1655,9 @@ fn stopped_accept(listener: &Listener, address: SocketAddr) -> Vec<String> {
         looks.get() > 2
     };
     let (sender, _) = mpsc::channel();
-    let accepted = registration.accept(by, None, false, sender, |arrival| arrival, stopped);
+    let accepted = registration.accept((&Machine, by), None, false, sender, |a| a, stopped);
     let accepted = outcome(accepted.map(drop));
-    let returned = by.remaining().map_or("past", |_| "before");
+    let returned = time::left(&Machine, by).map_or("past", |_| "before");
     let presented = present(address, &attesting("stopped"));
     vec![
         format!("an accept stopped as it waits returned {returned} its deadline: {accepted}"),
@@ -1779,7 +1784,8 @@ fn dials() {
             };
             let accepted = |registration: Registration, by, stopped: bool| {
                 let (sender, _) = mpsc::channel();
-                let session = registration.accept(by, None, false, sender, |a| a, || stopped);
+                let session =
+                    registration.accept((&Machine, by), None, false, sender, |a| a, || stopped);
                 session
                     .map(drop)
                     .map_err(|error| format!("{:?}: {error}", error.kind()))
@@ -1809,7 +1815,7 @@ fn dials() {
                 .port();
             let (_, unreached) = issue();
             // Under the first wait between dials, so that the accept gives up after one.
-            let at = Deadline::after(Duration::from_millis(300));
+            let at = Machine.now() + Duration::from_millis(300);
             let session = accepted(unreached.at(endpoint(closed)), at, false);
             let session = session.map_err(|error| error.replace(&closed.to_string(), "$PORT"));
             lines.push(format!("nothing listening: {session:?}"));
@@ -1839,13 +1845,13 @@ fn untrusted() -> String {
     let port = edge.local_addr().unwrap().port();
     let shown = thread::spawn(move || {
         let (stream, _) = edge.accept().unwrap();
-        let shown = test_support::edge::server().accept(stream, hung());
+        let shown = test_support::edge::server().accept(stream, Deadline::after(HUNG));
         shown.map(drop).map_err(|error| error.kind())
     });
     let (sender, _) = mpsc::channel();
-    let by = Deadline::after(Duration::from_millis(900));
+    let by = Machine.now() + Duration::from_millis(900);
     let registration = unreached.at(endpoint(port));
-    let session = registration.accept(by, None, false, sender, |a| a, || false);
+    let session = registration.accept((&Machine, by), None, false, sender, |a| a, || false);
     let session = session.map(drop).map_err(|error| {
         format!("{:?}: {error}", error.kind()).replace(&port.to_string(), "$PORT")
     });
@@ -1864,7 +1870,9 @@ fn listening(closes_first: bool, (hello, body): Said) -> (u16, JoinHandle<Option
             drop(listener.accept().unwrap());
         }
         let (stream, _) = listener.accept().unwrap();
-        let stream = test_support::edge::server().accept(stream, hung()).unwrap();
+        let stream = test_support::edge::server()
+            .accept(stream, Deadline::after(HUNG))
+            .unwrap();
         frame::write(&mut &stream, &hello, &body).unwrap();
         frame::read::<HelloReply>(&mut &stream)
             .unwrap()

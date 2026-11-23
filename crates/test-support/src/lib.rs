@@ -19,8 +19,8 @@ use std::time::Duration;
 use std::{fs, io};
 
 use schema::sandbox::{command_stdout, log_dir};
-use stdx::Deadline;
 use stdx::process::Environment;
+use stdx::time::{Clock as _, Machine};
 
 pub mod edge;
 pub mod http;
@@ -39,9 +39,9 @@ pub const WORKFLOW: &str = include_str!("workflow.json");
 /// How long a test waits for what only a test that hangs never sees, so no outcome rests on it.
 pub const HUNG: Duration = Duration::from_secs(60);
 
-/// A request's deadline, [`HUNG`] from now.
-pub fn hung() -> Deadline {
-    Deadline::after(HUNG)
+/// A request's deadline, [`HUNG`] from now, as a time on [`Machine`].
+pub fn hung() -> Duration {
+    Machine.now() + HUNG
 }
 
 /// The files and empty directories below `dir`, by their paths from it, sorted, each executable

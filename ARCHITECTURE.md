@@ -85,10 +85,11 @@ something deliberately absent, and each says what holds it.
 ### `crates/stdx`
 
 What `std` lacks and several crates share: errors with context (`Context`), deadlines
-(`Deadline`), commands that get only the environment their caller states (`process::command`),
-run to their end within a bound (`process::run`) or on their own (`process::spawn`), slots held by
-a lock on a file (`slots`), signals noted rather than acted on (`signal`), and a panic that aborts
-the whole process (`abort_on_panic`).
+(`Deadline`), a clock that a component is handed, so that a test can script it (`time::Clock`,
+the machine's `time::Machine`), commands that get only the environment their caller states
+(`process::command`), run to their end within a bound (`process::run`) or on their own
+(`process::spawn`), slots held by a lock on a file (`slots`), signals noted rather than acted on
+(`signal`), and a panic that aborts the whole process (`abort_on_panic`).
 
 **Architecture Invariant:** every `process::run` states its `Bound`, which has no unbounded case
 and no default, and its command is killed at the bound, or once a captured stream passes 128 MiB.
@@ -482,6 +483,13 @@ sandboxes left, or fails.
 **Architecture Invariant:** a run that doesn't fit beside other runs is refused with no record:
 `Run::prepare` makes the record only once each provider has reserved, and the run holds each
 `Reservation` until its end has deleted its sandboxes.
+
+**Architecture Invariant:** every deadline of a run is a time on the run's clock, its `Host`'s, so
+that a simulated host decides every outcome that time decides. The gateway's sessions and the
+model route take that clock, and each request, model response and start's wait takes its deadline
+as a time on it, which the gateway reads again every `Clock::look` as it waits. The loop ends a
+model route as the core stops its requests. A wait on the machine's clock within one, such as a
+dial or an upstream's connect, takes the time left as it begins or a bound of its own.
 
 ### `crates/pumpkin`
 

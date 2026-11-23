@@ -24,7 +24,7 @@ use schema::ir::{Api, ApiRoute, ModelRoute, Name, Sha256Digest};
 use schema::workflow::{ByRole, Sandbox, Workflow};
 use serde_json::{Map, Value, json};
 use sha2::{Digest as _, Sha256};
-use stdx::{Context as _, Deadline, unpoisoned};
+use stdx::{Context as _, unpoisoned};
 
 use crate::Clock;
 
@@ -125,13 +125,13 @@ impl Served {
     /// Serves one model request, number `number`, with its `exchange` keeping it, as `admission` of
     /// the index of the entry that takes it admits it: `forwarding` is called once if the request
     /// goes upstream, and `answered` once, with the name and API of the entry that took it, if one
-    /// did, and the answer.
+    /// did, and the answer. It gives up at `by`, a time on the exchange's clock.
     pub(super) fn serve<'b>(
         &self,
         (number, exchange): (u64, &Exchange<impl Clock>),
         incoming: IncomingModelRequest,
         admission: impl FnOnce(usize) -> Admission<'b>,
-        by: Deadline,
+        by: Duration,
         forwarding: impl FnOnce(),
         answered: impl FnOnce(Option<&(Name, Api)>, Answer),
     ) {
@@ -143,6 +143,7 @@ impl Served {
             answered(taken, answer);
         };
         let entries = &self.entries;
+        let by = (&exchange.clock, by);
         route::serve(
             entries, incoming, admission, by, exchange, forwarding, answered,
         );

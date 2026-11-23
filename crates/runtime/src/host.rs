@@ -1,21 +1,20 @@
 //! A run's host: what the run reads of time and waits on, and what makes its record last.
 //!
-//! What a run reads or waits on by the machine's time, whatever its host:
-//! - the session's and the provider's calls, and the model route's, each take a [`Deadline`]
-//!   that `deadline` makes from the clock as the time left then, so a later jump of the clock
-//!   shortens only the waits made after it;
-//! - the gateway's own deadlines and its looks at a socket;
-//! - a start's looks between its lists of the provider's sandboxes;
-//! - the simulated provider's sleeps (`SLOW`, `HUNG`, `LINGERING`);
-//! - the model route's requests upstream, through `ureq`;
-//! - [`Clock::unix`], the run's start by the machine's clock.
+//! Every deadline of a run is a time on the run's clock. A session's requests, a model response's
+//! frames and a start's wait for its sandbox take their deadlines as times on it. What a run waits
+//! on by the machine's time, whatever its host:
+//! - within a start's wait for its sandbox, each dial, its TLS and its hello, and the private
+//!   listener's wait for a check, which take the time left as they begin;
+//! - a provider's own calls, which wait on its platform;
+//! - the model route's exchange upstream, through `ureq`, which takes the time left as it begins,
+//!   and its resolve, connect and reads, by bounds of their own.
 
 use std::fs::File;
 use std::io;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::time::{Duration, Instant, SystemTime};
 
-use stdx::Deadline;
+use stdx::time::Clock as _;
 
 /// The machine a run runs on, as far as the run reads time, waits, and makes its record last.
 // Sync, as each child's thread syncs the record of its sandbox's start and delete through it.
@@ -40,20 +39,13 @@ pub enum Durable {
     All,
 }
 
-/// A run's clock: the time since the run started, which the core takes with each event, and when
-/// that was by the machine's clock.
+/// A run's clock, whose origin is the run's start: the core takes its time with each event.
 ///
-/// Each of the run's threads reads it through a clone of its own, and every clone reads the same
-/// time.
+/// Each of the run's threads reads it through a clone of its own.
 // 'static, as the agent's session's reader, a thread that outlives the run's borrows, stamps each
 // of the agent's arrivals with a clone.
-pub trait Clock: Clone + Send + 'static {
+pub trait Clock: stdx::time::Clock + Send + 'static {
     type Inbox<T: Send + 'static>: Inbox<T> + Send;
-
-    fn now(&self) -> Duration;
-
-    /// When the run started, by the machine's clock.
-    fn unix(&self) -> SystemTime;
 
     /// An empty inbox, whose waits this clock times.
     fn inbox<T: Send + 'static>(&self) -> Self::Inbox<T>;
@@ -83,7 +75,6 @@ impl Host for System {
     fn start(&self) -> SystemClock {
         SystemClock {
             start: Instant::now(),
-            unix: SystemTime::now(),
         }
     }
 
@@ -98,19 +89,24 @@ impl Host for System {
 #[derive(Clone, Copy, Debug)]
 pub struct SystemClock {
     start: Instant,
-    unix: SystemTime,
 }
 
-impl Clock for SystemClock {
-    type Inbox<T: Send + 'static> = SystemInbox<T>;
-
+impl stdx::time::Clock for SystemClock {
     fn now(&self) -> Duration {
         self.start.elapsed()
     }
 
-    fn unix(&self) -> SystemTime {
-        self.unix
+    fn realtime(&self) -> SystemTime {
+        SystemTime::now()
     }
+
+    fn look(&self) -> Option<Duration> {
+        None
+    }
+}
+
+impl Clock for SystemClock {
+    type Inbox<T: Send + 'static> = SystemInbox<T>;
 
     fn inbox<T: Send + 'static>(&self) -> SystemInbox<T> {
         let (sender, receiver) = mpsc::channel();
@@ -161,9 +157,4 @@ fn disconnected() -> ! {
         "an inbox disconnected, though it holds a sender of its own, so its channel can't \
          disconnect while the inbox is borrowed to wait on it"
     )
-}
-
-/// The deadline at `at`, a time since the run started by `clock`, for a call that takes one.
-pub(super) fn deadline(clock: &impl Clock, at: Duration) -> Deadline {
-    Deadline::after(at.saturating_sub(clock.now()))
 }

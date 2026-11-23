@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use expect_test::{Expect, expect};
-use gateway::{Arrival, Dialer, GatewayAddress, Listener, Process, Put, Session, Sockets};
+use gateway::{Arrival, Dialer, GatewayAddress, Listener, Process, Put, Sockets};
 use schema::frame;
 use schema::frame::MAX_BODY_BYTES;
 use schema::ir::{AbsolutePath, Argv, Env, EnvVar, Mode, Name};
@@ -39,8 +39,12 @@ use schema::sandbox::{
     SANDBOXD_ATTESTATION, SANDBOXD_GRANT, SOCKET_NAME, SocketDial, ToSandbox, dir_mode, file_mode,
 };
 use serde_json::{Value, json};
+use stdx::Deadline;
 use stdx::process::Environment;
-use test_support::{TestDir, hung};
+use stdx::time::Machine;
+use test_support::{HUNG, TestDir, hung};
+
+type Session = gateway::Session<Machine>;
 
 const PATH_ONLY: Environment = Environment::Only(&["PATH"]);
 
@@ -105,7 +109,7 @@ impl Sandbox {
                 let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
                 let address = GatewayAddress::try_from(loopback).unwrap();
                 let listener = Listener::bind(&address, HELLO_TIMEOUT).unwrap();
-                let (PrivateDial { gateway }, unattested) = listener.issue(hung());
+                let (PrivateDial { gateway }, unattested) = listener.issue(Deadline::after(HUNG));
                 let registration = unattested.admitting(|attestation, peer| {
                     let ours = attestation.bytes() == ATTESTATION.as_bytes() && peer.is_loopback();
                     ours.then_some(())
@@ -137,7 +141,7 @@ impl Sandbox {
         let sandboxd = sandboxd.spawn().unwrap();
         let (sender, arrivals) = mpsc::channel();
         let accepted =
-            registration.accept(hung(), None, false, sender, |arrival| arrival, || false);
+            registration.accept((&Machine, hung()), None, false, sender, |a| a, || false);
         let mut session = accepted.unwrap();
         let dirs = ["in", "out", "home", "log"].map(relative);
         session
@@ -477,7 +481,12 @@ fn modes_and_stdin() {
             lines.push(format!("the collected tree removed: {removed:?}"));
             let trees = sandbox.session.trees();
             let again = [Put::File(relative("again"), mode("0644"), b"")];
-            let replaced = trees.put(&sandbox.at("in/tools"), Root::Replaced, again, hung());
+            let replaced = trees.put(
+                &sandbox.at("in/tools"),
+                Root::Replaced,
+                again,
+                (&Machine, hung()),
+            );
             let held: Vec<_> = (fs::read_dir(sandbox.root.join("in/tools")).unwrap())
                 .map(|entry| entry.unwrap().file_name().into_string().unwrap())
                 .collect();
@@ -728,12 +737,12 @@ fn new_roots() {
             let root = absolute(&sandbox.root.join("in/fresh/tree"));
             let put = || [Put::Dir(relative("a"), dir_mode())];
             let first = thread::scope(|scope| {
-                let put = scope.spawn(|| trees.put(&root, Root::New, put(), hung()));
+                let put = scope.spawn(|| trees.put(&root, Root::New, put(), (&Machine, hung())));
                 put.join().unwrap()
             });
             first.unwrap();
             let made = sandbox.root.join("in/fresh/tree/a").is_dir();
-            let again = trees.put(&root, Root::New, put(), hung());
+            let again = trees.put(&root, Root::New, put(), (&Machine, hung()));
             let mut lines = vec![
                 format!("put, its parents made: {made}"),
                 format!("put again: {}", show_error(sandbox, again)),
@@ -746,7 +755,9 @@ fn new_roots() {
                 absolute(&file),
                 absolute(&sandbox.root.join("in/none")),
             ] {
-                trees.put(&at, Root::Replaced, other(), hung()).unwrap();
+                trees
+                    .put(&at, Root::Replaced, other(), (&Machine, hung()))
+                    .unwrap();
                 let held: Vec<_> = (fs::read_dir(at.as_str()).unwrap())
                     .map(|entry| entry.unwrap().file_name().into_string().unwrap())
                     .collect();
@@ -1030,7 +1041,7 @@ fn trickling(address: SocketAddr) -> (String, String) {
 
 fn dialed(address: SocketAddr) -> TcpStream {
     // A `sandboxd` that never listens fails the test rather than hang it.
-    let by = hung();
+    let by = Deadline::after(HUNG);
     let stream = loop {
         match TcpStream::connect(address) {
             Ok(stream) => break stream,
@@ -1044,8 +1055,8 @@ fn dialed(address: SocketAddr) -> TcpStream {
             Err(error) => panic!("{error}"),
         }
     };
-    stream.set_read_timeout(hung().remaining()).unwrap();
-    stream.set_write_timeout(hung().remaining()).unwrap();
+    stream.set_read_timeout(Some(HUNG)).unwrap();
+    stream.set_write_timeout(Some(HUNG)).unwrap();
     stream
 }
 
@@ -1349,7 +1360,7 @@ fn fake_gateway(socket: &Path) -> (UnixStream, Child, Value) {
     gateway.set_nonblocking(true).unwrap();
     let sandboxd = sandboxd(&[socket.as_ref()], &[]);
     // A `sandboxd` that never connects fails the test rather than hang it.
-    let by = hung();
+    let by = Deadline::after(HUNG);
     let mut connection = loop {
         match gateway.accept() {
             Ok((connection, _)) => break connection,
@@ -1364,8 +1375,8 @@ fn fake_gateway(socket: &Path) -> (UnixStream, Child, Value) {
         }
     };
     connection.set_nonblocking(false).unwrap();
-    connection.set_read_timeout(hung().remaining()).unwrap();
-    connection.set_write_timeout(hung().remaining()).unwrap();
+    connection.set_read_timeout(Some(HUNG)).unwrap();
+    connection.set_write_timeout(Some(HUNG)).unwrap();
     let (hello, _) = frame::read::<Value>(&mut connection).unwrap().unwrap();
     (connection, sandboxd, hello)
 }
@@ -1403,7 +1414,7 @@ fn as_root_with_user() {
     let container = format!("sandboxd-{}-as-root", std::process::id());
     start_as_root(&dir, &container, "1234:1235");
     let (sender, arrivals) = mpsc::channel();
-    let accepted = registration.accept(hung(), None, false, sender, |arrival| arrival, || false);
+    let accepted = registration.accept((&Machine, hung()), None, false, sender, |a| a, || false);
     let mut session = accepted.unwrap();
     let mut lines = as_user(&mut session, &arrivals, &root.join("collected"));
     lines.extend(left_behind(&mut session, &arrivals, &container));

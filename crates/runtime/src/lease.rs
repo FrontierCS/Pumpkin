@@ -25,10 +25,10 @@ use schema::sandbox::{
     Entry, Launch, RelativePath, Root, command_env, dir_mode, log_dir, out_dir, pumpkin_dir,
 };
 use schema::workflow::Runner;
-use stdx::{Context, Deadline};
+use stdx::Context;
+use stdx::time::Clock as _;
 
 use super::child::{Child, End, Message};
-use super::host::deadline;
 use super::sandbox::{ENTRIES, collect};
 use super::{Clock, Host, Inbox};
 
@@ -90,7 +90,7 @@ pub(super) fn run<H: Host>(leased: &Leased<'_>, child: &mut Child<'_, H, Order>)
 fn drive<H: Host>(
     leased: &Leased<'_>,
     child: &mut Child<'_, H, Order>,
-    session: &mut Session,
+    session: &mut Session<H::Clock>,
 ) -> Event {
     let lease = leased.lease;
     let failed = |reason: String| Event::LeaseFailed { lease, reason };
@@ -105,7 +105,7 @@ fn drive<H: Host>(
     child.event(Event::LeaseReady { lease });
     let mut running = None;
     let served = serve(leased, child, session, &mut running);
-    let by = deadline(&child.clock, child.deadlines.collect);
+    let by = child.deadlines.collect;
     if let Err(error) = session.freeze(by) {
         let reason = served
             .err()
@@ -130,7 +130,7 @@ fn drive<H: Host>(
 fn serve<H: Host>(
     leased: &Leased<'_>,
     child: &mut Child<'_, H, Order>,
-    session: &mut Session,
+    session: &mut Session<H::Clock>,
     running: &mut Option<Running>,
 ) -> Result<(), String> {
     let Leased {
@@ -162,7 +162,7 @@ fn serve<H: Host>(
                 });
             }
             Some(Message::Order(Order::Run(run))) => {
-                match start(runner, child, (&run, by_start), session) {
+                match start(runner, (&run, by_start), session) {
                     Ok(process) => {
                         let kill_at = run.timeout.map(|timeout| child.clock.now() + timeout);
                         *running = Some(Running {
@@ -214,11 +214,10 @@ fn kill<H: Host>(
     child: &Child<'_, H, Order>,
     by_start: Duration,
     running: &mut Running,
-    session: &mut Session,
+    session: &mut Session<H::Clock>,
 ) -> Result<(), String> {
-    let by = deadline(&child.clock, by_start);
     running.kill_at = None;
-    match session.kill(running.process, by) {
+    match session.kill(running.process, by_start) {
         Ok(()) => running.timed_out = true,
         Err(error) => {
             let reason = format!("command {} wasn't killed: {error}", running.command);
@@ -232,14 +231,12 @@ fn kill<H: Host>(
 }
 
 /// Starts `run` in the runner's `cwd` with its `env`, its output in [`command_dir`].
-fn start<H: Host>(
+fn start(
     runner: &Runner,
-    child: &Child<'_, H, Order>,
-    (run, by_start): (&Run, Duration),
-    session: &mut Session,
+    (run, by): (&Run, Duration),
+    session: &mut Session<impl Clock>,
 ) -> Result<Process, String> {
     let dir = command_dir(run.command);
-    let by = deadline(&child.clock, by_start);
     let put = session.put(&pumpkin_dir(), [Put::Dir(dir.clone(), dir_mode())], by);
     put.context(format_args!("making {dir} failed"))?;
     let output = |name: RelativePath| pumpkin_dir().join(&dir.join(&name));
@@ -259,13 +256,10 @@ fn start<H: Host>(
 fn outputs<H: Host>(
     child: &Child<'_, H, Order>,
     command: u64,
-    session: &mut Session,
+    session: &mut Session<H::Clock>,
     required: bool,
 ) -> Result<(String, String), String> {
-    let (dir, by) = (
-        command_dir(command),
-        deadline(&child.clock, child.deadlines.collect),
-    );
+    let (dir, by) = (command_dir(command), child.deadlines.collect);
     if let Err(error) = collect(session, &dir, &child.dir, by) {
         let reason = format!("command {command}'s output is incomplete: {error}");
         if required {
@@ -308,7 +302,7 @@ fn transfer<H: Host>(
         }
         held.is_some()
     };
-    let by = deadline(&child.clock, child.deadlines.collect);
+    let by = (&child.clock, child.deadlines.collect);
     let moved = staged_move(runner, order, &staging, by, &mut stopped);
     // The core's stop; the runner's session's end says itself why the transfer failed.
     let cut = matches!(held, Some(Message::Stop));
@@ -332,7 +326,7 @@ fn staged_move(
     runner: &Trees,
     order: &Transfer,
     staging: &Path,
-    by: Deadline,
+    by: (&impl Clock, Duration),
     stopped: &mut dyn FnMut() -> bool,
 ) -> Result<(u64, u64), String> {
     // Where the tree goes, and the rule that a failed put restates.

@@ -24,7 +24,8 @@ use route::Serving;
 use schema::ir::{Label, ModelName};
 use schema::sandbox::op::OpReply;
 use schema::workflow::{AgentId, ByProvider, ByRole, Placed, RoleId, TargetId, Workflow};
-use stdx::{Context, Deadline};
+use stdx::Context;
+use stdx::time::Clock as _;
 
 mod agent;
 mod body;
@@ -54,7 +55,6 @@ pub use body::{Bodies, RunState, Target};
 use budget::Budget;
 pub use budget::{Budgets, budgets};
 use child::{Message, Report};
-use host::deadline;
 pub use host::{Clock, Durable, Host, Inbox, System};
 pub use interruption::{Signal, Stopped};
 pub use log::{
@@ -227,7 +227,7 @@ impl<'r, H: Host> Run<'r, H> {
         interruption::check()?;
         started()?;
         let clock = host.start();
-        let unix = UnixTime::of(clock.unix())?;
+        let unix = UnixTime::of(clock.realtime())?;
         let inbox = clock.inbox();
         let sandboxes = Sandboxes::new(
             published,
@@ -344,7 +344,7 @@ struct Runtime<'r, H: Host> {
     unix_hard_end: UnixTime,
     log: Log<'r, H>,
     payloads: Payloads<'r, H>,
-    agents: BTreeMap<AgentId, Agent>,
+    agents: BTreeMap<AgentId, Agent<H::Clock>>,
     // Whether teardown was requested before setup handed over the session or disposed of it.
     starting: BTreeMap<AgentId, bool>,
     residents: BTreeMap<TargetId, shared::Resident<'r, H>>,
@@ -360,14 +360,14 @@ struct Runtime<'r, H: Host> {
     leases: BTreeMap<LeaseId, Sender<Message<lease::Order>>>,
     // Events known already, which the loop gives the core before it waits on its inbox.
     pending: VecDeque<(Duration, Event)>,
-    inbox: <H::Clock as Clock>::Inbox<Input>,
+    inbox: <H::Clock as Clock>::Inbox<Input<H::Clock>>,
     // What the loop took from the inbox once the core's tick was due, which reached the host at or
     // after the tick's time, and so goes to the core after the tick.
-    held: Option<Input>,
+    held: Option<Input<H::Clock>>,
 }
 
-enum Input {
-    Prepared(AgentId, Result<Box<Agent>, String>),
+enum Input<C> {
+    Prepared(AgentId, Result<Box<Agent<C>>, String>),
     Launched(AgentId, Duration, Result<(), String>),
     Agent(AgentId, Duration, Arrival),
     Shared(TargetId, Duration, Arrival),
@@ -375,7 +375,7 @@ enum Input {
     Logged(Entry),
 }
 
-impl Input {
+impl<C> Input<C> {
     // Setup and a successful launch have no core event; arrivals carry their own times.
     fn reached(&self) -> Option<Duration> {
         match self {
@@ -563,7 +563,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         &mut self,
         scope: Option<&'s Scope<'s, 'r>>,
         core: &Core<'_>,
-        input: Input,
+        input: Input<H::Clock>,
     ) -> Result<Option<(Duration, Event)>, String> {
         let (id, at, arrival) = match input {
             Input::Prepared(id, agent) => {
@@ -841,7 +841,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         id: AgentId,
         what: &str,
         by: Duration,
-        write: impl FnOnce(&mut Agent, Deadline) -> io::Result<()>,
+        write: impl FnOnce(&mut Agent<H::Clock>, Duration) -> io::Result<()>,
     ) -> Result<(), String> {
         let sent = match self.agents.get_mut(&id) {
             // A write past `by` would end the session, which the agent's teardown still needs, for
@@ -853,10 +853,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             Some(_) if self.clock.now() >= by => Err(format!(
                 "{what} wasn't sent: it was due by the core's next act, which has come"
             )),
-            Some(agent) => {
-                let by = deadline(&self.clock, by);
-                write(agent, by).context(format_args!("{what} failed"))
-            }
+            Some(agent) => write(agent, by).context(format_args!("{what} failed")),
             None => Err(format!("{what} wasn't sent: the agent's sandbox is gone")),
         };
         match sent {

@@ -17,36 +17,40 @@ use schema::sandbox::{
     ExitStatus, Launch, OpPayloadLimit, command_stdin, file_mode, log_dir, out_dir, pumpkin_dir,
 };
 use schema::workflow::{self, AgentId, TargetId, Workflow};
-use stdx::{Context, Deadline};
+use stdx::Context;
+use stdx::time::Clock as _;
 
 use super::log::Entry;
 use super::sandbox::{Sandboxes, Started, Unstarted, Which, collect, launch};
-use super::{Clock, Host, Inbox, Input, Report, Runtime, deadline, record};
+use super::{Clock, Host, Inbox, Input, Report, Runtime, record};
 
 /// The agent's sandbox, from when it starts until it is deleted.
-pub(super) struct Agent {
-    sandbox: Started,
+pub(super) struct Agent<C> {
+    sandbox: Started<C>,
     /// The reserved command, until the driver has reported its exit or the end of its session.
     process: Option<Process>,
     // The start is recorded once, even when the command sends an op before its confirmation.
     launched: bool,
 }
 
-impl Agent {
-    /// Creates the sandbox and installs the files its command needs. Keeps the session even on
-    /// a file error so its output and deletion are accounted for by the usual teardown.
-    fn prepare(
-        sandboxes: &Sandboxes<'_, impl Host>,
+impl<C: Clock> Agent<C> {
+    /// Creates the sandbox and installs the files its command needs, by `by`, a time on `clock`.
+    /// Keeps the session even on a file error so its output and deletion are accounted for by the
+    /// usual teardown.
+    fn prepare<H: Host<Clock = C>>(
+        sandboxes: &Sandboxes<'_, H>,
         agent: &workflow::Agent,
-        by: Deadline,
+        by: Duration,
         hard_end: UnixTime,
-        inbox: Sender<Input>,
-        clock: impl Clock,
+        inbox: Sender<Input<C>>,
+        clock: &C,
     ) -> Result<(Self, Result<Launch, String>), Unstarted> {
         let id = agent.id;
         let ops = Some(op_payload_limit(sandboxes.workflow(), id));
-        let wrap = move |arrival| Input::Agent(id, clock.now(), arrival);
-        let mut sandbox = sandboxes.start(Which::Agent(id), ops, by, hard_end, inbox, wrap)?;
+        let stamp = clock.clone();
+        let wrap = move |arrival| Input::Agent(id, stamp.now(), arrival);
+        let which = Which::Agent(id);
+        let mut sandbox = sandboxes.start(which, ops, (clock, by), hard_end, inbox, wrap)?;
         let launch = put(&mut sandbox.session, agent, by).map(|stdin| Launch {
             stdin,
             ..launch(&agent.command)
@@ -92,7 +96,7 @@ impl Agent {
         self.process.is_some() && !std::mem::replace(&mut self.launched, true)
     }
 
-    pub(super) fn reply(&mut self, op: IncomingOp, reply: OpReply, by: Deadline) -> io::Result<()> {
+    pub(super) fn reply(&mut self, op: IncomingOp, reply: OpReply, by: Duration) -> io::Result<()> {
         self.sandbox.session.reply(op, reply, by)
     }
 
@@ -100,13 +104,13 @@ impl Agent {
         self.sandbox.session.trees()
     }
 
-    pub(super) fn refuse(&mut self, refused: RefusedOp, by: Deadline) -> io::Result<()> {
+    pub(super) fn refuse(&mut self, refused: RefusedOp, by: Duration) -> io::Result<()> {
         self.sandbox.session.refuse(refused, by)
     }
 
     /// Freezes the sandbox, then collects its [`out_dir()`] and [`log_dir()`] into `dir`, all by
     /// `by`. Returns what failed, if anything.
-    fn freeze_and_collect(&mut self, dir: &Path, by: Deadline) -> Vec<String> {
+    fn freeze_and_collect(&mut self, dir: &Path, by: Duration) -> Vec<String> {
         let session = &mut self.sandbox.session;
         let mut failures = Vec::new();
         if let Err(error) = session.freeze(by) {
@@ -126,7 +130,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         &mut self,
         scope: Option<&'s Scope<'s, 'r>>,
         id: AgentId,
-        agent: Result<Box<Agent>, String>,
+        agent: Result<Box<Agent<H::Clock>>, String>,
     ) -> Result<(), String> {
         match agent {
             Ok(agent) => {
@@ -166,7 +170,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 .note("the agent's sandbox never started: nothing was collected");
         };
         let dir = self.dir.join(Which::Agent(id).record_dir(self.workflow()));
-        let by = deadline(&self.clock, self.teardown_end());
+        let by = self.teardown_end();
         let sandboxes = self.sandboxes;
         let sender = self.inbox.sender();
         let clock = self.clock.clone();
@@ -217,8 +221,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             let clock = self.clock.clone();
             let inbox = self.inbox.sender();
             let bound = self.placed.startup(id.role());
-            let by = deadline(&clock, bound);
-            let prepare = move || Agent::prepare(sandboxes, role, by, hard_end, inbox, clock);
+            let prepare = move || Agent::prepare(sandboxes, role, bound, hard_end, inbox, &clock);
             startup = startup.max(bound);
             self.starting.insert(id, false);
             let (release, gate) = mpsc::channel();
@@ -230,7 +233,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 gate,
             };
             thread::Builder::new()
-                .spawn_scoped(scope, move || worker.start(prepare(), sandboxes, by))
+                .spawn_scoped(scope, move || worker.start(prepare(), sandboxes, bound))
                 .context("starting the agent's setup thread")?;
             gates.insert(id, release);
         }
@@ -326,16 +329,16 @@ struct Worker<C> {
     id: AgentId,
     clock: C,
     notices: Sender<(Duration, Ready)>,
-    inbox: Sender<Input>,
+    inbox: Sender<Input<C>>,
     gate: Receiver<Duration>,
 }
 
 impl<C: Clock> Worker<C> {
     fn start(
         self,
-        prepared: Result<(Agent, Result<Launch, String>), Unstarted>,
-        sandboxes: &Sandboxes<'_, impl Host>,
-        by: Deadline,
+        prepared: Result<(Agent<C>, Result<Launch, String>), Unstarted>,
+        sandboxes: &Sandboxes<'_, impl Host<Clock = C>>,
+        by: Duration,
     ) {
         let id = self.id;
         let (mut agent, launch) = match prepared {
@@ -375,8 +378,7 @@ impl<C: Clock> Worker<C> {
             && let Ok(end) = self.gate.recv()
             && super::interruption::signal().is_none()
         {
-            let result =
-                start(deadline(&self.clock, end)).context("the agent's command didn't start");
+            let result = start(end).context("the agent's command didn't start");
             let _ = self
                 .inbox
                 .send(Input::Launched(id, self.clock.now(), result));
@@ -387,9 +389,9 @@ impl<C: Clock> Worker<C> {
 /// Puts `agent`'s directories and files in its sandbox, at `/`, then its standard input's text,
 /// if it has one, at [`command_stdin()`], by `by`. Returns where the standard input is.
 fn put(
-    session: &mut Session,
+    session: &mut Session<impl Clock>,
     agent: &workflow::Agent,
-    by: Deadline,
+    by: Duration,
 ) -> Result<Option<AbsolutePath>, String> {
     let dirs = (agent.dirs.iter()).map(|Dir { path, mode }| Put::Dir(path.relative(), *mode));
     let files = (agent.files.iter()).map(|file| {
