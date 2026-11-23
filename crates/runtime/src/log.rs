@@ -1,5 +1,6 @@
-//! The run log, `log.jsonl` in a run's record, and its readers. `ARCHITECTURE.md` says what the log
-//! holds and what it leaves to the record's other files.
+//! The run log, `log.jsonl` in a run's record, and its readers. The log holds each fact once. It
+//! leaves a command's output, an op's payload, a model exchange's bodies and the outcome to the
+//! record's other files.
 //!
 //! The log is one JSON object a line, appended as the run goes and never changed; a line counts
 //! once its newline is there. A line has `seq`, its number from 0, and `at_ns`, when it was
