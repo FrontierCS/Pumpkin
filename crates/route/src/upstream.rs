@@ -12,10 +12,8 @@ use gateway::{IncomingModelRequest, ModelRequest, ModelResponse};
 use schema::frame;
 use schema::ir::{Api, ModelBudget, ModelName, Name};
 use serde_json::{Map, Value};
-use ureq::RequestBuilder;
 use ureq::http::header::{AUTHORIZATION, CONTENT_ENCODING};
 use ureq::http::{HeaderMap, HeaderName, HeaderValue, Uri};
-use ureq::typestate::WithBody;
 
 use super::Keep;
 use super::closure::{Closed, Headers, Refusal, Route, Status, parsed, refusal};
@@ -37,8 +35,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 // Within the body, the harness gives up on a stream that stays silent this long, and asks again,
 // so a live provider never keeps it waiting longer; waiting on past it, a request would hold one
 // of its sandbox's places in flight (`MAX_MODEL_REQUESTS_IN_FLIGHT`) for a client that has gone.
-// Before the head, the harness waits without a bound of its own, so this bound or the route's end
-// ends that wait: the harness asks for a stream, whose head the provider sends before any of the
+// Before the head, the harness waits without a bound of its own, so this bound and the deadline end
+// that wait: the harness asks for a stream, whose head the provider sends before any of the
 // model's output, so a head this late is a stall as well. A provider that takes none of the
 // request for as long has stalled too. A long response that keeps coming is never cut by it.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -278,12 +276,12 @@ impl Upstream {
     }
 
     /// Sends `closed` upstream and streams the response back to `client` by its deadline, with
-    /// only the headers its entry passes back, keeping both bodies ([`Keep`]), giving up once the
-    /// upstream stalls or the route shuts down. The client hears 504 if the upstream stalls before
-    /// the head, the route's end if shut down by then ([`Refusal::ended`]), 502 for no answer or a
-    /// coded body, 400 if the key or the request is refused, and else the response, cut short if
-    /// it breaks off. It calls `forwarding` just before it sends the request. Fails if the head is
-    /// too long for a frame or the deadline passes.
+    /// only the headers its entry passes back, keeping both bodies ([`Keep`]), giving up at it or
+    /// once the upstream stalls. The client hears 504 if it gives up before the head, the route's
+    /// end if shut down by then ([`Refusal::ended`]), 502 for no answer or a coded body, 400 if
+    /// the key or the request is refused, and else the response, cut short if it breaks off.
+    /// It calls `forwarding` just before it sends the request. Fails if the head is too long for
+    /// a frame or the deadline passes.
     pub(crate) fn forward(
         &self,
         closed: &Closed<'_>,
@@ -293,13 +291,18 @@ impl Upstream {
     ) -> io::Result<()> {
         client.keep.dropped_headers(closed.dropped_headers());
         client.keep.request(closed.body(), Some(closed.apart()));
-        let call = match self.call(closed, (client.by)().unwrap_or_default()) {
-            Ok(call) => call,
+        let call = match self.url(closed) {
+            Ok(url) => self.agent.post(url).config(),
             Err(refusal) => {
                 let answer = refusal.answered(None, None);
                 return refuse(refusal, answer, closed, client, answered);
             }
         };
+        let call = call.timeout_global(bound((client.by)())).build();
+        let call =
+            (closed.headers().iter()).fold(call, |call, (name, value)| call.header(name, value));
+        let (name, key) = &self.authorization;
+        let call = call.header(name, key);
         forwarding();
         let response = match call.send(closed.body()) {
             Ok(response) => response,
@@ -356,22 +359,6 @@ impl Upstream {
             Relayed::BrokeOff => client.cut(),
             Relayed::Unsent(error) => Err(error),
         }
-    }
-
-    /// The request upstream for `closed`, with its headers and the key, whose lookup and connect
-    /// each take at most `left`: a shutdown ends neither once it is under way.
-    fn call(
-        &self,
-        closed: &Closed<'_>,
-        left: Duration,
-    ) -> Result<RequestBuilder<WithBody>, Refusal> {
-        let call = (self.agent.post(self.url(closed)?).config())
-            .timeout_resolve(Some(RESOLVE_TIMEOUT.min(left)))
-            .timeout_connect(Some(CONNECT_TIMEOUT.min(left)));
-        let call = (closed.headers().iter())
-            .fold(call.build(), |call, (name, value)| call.header(name, value));
-        let (name, key) = &self.authorization;
-        Ok(call.header(name, key))
     }
 
     /// The refusal that answers `closed` once sending it failed with `error`, before the
@@ -495,13 +482,13 @@ pub enum Admission<'b> {
     },
 }
 
-/// Answers `request` for the sandbox that made it, by `left`'s deadline, through an entry.
+/// Answers `request` for the sandbox that made it, by `left`, through an entry of `entries`.
 ///
 /// Each is a route's entry and its upstream. The one whose endpoint the request names takes it,
 /// and of several, the one that allows the model it names; else it is refused with a 404 or a 400
 /// that names what they serve. The entry's upstream refuses it unless `admission` of the entry's
 /// index is open, or once it has shut down ([`Upstream::shutdown`]) or its key was refused, and
-/// else forwards it closed, calling `forwarding` just before it sends it.
+/// else forwards it closed, giving up at `left` too, calling `forwarding` just before it sends it.
 /// It gives `keep` the exchange ([`Keep`]), and tells `answered` how it answered ([`Answer`]) and
 /// through which entry's index, once `keep` has the whole answer and before its end is written.
 // Whether the answer reached the sandbox isn't told: writing it fails only for a response's head
@@ -584,6 +571,16 @@ fn barred(
     keep.response(refusal.body(api).as_bytes());
     answered(refusal.barred(bar));
     refusal.answer(api, request, by)
+}
+
+/// The time that `left` leaves the exchange: none once it has passed, and no bound if it is
+/// never reached.
+fn bound(left: Option<Duration>) -> Option<Duration> {
+    match left {
+        None => Some(Duration::ZERO),
+        Some(Duration::MAX) => None,
+        left @ Some(_) => left,
+    }
 }
 
 /// Answers `client`'s request with `refusal`, which came in place of any response of the

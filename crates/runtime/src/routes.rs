@@ -13,7 +13,7 @@ use schema::ir::{Api, Name};
 use schema::workflow::{AgentId, RoleId};
 
 use crate::budget::Budget;
-use crate::host::until;
+use crate::host::left;
 use crate::log::{Entry, ModelAnswer};
 use crate::model::{Exchange, Served};
 use crate::{Clock, Host, Inbox, Input, Runtime, Stopped};
@@ -58,9 +58,14 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             Caller::Agent(_) => self.teardown_end(),
             Caller::Job(job) => self.call(job).collect,
         };
-        let by = until(&self.clock, by);
         let reports = self.inbox.sender();
         let clock = self.clock.clone();
+        // The time left whole, not at most `Clock::look`, as the route bounds the exchange by it
+        // as the exchange begins.
+        let by = {
+            let clock = clock.clone();
+            move || left(&clock, by)
+        };
         let exchange = Exchange::new(self.dir, number, clock.clone());
         // A request stays in flight until its thread writes its response's end, the thread's last
         // step, so the session's bound on the requests in flight, `MAX_MODEL_REQUESTS_IN_FLIGHT`,
