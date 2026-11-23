@@ -5,8 +5,7 @@
 //! ([`say`]); what it prints for a person or a program to read, such as a run's id or outcome,
 //! goes to the standard output ([`print()`]).
 
-use std::io::{self, Write};
-use std::os::fd::AsFd;
+use std::io::{self, Write as _};
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -18,9 +17,7 @@ use driver::ARGV0;
 use engine::{ContextName, Engine};
 use provider::UnixTime;
 use runtime::{ReadError, Record};
-use rustix::event::{self, PollFd, PollFlags};
 use rustix::fs::Mode;
-use rustix::io::Errno;
 use rustix::process::umask;
 use stdx::Context;
 use workspace::Workspace;
@@ -119,7 +116,7 @@ fn main() -> Exit {
 
 fn printed(text: &StyledStr) -> Result<Exit, String> {
     // clap's own printing writes the help in many pieces. `head` can close the pipe between two of
-    // them, and the next write fails. `print` writes the help whole, in one call.
+    // them, and the next write fails. `print` writes the help in one `write_all`.
     print(styled(text).as_bytes()).context("printing to the standard output failed")?;
     Ok(Exit::Success)
 }
@@ -514,7 +511,9 @@ fn engine(context: ContextName, reader: Reader) -> Result<Engine, String> {
 }
 
 fn print(bytes: &[u8]) -> io::Result<()> {
-    written(io::stdout().lock(), bytes)
+    let mut stdout = io::stdout().lock();
+    stdout.write_all(bytes)?;
+    stdout.flush()
 }
 
 /// `text`, without its ANSI styles where clap would print its own help without them.
@@ -541,47 +540,5 @@ fn say(message: impl fmt::Display) {
 fn to_stderr(bytes: &[u8]) {
     // Writing to a terminal that has hung up fails, and `eprintln!` would panic; the exit
     // status and the run's record still say how it ended.
-    let _ = written(io::stderr().lock(), bytes);
-}
-
-/// Writes all of `bytes` to `stream`, then flushes it, waiting while `stream` is full even where it
-/// is non-blocking.
-fn written(mut stream: impl Write + AsFd, mut bytes: &[u8]) -> io::Result<()> {
-    // A full non-blocking pipe fails a write with `WouldBlock`. std's `write_all` retries only
-    // `Interrupted`, so it fails there. git's `xwrite` waits for room and writes again.
-    // https://github.com/rust-lang/rust/blob/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/io/write.rs#L214-L226
-    // https://github.com/git/git/blob/fb255012acbcbe81189cb8014da0280b09c66ecc/wrapper.c#L205-L221
-    // https://github.com/git/git/blob/fb255012acbcbe81189cb8014da0280b09c66ecc/wrapper.c#L245-L266
-    // Clearing `O_NONBLOCK` would change an open file description that other processes share.
-    // One of them may set it again at any time: `ssh` sets it on the standard error it inherits.
-    // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/channels.c#L514-L540
-    while !bytes.is_empty() {
-        match stream.write(bytes) {
-            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
-            Ok(count) => bytes = &bytes[count..],
-            // A write that fails writes none of `bytes`.
-            // https://github.com/rust-lang/rust/blob/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/io/write.rs#L72-L74
-            Err(error) => retried(&stream, error)?,
-        }
-    }
-    while let Err(error) = stream.flush() {
-        retried(&stream, error)?;
-    }
-    Ok(())
-}
-
-/// Waits until `stream` can take the write that failed with `error`, or returns `error` where no
-/// wait helps.
-fn retried(stream: &impl AsFd, error: io::Error) -> io::Result<()> {
-    match error.kind() {
-        io::ErrorKind::Interrupted => Ok(()),
-        // A blocking write would wait for the reader without a bound, so this waits without one.
-        io::ErrorKind::WouldBlock => {
-            match event::poll(&mut [PollFd::new(stream, PollFlags::OUT)], None) {
-                Ok(_) | Err(Errno::INTR) => Ok(()),
-                Err(error) => Err(error.into()),
-            }
-        }
-        _ => Err(error),
-    }
+    let _ = io::stderr().write_all(bytes);
 }
