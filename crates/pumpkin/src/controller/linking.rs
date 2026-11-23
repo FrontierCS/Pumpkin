@@ -2,6 +2,7 @@
 //! An opening repairs the destination if needed, and a cut request is retried from its progress.
 
 use std::collections::BTreeMap;
+use std::fs::OpenOptions;
 use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::PathBuf;
 use std::thread;
@@ -80,7 +81,8 @@ impl From<String> for Unlinked {
 
 pub(super) struct Linked {
     link: Link,
-    // OpenSSH puts only its own diagnostics here. The remote command's stderr stays the user's.
+    // What OpenSSH says of the connection, and what the remote command writes to its standard
+    // error: of `serve`, only its error as it ends and a failure to mark its install.
     diagnostics: tempfile::NamedTempFile,
 }
 
@@ -136,10 +138,22 @@ impl Linked {
         at: &Located,
     ) -> Result<Option<Self>, Unlinked> {
         let diagnostics = reached.location.diagnostics()?;
+        // Never this process's own standard error. OpenSSH makes each of its standard streams that
+        // isn't a terminal non-blocking, and blocking again only as it closes it, which an `ssh`
+        // killed, or ended by a fatal error, never does. A write to a stream left so fails with
+        // `WouldBlock`, in each process that shares it, as under `2>&1`. Opened to append, as `-E`
+        // opens it, so that neither writer's lines overwrite the other's.
+        // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/ssh.c#L2234-L2251
+        // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/channels.c#L514-L540
+        // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/channels.c#L636-L645
+        // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/clientloop.c#L2901-L2908
+        // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/log.c#L319
+        let stderr = OpenOptions::new().append(true).open(diagnostics.path());
+        let stderr = stderr.context(diagnostics.path().display())?;
         let mut ssh = Reached::ssh_command();
         ssh.arg("-E").arg(diagnostics.path());
         reached.remote(&mut ssh, at, &link::command(key));
-        match Link::open(ssh) {
+        match Link::open(ssh, stderr) {
             Ok(link) => Ok(link.map(|link| Self { link, diagnostics })),
             Err(error) => Err(unlinked(reached, &diagnostics, error)),
         }
@@ -274,7 +288,8 @@ fn unlinked(
             let denied = line
                 .as_ref()
                 .is_some_and(|line| line.contains("Permission denied ("));
-            let said = line.map_or(ended, |line| format!("ssh says: {line}"));
+            // The line may be `ssh`'s or `serve`'s.
+            let said = line.map_or(ended, |line| format!("the link last said: {line}"));
             let said = format!("controller `{name}` didn't answer: {said}");
             if host_refused {
                 Unlinked::HostKey(reached.host_refused(&said))

@@ -20,6 +20,7 @@
 pub(crate) mod copy;
 pub(crate) mod store;
 
+use std::fs::File;
 use std::io::{self, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
@@ -737,11 +738,10 @@ pub(crate) struct Link {
 }
 
 impl Link {
-    /// Runs `ssh`, an `ssh` that runs [`command`], and reads its hello: `None` if it is
-    /// [`Hello::Absent`].
-    pub(crate) fn open(mut ssh: Command) -> Result<Option<Self>, Unanswered> {
-        let child =
-            stdx::process::spawn(&mut ssh, Stdio::piped(), Stdio::piped(), Stdio::inherit());
+    /// Runs `ssh`, an `ssh` that runs [`command`], with `stderr` as its standard error, which
+    /// `serve`'s goes to as well, and reads its hello: `None` if it is [`Hello::Absent`].
+    pub(crate) fn open(mut ssh: Command, stderr: File) -> Result<Option<Self>, Unanswered> {
+        let child = stdx::process::spawn(&mut ssh, Stdio::piped(), Stdio::piped(), stderr.into());
         let mut child = child.map_err(Unanswered::Failed)?;
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
             unreachable!(

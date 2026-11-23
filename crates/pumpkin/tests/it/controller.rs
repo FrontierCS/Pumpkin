@@ -63,6 +63,7 @@ fn noted(scratch: &Scratch) -> Vec<String> {
 }
 
 fn check(scratch: &Scratch, text: &str, shown: &[(&str, &str)], expect: &Expect) {
+    quiet(scratch);
     let mut text = text.replace(scratch.0.to_str().unwrap(), "<scratch>");
     text = text.replace(EMPTY_TREE, "<empty tree>");
     for (value, name) in shown {
@@ -83,6 +84,20 @@ fn check(scratch: &Scratch, text: &str, shown: &[(&str, &str)], expect: &Expect)
         None => line.to_owned(),
     });
     expect.assert_eq(&lines.collect::<Vec<String>>().join("\n"));
+}
+
+// What a command on the controller wrote to its standard error, which `serve` writes only as it
+// fails; the copy is removed.
+fn said_there(scratch: &Scratch) -> String {
+    let path = scratch.0.join("bin/stderr");
+    let said = fs::read_to_string(&path).unwrap_or_default();
+    let _ = fs::remove_file(path);
+    said
+}
+
+fn quiet(scratch: &Scratch) {
+    let said = said_there(scratch);
+    assert!(said.is_empty(), "the controller's standard error: {said}");
 }
 
 // Refused before the job reads its settings: outside a user's systemd unit, a file below the
@@ -202,7 +217,9 @@ const KEY: &str = "sk-client-stand-in";
 // stream. Each before-N action runs just before the Nth connection. A client home with a
 // `.member` is a key that the admin lists under that member, so the command runs as the
 // controller's forced command runs it. A `refused` file refuses every key, as `sshd` refuses a key
-// that is unlisted. As OpenSSH does, it makes its standard error non-blocking, and leaves it so.
+// that is unlisted. As OpenSSH does, it makes its standard error non-blocking, and leaves it so. It
+// copies the command's standard error to its own, as `sshd` and `ssh` do, and to `stderr` beside.
+// A `link-pid` file gets the pid of the command, which `serve` runs as.
 const SSH: &str = r#"#!/bin/sh
 dir=${0%/*}
 printf '%s\n' "$@" >> "$dir/argv"
@@ -226,6 +243,11 @@ if [ -f "$dir/refused" ]; then
     echo "$at: Permission denied (publickey)." >> "${diagnostics:-/dev/stderr}"
     exit 255
 fi
+mkfifo "$dir/stderr-$$"
+tee --append "$dir/stderr" < "$dir/stderr-$$" >&2 &
+tee=$!
+exec 4>&2 2> "$dir/stderr-$$"
+rm "$dir/stderr-$$"
 cd "$dir/../home" || exit 1
 export HOME="$PWD" XDG_RUNTIME_DIR="$dir/../run"
 if mv "$dir/cut-in" "$dir/cut-in-$$" 2>/dev/null; then
@@ -239,8 +261,17 @@ if mv "$dir/cut-out" "$dir/cut-out-$$" 2>/dev/null; then
     dd bs=1 count="$(cat "$dir/cut-out-$$")" status=none < "$dir/fifo-$$"
     exit 1
 fi
-if [ -f "$dir/link-pid" ]; then echo $$ > "$dir/link-pid"; fi
-exec /bin/sh -c "$command" "$@"
+# The command runs apart, so that the output ends only once its standard error is copied, as
+# `ssh` writes what `sshd` sent before it ends; a test may stop it by its pid.
+exec 3<&0
+/bin/sh -c "$command" "$@" <&3 3<&- &
+served=$!
+if [ -f "$dir/link-pid" ]; then echo "$served" > "$dir/link-pid"; fi
+exec 2>&4 4>&-
+wait "$served" 2>/dev/null
+status=$?
+wait "$tee"
+exit "$status"
 "#;
 
 const SYSTEMCTL: &str = "#!/bin/sh\n";
@@ -1492,6 +1523,7 @@ fn cancel_copies_the_record_when_reaping_fails() {
         .join(format!("repo/.pumpkin/runs/{id}/outcome.json"));
     let outcome: serde_json::Value = serde_json::from_slice(&fs::read(copy).unwrap()).unwrap();
     assert_eq!(outcome["reason"], "its driver ended without an outcome");
+    quiet(&scratch);
 }
 
 #[test]
@@ -2779,19 +2811,21 @@ fn serve_refuses_member() {
     );
     // What follows is the repair's, which finds no controller, as no `aws` answers.
     let (ls, _) = ls.split_once("; SSH at its last private address").unwrap();
+    let there = said_there(&scratch);
     check(
         &scratch,
-        ls,
+        &format!("{ls}\nthe controller's standard error:\n{there}"),
         &[],
         &expect![[r#"
             $ pumpkin ls
             exit status: Some(1)
+            pumpkin: controller `alice` didn't answer: the link last said: pumpkin: to read how to use it: pumpkin controller serve --help: opening it again now, attempt 2 of 8
+            pumpkin: controller `alice` didn't answer: the link last said: pumpkin: to read how to use it: pumpkin controller serve --help
+            the controller's standard error:
             error: invalid value 'Bad!' for '--member <member>': `Bad!` is not a member's name: give one of 1 to 32 of a-z, 0-9 and `-`, starting with a letter
             pumpkin: to read how to use it: pumpkin controller serve --help
-            pumpkin: controller `alice` didn't answer: ended before its hello: opening it again now, attempt 2 of 8
             error: invalid value 'Bad!' for '--member <member>': `Bad!` is not a member's name: give one of 1 to 32 of a-z, 0-9 and `-`, starting with a letter
-            pumpkin: to read how to use it: pumpkin controller serve --help
-            pumpkin: controller `alice` didn't answer: ended before its hello"#]],
+            pumpkin: to read how to use it: pumpkin controller serve --help"#]],
     );
 }
 
