@@ -49,14 +49,15 @@ const UPTIME: &str = "/proc/uptime";
 /// Answers a client's link on the standard input and output, as the module says, for `member`.
 pub(crate) fn serve(member: &Member) -> Result<Exit, String> {
     let home = crate::home("run `serve` as the controller's user, whose home holds the runs")?;
-    marked();
+    let mut marks = Marks::default();
+    marks.mark();
     let stdin = io::stdin().as_fd().try_clone_to_owned();
     let mut input = BufReader::new(File::from(stdin.context("the standard input")?));
     let mut output = io::stdout().lock();
     if !delivered(frame::write(&mut output, &Hello::Serving, &[]))? {
         return Ok(Exit::Success);
     }
-    requests(&mut input, &mut output, &home, member)
+    requests(&mut input, &mut output, &home, member, &mut marks)
 }
 
 fn requests(
@@ -64,6 +65,7 @@ fn requests(
     output: &mut impl Write,
     home: &Path,
     member: &Member,
+    marks: &mut Marks,
 ) -> Result<Exit, String> {
     // Kept for the link's life: it holds what it read of the live runs.
     let mut view = Answering::new(home);
@@ -73,7 +75,7 @@ fn requests(
             Ok(None) => break,
             Err(error) => return invalid_request(output, error),
         };
-        marked();
+        marks.mark();
         let body = match ask.read_buffered_body(input) {
             Ok(body) => body,
             Err(error) => return invalid_request(output, error),
@@ -245,11 +247,23 @@ fn ready(fd: &impl AsFd, events: PollFlags, timeout: Duration) -> io::Result<boo
     }
 }
 
-/// Marks this `serve`'s install as used now, as [`mark_used`] does. Says what it can't do, and goes
-/// on.
-fn marked() {
-    if let Err(error) = mark_used() {
-        say(error);
+/// The marks of this `serve`'s install as used, and whether one has failed.
+#[derive(Default)]
+struct Marks {
+    failed: bool,
+}
+
+impl Marks {
+    /// Marks this `serve`'s install as used now, as [`mark_used`] does. Says the first failure, and
+    /// goes on: a link that an open page keeps asks every few seconds, and each failure would add a
+    /// line to the client's file of what `serve` said.
+    fn mark(&mut self) {
+        if let Err(error) = mark_used()
+            && !self.failed
+        {
+            self.failed = true;
+            say(error);
+        }
     }
 }
 
