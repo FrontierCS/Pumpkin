@@ -109,8 +109,29 @@ RUN systemctl enable pumpkin-install.service
 
 COPY --from=pumpkin / /opt/pumpkin/
 
+# Before systemd starts, every process of the container's cgroup moves into `init.scope`, and the
+# cgroup gives its children every controller. systemd moves the processes there only once, as it
+# starts. A `docker exec` that came after would stay in the cgroup, and the kernel would refuse
+# each controller to its children while it ran, so the engine would start without the memory
+# controller, and say for good that it can't limit swap. Once the cgroup gives its children
+# controllers, a `docker exec` joins systemd's own cgroup instead. moby's dind enables them so, in a
+# loop for `docker exec`'s race; systemd takes `init.scope`'s parent as its root:
+# https://github.com/moby/moby/blob/1f98bfc8473f1c9753cbc80bdc30c04dfea266e3/hack/dind#L61-L80
+# https://github.com/systemd/systemd/blob/db11bab38ccf1ed257f310d29070843d4c58ea01/src/core/cgroup.c#L3698-L3699
+# https://github.com/systemd/systemd/blob/db11bab38ccf1ed257f310d29070843d4c58ea01/src/core/cgroup.c#L3799-L3805
+# https://github.com/opencontainers/runc/blob/48dfb3a2c0bc9967074e04609493a500120ba018/libcontainer/process_linux.go#L308-L318
+COPY --chmod=0755 <<EOF /usr/local/sbin/pumpkin-init
+#!/bin/sh
+mkdir -p /sys/fs/cgroup/init.scope
+while ! {
+    xargs -rn1 < /sys/fs/cgroup/cgroup.procs > /sys/fs/cgroup/init.scope/cgroup.procs || :
+    sed -e 's/ / +/g' -e 's/^/+/' < /sys/fs/cgroup/cgroup.controllers > /sys/fs/cgroup/cgroup.subtree_control
+}; do :; done
+exec /sbin/init
+EOF
+
 # systemd reads that it runs in a container from `container`, and stops on SIGRTMIN+3:
 # https://github.com/kubernetes-sigs/kind/blob/b5bed7e9f115a19e8d9f300be66c462039937d57/images/base/Dockerfile#L211-L216
 ENV container=docker
 STOPSIGNAL SIGRTMIN+3
-CMD ["/sbin/init"]
+ENTRYPOINT ["/usr/local/sbin/pumpkin-init"]
