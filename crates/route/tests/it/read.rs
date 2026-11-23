@@ -318,8 +318,11 @@ pub(crate) const CHAT_CUSTOM: &str = concat!(
 // wrong type or index, give what they hold and never panic.
 #[test]
 fn messages_of_any_form() {
+    // Only a prefix that holds the line of the last event, `message_stop`, is a whole answer.
+    let last_line_at = MESSAGES_STREAM.len() - "\n".len();
     for at in 0..=MESSAGES_STREAM.len() {
-        read::answer(Api::Messages, &MESSAGES_STREAM.as_bytes()[..at]);
+        let reply = read::answer(Api::Messages, &MESSAGES_STREAM.as_bytes()[..at]);
+        assert_eq!(reply.whole, at >= last_line_at, "a stream cut at byte {at}");
     }
     for at in 0..=MESSAGES_REQUEST.len() {
         if let Ok(body) = serde_json::from_str::<Value>(&MESSAGES_REQUEST[..at]) {

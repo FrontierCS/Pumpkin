@@ -352,8 +352,6 @@ impl Closed<'_> {
         self.route
     }
 
-    /// The names of the request's headers that the route leaves behind, those an entry could
-    /// list: sorted, each once, and at most `MAX_DROPPED_HEADERS`.
     pub(crate) fn dropped_headers(&self) -> &[String] {
         &self.dropped_headers
     }

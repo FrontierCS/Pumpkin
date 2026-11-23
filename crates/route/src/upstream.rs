@@ -55,7 +55,6 @@ pub struct Key(HeaderValue);
 /// The model provider's endpoint, with its key, which forwards closed requests.
 pub struct Upstream {
     url: Uri,
-    /// The header that carries the key, and its value.
     authorization: (HeaderName, HeaderValue),
     // One for the upstream's every exchange, so that `shutdown` ends them all at once.
     agent: ureq::Agent,
@@ -124,8 +123,7 @@ pub enum Bar {
     Budget,
 }
 
-/// How a run serves a model route's entry for one API: the upstream that its requests reach, of
-/// which the run makes an [`Upstream`] for each sandbox that it serves.
+/// How a run serves a model route's entry for one API: the upstream that its requests reach.
 pub struct Serving {
     /// The name that the deployment gives the upstream.
     pub name: Name,
@@ -493,7 +491,7 @@ pub enum Admission<'b> {
 /// It gives `keep` the exchange ([`Keep`]), and tells `answered` how it answered ([`Answer`]) and
 /// through which entry's index, once `keep` has the whole answer and before its end is written.
 // Whether the answer reached the sandbox isn't told: writing it fails only for a response's head
-// too long for a frame, or as the sandbox's session ends, which the run log shows.
+// too long for a frame, or as the sandbox's session ends.
 pub fn serve<'b, C: Clock>(
     entries: &[(Route, Upstream)],
     request: IncomingModelRequest,
