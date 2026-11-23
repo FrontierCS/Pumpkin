@@ -13,7 +13,6 @@ test = false
 [dependencies]
 install = { path = "../crates/install" }
 proc-macro2 = { version = "1.0.107", default-features = false, features = ["span-locations"] }
-rustix = { workspace = true, features = ["fs", "process"] }
 serde_json.workspace = true
 sha2.workspace = true
 stdx = { path = "../crates/stdx" }
