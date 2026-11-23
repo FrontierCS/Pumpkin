@@ -57,8 +57,8 @@ pub(crate) struct Listing {
     pub(crate) runs: BTreeMap<String, Entry>,
 }
 
-/// A run that `ls` can't list, and why, as `ls` says it, with what of its log this `pumpkin`
-/// can't read, if it read the log and any of it.
+/// A run that `ls` can't list, and why, as `ls` says it. `unread` is what of the run's log this
+/// `pumpkin` can't read, as a row's is, if it read the log before it failed.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Unlisted {
     pub(crate) id: String,

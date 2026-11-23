@@ -2844,8 +2844,13 @@ fn serve_refuses_member() {
     );
     // What follows is the repair's, which finds no controller, as no `aws` answers.
     let (ls, _) = ls.split_once("; SSH at its last private address").unwrap();
-    // Shown above, as the link quotes it.
-    said_there(&scratch);
+    // Each line that `serve` wrote is quoted whole.
+    let there = said_there(&scratch);
+    assert!(
+        there
+            .lines()
+            .all(|line| ls.contains(&format!("  {line}\n")))
+    );
     check(
         &scratch,
         ls,
@@ -2853,11 +2858,11 @@ fn serve_refuses_member() {
         &expect![[r#"
             $ pumpkin ls
             exit status: Some(1)
-            pumpkin: controller `alice` wrote to its standard error:
+            pumpkin: the link to controller `alice` wrote to its standard error:
               error: invalid value 'Bad!' for '--member <member>': `Bad!` is not a member's name: give one of 1 to 32 of a-z, 0-9 and `-`, starting with a letter
               pumpkin: to read how to use it: pumpkin controller serve --help
             pumpkin: controller `alice` didn't answer: ended before its hello: opening it again now, attempt 2 of 8
-            pumpkin: controller `alice` wrote to its standard error:
+            pumpkin: the link to controller `alice` wrote to its standard error:
               error: invalid value 'Bad!' for '--member <member>': `Bad!` is not a member's name: give one of 1 to 32 of a-z, 0-9 and `-`, starting with a letter
               pumpkin: to read how to use it: pumpkin controller serve --help
             pumpkin: controller `alice` didn't answer: ended before its hello"#]],

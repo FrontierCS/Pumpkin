@@ -247,16 +247,16 @@ fn ready(fd: &impl AsFd, events: PollFlags, timeout: Duration) -> io::Result<boo
     }
 }
 
-/// The marks of this `serve`'s install as used, and whether one has failed.
+/// Whether a mark of this `serve`'s install as used has failed.
 #[derive(Default)]
 struct Marks {
     failed: bool,
 }
 
 impl Marks {
-    /// Marks this `serve`'s install as used now, as [`mark_used`] does. Says the first failure, and
-    /// goes on: a link that an open page keeps asks every few seconds, and each failure would add a
-    /// line to the client's file of what `serve` said.
+    /// Marks this `serve`'s install as used now, as [`mark_used`] does. Says the first failure
+    /// alone, and goes on.
+    // A long link asks every few seconds, and each line said lasts as long as the link.
     fn mark(&mut self) {
         if let Err(error) = mark_used()
             && !self.failed

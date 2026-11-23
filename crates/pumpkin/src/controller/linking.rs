@@ -15,8 +15,8 @@ use super::{AGAIN, Found, Located, OPENINGS, Reached, SHORT_TIMEOUT, when};
 use crate::link::{self, Link, Request, Unanswered};
 use crate::{manifest, say, workspace};
 
-// The most of what a command there wrote to its standard error that a failed link says: enough
-// for a clap usage error or a panic's message. Kubernetes bounds a response's warnings so:
+// The most of what a link's standard error holds that a failed link says: enough for a clap usage
+// error or a panic's message. Kubernetes bounds a response's warnings at 4 Ki runes:
 // https://github.com/kubernetes/kubernetes/blob/ab69524f795c42094a6630298ff53f3c3ebab7f4/staging/src/k8s.io/apiserver/pkg/endpoints/filters/warning.go#L39-L42
 const REMOTE_TAIL_BYTES: u64 = 4096;
 
@@ -87,8 +87,8 @@ pub(super) struct Linked {
     link: Link,
     // OpenSSH puts only its own diagnostics here.
     diagnostics: tempfile::NamedTempFile,
-    // What the command there writes to its standard error, which `ssh` writes to its own: of
-    // `serve`, only its error as it ends, and that it can't mark its install.
+    // What the command there writes to its standard error, which `ssh` writes to its own, with
+    // what `ssh` says before it reads `-E`.
     remote: tempfile::NamedTempFile,
 }
 
@@ -284,7 +284,7 @@ impl Reached {
 }
 
 /// Why a link to `reached` gave no answer, `error`, with the last line of `ssh`'s `diagnostics`.
-/// Says first what the command there wrote to its standard error, `remote`, if anything.
+/// Says first what the link's standard error, `remote`, holds, if anything.
 fn unlinked(
     reached: &Reached,
     diagnostics: &tempfile::NamedTempFile,
@@ -294,7 +294,7 @@ fn unlinked(
     let name = &reached.name;
     if let Some(said) = remote.and_then(said_there) {
         say(format_args!(
-            "controller `{name}` wrote to its standard error:\n{said}"
+            "the link to controller `{name}` wrote to its standard error:\n{said}"
         ));
     }
     match error {
@@ -303,7 +303,8 @@ fn unlinked(
             // OpenSSH's fatal when the server's host key cannot be verified.
             // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/sshconnect2.c#L104
             let host_refused = line.as_deref() == Some("Host key verification failed.");
-            // OpenSSH's fatal when the server refuses every key.
+            // OpenSSH's fatal when the server refuses every key, in its own form, which an error of
+            // another program that `ssh` runs, such as `Permission denied (os error 13)`, isn't.
             // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/sshconnect2.c#L543
             let denied = line
                 .as_ref()
@@ -337,25 +338,38 @@ fn last_line(file: &tempfile::NamedTempFile) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// The last lines of `remote`, a command's standard error, each escaped and indented, as many as
-/// fit [`REMOTE_TAIL_BYTES`]; `None` if it holds none or can't be read.
+/// The lines of `remote`, a link's standard error, each escaped and indented, but those before the
+/// last [`REMOTE_TAIL_BYTES`], which a line of `…` stands for; `None` if it holds none or can't be
+/// read.
 fn said_there(remote: &tempfile::NamedTempFile) -> Option<String> {
     let mut file = remote.reopen().ok()?;
     let size = file.metadata().ok()?.len();
-    let from = size.saturating_sub(REMOTE_TAIL_BYTES);
+    let cut = size > REMOTE_TAIL_BYTES;
+    // From the byte before the tail, which says whether the tail starts a line.
+    let from = size.saturating_sub(REMOTE_TAIL_BYTES + 1);
     file.seek(SeekFrom::Start(from)).ok()?;
     let mut bytes = Vec::new();
-    file.take(REMOTE_TAIL_BYTES).read_to_end(&mut bytes).ok()?;
-    let text = String::from_utf8_lossy(&bytes);
-    let mut lines = text.lines();
-    // A tail that starts within a line leaves out the part of it.
-    if from > 0 {
-        lines.next();
+    file.take(REMOTE_TAIL_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    let mut tail = bytes.as_slice();
+    if cut {
+        // A line that starts before the tail is left out, unless the tail holds no other.
+        let start = match tail.iter().position(|&byte| byte == b'\n') {
+            Some(at) if at + 1 < tail.len() => at + 1,
+            Some(_) | None => 1,
+        };
+        tail = &tail[start..];
     }
-    let lines: Vec<String> = (lines.filter(|line| !line.is_empty()))
-        .map(|line| format!("  {}", crate::escaped(line)))
+    let text = String::from_utf8_lossy(tail);
+    let lines = (text.lines().filter(|line| !line.is_empty()))
+        .map(|line| format!("  {}", crate::escaped(line)));
+    let lines: Vec<String> = cut
+        .then(|| "  …".to_owned())
+        .into_iter()
+        .chain(lines)
         .collect();
-    (!lines.is_empty()).then(|| lines.join("\n"))
+    (lines.len() > usize::from(cut)).then(|| lines.join("\n"))
 }
 
 /// Uploads `build`'s files to the controller, as the install whose `serve` a link runs there.

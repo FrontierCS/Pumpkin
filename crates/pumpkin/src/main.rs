@@ -267,10 +267,10 @@ fn unix_now() -> UnixTime {
 }
 
 /// The runs of `runs` whose ids start with one of `prefixes`, or every run if there are none, and
-/// those that can't be listed. A run that ended before `since` is listed
-/// as older, and one that another build made and this can't read is an `unread` row. Each row is
-/// made at `now`, with its commands naming `named` as the runs directory. A `runs` that is missing
-/// is an empty listing unless `named` names it.
+/// those that can't be listed. A run that ended before `since` is listed as older, and one that
+/// another build made and this can't read is an `unread` row. Each row is made at `now`, with its
+/// commands naming `named` as the runs directory. A `runs` that is missing is an empty listing
+/// unless `named` names it.
 fn listed_in(
     runs: &Path,
     prefixes: &[String],
