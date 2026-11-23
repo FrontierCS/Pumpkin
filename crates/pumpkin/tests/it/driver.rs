@@ -85,8 +85,9 @@ fn lost_on_docker() {
     let (id, dir) = record(&stderr).unwrap();
     let tag = RunTag::try_from(id.to_owned()).unwrap();
     let record = scratch.0.join(dir);
-    let created = record.join("agents/agent/sandbox.json");
-    poll(|| Some(()).filter(|()| created.exists()));
+    // Killed once the agent has started, which the summary's line of the agent needs.
+    let log = || fs::read_to_string(record.join("log.jsonl")).unwrap_or_default();
+    poll(|| Some(()).filter(|()| log().contains(r#""kind":"agent_started""#)));
     let listed = containers.list(&tag).unwrap();
     let agent = listed[0].id.as_str().to_owned();
     let driver = live_driver(&record).unwrap();

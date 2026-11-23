@@ -50,6 +50,11 @@ const PUMPKIN: &str = env!("CARGO_BIN_EXE_pumpkin");
 
 const AWS_GUARD: &str = "no-aws";
 
+// What the machine's environment would change in what `pumpkin` prints or where it writes:
+// clap wraps help at `COLUMNS` when no terminal is attached, the colour follows `CLICOLOR_FORCE`
+// and `NO_COLOR`, and `PUMPKIN_WORKSPACE` names the workspace in place of the executable's.
+const UNSET: [&str; 4] = ["CLICOLOR_FORCE", "COLUMNS", "NO_COLOR", "PUMPKIN_WORKSPACE"];
+
 // The command of the final call of each task that a test writes: it scores the payload by its
 // size.
 const SCORE: &str =
@@ -238,8 +243,9 @@ impl Scratch {
         let home = self.0.join("home");
         fs::create_dir_all(&home).unwrap();
         command.env("HOME", home);
-        // clap wraps help at `COLUMNS` when no terminal is attached, and at 100 columns without it.
-        command.env_remove("COLUMNS");
+        for name in UNSET {
+            command.env_remove(name);
+        }
         // So that no test reaches AWS with the machine's credentials: one that runs `aws` puts its
         // own first on the `PATH` it gives.
         let path = std::env::var_os("PATH").unwrap_or_default();
@@ -358,12 +364,14 @@ fn check(
     expect.assert_eq(&text);
 }
 
-/// Runs `command` again for up to ten minutes while it fails only because other runs hold the
+/// Runs `command` again for up to four minutes while it fails only because other runs hold the
 /// machine's CPUs. Gives its output without the lines that say an image's build started or ended.
 // A run builds an image only if the engine lacks it under its tag. An earlier try, or another
 // test's run of the same recipe, may have left it.
 fn with_room(command: &mut Command) -> Output {
-    let room = Instant::now() + Duration::from_mins(10);
+    // Below the 300 s at which nextest's `live` profile kills a test, so that a machine too
+    // crowded shows as the reservation's refusal, not as a kill that says nothing.
+    let room = Instant::now() + Duration::from_mins(4);
     loop {
         let output = command.output().unwrap();
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -398,10 +406,10 @@ fn ran(mut command: Command, dir: &Path, rootful: bool) -> String {
 
 fn invocation(command: &Command) -> String {
     // The home and the `PATH` that `Scratch::program` gives each command, `<scratch>/home` and
-    // one that starts with its AWS guard, and its unset `COLUMNS`, are the rule: they are not
+    // one that starts with its AWS guard, and the variables it unsets, are the rule: they are not
     // shown.
     let set = command.get_envs().filter_map(|(name, value)| match value {
-        None if name == "COLUMNS" => None,
+        None if UNSET.iter().any(|unset| name == *unset) => None,
         Some(value) if name == "HOME" && Path::new(value).ends_with("home") => None,
         Some(value)
             if name == "PATH"

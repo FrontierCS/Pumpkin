@@ -1,8 +1,10 @@
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{BufRead as _, BufReader, Read as _, Write as IoWrite};
 use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt as _;
+use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -1264,10 +1266,6 @@ fn loaded(path: &str, body: &str) -> Vec<String> {
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "its snapshot has a line for each file of the page"
-)]
 fn serves_the_page() {
     let scratch = Scratch::new();
     fs::create_dir_all(scratch.0.join("runs")).unwrap();
@@ -1276,6 +1274,10 @@ fn serves_the_page() {
     let no_token = [("X-Pumpkin-Token", "")];
     let mut steps = Vec::new();
     let mut paths = vec!["/".to_owned()];
+    // How the page's files are served, by kind, so that a file added to the page changes nothing.
+    let mut kinds = BTreeSet::new();
+    let mut preloaded = BTreeSet::new();
+    let mut classic = String::new();
     let mut at = 0;
     while let Some(path) = paths.get(at).cloned() {
         at += 1;
@@ -1287,21 +1289,33 @@ fn serves_the_page() {
             line.map_or("none", |line| &line[name.len() + 2..])
                 .to_owned()
         };
-        steps.push(format!(
-            "{path}: {} {}; {}",
+        let answered = format!(
+            "{} {}; {}",
             head.lines().next().unwrap(),
             header("Content-Type"),
             header("Cache-Control"),
-        ));
+        );
         assert_eq!(header("Content-Length"), body.len().to_string(), "{path}");
         let policy = format!("policy: {}", header("Content-Security-Policy"));
         if path == "/" {
+            steps.push(format!("{path}: {answered}"));
             steps.push(policy.clone());
             let page = String::from_utf8_lossy(&body);
-            let head = page
-                .lines()
-                .filter(|line| line.starts_with("<script") || line.starts_with("<link"));
-            steps.extend(head.map(|line| format!("head: {line}")));
+            for line in page.lines() {
+                let preload = r#"<link rel="modulepreload" href=""#;
+                if let Some(href) = line.strip_prefix(preload) {
+                    preloaded.insert(href.trim_end_matches("\">").to_owned());
+                } else if line.starts_with("<script") || line.starts_with("<link") {
+                    steps.push(format!("head: {line}"));
+                }
+                if let Some(src) = line.strip_prefix(r#"<script src=""#) {
+                    classic = src.split('"').next().unwrap().to_owned();
+                }
+            }
+        } else {
+            let (dir, name) = path.rsplit_once('/').unwrap();
+            let (_, extension) = name.rsplit_once('.').unwrap();
+            kinds.insert(format!("{dir}/*.{extension}: {answered}"));
         }
         assert_eq!(steps[1], policy, "{path}");
         let font = header("Content-Type") == "font/woff2";
@@ -1312,6 +1326,12 @@ fn serves_the_page() {
             }
         }
     }
+    // Each module that the page loads is preloaded, so that none waits for its importer.
+    let modules: BTreeSet<&String> = (paths.iter())
+        .filter(|path| Path::new(path).extension() == Some("js".as_ref()) && **path != classic)
+        .collect();
+    assert_eq!(modules, preloaded.iter().collect());
+    steps.extend(kinds);
     let dir = paths[1].rsplit_once('/').unwrap().0.to_owned();
     // A page of another build, still open, asks for a file at its own path, which the files of
     // this one are never served at.
@@ -1339,48 +1359,9 @@ fn serves_the_page() {
             head: <script src="/<digest>/scheme.js"></script>
             head: <link rel="stylesheet" href="/<digest>/style.css">
             head: <script type="module" src="/<digest>/app.js"></script>
-            head: <link rel="modulepreload" href="/<digest>/app.js">
-            head: <link rel="modulepreload" href="/<digest>/diff.js">
-            head: <link rel="modulepreload" href="/<digest>/failure.js">
-            head: <link rel="modulepreload" href="/<digest>/h.js">
-            head: <link rel="modulepreload" href="/<digest>/inspector.js">
-            head: <link rel="modulepreload" href="/<digest>/key.js">
-            head: <link rel="modulepreload" href="/<digest>/ledger.js">
-            head: <link rel="modulepreload" href="/<digest>/list.js">
-            head: <link rel="modulepreload" href="/<digest>/log.js">
-            head: <link rel="modulepreload" href="/<digest>/payload.js">
-            head: <link rel="modulepreload" href="/<digest>/records.js">
-            head: <link rel="modulepreload" href="/<digest>/returned.js">
-            head: <link rel="modulepreload" href="/<digest>/rows.js">
-            head: <link rel="modulepreload" href="/<digest>/run.js">
-            head: <link rel="modulepreload" href="/<digest>/stats.js">
-            head: <link rel="modulepreload" href="/<digest>/steps.js">
-            head: <link rel="modulepreload" href="/<digest>/talk.js">
-            head: <link rel="modulepreload" href="/<digest>/timeline.js">
-            head: <link rel="modulepreload" href="/<digest>/trace.js">
-            /<digest>/style.css: HTTP/1.1 200 OK text/css; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/app.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/diff.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/failure.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/h.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/inspector.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/key.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/ledger.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/list.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/log.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/payload.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/records.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/returned.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/rows.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/run.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/stats.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/steps.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/talk.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/timeline.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/trace.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/scheme.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/hanken-grotesk.woff2: HTTP/1.1 200 OK font/woff2; public, max-age=31536000, immutable
-            /<digest>/jetbrains-mono.woff2: HTTP/1.1 200 OK font/woff2; public, max-age=31536000, immutable
+            /<digest>/*.css: HTTP/1.1 200 OK text/css; charset=utf-8; public, max-age=31536000, immutable
+            /<digest>/*.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
+            /<digest>/*.woff2: HTTP/1.1 200 OK font/woff2; public, max-age=31536000, immutable
             /nothing.js []: HTTP/1.1 404 Not Found {"error":"nothing is at `/nothing.js`: expected the page at `/`, or the runs at `/api/runs` and below it"}
             /app.js []: HTTP/1.1 404 Not Found {"error":"nothing is at `/app.js`: expected the page at `/`, or the runs at `/api/runs` and below it"}
             /0000000000000000000000000000000000000000000000000000000000000000/app.js []: HTTP/1.1 404 Not Found {"error":"nothing is at `/0000000000000000000000000000000000000000000000000000000000000000/app.js`: expected the page at `/`, or the runs at `/api/runs` and below it"}

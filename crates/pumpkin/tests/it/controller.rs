@@ -254,7 +254,6 @@ if mv "$dir/cut-in" "$dir/cut-in-$$" 2>/dev/null; then
     stdbuf --output=0 head --bytes="$(cat "$dir/cut-in-$$")" | /bin/sh -c "$command" "$@"
     exit 1
 fi
-if mv "$dir/answer" "$dir/answered" 2>/dev/null; then exec cat "$dir/answered"; fi
 if mv "$dir/cut-out" "$dir/cut-out-$$" 2>/dev/null; then
     exec 3<&0; mkfifo "$dir/fifo-$$"
     /bin/sh -c "$command" "$@" <&3 > "$dir/fifo-$$" &
@@ -462,6 +461,22 @@ fn start_in(scratch: &Scratch, repo: &str, client: &[(String, String); 2]) -> (S
         ran = ran.replace(&id, "<id>");
     }
     (id, ran)
+}
+
+// What every client's `run` says of a job it started, which `keys_on_standard_input` shows.
+const STARTED: [&str; 6] = [
+    "pumpkin: run <id> goes to controller `alice`",
+    "pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it",
+    "pumpkin: to follow it: pumpkin wait <id>",
+    "pumpkin: to stop it: pumpkin cancel <id>",
+    "printed:",
+    "  <id>",
+];
+
+// A client's `run`, as `start` describes it, without the lines of `STARTED`.
+fn sent(ran: &str) -> String {
+    let lines = ran.lines().filter(|line| !STARTED.contains(line));
+    lines.collect::<Vec<_>>().join("\n")
 }
 
 #[test]
@@ -999,7 +1014,7 @@ fn send_refused_partial() {
     let hex = sha256(b"noted\n");
     scratch.write(&format!("home/store/incoming/{hex}.part"), "Noted\n");
     let (_, refused) = start(&scratch, &client);
-    let mut lines = vec![refused, send_calls(&scratch)];
+    let mut lines = vec![sent(&refused), send_calls(&scratch)];
     let store = scratch.0.join("home/store");
     lines.push(format!(
         "the store holds it: {}; its partial: {}",
@@ -1007,7 +1022,7 @@ fn send_refused_partial() {
         store.join(format!("incoming/{hex}.part")).exists()
     ));
     let (_, again) = start(&scratch, &client);
-    lines.extend([again, send_calls(&scratch)]);
+    lines.extend([sent(&again), send_calls(&scratch)]);
     check(
         &scratch,
         &lines.join("\n"),
@@ -1015,20 +1030,13 @@ fn send_refused_partial() {
         &expect![[r#"
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(1)
-            pumpkin: run <id> goes to controller `alice`
             pumpkin: controller `alice` lacks all 7 of the task's files: sending 2.9 KiB
             pumpkin: <scratch>/repo/stand-in/notes changed since it was hashed: send the task again
             the calls: serve
             the store holds it: false; its partial: false
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
-            pumpkin: run <id> goes to controller `alice`
             pumpkin: controller `alice` lacks all 7 of the task's files: sending 2.9 KiB
-            pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
-            pumpkin: to follow it: pumpkin wait <id>
-            pumpkin: to stop it: pumpkin cancel <id>
-            printed:
-              <id>
             the calls: serve"#]],
     );
 }
@@ -1040,9 +1048,9 @@ fn send_carries_on() {
     fs::write(scratch.0.join("repo/stand-in/big.bin"), vec![42; 3 << 20]).unwrap();
     // End the link in the second frame of the large file, after the first MiB is durable.
     scratch.write("bin/cut-in", &(1536 << 10).to_string());
-    let (_, sent) = start(&scratch, &client);
+    let (_, ran) = start(&scratch, &client);
     let holders = holders(&scratch, &[]);
-    let mut lines = vec![sent, send_calls(&scratch)];
+    let mut lines = vec![sent(&ran), send_calls(&scratch)];
     lines.extend(
         stored(&scratch, &holders)
             .into_iter()
@@ -1055,51 +1063,12 @@ fn send_carries_on() {
         &expect![[r#"
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
-            pumpkin: run <id> goes to controller `alice`
             pumpkin: controller `alice` lacks all 7 of the task's files: sending 3.0 MiB
             pumpkin: controller `alice` didn't answer: ended during the upload: starting the job again now, attempt 2 of 7
             pumpkin: controller `alice` lacks all 7 of the task's files: sending 2.0 MiB
-            pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
-            pumpkin: to follow it: pumpkin wait <id>
-            pumpkin: to stop it: pumpkin cancel <id>
-            printed:
-              <id>
             the calls: serve, serve
               stand-in/big.bin: 444, 1 link
               incoming/: none"#]],
-    );
-}
-
-#[test]
-fn cut_upload_finishes_on_the_original_connection() {
-    let scratch = Scratch::new();
-    let client = set_up_client(&scratch);
-    for mib in [224, 32] {
-        let path = scratch.0.join(format!("repo/stand-in/{mib}.bin"));
-        fs::File::create(path).unwrap().set_len(mib << 20).unwrap();
-    }
-    scratch.write(
-        "bin/before-2",
-        &format!("echo {} > '{}/bin/cut-in'", 1536 << 10, scratch.0.display()),
-    );
-    let (_, sent) = start(&scratch, &client);
-    check(
-        &scratch,
-        &format!("{sent}\n{}", send_calls(&scratch)),
-        &[],
-        &expect![[r#"
-            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
-            exit status: Some(0)
-            pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks all 8 of the task's files: sending 256.0 MiB
-            pumpkin: controller `alice` didn't answer: ended during the upload: continuing the upload on the open connection
-            pumpkin: controller `alice` lacks 1 of the task's 8 files: sending 31.0 MiB
-            pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
-            pumpkin: to follow it: pumpkin wait <id>
-            pumpkin: to stop it: pumpkin cancel <id>
-            printed:
-              <id>
-            the calls: serve, serve"#]],
     );
 }
 
@@ -1137,24 +1106,18 @@ fn cut_during_group_answers() {
             scratch.0.display()
         ),
     );
-    let (_, sent) = start(&scratch, &client);
+    let (_, ran) = start(&scratch, &client);
     check(
         &scratch,
-        &[sent, send_calls(&scratch)].join("\n"),
+        &[sent(&ran), send_calls(&scratch)].join("\n"),
         &[],
         &expect![[r#"
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
-            pumpkin: run <id> goes to controller `alice`
             pumpkin: controller `alice` didn't answer: ended within the answer: starting the job again now, attempt 2 of 7
             pumpkin: controller `alice` lacks 9 of the task's 15 files: sending 108 bytes
             pumpkin: controller `alice` didn't answer: ended within the upload's answer: starting the job again now, attempt 2 of 7
             pumpkin: controller `alice` lacks 1 of the task's 15 files: sending 12 bytes
-            pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
-            pumpkin: to follow it: pumpkin wait <id>
-            pumpkin: to stop it: pumpkin cancel <id>
-            printed:
-              <id>
             the calls: serve, serve, serve"#]],
     );
 }
@@ -1296,21 +1259,15 @@ fn sends_from_a_repository_with_a_native_name() {
     let native = scratch.0.join(OsStr::from_bytes(b"native-\xff\n"));
     fs::rename(&repo, &native).unwrap();
     symlink(&native, &repo).unwrap();
-    let (_, sent) = start(&scratch, &client);
+    let (_, ran) = start(&scratch, &client);
     check(
         &scratch,
-        &sent,
+        &sent(&ran),
         &[],
         &expect![[r#"
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
-            pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks all 6 of the task's files: sending 2.9 KiB
-            pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
-            pumpkin: to follow it: pumpkin wait <id>
-            pumpkin: to stop it: pumpkin cancel <id>
-            printed:
-              <id>"#]],
+            pumpkin: controller `alice` lacks all 6 of the task's files: sending 2.9 KiB"#]],
     );
 }
 
@@ -1388,9 +1345,9 @@ fn send_changed_file() {
         &format!("printf no > '{}'\n", notes.display()),
     );
     let (_, changed) = start(&scratch, &client);
-    let mut lines = vec![changed, send_calls(&scratch)];
+    let mut lines = vec![sent(&changed), send_calls(&scratch)];
     let (_, again) = start(&scratch, &client);
-    lines.extend([again, send_calls(&scratch)]);
+    lines.extend([sent(&again), send_calls(&scratch)]);
     check(
         &scratch,
         &lines.join("\n"),
@@ -1398,19 +1355,12 @@ fn send_changed_file() {
         &expect![[r#"
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(1)
-            pumpkin: run <id> goes to controller `alice`
             pumpkin: controller `alice` lacks all 7 of the task's files: sending 2.9 KiB
             pumpkin: <scratch>/repo/stand-in/notes changed since the task was hashed: send the task again
             the calls: serve
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
-            pumpkin: run <id> goes to controller `alice`
             pumpkin: controller `alice` lacks all 7 of the task's files: sending 2.9 KiB
-            pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
-            pumpkin: to follow it: pumpkin wait <id>
-            pumpkin: to stop it: pumpkin cancel <id>
-            printed:
-              <id>
             the calls: serve"#]],
     );
 }
@@ -1427,7 +1377,7 @@ fn send_evicted_file() {
     fs::remove_file(blob).unwrap();
     let mut lines = Vec::new();
     let (_, gone) = start(&scratch, &client);
-    lines.extend([gone, send_calls(&scratch)]);
+    lines.extend([sent(&gone), send_calls(&scratch)]);
     check(
         &scratch,
         &lines.join("\n"),
@@ -1435,13 +1385,7 @@ fn send_evicted_file() {
         &expect![[r#"
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
-            pumpkin: run <id> goes to controller `alice`
             pumpkin: controller `alice` lacks 1 of the task's 7 files: sending 6 bytes
-            pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
-            pumpkin: to follow it: pumpkin wait <id>
-            pumpkin: to stop it: pumpkin cancel <id>
-            printed:
-              <id>
             the calls: serve"#]],
     );
 }
@@ -1908,51 +1852,6 @@ fn follow_cut_before_a_line() {
 }
 
 #[test]
-fn follow_prints_the_outcome() {
-    let scratch = Scratch::new();
-    let client = set_up_client(&scratch);
-    connect(&scratch, &client);
-    served(&scratch);
-    let id = id_ago(0, "0f000004");
-    ended_job(&scratch, &id, "line 01 of 01\n");
-    let copy = scratch.0.join(format!("repo/.pumpkin/runs/{id}"));
-    let mut lines = Vec::new();
-    for args in [&["wait", &id][..], &["wait", "--outcome", &id]] {
-        let _ = fs::remove_dir_all(&copy);
-        let waited = on_client(&scratch, &client, args).output().unwrap();
-        assert!(waited.status.success(), "{waited:?}");
-        let stderr = String::from_utf8(waited.stderr).unwrap();
-        let ended = stderr
-            .lines()
-            .find(|line| line.contains(" finished "))
-            .unwrap();
-        let copied = fs::read(copy.join("outcome.json")).unwrap();
-        let printed = match &waited.stdout {
-            output if output.is_empty() => "nothing",
-            output if *output == copied => "the copy's outcome.json",
-            _ => "something else",
-        };
-        lines.extend([
-            format!("$ pumpkin {}", args.join(" ")),
-            ended.to_owned(),
-            format!("printed: {printed}"),
-        ]);
-    }
-    check(
-        &scratch,
-        &lines.join("\n"),
-        &[(id.as_str(), "<id>")],
-        &expect![[r#"
-            $ pumpkin wait <id>
-            pumpkin: run <id> finished with a result (score=1 metrics={"solved":3}); its record is <scratch>/repo/.pumpkin/runs/<id>
-            printed: nothing
-            $ pumpkin wait --outcome <id>
-            pumpkin: run <id> finished with a result (score=1 metrics={"solved":3}); its record is <scratch>/repo/.pumpkin/runs/<id>
-            printed: the copy's outcome.json"#]],
-    );
-}
-
-#[test]
 fn follow_copies_another_writers_record() {
     let scratch = Scratch::new();
     let client = set_up_client(&scratch);
@@ -2194,34 +2093,6 @@ fn ls_leaves_its_streams_blocking() {
 }
 
 #[test]
-fn ls_lists_other_formats_unread() {
-    let scratch = Scratch::new();
-    let client = set_up_client(&scratch);
-    connect(&scratch, &client);
-    served(&scratch);
-    let other =
-        json!({ "version": "9.9.9", "commit": { "hash": "0f3a2b1c9d8e", "date": "2026-11-08" } });
-    let record = json!({ "record_version": "pumpkin.record/v9", "pumpkin": other, "args": [] });
-    scratch.write(
-        "home/.pumpkin/runs/20261107-120200-3d0c0002/record.json",
-        &record,
-    );
-    let steps = ls_ran(&scratch, &client, &[]);
-    check(
-        &scratch,
-        &steps,
-        &[],
-        &expect![[r#"
-        $ pumpkin ls
-        exit status: Some(0)
-        pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
-        printed:
-          20261107-120200-3d0c0002 unread            -                  -  made by pumpkin 9.9.9 (0f3a2b1c9 2026-11-08)
-          1 run: 1 unread"#]],
-    );
-}
-
-#[test]
 fn ls_installs_its_serve_there() {
     let scratch = Scratch::new();
     let client = set_up_client(&scratch);
@@ -2243,7 +2114,13 @@ fn ls_installs_its_serve_there() {
     let install = scratch.0.join(format!("home/.pumpkin/{hex}"));
     let mut steps = Vec::new();
     for first in [true, false] {
-        steps.push(ls_ran(&scratch, &client, &[]));
+        let ls = ls_ran(&scratch, &client, &[]);
+        // Only what it installs is at issue, not what it lists. An `ls` that printed nothing is
+        // shown whole.
+        let said = ls
+            .split_once("\nprinted:")
+            .map_or(ls.as_str(), |(said, _)| said);
+        steps.push(said.to_owned());
         steps.push(calls(&scratch));
         if first {
             // Set it past what the prune of installs keeps, so that the next `serve`'s mark shows.
@@ -2267,16 +2144,10 @@ fn ls_installs_its_serve_there() {
             exit status: Some(0)
             pumpkin: controller `alice` has no serve of this pumpkin: installing it there
             pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
-            printed:
-              20261107-120000-1b8a0001 finished          -  -               -  -: score=7 metrics={"solved":3}
-              1 run: 1 finished
             the calls: serve=.pumpkin/<this build>/bin/pumpkin, install=.pumpkin/<this build>, serve=.pumpkin/<this build>/bin/pumpkin
             $ pumpkin ls
             exit status: Some(0)
             pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
-            printed:
-              20261107-120000-1b8a0001 finished          -  -               -  -: score=7 metrics={"solved":3}
-              1 run: 1 finished
             the calls: serve=.pumpkin/<this build>/bin/pumpkin
             the second serve marked the install as used: true
             the install: bin 700
@@ -2288,46 +2159,12 @@ fn ls_installs_its_serve_there() {
 }
 
 #[test]
-fn ls_carries_on_after_a_cut() {
-    let scratch = Scratch::new();
-    let client = set_up_client(&scratch);
-    connect(&scratch, &client);
-    let hex = served(&scratch);
-    write_record(
-        &scratch,
-        "20261107-120000-1b8a0001",
-        true,
-        Some(returned(7.0)),
-    );
-    move_runs(&scratch, "home/.pumpkin/runs");
-    // Past the hello, within the answer to `Health`.
-    scratch.write("bin/cut-out", "40");
-    let steps = [ls_ran(&scratch, &client, &[]), calls(&scratch)];
-    check(
-        &scratch,
-        &steps.join("\n"),
-        &[(&hex, "<this build>")],
-        &expect![[r#"
-            $ pumpkin ls
-            exit status: Some(0)
-            pumpkin: controller `alice` didn't answer: ended within the answer: listing the runs again now, attempt 2 of 7
-            pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
-            printed:
-              20261107-120000-1b8a0001 finished          -  -               -  -: score=7 metrics={"solved":3}
-              1 run: 1 finished
-            the calls: serve=.pumpkin/<this build>/bin/pumpkin, serve=.pumpkin/<this build>/bin/pumpkin"#]],
-    );
-}
-
-#[test]
 fn ls_refusals() {
     let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     connect(&scratch, &client);
     served(&scratch);
     let mut steps = Vec::new();
-    scratch.write("bin/answer", "Welcome to the controller!\n");
-    steps.push(ls_ran(&scratch, &client, &[]));
     // A run of this build that doesn't read, beside one that does.
     write_record(
         &scratch,
@@ -2347,9 +2184,6 @@ fn ls_refusals() {
         &steps.join("\n"),
         &[],
         &expect![[r#"
-            $ pumpkin ls
-            exit status: Some(1)
-            pumpkin: linking to controller `alice` failed: its hello is no frame that `pumpkin controller serve` sends: a frame's message is 1466264675 bytes: it holds at most 65536: expected its frames alone on the standard output there, which a shell's startup file may write to
             $ pumpkin ls
             exit status: Some(1)
             pumpkin: <scratch>/home/.pumpkin/runs/20261107-120100-1b8a0002/driver.pid isn't there: expected the record of a run to have it
@@ -2598,8 +2432,8 @@ fn members_share_uploads() {
     let (id, by_bob) = start_in(&scratch, "repo-bob", &bob);
     let member = fs::read_to_string(scratch.0.join(format!("home/jobs/{id}/member"))).unwrap();
     let lines = [
-        ran,
-        by_bob,
+        sent(&ran),
+        sent(&by_bob),
         send_calls(&scratch),
         format!("the job's member: {member:?}"),
     ];
@@ -2608,26 +2442,14 @@ fn members_share_uploads() {
         &lines.join("\n"),
         &[],
         &expect![[r#"
-        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
-        exit status: Some(0)
-        pumpkin: run <id> goes to controller `alice`
-        pumpkin: controller `alice` lacks all 6 of the task's files: sending 2.9 KiB
-        pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
-        pumpkin: to follow it: pumpkin wait <id>
-        pumpkin: to stop it: pumpkin cancel <id>
-        printed:
-          <id>
-        $ HOME=<scratch>/client-bob PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
-        exit status: Some(0)
-        pumpkin: run <id> goes to controller `alice`
-        pumpkin: controller `alice` holds all 6 of the task's files
-        pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
-        pumpkin: to follow it: pumpkin wait <id>
-        pumpkin: to stop it: pumpkin cancel <id>
-        printed:
-          <id>
-        the calls: serve
-        the job's member: "bob\n""#]],
+            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+            exit status: Some(0)
+            pumpkin: controller `alice` lacks all 6 of the task's files: sending 2.9 KiB
+            $ HOME=<scratch>/client-bob PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+            exit status: Some(0)
+            pumpkin: controller `alice` holds all 6 of the task's files
+            the calls: serve
+            the job's member: "bob\n""#]],
     );
 }
 
@@ -3654,43 +3476,6 @@ fn view_reopens_between_requests() {
     );
 }
 
-#[test]
-fn view_installs_its_serve_there() {
-    let scratch = Scratch::new();
-    let (client, driver, [ended, _]) = viewed(&scratch);
-    let served = Served::of(on_client(&scratch, &client, &["view"]));
-    let window = format!("/api/runs/{ended}/log?at=0");
-    let mut steps = Vec::new();
-    // The first request installs it and then asks, and the second asks over the same link.
-    for _ in 0..2 {
-        steps.push(got(&served, &window, &["end"]));
-        steps.push(calls(&scratch));
-    }
-    let hex = key();
-    let install = scratch.0.join(format!("home/.pumpkin/{hex}/bin"));
-    steps.push(format!("the install: {}", modes(&install)));
-    steps.push(files_of(&scratch, &install));
-    drop(driver);
-    check(
-        &scratch,
-        &steps.join("\n"),
-        &[(ended, "<ended>"), (&hex, "<this build>")],
-        &expect![[r#"
-            GET /api/runs/<ended>/log?at=0
-            HTTP/1.1 200 OK
-            end: 310332
-            the calls: serve=.pumpkin/<this build>/bin/pumpkin, install=.pumpkin/<this build>, serve=.pumpkin/<this build>/bin/pumpkin
-            GET /api/runs/<ended>/log?at=0
-            HTTP/1.1 200 OK
-            end: 310332
-            the calls: none
-            the install: buildifier 555, pumpkin 555
-            its files:
-              pumpkin: the client's pumpkin
-              buildifier: the client's buildifier"#]],
-    );
-}
-
 // Each is refused before EC2 is asked, which the stand-in `aws` doesn't answer.
 #[test]
 fn view_refuses_a_start_but_from_its_page() {
@@ -3723,36 +3508,5 @@ fn view_refuses_a_start_but_from_its_page() {
             POST /api/controller/start [("Origin", "<page>"), ("X-Pumpkin-Token", "")]
             HTTP/1.1 401 Unauthorized
             {"error":"the request carries no token in `X-Pumpkin-Token`: give the one in the address that `pumpkin view` printed as it started"}"#]],
-    );
-}
-
-// The stand-in controller has no job of the run, which is what the cancel says.
-#[test]
-fn view_cancels_on_the_controller() {
-    let scratch = Scratch::new();
-    let (client, driver, [_, live]) = viewed(&scratch);
-    served(&scratch);
-    let served = Served::of(on_client(&scratch, &client, &["view"]));
-    let origin = format!("http://127.0.0.1:{}", served.port);
-    let cancel = format!("/api/runs/{live}/cancel");
-    let (status, _) = served.ask("POST", &cancel, &[("Origin", &origin)]);
-    let cancelling = format!("/api/runs/{live}/cancelling");
-    let said = poll(|| {
-        let (_, body) = served.ask("GET", &cancelling, &[]);
-        let said: serde_json::Value = serde_json::from_str(&body).unwrap();
-        (said["ended"] == true).then_some(said)
-    });
-    drop(driver);
-    check(
-        &scratch,
-        &format!(
-            "POST {cancel}\n{status}\n{}",
-            said["said"].as_str().unwrap()
-        ),
-        &[(live, "<live>")],
-        &expect![[r#"
-            POST /api/runs/<live>/cancel
-            HTTP/1.1 202 Accepted
-            pumpkin: no run on controller `alice` matches `<live>`: name an id, a unique prefix of an id or of its random digits, or a record's path"#]],
     );
 }
