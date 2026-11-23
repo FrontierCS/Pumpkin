@@ -423,19 +423,27 @@ fn task_problems(entry: &star::Entry, problems: &lang::Problems) -> String {
     closing_problems(format_args!("{entry}: the task has"), problems.count())
 }
 
-/// `text`, which a sandbox may have shaped, on one line for a terminal: each control character
-/// but a tab escaped, a newline as `\n`.
+/// `text`, which a sandbox may have shaped, on one line for a terminal, as [`Escaped`] shows it.
 fn escaped(text: &str) -> String {
-    let mut shown = String::new();
-    for c in text.chars() {
-        // Control characters would steer the operator's terminal.
-        if c.is_control() && c != '\t' {
-            shown.extend(c.escape_debug());
-        } else {
-            shown.push(c);
+    Escaped(text).to_string()
+}
+
+/// Shows its text on one line for a terminal: each control character but a tab escaped, a
+/// newline as `\n`. It writes a character at a time, so a write that fails stops it there.
+struct Escaped<'a>(&'a str);
+
+impl fmt::Display for Escaped<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for c in self.0.chars() {
+            // Control characters would steer the operator's terminal.
+            if c.is_control() && c != '\t' {
+                write!(f, "{}", c.escape_debug())?;
+            } else {
+                fmt::Write::write_char(f, c)?;
+            }
         }
+        Ok(())
     }
-    shown
 }
 
 fn default_runs() -> Result<String, String> {

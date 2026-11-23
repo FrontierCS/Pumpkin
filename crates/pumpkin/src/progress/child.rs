@@ -33,7 +33,7 @@ pub(super) fn ended(call: &CallSpan) -> Option<Duration> {
 pub(super) fn call_end(call: &CallSpan) -> String {
     match &call.end {
         Some((_, CallEnd::Result(values), _)) => result(values),
-        Some((_, CallEnd::Failed(reason), _)) => format!("failed: {}", crate::escaped(reason)),
+        Some((_, CallEnd::Failed(reason), _)) => super::call_failed(reason),
         None => STOPPED.to_owned(),
     }
 }
@@ -127,7 +127,7 @@ pub(super) fn lease_end(lease: &LeaseSpan) -> String {
 }
 
 pub(super) fn command(work: &Work) -> String {
-    let shown = |text: &str, chars| clipped(&crate::escaped(text), chars);
+    let shown = |text: &str, bytes| clipped(crate::Escaped(text), bytes);
     let (what, ended) = match work {
         Work::Command { argv, end } => {
             let ended = end.map(|end| match end {
@@ -135,7 +135,7 @@ pub(super) fn command(work: &Work) -> String {
                 CommandEnd::Unstarted => "didn't start".to_owned(),
                 CommandEnd::Exited(status) => exited(status),
             });
-            let what = format!("`{}`", shown(&argv.join(" "), COMMAND_SHOWN_CHARS));
+            let what = format!("`{}`", shown(&argv.join(" "), COMMAND_SHOWN_BYTES));
             (what, ended)
         }
         Work::Transfer {
@@ -144,7 +144,7 @@ pub(super) fn command(work: &Work) -> String {
             to,
             end,
         } => {
-            let (from, to) = (shown(from, PATH_SHOWN_CHARS), shown(to, PATH_SHOWN_CHARS));
+            let (from, to) = (shown(from, PATH_SHOWN_BYTES), shown(to, PATH_SHOWN_BYTES));
             let what = match direction {
                 Direction::Put => format!("put {from} to {to}"),
                 Direction::Replace => format!("put {from} to {to}, replacing it"),
@@ -164,11 +164,11 @@ pub(super) fn command(work: &Work) -> String {
     format!("{what} {}", ended.as_deref().unwrap_or("running"))
 }
 
-/// The most characters of a lease's command that `ls` and a summary show.
-const COMMAND_SHOWN_CHARS: usize = 60;
+/// The most bytes of a lease's command that `ls` and a summary show.
+const COMMAND_SHOWN_BYTES: usize = 60;
 
-/// The most characters of each path of a lease's transfer that `ls` and a summary show.
-const PATH_SHOWN_CHARS: usize = 40;
+/// The most bytes of each path of a lease's transfer that `ls` and a summary show.
+const PATH_SHOWN_BYTES: usize = 40;
 
 pub(super) fn exited(status: ExitStatus) -> String {
     match status {

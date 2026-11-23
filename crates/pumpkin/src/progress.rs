@@ -31,7 +31,8 @@ mod row;
 pub(crate) use agent::{caller_lane, line as agent_line};
 use child::{call_end, call_name, command, lease_end, lease_name, over_budget};
 pub(crate) use child::{called, leased};
-use clip::{Clip, clipped};
+use clip::Clip;
+pub(crate) use clip::clipped;
 pub(crate) use cost::usd;
 pub(crate) use model::median;
 use model::model;
@@ -694,16 +695,23 @@ fn models(models: &[&str]) -> String {
     counted.collect::<Vec<_>>().join(", ")
 }
 
-/// The most characters of a result's values that the words for a run show; the record keeps them
+/// The most bytes of a result's values that the words for a run show; the record keeps them
 /// whole.
 // A body may return 1 MiB. The bound is `kubectl describe`'s, past which it shortens an annotation:
 // https://github.com/kubernetes/kubernetes/blob/af46c47ce925f4c4ad5cc8d1fca46c7b77d13b38/staging/src/k8s.io/kubectl/pkg/describe/describe.go#L4966
-const RESULT_SHOWN_CHARS: usize = 140;
+const RESULT_SHOWN_BYTES: usize = 140;
 
-/// `values` as `name=value`, separated by spaces, cut after [`RESULT_SHOWN_CHARS`]: a number with
+/// The most bytes of a text, such as the reason a call failed or a string of a log's record, that
+/// is shown whole; the record keeps it whole.
+// Pumpkin's own reasons say what is wrong, then what to do. They run to a few hundred bytes, and a
+// bound of 140 would cut off what to do. A body may also fail with a command's 1 MiB of output.
+// 8 KiB holds each reason that Pumpkin writes, and a page that shows many cut ones stays light.
+pub(crate) const TEXT_SHOWN_BYTES: usize = 8 * 1024;
+
+/// `values` as `name=value`, separated by spaces, cut after [`RESULT_SHOWN_BYTES`]: a number with
 /// two decimals, four if it is below one, and no trailing zero; any other value as compact JSON.
 pub(crate) fn shown_values(values: &[(Name, Value)]) -> String {
-    let mut shown = Clip::new(RESULT_SHOWN_CHARS);
+    let mut shown = Clip::new(RESULT_SHOWN_BYTES);
     for (index, (name, value)) in values.iter().enumerate() {
         let space = if index == 0 { "" } else { " " };
         // A write fails once the words pass the bound, so a long value is never copied whole.
@@ -722,6 +730,15 @@ pub(crate) fn shown_values(values: &[(Name, Value)]) -> String {
         }
     }
     shown.text()
+}
+
+/// How a call that failed for `reason` ended, in words: `failed: ` and the reason, escaped onto
+/// one line and cut after [`TEXT_SHOWN_BYTES`].
+pub(crate) fn call_failed(reason: &str) -> String {
+    format!(
+        "failed: {}",
+        clipped(crate::Escaped(reason), TEXT_SHOWN_BYTES)
+    )
 }
 
 /// What a call's result shows, or `a result` if it shows nothing.

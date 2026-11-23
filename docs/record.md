@@ -40,8 +40,9 @@ in the order the final body returned them. If it is `no_result`, `failure` recor
 or an error and its reason. A failed run instead records `state: "failed"` and a reason.
 An interrupted run records `state: "interrupted"` and the signal.
 The lines of `pumpkin ls` and `pumpkin wait`, and the page's words for a run, cut a long result
-short. `outcome.json` keeps the run's result whole, which `pumpkin wait --outcome` prints. The log
-keeps whole what each call's body returned.
+short. They cut a call's long reason for failing short too, as the page does each long string of
+a record. `outcome.json` keeps the run's result whole, which `pumpkin wait --outcome` prints. The
+log keeps whole what each call's body returned, or why it failed.
 
 For example, to see who submitted and what the judge returned for `examples/hello`:
 

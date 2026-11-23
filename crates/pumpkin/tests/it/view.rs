@@ -3138,69 +3138,86 @@ fn times_a_callers_ops() {
     );
 }
 
-// A call that returns the most its body may: each reply that says it shows its start alone.
+// A call that returns the most its body may, and one that fails with as much: each reply that
+// says how they ended cuts it short.
 #[test]
-fn cuts_a_long_result_short() {
+fn cuts_a_long_call_end_short() {
     let scratch = Scratch::new();
     let id = "20261110-230000-00000019";
-    let output = "a".repeat(usize::try_from(RESULT_MAX_BYTES).unwrap() - 64);
+    let most = usize::try_from(RESULT_MAX_BYTES).unwrap();
+    let output = "a".repeat(most - 64);
     let values = json!([{ "name": "output", "value": output }, { "name": "score", "value": 1 }]);
-    let arrived = json!({
-        "kind": "op_arrived", "caller": "agent-0", "op": 0,
-        "request": { "kind": "call", "grant": "train" },
-    });
-    let start = json!([{ "kind": "reply", "op": 0, "reply": { "kind": "call", "job": 0 } }, {
-        "kind": "start_call", "caller": "agent-0", "job": 0, "grant": "train", "payload": payload(),
-        "timeout_ns": "60000000000",
-    }]);
-    let ended = |seconds, event| logged(seconds, event, json!([]));
-    let log = [
-        logged(1, arrived, start),
-        ended(1, json!({ "kind": "call_started", "job": 0 })),
-        ended(
-            2,
-            json!({ "kind": "call_returned", "job": 0, "returned": values }),
-        ),
+    let reason = "a line of stdout\n".repeat(most / 17);
+    let ends = [
+        json!({ "kind": "call_returned", "job": 0, "returned": values }),
+        json!({ "kind": "call_failed", "job": 1, "reason": reason }),
     ];
+    let mut log = Vec::new();
+    for (job, end) in (0_u64..).zip(ends) {
+        let arrived = json!({
+            "kind": "op_arrived", "caller": "agent-0", "op": job,
+            "request": { "kind": "call", "grant": "train" },
+        });
+        let start = json!([{ "kind": "reply", "op": job, "reply": { "kind": "call", "job": job } }, {
+            "kind": "start_call", "caller": "agent-0", "job": job, "grant": "train",
+            "payload": payload(), "timeout_ns": "60000000000",
+        }]);
+        log.extend([
+            logged(1, arrived, start),
+            logged(1, json!({ "kind": "call_started", "job": job }), json!([])),
+            logged(2, end, json!([])),
+        ]);
+    }
     let outcome = Some(returned(6.0));
-    write_run(
-        &scratch,
-        id,
-        asked(id, 0),
-        &log,
-        outcome,
-        &lease_places(Prices::Nothing),
-    );
+    let places = lease_places(Prices::Nothing);
+    write_run(&scratch, id, asked(id, 0), &log, outcome, &places);
     let served = Served::start(&scratch);
     let (_, body) = served.get_with(&format!("/api/runs/{id}"), &[]);
-    // The reply's other fields hold some kilobytes.
-    assert!(body.len() < 32 * 1024, "{} bytes", body.len());
+    // Four cut reasons of 8 KiB, and some kilobytes of the rest.
+    assert!(body.len() < 64 * 1024, "{} bytes", body.len());
     let run: Value = serde_json::from_str(&body).unwrap();
-    let summary = run["summary"].as_str().unwrap();
-    let called = summary
-        .lines()
-        .find(|line| line.contains("train job 0"))
-        .unwrap();
-    let lane = run["lanes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|lane| lane["lane"] == "job 0");
     let ops = served.get(&format!("/api/runs/{id}/trace/agent-0/ops"));
-    let said = format!(
-        "summary: {}\nsaid: {}\nop: {}",
-        called.trim_start(),
-        lane.unwrap()["said"].as_str().unwrap(),
-        ops["ops"]["result"][0].as_str().unwrap(),
-    );
+    let summary = run["summary"].as_str().unwrap();
+    let mut said = String::new();
+    for job in 0..2 {
+        let called = summary
+            .lines()
+            .find(|line| line.contains(&format!("train job {job}")));
+        let lane = &run["lanes"][1 + job];
+        said.push_str(&ending("summary", called.unwrap().trim_start()));
+        said.push_str(&ending(
+            lane["lane"].as_str().unwrap(),
+            lane["said"].as_str().unwrap(),
+        ));
+        said.push_str(&ending("op", ops["ops"]["result"][job].as_str().unwrap()));
+    }
+    said.push_str(&ending(
+        "failure",
+        run["failures"][0]["reason"].as_str().unwrap(),
+    ));
     check(
         &scratch,
         [Step::Ran(said)],
         false,
         &[],
         &expect![[r#"
-        summary: 0:01 train job 0 of agent 0 on modal/a100_80 with unknown GPUs, started after 0s, ran 1s: output="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa…
-        said: train job 0 of agent 0 on modal/a100_80 with unknown GPUs, started after 0s, ran 1s: output="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa…
-        op: returned output="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa…"#]],
+            summary: `0:01 train job 0 of agent 0 on modal/a100_80 wit`, 233 bytes, ending `aaaaaaaaaaaaaaaaaaaaaaa…`
+            job 0: `train job 0 of agent 0 on modal/a100_80 with unk`, 228 bytes, ending `aaaaaaaaaaaaaaaaaaaaaaa…`
+            op: `returned output="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`, 152 bytes, ending `aaaaaaaaaaaaaaaaaaaaaaa…`
+            summary: `0:01 train job 1 of agent 0 on modal/a100_80 wit`, 8293 bytes, ending `t\na line of stdout\na …`
+            job 1: `train job 1 of agent 0 on modal/a100_80 with unk`, 8288 bytes, ending `t\na line of stdout\na …`
+            op: `failed: a line of stdout\na line of stdout\na li`, 8203 bytes, ending `t\na line of stdout\na …`
+            failure: `a line of stdout
+            a line of stdout
+            a line of stdo`, 8218 bytes, ending `… [1048560 bytes in all]`
+        "#]],
     );
+}
+
+/// `text` by its start, its length in bytes and its end, after `name`, on a line.
+fn ending(name: &str, text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let start: String = chars[..chars.len().min(48)].iter().collect();
+    let end: String = chars[chars.len().saturating_sub(24)..].iter().collect();
+    format!("{name}: `{start}`, {} bytes, ending `{end}`\n", text.len())
 }
