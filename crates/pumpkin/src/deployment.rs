@@ -268,7 +268,7 @@ fn controller(cli: &Cli, region: &Region, name: &Name, found: &mut Found) -> Opt
     let described = Described { instance, profile };
     let resource = format!("controller `{name}`, {}", described.instance.id);
     (found.problems).extend(described.problems(&resource));
-    (found.unchecked).extend(described.unchecked(&resource));
+    (found.unchecked).extend(described.unchecked(&resource, &name.to_string()));
     let role = described.role().map(str::to_owned);
     let id = described.instance.id;
     Some(Controller { id, role })

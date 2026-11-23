@@ -108,6 +108,14 @@ impl Controller {
                 ));
             }
         };
+        // A job gives Modal's sandboxes the address they dial from the instance's metadata, which
+        // only an EC2 controller has.
+        if let (Find::Address(_), Some(_)) = (&find, &modal) {
+            return Err(format!(
+                "`[controllers.{name}]` names `modal` beside `address`, but a Modal provider needs \
+                 a controller that deploy/aws made: remove `[controllers.{name}.modal]`"
+            ));
+        }
         Ok(Self { name, find, modal })
     }
 }

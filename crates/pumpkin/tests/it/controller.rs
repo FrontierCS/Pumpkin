@@ -790,6 +790,13 @@ fn target_refusals() {
             "optional.toml",
             "address = \"-oProxyCommand=true:22\"".to_owned(),
         ),
+        (
+            "modal.toml",
+            format!(
+                "address = \"lab:2222\"\n{}",
+                SENT_MODAL.replace("[modal]", "[controllers.alice.modal]")
+            ),
+        ),
     ];
     for (file, find) in &finds {
         scratch.write(file, &named.replace(region, find));
@@ -912,6 +919,9 @@ fn target_refusals() {
             2 | address = "-oProxyCommand=true:22"
               |           ^^^^^^^^^^^^^^^^^^^^^^^^
             `-oProxyCommand=true:22` is not a controller's address: give its host and the port of its `sshd`, such as `lab.example.org:2222` or `192.0.2.1:2222`
+            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --config ../modal.toml
+            exit status: Some(1)
+            pumpkin: ../modal.toml: `[controllers.alice]` names `modal` beside `address`, but a Modal provider needs a controller that deploy/aws made: remove `[controllers.alice.modal]`
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --config ../several.toml
             exit status: Some(1)
             pumpkin: ../several.toml: it names several controllers, `alice`, `lab`: name one with `--controller`

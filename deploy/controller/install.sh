@@ -16,6 +16,22 @@ CONTAINERD=2.4.2-3~ubuntu.24.04~noble
 BUILDX=0.38.1-1~ubuntu.24.04~noble
 
 here=$(dirname "$0")
+
+# `apt-get` with the arguments given, tried again 5 s apart while it fails, 6 times in all: a first
+# boot's apt-daily may hold a lock of apt's, and apt waits for none but dpkg's frontend lock, as it
+# takes the others with a lock that doesn't wait. So cloud-init tries an apt command again, for up
+# to 30 s, while another apt holds apt's locks:
+# https://salsa.debian.org/apt-team/apt/-/blob/db797312548f6e7d6d1d1faa9f1e48c1e521d290/apt-pkg/contrib/fileutl.cc#L279
+# https://github.com/canonical/cloud-init/blob/905d10891051496bd196798b2a8e0d77f161db74/cloudinit/distros/debian.py#L202-L243
+apt_get() {
+    tries=1
+    until DEBIAN_FRONTEND=noninteractive apt-get "$@"; do
+        [ "$tries" -lt 6 ] || return 1
+        tries=$((tries + 1))
+        sleep 5
+    done
+}
+
 case "${1-}" in
 sources)
     install -D --mode=0644 "$here/docker.asc" /etc/apt/keyrings/docker.asc
@@ -39,13 +55,9 @@ docker)
     cat > /etc/docker/daemon.json <<DAEMON
 {"features": {"containerd-snapshotter": true}}
 DAEMON
-    # Each waits 30 s for the lock of another apt, as a first boot's apt-daily may hold it, as
-    # cloud-init waits for it before its own:
-    # https://github.com/canonical/cloud-init/blob/905d10891051496bd196798b2a8e0d77f161db74/cloudinit/distros/debian.py#L202-L215
-    apt-get --option=DPkg::Lock::Timeout=30 update
-    DEBIAN_FRONTEND=noninteractive apt-get --option=DPkg::Lock::Timeout=30 install --yes \
-        "docker-ce=$DOCKER" "docker-ce-cli=$DOCKER" "containerd.io=$CONTAINERD" \
-        "docker-buildx-plugin=$BUILDX" "$@"
+    apt_get update
+    apt_get install --yes "docker-ce=$DOCKER" "docker-ce-cli=$DOCKER" \
+        "containerd.io=$CONTAINERD" "docker-buildx-plugin=$BUILDX" "$@"
     ;;
 release)
     dir=$(realpath --canonicalize-missing "$3")

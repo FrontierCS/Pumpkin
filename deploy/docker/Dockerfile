@@ -72,7 +72,10 @@ RUN systemctl enable pumpkin-host-key.service
 # The install, at every start, from the settings in the directory that compose mounts. It enables
 # the boot's reap, which then runs after it. `sshd` starts only once it has succeeded, as a new
 # container has none of `sshd`'s settings and the members' keys until it has run, and an `sshd`
-# without them would admit the keys that the kept home's `authorized_keys` holds.
+# without them would admit the keys that the kept home's `authorized_keys` holds. It stays active
+# once it has succeeded, so that the start of `sshd` that the first connection makes doesn't run it
+# again, as systemd's manual says of a oneshot that a dependency pulls in:
+# https://github.com/systemd/systemd/blob/db11bab38ccf1ed257f310d29070843d4c58ea01/man/systemd.service.xml#L1602-L1613
 COPY <<EOF /etc/systemd/system/pumpkin-install.service
 [Unit]
 Description=Install the Pumpkin controller's host software from /opt/pumpkin
@@ -80,6 +83,7 @@ Before=pumpkin-boot.service ssh.service
 
 [Service]
 Type=oneshot
+RemainAfterExit=yes
 ExecStart=/opt/pumpkin/bin/pumpkin-admin install docker --settings /etc/pumpkin/conf/settings.toml
 ExecStartPost=/usr/bin/systemctl start --no-block pumpkin-boot.service
 
@@ -97,13 +101,18 @@ COPY --from=pumpkin / /opt/pumpkin/
 # each controller to its children while it ran, so the engine would start without the memory
 # controller, and say for good that it can't limit swap. Once the cgroup gives its children
 # controllers, a `docker exec` joins systemd's own cgroup instead. moby's dind enables them so, in a
-# loop for `docker exec`'s race; systemd takes `init.scope`'s parent as its root:
+# loop for `docker exec`'s race, on cgroup v2 alone; on a host without it, which the README asks
+# for, this stops with why. systemd takes `init.scope`'s parent as its root:
 # https://github.com/moby/moby/blob/1f98bfc8473f1c9753cbc80bdc30c04dfea266e3/hack/dind#L61-L80
 # https://github.com/systemd/systemd/blob/db11bab38ccf1ed257f310d29070843d4c58ea01/src/core/cgroup.c#L3698-L3699
 # https://github.com/systemd/systemd/blob/db11bab38ccf1ed257f310d29070843d4c58ea01/src/core/cgroup.c#L3799-L3805
 # https://github.com/opencontainers/runc/blob/48dfb3a2c0bc9967074e04609493a500120ba018/libcontainer/process_linux.go#L308-L318
 COPY --chmod=0755 <<EOF /usr/local/sbin/pumpkin-init
 #!/bin/sh
+if [ ! -f /sys/fs/cgroup/cgroup.controllers ]; then
+    echo "pumpkin-init: /sys/fs/cgroup is no cgroup v2 hierarchy: run the controller on a host with cgroup v2" >&2
+    exit 1
+fi
 mkdir -p /sys/fs/cgroup/init.scope
 while ! {
     xargs -rn1 < /sys/fs/cgroup/cgroup.procs > /sys/fs/cgroup/init.scope/cgroup.procs || :
