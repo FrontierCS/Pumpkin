@@ -1,4 +1,4 @@
-//! A workflow parsed from its IR: references resolved to typed ids, every time given as a
+//! A workflow parsed from its IR: references resolved to typed ids, every time readable as a
 //! [`Duration`], and the rules that span its parts checked.
 //!
 //! A [`Placed`] workflow has each of its roles on a provider, in the smallest class of sandbox
@@ -245,7 +245,6 @@ impl TryFrom<f64> for UsdPerHour {
 
 impl From<UsdPerHour> for f64 {
     fn from(price: UsdPerHour) -> Self {
-        // A million dollars in millionths is exact as a double.
         #[expect(clippy::cast_precision_loss, reason = "at most 10^12, below 2^53")]
         let micros = price.micros as Self;
         micros / 1e6

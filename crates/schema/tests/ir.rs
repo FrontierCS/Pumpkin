@@ -48,7 +48,6 @@ fn check<C: Case>(cases: impl IntoIterator<Item = C>, expect: &Expect) {
     expect.assert_eq(&actual.join("\n"));
 }
 
-/// A case whose outcome [`check`] shows.
 trait Case {
     fn outcome(self) -> String;
 }
@@ -148,7 +147,7 @@ impl Case for Needing {
 /// `aws`, `judge`, `agent` and `judge_memory`, the last two alike, `judge_60`, and `ice_lake`,
 /// which states its CPU's model; and on `gpus`, `h100` and `h100_4`, with GPUs.
 fn offered() -> BTreeMap<ir::Name, BTreeMap<ir::Name, Class>> {
-    let name = |name: &str| ir::Name::try_from(name.to_owned()).unwrap();
+    let name = valid::<ir::Name>;
     let flags = |flags: &[&str]| flags.iter().map(|flag| valid(flag)).collect();
     let h100 = |count| {
         let model = valid("NVIDIA H100 80GB HBM3");
@@ -391,6 +390,8 @@ fn placement() {
             {"cpu_millis":2000,"cpu_model":"AMD EPYC 7R13 Processor","memory_bytes":2147483648}: /roles/1/needs: `trainer` fits no class of sandbox, as `aws`'s `agent` states no CPU model, and it needs `AMD EPYC 7R13 Processor`; `aws`'s `ice_lake` states the CPU model `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`, and it needs `AMD EPYC 7R13 Processor`; `aws`'s `judge` states no CPU model, and it needs `AMD EPYC 7R13 Processor`; `aws`'s `judge_60` states no CPU model, and it needs `AMD EPYC 7R13 Processor`; `aws`'s `judge_memory` states no CPU model, and it needs `AMD EPYC 7R13 Processor`; `gpus`'s `h100` has GPUs, 1 × `NVIDIA H100 80GB HBM3`, and it needs none; `gpus`'s `h100_4` has GPUs, 4 × `NVIDIA H100 80GB HBM3`, and it needs none: change its needs, or run it where sandboxes are larger
             {"cpu_millis":2000,"gpu":{"count":2,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":2147483648}: /roles/1/needs: `trainer` fits no class of sandbox, as `aws`'s `agent` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `aws`'s `ice_lake` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `aws`'s `judge` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `aws`'s `judge_60` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `aws`'s `judge_memory` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `gpus`'s `h100` has GPUs, 1 × `NVIDIA H100 80GB HBM3`, and it needs 2 × `NVIDIA H100 80GB HBM3`; `gpus`'s `h100_4` has GPUs, 4 × `NVIDIA H100 80GB HBM3`, and it needs 2 × `NVIDIA H100 80GB HBM3`: change its needs, or run it where sandboxes are larger"#]],
     );
+    // Past what any class offers: 8 GPUs, where the most is 4, and one thousandth of a CPU over
+    // the most, 64.
     let mut unplaced = fixture();
     unplaced["roles"][0]["needs"]["gpu"] = h100(8);
     unplaced["roles"][2]["needs"]["cpu_millis"] = json!(64_001);
@@ -882,6 +883,7 @@ fn grant_help() {
 
 #[test]
 fn ops_frame_bound() {
+    // JSON writes each NUL as `\u0000`, 6 bytes, so this many fill a frame's message by themselves.
     let ir = fixture_with(
         "/roles/0/runtime/agent/grants/0/help",
         json!("\0".repeat(frame::MAX_MESSAGE_BYTES / 6)),
@@ -1444,7 +1446,7 @@ fn broken_roles() {
         ir["roles"][0]["runtime"]["agent"]["egress"].clone();
     let grants = &mut ir["roles"][0]["runtime"]["agent"]["grants"];
     let mut submit = now("resubmit");
-    submit["now"]["payload_max_bytes"] = json!(67_108_865);
+    submit["now"]["payload_max_bytes"] = json!(MAX_OP_PAYLOAD_BYTES + 1);
     let mut retrain = grants[0].clone();
     retrain["name"] = json!("retrain");
     grants.as_array_mut().unwrap().extend([submit, retrain]);
@@ -1476,10 +1478,7 @@ impl Case for Given {
         }))
         .unwrap();
         let given = (self.0.iter())
-            .map(|(name, text)| {
-                let name = ir::Name::try_from((*name).to_owned()).unwrap();
-                (name, (*text).to_owned())
-            })
+            .map(|(name, text)| (valid::<ir::Name>(name), (*text).to_owned()))
             .collect();
         match ir::argument::read(&function, &parameters, &given) {
             Ok(values) => format!("{values:?}"),

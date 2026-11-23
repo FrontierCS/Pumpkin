@@ -13,9 +13,8 @@ use crate::sandbox::{MAX_OP_PAYLOAD_BYTES, MAX_TRANSFER_BYTES};
 impl Workflow {
     /// Parses `ir`: resolves its names to ids, and reports each rule it breaks
     /// [at](super::ParseError::at) its place. Each reference names a role of the required kind,
-    /// and every role is reached. Agents have one work deadline and grant names local to each
-    /// holder. A rule about
-    /// parts that fail to resolve goes unchecked, so fixing these errors may reveal others.
+    /// every role is reached, and grant names are local to each holder. A rule about parts that
+    /// fail to resolve goes unchecked, so fixing these errors may reveal others.
     pub fn parse(ir: &ir::Workflow) -> Result<Self, ParseErrors> {
         Parser::default().workflow(ir)
     }
@@ -30,7 +29,7 @@ struct Parser<'ir> {
     targets: BTreeMap<RoleId, Target>,
     runners: BTreeMap<RoleId, Runner>,
     holders: Vec<Holding<'ir>>,
-    /// Each job function's target, with the function's name, in the IR's order.
+    /// Each job function's target, holder and name, in the IR's order.
     called: Vec<(TargetId, AgentId, &'ir Name)>,
     job_functions: Vec<JobFunction>,
     now_functions: Vec<NowFunction>,
