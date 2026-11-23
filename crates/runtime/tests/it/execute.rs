@@ -1952,13 +1952,14 @@ fn result_over_the_limit() {
 #[test]
 fn crashes_with_an_op_in_flight() {
     let mut ir = ops_workflow(&["ops", "call train 12", "crash"], 30);
-    // Slow to create, so that the agent's end stops the call before its body starts.
-    ir["roles"][1]["image"] = json!(sim::image(SLOW).as_str());
     // Over the final call's payload but within `train`'s, so within the most an op may carry.
     ir["roles"][0]["runtime"]["agent"]["grants"][0]["job"]["payload_max_bytes"] = json!(16);
     ir["final"]["payload_max_bytes"] = json!(8);
+    // The call's sandbox is recorded once the agent's teardown is, so that the agent's end stops
+    // the call before its body starts.
+    let created = Synced::Holding("jobs/0/.sandbox.json.partial", "sim-2");
     check(
-        &SimHost::new(),
+        &SimHost::new().held_sync(created, r#""kind":"agent_torn_down""#),
         "crashes-with-an-op",
         &[(PROVIDER, &Sim::new())],
         &ir,
@@ -2336,8 +2337,10 @@ fn returns_before_its_delete() {
     let argv = ["ops", "call train 6", "await_result 0 completed", "exit"];
     let mut ir = short_workflow(&argv, 30);
     ir["roles"][1]["image"] = json!(sim::image(LAST).as_str());
+    // The call's delete is recorded once the agent's teardown is.
+    let deleted = Synced::Holding("jobs/0/.sandbox.json.partial", DELETED);
     check(
-        &SimHost::new(),
+        &SimHost::new().held_sync(deleted, r#""kind":"agent_torn_down""#),
         "returns-before-its-delete",
         &[(PROVIDER, &Sim::new())],
         &ir,
@@ -2501,8 +2504,14 @@ fn reported_past_the_deadline() {
         at: Duration::from_millis(30_500),
         then: 1,
     };
+    // The call's teardown reaches the loop as it records the tick, before the agent's begins.
+    let tick = SlowSync {
+        record: Synced::Holding("log.jsonl", r#""kind":"tick""#),
+        queued: 1,
+        at: Duration::from_millis(30_500),
+    };
     check(
-        &SimHost::new().late_take(late),
+        &SimHost::new().late_take(late).slow_sync(tick),
         "reported-past-the-deadline",
         &[(PROVIDER, &Sim::new())],
         &short_workflow(
@@ -4731,8 +4740,10 @@ fn call_leases() {
         "await_log lease_ended",
         "call submit 6 finalize=true",
     ];
+    // The lease's delete is recorded once the call's teardown is, though the two run at once.
+    let deleted = Synced::Holding("leases/0/.sandbox.json.partial", DELETED);
     check(
-        &SimHost::new(),
+        &SimHost::new().held_sync(deleted, r#"{"job":0,"kind":"call_torn_down"}"#),
         "call-leases",
         &[(PROVIDER, &Sim::new())],
         &held_lease_workflow(&argv, &LEASING),

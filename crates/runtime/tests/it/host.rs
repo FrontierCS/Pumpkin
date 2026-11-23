@@ -40,6 +40,7 @@ struct State {
     late_armed: bool,
     after_take: Option<fn()>,
     slow: VecDeque<SlowSync>,
+    held: Option<(Synced, &'static str)>,
     failed: Option<Synced>,
     failed_file: Option<(&'static str, u32)>,
     first: Option<Arc<dyn Fill>>,
@@ -82,6 +83,7 @@ impl SimHost {
             late_armed: false,
             after_take: None,
             slow: VecDeque::new(),
+            held: None,
             failed: None,
             failed_file: None,
             first: None,
@@ -107,6 +109,13 @@ impl SimHost {
 
     pub(crate) fn slow_sync(self, slow: SlowSync) -> Self {
         stdx::unpoisoned(self.state.lock()).slow.push_back(slow);
+        self
+    }
+
+    /// Holds the first sync that makes `record` last until the run log holds `logged` in a line,
+    /// as the machine may hold one thread while the loop records what others report.
+    pub(crate) fn held_sync(self, record: Synced, logged: &'static str) -> Self {
+        stdx::unpoisoned(self.state.lock()).held = Some((record, logged));
         self
     }
 
@@ -167,6 +176,7 @@ impl Host for SimHost {
             Synced::Holding(file, text) => path.ends_with(file) && holds(text),
         };
         let slow = state.slow.pop_front_if(|slow| reached(&slow.record));
+        let awaited = (state.held.take_if(|(record, _)| reached(record))).map(|(_, logged)| logged);
         let named = |name: &str| path.file_name() == Some(name.as_ref());
         let file = match &mut state.failed_file {
             Some((name, 0)) => named(name),
@@ -186,6 +196,10 @@ impl Host for SimHost {
         // Without the lock, so that the run's other threads read the clock as they hand the loop
         // its inputs.
         drop(state);
+        let waited = awaited.map_or_else(String::new, |logged| {
+            await_logged(&path, logged);
+            format!(", held until the run log held {logged}")
+        });
         let held = slow.map_or_else(String::new, |SlowSync { queued, at, .. }| {
             #[expect(clippy::expect_used, reason = "a test's bug fails the test")]
             first
@@ -200,13 +214,27 @@ impl Host for SimHost {
         });
         let outcome = if failed { ", failed" } else { "" };
         if let Some(journal) = &self.journal {
-            journal.tell(format!("{kind} {}{through}{held}{outcome}", path.display()));
+            journal.tell(format!(
+                "{kind} {}{through}{waited}{held}{outcome}",
+                path.display()
+            ));
         }
         if failed {
             return Err(io::Error::other("the simulated host's sync failed"));
         }
         Ok(())
     }
+}
+
+// Waits until the run log of the record that holds `path`, in the nearest directory above it that
+// holds one, holds `logged` in a line.
+fn await_logged(path: &Path, logged: &str) {
+    let record = path.ancestors().find(|dir| dir.join("log.jsonl").is_file());
+    #[expect(clippy::expect_used, reason = "a test's bug fails the test")]
+    crate::sim::logged(
+        record.expect("a held sync is of a file in a run's record"),
+        logged,
+    );
 }
 
 fn last_record(path: &Path) -> io::Result<Option<u64>> {

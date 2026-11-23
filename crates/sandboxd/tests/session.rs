@@ -1095,8 +1095,9 @@ fn wait_at_a_full_control_socket() {
     // Linux lets one connection through a backlog of zero. The next waits for an accept.
     let _queued = UnixStream::connect(&socket).unwrap();
     let binary = test_support::sandboxd();
+    // Quiet, so that `docker` writes nothing to stderr as it pulls an image the engine lacks.
     let output = test_support::docker()
-        .args(["run", "--rm", "--network", "none", "--volume"])
+        .args(["run", "--quiet", "--rm", "--network", "none", "--volume"])
         .arg(format!("{}:/pumpkin/sandboxctl:ro", dir.path().display()))
         .arg("--volume")
         .arg(format!("{}:/sandboxctl:ro", binary.display()))
@@ -1223,7 +1224,7 @@ fn reading_while_collecting() {
             // Far more than a connection buffers, so that a `sandboxd` that read nothing while it
             // collected would hold the put's write up until its deadline.
             let tree = pattern(4 * MAX_BODY_BYTES);
-            fs::write(sandbox.root.join("out/tree"), &tree).unwrap();
+            collected_file(&sandbox.root.join("out/tree"), &tree);
             let (mut gateway, sandboxd) = accepting_gateway(&sandbox.socket("fake.sock"));
             let frames = collect_and_put(&sandbox.root, &tree);
             let sent = (frames.iter())
@@ -1259,7 +1260,7 @@ fn collects_one_file() {
     check(
         Meeting::Socket,
         |sandbox| {
-            fs::write(sandbox.root.join("out/result.json"), "{}").unwrap();
+            collected_file(&sandbox.root.join("out/result.json"), b"{}");
             let (mut gateway, sandboxd) = accepting_gateway(&sandbox.socket("fake.sock"));
             let collect = ToSandbox::Collect {
                 stream: 1,
@@ -1290,6 +1291,12 @@ fn collects_one_file() {
             sandboxd: exit status: 0
             left running: 0"#]],
     );
+}
+
+// Writes `bytes` at `path` with mode 0o664 whatever the test's umask, as a collect reports it.
+fn collected_file(path: &Path, bytes: &[u8]) {
+    fs::write(path, bytes).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o664)).unwrap();
 }
 
 fn collect_and_put<'a>(root: &Path, bytes: &'a [u8]) -> Vec<(ToSandbox, &'a [u8])> {

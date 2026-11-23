@@ -97,11 +97,10 @@ impl runtime::Bodies for Bodies<'_> {
             }
             "waits" => {
                 target.run(&argv(&["print", "one"]))?;
-                // The core stops the run's calls as the agent's work ends, before the agent's
-                // teardown, whose delete of its sandbox the record then shows.
-                let deleted =
-                    r#""kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0""#;
-                sim::logged(self.record, deleted);
+                // The core stops the run's calls as the agent's work ends. The record shows the
+                // agent's teardown end first.
+                let torn_down = r#""caller":"agent-0","kind":"agent_torn_down""#;
+                sim::logged(self.record, torn_down);
                 target.run(&argv(&["print", "two"]))?;
                 Ok(Vec::new())
             }
