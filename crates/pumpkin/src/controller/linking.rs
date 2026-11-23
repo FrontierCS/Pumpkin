@@ -2,7 +2,6 @@
 //! An opening repairs the destination if needed, and a cut request is retried from its progress.
 
 use std::collections::BTreeMap;
-use std::fs::OpenOptions;
 use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::PathBuf;
 use std::thread;
@@ -15,6 +14,11 @@ use stdx::process::{Bound, Echo, Failure, Run};
 use super::{AGAIN, Found, Located, OPENINGS, Reached, SHORT_TIMEOUT, when};
 use crate::link::{self, Link, Request, Unanswered};
 use crate::{manifest, say, workspace};
+
+// The most of what a command there wrote to its standard error that a failed link says: enough
+// for a clap usage error or a panic's message. Kubernetes bounds a response's warnings so:
+// https://github.com/kubernetes/kubernetes/blob/ab69524f795c42094a6630298ff53f3c3ebab7f4/staging/src/k8s.io/apiserver/pkg/endpoints/filters/warning.go#L39-L42
+const REMOTE_TAIL_BYTES: u64 = 4096;
 
 /// This build's files, which the controller installs whole. The controller runs their `pumpkin`
 /// as `serve`. They are this build's executable, and whichever of an install's other files lie
@@ -81,9 +85,11 @@ impl From<String> for Unlinked {
 
 pub(super) struct Linked {
     link: Link,
-    // What OpenSSH says of the connection, and what the remote command writes to its standard
-    // error, where `serve` writes only as it ends, or fails to mark its install.
+    // OpenSSH puts only its own diagnostics here.
     diagnostics: tempfile::NamedTempFile,
+    // What the command there writes to its standard error, which `ssh` writes to its own: of
+    // `serve`, only its error as it ends, and that it can't mark its install.
+    remote: tempfile::NamedTempFile,
 }
 
 impl Linked {
@@ -129,7 +135,8 @@ impl Linked {
         reached: &Reached,
         read: impl FnOnce(&mut Link) -> Result<T, Unanswered>,
     ) -> Result<T, Unlinked> {
-        read(&mut self.link).map_err(|error| unlinked(reached, &self.diagnostics, error))
+        read(&mut self.link)
+            .map_err(|error| unlinked(reached, &self.diagnostics, Some(&self.remote), error))
     }
 
     fn connect(
@@ -138,24 +145,27 @@ impl Linked {
         at: &Located,
     ) -> Result<Option<Self>, Unlinked> {
         let diagnostics = reached.location.diagnostics()?;
+        let remote = reached.location.diagnostics()?;
         // Never this process's own standard error. OpenSSH makes each of its standard streams that
         // isn't a terminal non-blocking, and blocking again only as it closes it, which an `ssh`
         // killed, or ended by a fatal error, never does. A write to a stream left so fails with
-        // `WouldBlock`, in each process that shares it, as under `2>&1`. Opened to append, as `-E`
-        // opens it, so that neither writer's lines overwrite the other's.
+        // `WouldBlock`, in each process that shares it, as under `2>&1`.
         // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/ssh.c#L2234-L2251
         // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/channels.c#L514-L540
         // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/channels.c#L636-L645
         // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/clientloop.c#L2901-L2908
-        // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/log.c#L319
-        let stderr = OpenOptions::new().append(true).open(diagnostics.path());
-        let stderr = stderr.context(diagnostics.path().display())?;
+        let stderr = remote.as_file().try_clone();
+        let stderr = stderr.context(remote.path().display())?;
         let mut ssh = Reached::ssh_command();
         ssh.arg("-E").arg(diagnostics.path());
         reached.remote(&mut ssh, at, &link::command(key));
         match Link::open(ssh, stderr) {
-            Ok(link) => Ok(link.map(|link| Self { link, diagnostics })),
-            Err(error) => Err(unlinked(reached, &diagnostics, error)),
+            Ok(link) => Ok(link.map(|link| Self {
+                link,
+                diagnostics,
+                remote,
+            })),
+            Err(error) => Err(unlinked(reached, &diagnostics, Some(&remote), error)),
         }
     }
 }
@@ -273,26 +283,32 @@ impl Reached {
     }
 }
 
+/// Why a link to `reached` gave no answer, `error`, with the last line of `ssh`'s `diagnostics`.
+/// Says first what the command there wrote to its standard error, `remote`, if anything.
 fn unlinked(
     reached: &Reached,
     diagnostics: &tempfile::NamedTempFile,
+    remote: Option<&tempfile::NamedTempFile>,
     error: Unanswered,
 ) -> Unlinked {
     let name = &reached.name;
+    if let Some(said) = remote.and_then(said_there) {
+        say(format_args!(
+            "controller `{name}` wrote to its standard error:\n{said}"
+        ));
+    }
     match error {
         Unanswered::Unreached(ended) => {
             let line = last_line(diagnostics);
             // OpenSSH's fatal when the server's host key cannot be verified.
             // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/sshconnect2.c#L104
             let host_refused = line.as_deref() == Some("Host key verification failed.");
-            // OpenSSH's fatal when the server refuses every key, in its own form, as the file
-            // also holds `serve`'s lines, whose errors may say `Permission denied (os error 13)`.
+            // OpenSSH's fatal when the server refuses every key.
             // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/sshconnect2.c#L543
             let denied = line
                 .as_ref()
                 .is_some_and(|line| line.contains(": Permission denied (") && line.ends_with(")."));
-            // The line may be `ssh`'s or `serve`'s.
-            let said = line.map_or(ended, |line| format!("the link last said: {line}"));
+            let said = line.map_or(ended, |line| format!("ssh says: {line}"));
             let said = format!("controller `{name}` didn't answer: {said}");
             if host_refused {
                 Unlinked::HostKey(reached.host_refused(&said))
@@ -321,6 +337,27 @@ fn last_line(file: &tempfile::NamedTempFile) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The last lines of `remote`, a command's standard error, each escaped and indented, as many as
+/// fit [`REMOTE_TAIL_BYTES`]; `None` if it holds none or can't be read.
+fn said_there(remote: &tempfile::NamedTempFile) -> Option<String> {
+    let mut file = remote.reopen().ok()?;
+    let size = file.metadata().ok()?.len();
+    let from = size.saturating_sub(REMOTE_TAIL_BYTES);
+    file.seek(SeekFrom::Start(from)).ok()?;
+    let mut bytes = Vec::new();
+    file.take(REMOTE_TAIL_BYTES).read_to_end(&mut bytes).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lines = text.lines();
+    // A tail that starts within a line leaves out the part of it.
+    if from > 0 {
+        lines.next();
+    }
+    let lines: Vec<String> = (lines.filter(|line| !line.is_empty()))
+        .map(|line| format!("  {}", crate::escaped(line)))
+        .collect();
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
 /// Uploads `build`'s files to the controller, as the install whose `serve` a link runs there.
 fn install(reached: &Reached, build: &Build, at: &Located) -> Result<(), Unlinked> {
     let name = &reached.name;
@@ -342,6 +379,7 @@ fn install(reached: &Reached, build: &Build, at: &Located) -> Result<(), Unlinke
         Err(Failure::Exited { .. }) => Err(unlinked(
             reached,
             &diagnostics,
+            None,
             Unanswered::Unreached("ended during the install".to_owned()),
         )),
         Err(

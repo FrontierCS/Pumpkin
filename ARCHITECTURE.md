@@ -524,9 +524,9 @@ view that `serve` keeps to answer a client.
 **Architecture Invariant:** `serve` says nothing on its standard error while it answers. What a
 request has to say, such as a run that `ls` can't list or what a reap removed, crosses in its
 answer as data, which the CLI words as it words the same of this machine's runs. `serve` writes
-there only as it ends, or fails to mark its install, and that stream goes with `ssh`'s to the
-link's diagnostics file, never to the person's standard error, which `ssh` would leave
-non-blocking.
+there only as it ends, or fails to mark its install, and `ssh` writes that stream to a file of
+the link's, which a link that fails quotes, never to the person's standard error, which `ssh`
+would leave non-blocking.
 
 **Architecture Invariant:** `view` writes no record, and reads one only through `runtime`'s
 readers (`Record`, `LogFold`), so a record's files are laid out in `runtime` alone, and a path
