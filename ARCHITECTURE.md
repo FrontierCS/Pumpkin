@@ -67,7 +67,8 @@ process's loop, its one door to the operating system (`io`).
 **Architecture Invariant:** it knows nothing of Pumpkin.
 
 **Architecture Invariant:** a loop's callbacks run only in its batch, never in the call that
-submitted their operation, and every deadline on the loop is a time on its backend's clock.
+submitted their operation, and every deadline on the loop is a time on its backend's clock. A test
+stands a simulated world in for the machine at the loop's `io::Backend`.
 
 **Architecture Invariant:** a child process gets only the environment that its caller states, and
 `process::run` ends it at a bound that its caller states. Clippy's configuration bans std's ways
@@ -207,13 +208,14 @@ member's build runs as the controller's one user.
 ### `crates/test-support`, `xtask`, `dist`, `deploy`, `examples`
 
 `test-support` holds what the tests of several crates share, such as the conformance suite of the
-`Provider` trait. Only tests use it. `xtask` holds the contributor tasks: `ci` runs the checks
-every change passes, and `live` those that reach a real environment. `dist` holds the files that a
-release ships as they are, such as `./pumpkin`, a task repository's launcher. `deploy/aws` is the
-Terraform module that makes a team's Pumpkin on AWS, as [its README](deploy/aws/README.md) says.
-`deploy/docker` makes a team's controller in a privileged container on a Docker host, as
-[its README](deploy/docker/README.md) says: systemd, `sshd` and a Docker engine of the container's
-own. Both install a controller by `deploy/controller`'s one script. `examples` holds tasks.
+`Provider` trait, and the simulated world that a loop runs in (`world`). Only tests use it.
+`xtask` holds the contributor tasks: `ci` runs the checks every change passes, and `live` those
+that reach a real environment. `dist` holds the files that a release ships as they are, such as
+`./pumpkin`, a task repository's launcher. `deploy/aws` is the Terraform module that makes a
+team's Pumpkin on AWS, as [its README](deploy/aws/README.md) says. `deploy/docker` makes a team's
+controller in a privileged container on a Docker host, as [its README](deploy/docker/README.md)
+says: systemd, `sshd` and a Docker engine of the container's own. Both install a controller by
+`deploy/controller`'s one script. `examples` holds tasks.
 
 **Architecture Invariant:** a Docker controller's jobs reach the engine inside its container alone,
 never the host's, so the paths that the Docker provider mounts, its ledger of CPUs and the prune of

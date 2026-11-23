@@ -27,6 +27,7 @@ pub mod http;
 pub mod io;
 pub mod suite;
 mod test_dir;
+pub mod world;
 
 pub use test_dir::TestDir;
 

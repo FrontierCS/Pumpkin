@@ -4,6 +4,7 @@ use std::path::Path;
 
 use expect_test::expect;
 use stdx::io::Backend;
+use test_support::world::World;
 
 fn check<P: Read + Write + Send + 'static>(
     backend: impl Fn() -> Box<dyn Backend>,
@@ -55,4 +56,31 @@ fn machine() {
         || stdx::io::machine().unwrap(),
         |path| UnixStream::connect(path),
     );
+}
+
+#[test]
+fn world() {
+    let world = World::new();
+    check(|| world.backend(), |path| world.connect(path));
+}
+
+#[test]
+fn world_clock_script_and_peers() {
+    expect![[r#"
+        a sync that fails: at 0s, the sync of failed failed: Other
+        a sync due at 10s, in a wait until 4s: at 4s, nothing
+        then in a wait until 20s: at 10s, the sync of late completed
+        a write that waited until 10s: at 10s, the recv of "after 10s"
+        a sync due at 12s, with an event owed: at 10s, nothing
+        the edge's event: at 10s, took 1
+        then: at 12s, the sync of owed completed
+        a write that moves time to 30s: at 30s, the recv of "moved"
+        a send once the peer reads no more: at 30s, the send failed: BrokenPipe
+        the peer's shutdown, then its drop: at 30s, the recv of 0 bytes
+        an event: at 30s, the sync of counted completed, took 2
+        a held sync, once the world reached 50s: at 50s, nothing
+        once its function says so: at 50s, the sync of held completed
+        a stream that the loop held as its backend dropped: its peer read 0 bytes
+    "#]]
+    .assert_eq(&test_support::io::world_outcomes());
 }

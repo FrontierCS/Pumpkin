@@ -5,6 +5,9 @@
 //! that every backend's test shares. Each case asserts what holds of every case: each callback runs
 //! in a batch after the one that submitted its operation, so never inside the call that submitted
 //! it, and the case ends with nothing in flight.
+//!
+//! [`world_outcomes`] runs the steps that only the simulated world ([`crate::world`]) stages, on
+//! one loop, with the same assertions.
 // The cases follow TigerBeetle's tests of its IO, which each of its backends passes:
 // https://github.com/tigerbeetle/tigerbeetle/blob/68958eb757747d0fc96a79d1f9c2fa6766b67b48/src/stdx/io/test.zig
 
@@ -13,11 +16,12 @@ use std::fmt::Write as _;
 use std::io::{self, Read, Write};
 use std::path::Path;
 use std::time::Duration;
-use std::{fs, thread};
+use std::{fs, mem, thread};
 
 use stdx::io::{Backend, Durable, File, Inbox, Io, Listener, Loop, Stream};
 
 use crate::TestDir;
+use crate::world::{Script, Synced, World};
 
 // A case puts two operations in flight at most, such as an accept and a recv.
 const CAPACITY: usize = 2;
@@ -379,6 +383,133 @@ fn events<P>(case: &mut Case, _: &Path, _: &dyn Fn(&Path) -> P) -> Vec<String> {
     ]
 }
 
+// The files that the world's steps sync, in the order of their scripts.
+const SYNCED: [&str; 5] = ["failed", "late", "owed", "counted", "held"];
+
+/// Runs the steps that only a simulated world stages, and lists what each came to.
+///
+/// The steps run on one loop in a fresh [`World`]. They pin the clock's stops, the scripts, what
+/// counts as an event, the peers' moves and shutdowns, and the backend's drop.
+///
+/// # Panics
+///
+/// Panics if a callback runs in the batch that submitted it, or an operation stays in flight.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one world's steps, each a line of what it lists"
+)]
+pub fn world_outcomes() -> String {
+    let dir = TestDir::new();
+    let world = World::new();
+    let secs = Duration::from_secs;
+    let file = |name: &'static str| Box::new(move |path: &Path| path.ends_with(name));
+    let lasts = |at_secs, events| Synced::Lasts {
+        at: secs(at_secs),
+        events,
+    };
+    let done = dir.path().join("done");
+    let synced = [
+        Synced::Fails,
+        lasts(10, 0),
+        lasts(12, 0),
+        lasts(0, 4),
+        Synced::Held(Box::new(move |_| done.exists())),
+    ];
+    for (name, synced) in SYNCED.into_iter().zip(synced) {
+        world.script(Script {
+            matches: file(name),
+            synced,
+        });
+    }
+    let mut case = Case::new(world.backend());
+    let files = SYNCED.map(|name| {
+        case.io
+            .file(fs::File::create(dir.path().join(name)).unwrap())
+    });
+    let sync = |case: &mut Case, name: &str| {
+        let index = SYNCED.iter().position(|synced| *synced == name).unwrap();
+        let token = case.fsync(&files[index]);
+        case.names.insert(token, format!("the sync of {name}"));
+    };
+    let socket = dir.path().join("socket");
+    let listener = case.io.listen(&socket, 0o600).unwrap();
+    let accept = case.accept(&listener);
+    let mut peer = world.connect(&socket).unwrap();
+    let stream = case.wait(accept).0.stream();
+    let recv = |case: &mut Case| {
+        let token = case.recv(&stream);
+        case.names.insert(token, "the recv of".to_owned());
+    };
+    recv(&mut case);
+    let mut waiting = peer.try_clone().unwrap();
+    let clock = world.clone();
+    let waiter = thread::spawn(move || {
+        clock.wait_until(secs(10));
+        waiting.write_all(b"after 10s").unwrap();
+    });
+
+    let mut text = String::new();
+    // Runs batches as `Case::ran` does, and lists what they ran.
+    let mut step = |case: &mut Case, what: &str, until_secs: u64, most: usize| {
+        writeln!(text, "{what}: {}", case.ran(secs(until_secs), most)).unwrap();
+    };
+    sync(&mut case, "failed");
+    step(&mut case, "a sync that fails", 1, 1);
+    sync(&mut case, "late");
+    step(&mut case, "a sync due at 10s, in a wait until 4s", 4, 1);
+    step(&mut case, "then in a wait until 20s", 20, 1);
+    step(&mut case, "a write that waited until 10s", 20, BATCHES);
+    waiter.join().unwrap();
+
+    let edge = case.io.edge();
+    sync(&mut case, "owed");
+    step(&mut case, "a sync due at 12s, with an event owed", 20, 1);
+    edge.send(1);
+    step(&mut case, "the edge's event", 20, BATCHES);
+    step(&mut case, "then", 20, 1);
+
+    // Four events since the sync before it began: the edge's, a write, the peer's end, and 2.
+    sync(&mut case, "counted");
+    recv(&mut case);
+    peer.move_on_write(secs(30));
+    peer.write_all(b"moved").unwrap();
+    step(&mut case, "a write that moves time to 30s", 40, BATCHES);
+    peer.shutdown_read();
+    let send = case.send(&stream, b"lost".to_vec(), 0);
+    case.names.insert(send, "the send".to_owned());
+    step(&mut case, "a send once the peer reads no more", 40, BATCHES);
+    recv(&mut case);
+    peer.shutdown();
+    drop(peer);
+    step(&mut case, "the peer's shutdown, then its drop", 40, BATCHES);
+    case.io.events().send(2);
+    step(&mut case, "an event", 40, BATCHES);
+
+    sync(&mut case, "held");
+    world.reach(secs(50));
+    step(&mut case, "a held sync, once the world reached 50s", 60, 1);
+    fs::write(dir.path().join("done"), "").unwrap();
+    step(&mut case, "once its function says so", 60, BATCHES);
+
+    let accept = case.accept(&listener);
+    let mut kept = world.connect(&socket).unwrap();
+    // Left to the backend's drop, which closes what it holds.
+    let _accepted = case.wait(accept).0.stream();
+    case.io.close_listener(listener);
+    case.io.close(stream);
+    case.end();
+    let read = match kept.read(&mut [0; 8]) {
+        Ok(bytes) => format!("its peer read {bytes} bytes"),
+        Err(error) => format!("its peer's read failed: {:?}", error.kind()),
+    };
+    writeln!(
+        text,
+        "a stream that the loop held as its backend dropped: {read}"
+    )
+    .unwrap();
+    text
+}
+
 fn shown(done: &Done) -> String {
     match done {
         Done::Accepted(Ok(_)) => "accepted".to_owned(),
@@ -397,6 +528,8 @@ fn shown(done: &Done) -> String {
 struct Case {
     io: Io<Owner>,
     owner: Owner,
+    // The names of operations that `Case::ran` shows, by token.
+    names: BTreeMap<u64, String>,
 }
 
 impl Case {
@@ -405,13 +538,41 @@ impl Case {
         Self {
             io: Io::new(backend, CAPACITY, inbox),
             owner: Owner::default(),
+            names: BTreeMap::new(),
         }
     }
 
     fn run(&mut self) {
-        self.owner.batches_count += 1;
         let until = self.io.now() + WAIT;
+        self.run_until(until);
+    }
+
+    fn run_until(&mut self, until: Duration) {
+        self.owner.batches_count += 1;
         self.io.run_until(&mut self.owner, until);
+    }
+
+    // Runs batches that wait until `until`, `most` at most, up to the first that completes an
+    // operation or takes an event: the time it read, and what it ran, each operation by its name.
+    fn ran(&mut self, until: Duration, most: usize) -> String {
+        for _ in 0..most {
+            if !self.owner.done.is_empty() || !self.owner.events.is_empty() {
+                break;
+            }
+            self.run_until(until);
+        }
+        let done = mem::take(&mut self.owner.done).into_iter();
+        let mut ran: Vec<String> = done
+            .map(|(token, (done, _))| format!("{} {}", self.names[&token], shown(&done)))
+            .collect();
+        let events = self.owner.events.drain(..);
+        ran.extend(events.map(|event| format!("took {event}")));
+        let ran = if ran.is_empty() {
+            "nothing".to_owned()
+        } else {
+            ran.join(", ")
+        };
+        format!("at {}s, {ran}", self.io.now().as_secs_f64())
     }
 
     // Runs a batch, and says what `Loop::event` took in it.
@@ -469,6 +630,12 @@ impl Case {
     fn send(&mut self, stream: &Stream, buffer: Vec<u8>, from: usize) -> u64 {
         let token = self.owner.token();
         self.io.send(stream, (buffer, from), token, on_bytes);
+        token
+    }
+
+    fn fsync(&mut self, file: &File) -> u64 {
+        let token = self.owner.token();
+        self.io.fsync(file, Durable::Data, token, on_synced);
         token
     }
 
