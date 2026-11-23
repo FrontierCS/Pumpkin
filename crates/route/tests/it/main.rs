@@ -26,7 +26,7 @@ use schema::sandbox::{FromSandbox, Hello, HelloReply, SOCKET_NAME, SocketDial, T
 use serde_json::{Value, json};
 use stdx::Deadline;
 use test_support::http::read_request;
-use test_support::{HUNG, TestDir};
+use test_support::{HUNG, TestDir, left};
 
 mod kept;
 mod read;
@@ -168,7 +168,7 @@ fn check_apis(entries: &[(Api, &[&str])], cases: &[(&str, Request)], expect: &Ex
                 &entries,
                 incoming,
                 |_| Admission::Open,
-                by,
+                left(by),
                 &dropped,
                 || forwarded = true,
                 answered,

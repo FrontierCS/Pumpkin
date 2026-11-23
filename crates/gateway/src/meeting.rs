@@ -26,7 +26,7 @@ use schema::sandbox::{
 };
 use stdx::Deadline;
 
-use crate::{Arrival, Connection, Session, Until, context, lock, passed};
+use crate::{Arrival, Bound, Connection, POLL, Session, Until, context, lock, passed};
 
 // Names each file this process holds open by its descriptor's number: a path through one resolves
 // as through the file, a directory included. A socket's path holds 107 bytes at most, which a deep
@@ -34,9 +34,6 @@ use crate::{Arrival, Connection, Session, Until, context, lock, passed};
 const OPEN_FILES: &str = "/proc/self/fd";
 
 const RANDOM: &str = "/dev/urandom";
-
-// How long a wait sleeps between looks at its stop, its deadline and what it waits for.
-const POLL: Duration = Duration::from_millis(10);
 
 // A dial that fails is tried again after this wait, which doubles up to `REDIAL_MOST`. It starts
 // as gRPC's connection backoff does, at its INITIAL_BACKOFF of 1 s:
@@ -695,25 +692,6 @@ impl Registration {
     }
 }
 
-// The time left of an accept, by its caller's clock.
-#[derive(Clone, Copy)]
-struct Bound<'a> {
-    left: &'a dyn Fn() -> Option<Duration>,
-}
-
-impl Bound<'_> {
-    // The time left, none once it has passed.
-    fn left(self) -> Option<Duration> {
-        (self.left)()
-    }
-
-    // The deadline by the machine's clock at the time left now, for a socket's waits: a dial's,
-    // and an answer's to a hello.
-    fn deadline(self) -> Deadline {
-        Deadline::after(self.left().unwrap_or_default())
-    }
-}
-
 fn unstopped(
     stopped: &dyn Fn() -> bool,
     awaited: impl fmt::Display,
@@ -919,6 +897,8 @@ fn refuse(connection: &Connection, by: Deadline, error: io::Error) -> io::Error 
     }
     let message = error.to_string();
     let reason = format!("the gateway refused the session: {message}");
+    let left = || by.remaining();
+    let by = Bound { left: &left };
     let _ = frame::write(
         &mut Until { connection, by },
         &HelloReply::Refused { message },
@@ -933,6 +913,8 @@ fn welcome(
     grant: Option<RegistrationGrant>,
 ) -> io::Result<()> {
     let accepted = HelloReply::Accepted { grant };
+    let left = || by.remaining();
+    let by = Bound { left: &left };
     frame::write(&mut Until { connection, by }, &accepted, &[]).map_err(|error| {
         if !passed(&error) {
             return context("the answer to the sandbox's hello can't be sent", &error);

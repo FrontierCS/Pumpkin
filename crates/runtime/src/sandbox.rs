@@ -12,7 +12,7 @@ use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::mpsc::Sender;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use std::{fmt, io};
 
 use decision::{JobId, LeaseId};
@@ -34,7 +34,7 @@ use schema::workflow::{
 use serde::{Deserialize, Deserializer, de};
 use stdx::{Context, Deadline};
 
-use super::{Clock, Host, Input, Stopped, deadline, interruption, left, log, record};
+use super::{Clock, Host, Input, Stopped, interruption, left, log, record};
 
 /// The most entries, files and directories, that the host collects from a sandbox in one tree.
 pub(super) const ENTRIES: u64 = 100_000;
@@ -503,7 +503,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         wrap: impl Fn(Arrival) -> T + Send + 'static,
     ) -> Result<Started, Unstarted> {
         let name = which.name();
-        let now = UnixTime::of(SystemTime::now())?;
+        let run_start = UnixTime::of(clock.unix())?;
         let role = which.role();
         let model = self.workflow().model(role).is_some();
         let placement = self.placed.placement(role);
@@ -519,11 +519,12 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             ops: ops.is_some(),
             model,
             hard_end,
-            // The start's deadline by the machine's clock, which the provider reads, at most the
-            // hard end, as the run is abandoned then.
-            by: (now.saturating_add(by.saturating_sub(clock.now()))).min(hard_end),
+            // The start's deadline as the provider reads it, by the run's start on the machine's
+            // clock, at most the hard end, as the run is abandoned then.
+            by: run_start.saturating_add(by).min(hard_end),
         };
-        let by_machine = deadline(clock, by);
+        // The private listener's wait for a check, which the machine's clock times.
+        let by_machine = Deadline::after(left(clock, by).unwrap_or_default());
         let started = hosting.meets.create(&self.sockets, &create, by_machine);
         let (Created { id }, registration) = started.inspect_err(|_| {
             let mut inventory = stdx::unpoisoned(self.inventory.lock());
@@ -563,7 +564,8 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             }
             (false, _) => error.to_string(),
         });
-        let session = accepted.and_then(|mut session| session.set_up(by_machine).map(|()| session));
+        let set_up = |mut session: Session| session.set_up(|| left(clock, by)).map(|()| session);
+        let session = accepted.and_then(set_up);
         let session = session.and_then(|session| match session.gpus() {
             Some(gpus) => self.saw(which, &id, gpus).map(|()| session),
             None => Ok(session),
@@ -897,7 +899,7 @@ pub(super) fn collect(
     session: &mut Session,
     dir: &RelativePath,
     record: &Path,
-    by: Deadline,
+    by: &dyn Fn() -> Option<Duration>,
 ) -> Result<(), String> {
     collect_as(session, dir, &record.join(dir.as_str()), by)
 }
@@ -906,7 +908,7 @@ pub(super) fn collect_as(
     session: &mut Session,
     dir: &RelativePath,
     into: &Path,
-    by: Deadline,
+    by: &dyn Fn() -> Option<Duration>,
 ) -> Result<(), String> {
     let from = pumpkin_dir().join(dir);
     session

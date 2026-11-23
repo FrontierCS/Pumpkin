@@ -25,10 +25,10 @@ use schema::sandbox::{
     Entry, Launch, RelativePath, Root, command_env, dir_mode, log_dir, out_dir, pumpkin_dir,
 };
 use schema::workflow::Runner;
-use stdx::{Context, Deadline};
+use stdx::Context;
 
 use super::child::{Child, End, Message};
-use super::host::deadline;
+use super::host::until;
 use super::sandbox::{ENTRIES, collect};
 use super::{Clock, Host, Inbox};
 
@@ -105,8 +105,8 @@ fn drive<H: Host>(
     child.event(Event::LeaseReady { lease });
     let mut running = None;
     let served = serve(leased, child, session, &mut running);
-    let by = deadline(&child.clock, child.deadlines.collect);
-    if let Err(error) = session.freeze(by) {
+    let by = until(&child.clock, child.deadlines.collect);
+    if let Err(error) = session.freeze(&by) {
         let reason = served
             .err()
             .unwrap_or_else(|| format!("freezing the runner's sandbox failed: {error}"));
@@ -114,11 +114,11 @@ fn drive<H: Host>(
     }
     if let Some(running) = running {
         let dir = command_dir(running.command);
-        if let Err(error) = collect(session, &dir, &child.dir, by) {
+        if let Err(error) = collect(session, &dir, &child.dir, &by) {
             child.note(format!("lease {}'s {dir} is incomplete: {error}", lease.0));
         }
     }
-    if let Err(error) = collect(session, &out_dir(), &child.dir, by) {
+    if let Err(error) = collect(session, &out_dir(), &child.dir, &by) {
         child.note(format!("lease {}'s out is incomplete: {error}", lease.0));
     }
     served.map_or_else(failed, |()| Event::LeaseEnded { lease })
@@ -216,7 +216,7 @@ fn kill<H: Host>(
     running: &mut Running,
     session: &mut Session,
 ) -> Result<(), String> {
-    let by = deadline(&child.clock, by_start);
+    let by = until(&child.clock, by_start);
     running.kill_at = None;
     match session.kill(running.process, by) {
         Ok(()) => running.timed_out = true,
@@ -239,8 +239,8 @@ fn start<H: Host>(
     session: &mut Session,
 ) -> Result<Process, String> {
     let dir = command_dir(run.command);
-    let by = deadline(&child.clock, by_start);
-    let put = session.put(&pumpkin_dir(), [Put::Dir(dir.clone(), dir_mode())], by);
+    let by = until(&child.clock, by_start);
+    let put = session.put(&pumpkin_dir(), [Put::Dir(dir.clone(), dir_mode())], &by);
     put.context(format_args!("making {dir} failed"))?;
     let output = |name: RelativePath| pumpkin_dir().join(&dir.join(&name));
     let launch = Launch {
@@ -251,7 +251,7 @@ fn start<H: Host>(
         stdout: output(const { RelativePath::from_static("command.stdout") }),
         stderr: output(const { RelativePath::from_static("command.stderr") }),
     };
-    (session.start(launch, by)).context("the command didn't start")
+    (session.start(launch, &by)).context("the command didn't start")
 }
 
 /// Collects the output of the lease's `command`th command into the lease's record, and returns
@@ -264,9 +264,9 @@ fn outputs<H: Host>(
 ) -> Result<(String, String), String> {
     let (dir, by) = (
         command_dir(command),
-        deadline(&child.clock, child.deadlines.collect),
+        until(&child.clock, child.deadlines.collect),
     );
-    if let Err(error) = collect(session, &dir, &child.dir, by) {
+    if let Err(error) = collect(session, &dir, &child.dir, &by) {
         let reason = format!("command {command}'s output is incomplete: {error}");
         if required {
             return Err(reason);
@@ -308,8 +308,8 @@ fn transfer<H: Host>(
         }
         held.is_some()
     };
-    let by = deadline(&child.clock, child.deadlines.collect);
-    let moved = staged_move(runner, order, &staging, by, &mut stopped);
+    let by = until(&child.clock, child.deadlines.collect);
+    let moved = staged_move(runner, order, &staging, &by, &mut stopped);
     // The core's stop; the runner's session's end says itself why the transfer failed.
     let cut = matches!(held, Some(Message::Stop));
     if let Err(error) = fs::remove_dir_all(&staging)
@@ -332,7 +332,7 @@ fn staged_move(
     runner: &Trees,
     order: &Transfer,
     staging: &Path,
-    by: Deadline,
+    by: &dyn Fn() -> Option<Duration>,
     stopped: &mut dyn FnMut() -> bool,
 ) -> Result<(u64, u64), String> {
     // Where the tree goes, and the rule that a failed put restates.

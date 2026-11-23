@@ -8,10 +8,9 @@ use gateway::{Arrival, IncomingOp, Process, Session};
 use schema::ir::Name;
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::{LeaseStatusReply, OpReply, SessionOp};
-use stdx::Deadline;
 
 use crate::child::{Child, Message, Report};
-use crate::host::deadline;
+use crate::host::until;
 use crate::{Clock, Host, Inbox, request};
 
 /// Separate destinations for the sandbox's outstanding op and the body's session operation.
@@ -99,12 +98,12 @@ impl Relay {
         if let Some(reason) = &self.closed {
             return Err(reason.clone());
         }
-        let by = deadline(&child.clock, timeout);
+        let by = until(&child.clock, timeout);
         loop {
             let Some(message) = child.inbox.wait(timeout) else {
                 return Ok(Waited::TimedOut);
             };
-            match self.relay(child, job, (session, by), message)? {
+            match self.relay(child, job, (session, &by), message)? {
                 Some(Arrived::Stopped) => return Ok(Waited::Stopped),
                 Some(arrival) => {
                     if let Some(result) = finished(arrival) {
@@ -123,7 +122,7 @@ impl Relay {
         &mut self,
         child: &mut Child<'_, H, Order>,
         job: JobId,
-        (session, by): (&mut Session, Deadline),
+        (session, by): (&mut Session, &dyn Fn() -> Option<Duration>),
     ) -> Result<bool, String> {
         if let Some(reason) = &self.closed {
             return Err(reason.clone());
@@ -142,7 +141,7 @@ impl Relay {
         &mut self,
         child: &mut Child<'_, H, Order>,
         job: JobId,
-        (session, by): (&mut Session, Deadline),
+        (session, by): (&mut Session, &dyn Fn() -> Option<Duration>),
         message: Message<Order>,
     ) -> Result<Option<Arrived>, String> {
         match message {

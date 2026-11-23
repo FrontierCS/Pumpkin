@@ -16,7 +16,7 @@ use crate::agent::Ready;
 use crate::call::job;
 use crate::child::{Child, End, Message, Report};
 use crate::sandbox::{Sandboxes, Started, Which, collect};
-use crate::{Clock, Entry, Host, Inbox, Input, Runtime, deadline};
+use crate::{Clock, Entry, Host, Inbox, Input, Runtime, until};
 
 type Call<'r, H> = (job::Call<'r>, Child<'r, H, crate::relay::Order>);
 
@@ -152,8 +152,8 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                     drop(ready);
                     serve(rx, bodies, sandbox.as_mut());
                     if let Some(sandbox) = sandbox {
-                        let by = deadline(&clock, collect_end);
-                        if let Err(reason) = tear_down(sandbox, sandboxes, &dir, by, &inbox) {
+                        let by = until(&clock, collect_end);
+                        if let Err(reason) = tear_down(sandbox, sandboxes, &dir, &by, &inbox) {
                             let _ = inbox.send(Input::Child(Report::Undeleted(reason)));
                             return;
                         }
@@ -191,7 +191,7 @@ fn tear_down(
     mut sandbox: Started,
     sandboxes: &Sandboxes<'_, impl Host>,
     dir: &Path,
-    by: stdx::Deadline,
+    by: &dyn Fn() -> Option<Duration>,
     inbox: &Sender<Input>,
 ) -> Result<(), String> {
     let note = |text| {

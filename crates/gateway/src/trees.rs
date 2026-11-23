@@ -5,14 +5,14 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
 use std::sync::mpsc::{Receiver, TryRecvError};
+use std::time::Duration;
 
 use schema::frame;
 use schema::ir::{AbsolutePath, Mode};
 use schema::sandbox::tree::{self, Limits, Modes};
 use schema::sandbox::{Entry, RelativePath, Root, ToSandbox};
-use stdx::Deadline;
 
-use crate::{Part, Put, Reply, Route, Shared, Trees, broke, context, out_of_turn};
+use crate::{Bound, Part, Put, Reply, Route, Shared, Trees, broke, context, out_of_turn};
 
 impl Trees {
     /// As [`crate::Session::put`], with `root` saying how `dir` is made. [`Root::New`] requires
@@ -22,9 +22,9 @@ impl Trees {
         dir: &AbsolutePath,
         root: Root,
         entries: impl IntoIterator<Item = Put<'a>>,
-        by: Deadline,
+        left: impl Fn() -> Option<Duration>,
     ) -> io::Result<()> {
-        self.shared.put(dir, root, entries, by)
+        self.shared.put(dir, root, entries, Bound { left: &left })
     }
 
     /// Collects as [`crate::Session::collect`] does. Once `stopped` returns true before a part
@@ -36,10 +36,11 @@ impl Trees {
         path: &AbsolutePath,
         into: &Path,
         limits: Limits,
-        by: Deadline,
+        left: impl Fn() -> Option<Duration>,
         stopped: &mut dyn FnMut() -> bool,
     ) -> io::Result<Vec<Entry>> {
-        self.shared.collect(path, into, limits, by, stopped)
+        self.shared
+            .collect(path, into, limits, Bound { left: &left }, stopped)
     }
 }
 
@@ -49,7 +50,7 @@ impl Shared {
         dir: &AbsolutePath,
         root: Root,
         entries: impl IntoIterator<Item = Put<'a>>,
-        by: Deadline,
+        by: Bound<'_>,
     ) -> io::Result<()> {
         let (stream, replies) = self.open(Route::Reply, by)?;
         let put = self.send_tree(stream, dir, root, entries, &replies, by);
@@ -62,7 +63,7 @@ impl Shared {
         path: &AbsolutePath,
         into: &Path,
         limits: Limits,
-        by: Deadline,
+        by: Bound<'_>,
         stopped: &mut dyn FnMut() -> bool,
     ) -> io::Result<Vec<Entry>> {
         let (stream, parts) = self.open(Route::Tree, by)?;
@@ -86,7 +87,7 @@ impl Shared {
         root: Root,
         entries: impl IntoIterator<Item = Put<'a>>,
         replies: &Receiver<Result<(), String>>,
-        by: Deadline,
+        by: Bound<'_>,
     ) -> io::Result<()> {
         let dir = dir.clone();
         self.send(&ToSandbox::Put { stream, dir, root }, &[], by)?;
@@ -141,7 +142,7 @@ impl Shared {
         path: RelativePath,
         mode: Mode,
         file: fs::File,
-        by: Deadline,
+        by: Bound<'_>,
     ) -> io::Result<io::Result<()>> {
         let size = match file.metadata() {
             Ok(metadata) => metadata.len(),
@@ -174,7 +175,7 @@ impl Shared {
         stream: u32,
         parts: &Receiver<Result<Part, String>>,
         mut tree: tree::Writer,
-        by: Deadline,
+        by: Bound<'_>,
         stopped: &mut dyn FnMut() -> bool,
     ) -> io::Result<Vec<Entry>> {
         let mut entries = Vec::new();

@@ -44,6 +44,11 @@ pub fn hung() -> Deadline {
     Deadline::after(HUNG)
 }
 
+/// The time that `by` leaves, as a function, which a session's requests take.
+pub fn left(by: Deadline) -> impl Fn() -> Option<Duration> + Copy + Send + Sync + 'static {
+    move || by.remaining()
+}
+
 /// The files and empty directories below `dir`, by their paths from it, sorted, each executable
 /// file marked `*`.
 pub fn files(dir: &Path) -> Vec<String> {

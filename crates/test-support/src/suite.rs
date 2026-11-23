@@ -250,7 +250,7 @@ fn lifecycle(
 fn kills(suite: &mut Suite<'_>, image: &ImageRef, sandboxd: &SandboxdRef) -> Vec<String> {
     let (id, started) = suite.start("killed", image, sandboxd);
     let (mut session, arrivals) = started.unwrap();
-    let by = || Deadline::after(suite.startup());
+    let by = || crate::left(Deadline::after(suite.startup()));
     let process = session.start(sleep(), by()).unwrap();
     session.kill(process, by()).unwrap();
     let exited = match arrivals.recv_timeout(suite.startup()).unwrap() {
@@ -362,7 +362,11 @@ fn put(mut session: Session) -> String {
         vec![0; 4 << 20],
     );
     let home = AbsolutePath::try_from("/pumpkin/home".to_owned()).unwrap();
-    match session.put(&home, [Put::File(path, file_mode(), &bytes)], soon()) {
+    match session.put(
+        &home,
+        [Put::File(path, file_mode(), &bytes)],
+        crate::left(soon()),
+    ) {
         Ok(()) => "put".to_owned(),
         Err(error) => format!("{:?}: {error}", error.kind()),
     }
@@ -515,7 +519,7 @@ impl<'a> Suite<'a> {
         let accepted = accepted.map_err(|error| error.to_string());
         let session = accepted.and_then(|mut session| {
             session
-                .set_up(by)
+                .set_up(|| by.remaining())
                 .context(format_args!("sandbox {}", id.as_str()))?;
             Ok((session, arrivals))
         });

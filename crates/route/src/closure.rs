@@ -14,11 +14,11 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::io;
+use std::time::Duration;
 
 use gateway::{IncomingModelRequest, ModelRequest};
 use schema::ir::{Api, ModelBudget, ModelName};
 use serde_json::{Map, Value, json};
-use stdx::Deadline;
 use ureq::http::{HeaderName, HeaderValue};
 
 use super::upstream::{Answer, Bar};
@@ -492,12 +492,12 @@ impl Refusal {
     }
 
     /// Answers `request`, of `api`, with the refusal: its status, with `allow: POST` for a 405, and
-    /// its [`body`](Refusal::body). Fails if `by` passes first.
+    /// its [`body`](Refusal::body). Fails if the deadline that `left` gives passes first.
     pub(crate) fn answer(
         self,
         api: Api,
         request: IncomingModelRequest,
-        by: Deadline,
+        left: impl Fn() -> Option<Duration> + Send + 'static,
     ) -> io::Result<()> {
         let mut headers = vec![("content-type".to_owned(), "application/json".to_owned())];
         if let Status::MethodNotAllowed = self.status {
@@ -505,7 +505,7 @@ impl Refusal {
             headers.push(("allow".to_owned(), "POST".to_owned()));
         }
         let body = self.body(api);
-        let mut response = request.respond(self.status.code(), headers, by)?;
+        let mut response = request.respond(self.status.code(), headers, left)?;
         response.send(body.as_bytes())?;
         response.end()
     }

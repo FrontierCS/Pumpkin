@@ -24,7 +24,7 @@ use schema::ir::{Api, ApiRoute, ModelRoute, Name, Sha256Digest};
 use schema::workflow::{ByRole, Sandbox, Workflow};
 use serde_json::{Map, Value, json};
 use sha2::{Digest as _, Sha256};
-use stdx::{Context as _, Deadline, unpoisoned};
+use stdx::{Context as _, unpoisoned};
 
 use crate::Clock;
 
@@ -131,7 +131,7 @@ impl Served {
         (number, exchange): (u64, &Exchange<impl Clock>),
         incoming: IncomingModelRequest,
         admission: impl FnOnce(usize) -> Admission<'b>,
-        by: Deadline,
+        by: impl Fn() -> Option<Duration> + Send + 'static,
         forwarding: impl FnOnce(),
         answered: impl FnOnce(Option<&(Name, Api)>, Answer),
     ) {

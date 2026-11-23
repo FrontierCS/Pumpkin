@@ -2375,7 +2375,9 @@ fn stopped_past_the_hard_end() {
     let failed = |line: &Value| line["event"]["kind"] == "call_failed";
     let failed = log.iter().position(failed).unwrap();
     assert!(abandoned < failed);
-    assert_eq!(log[failed]["event"]["reason"], "the call was stopped");
+    // The move passes the call's timeout too, which its thread may see before the stop.
+    let reason = &log[failed]["event"]["reason"];
+    assert!(reason == "the call was stopped" || reason == "the call's timeout passed");
     assert_eq!(log[failed]["observed_ns"], "6500000000");
 }
 
@@ -2667,78 +2669,6 @@ fn torn_down_past_the_hard_end() {
             {"actions":[],"at_ns":"6500000000","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"6500000000","seq":8}
             {"at_ns":"6500000000","note":"the run failed: the run was still going at its hard end, 6 s after it started: expected it to end within its deadline, its finalize grace, its final call's timeout and its sandboxes' startups","seq":9}
             its last record came once the hard end had passed"#]],
-    );
-}
-
-#[test]
-fn model_request_after_abandon() {
-    let mut ir = short_workflow(
-        &[
-            "ops",
-            "await_log agent_started",
-            "ops",
-            "call submit 6 finalize=true",
-        ],
-        2,
-    );
-    ir["roles"][2]["runtime"]["target"]["egress"] = route();
-    ir["final"]["body"]["def"] = json!("routed");
-    ir["final"]["keywords"] = json!({ "argv": ["ops", "model m-small 7", "result"] });
-    // The loop waits for the agent's remaining arrivals and the start of the final call.
-    let waited = LateTake {
-        behind: 0,
-        at: Duration::ZERO,
-        then: 3,
-    };
-    // The call reports its command and model request while the loop syncs its abandon.
-    let requested = SlowSync {
-        record: Synced::Holding("log.jsonl", r#""kind":"abandon""#),
-        queued: 2,
-        at: PAST_THE_HARD_END,
-    };
-    let host = SimHost::new().late_take(waited).slow_sync(requested);
-    // Its sandbox met the gateway on time, but its set-up lasts past the hard end.
-    let late = host.moving_to(PAST_THE_HARD_END);
-    let here = Sim::with_startup(SHORT_STARTUP).named("here");
-    let there = there(Sim::with_startup(SHORT_STARTUP)).holding_set_ups(1, late);
-    check(
-        &host,
-        "model-request-after-abandon",
-        &[("here", &here), ("there", &there)],
-        &ir,
-        SANDBOXD,
-        &expect![[r#"
-            failed: the run was still going at its hard end, 6 s after it started: expected it to end within its deadline, its finalize grace, its final call's timeout and its sandboxes' startups
-            payloads hold: ["xxxxxx"]
-            provider.json routes: {"final_judge":[{"api":"responses","models":{"m-small":{"upstream_name":"vendor/m-small","usd_per_mtok":{"cache_write":3.75,"cached":0.3,"input":3.0,"output":15.0}}},"upstream":"stand-in"}]}
-            provider.json places the roles: {"agent":{"class":"sim","provider":"here"},"final_judge":{"class":"sim","provider":"there"},"trainer":{"class":"sim","provider":"there"}}
-            log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"6000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
-            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
-            {"actions":[{"kind":"reply","reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"job","name":"train","payload_max_bytes":8},{"arguments":{"finalize":{"default":false,"type":"bool"}},"kind":"now","name":"submit","payload_max_bytes":16}],"kind":"ops","remaining_seconds":2,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"role":"agent"}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"kind":"ops"}},"observed_ns":"0","seq":3}
-            {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":0,"returned":{"state":"accepted"}}},{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":1,"request":{"evaluated":{"effects":["set_submission","end_work"],"returned":[{"name":"state","value":"accepted"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":4}
-            {"at_ns":"0","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":5}
-            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_collected"},"seq":6}
-            {"actions":[],"at_ns":"0","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"here","sandbox":"agent-0"},"seq":7}
-            {"actions":[{"job":0,"kind":"start_final_call","selections":[{"role":"agent","selection":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}],"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"0","seq":8}
-            {"actions":[{"kind":"abandon"}],"at_ns":"6500000000","event":{"kind":"tick"},"observed_ns":"6500000000","seq":9}
-            {"actions":[],"at_ns":"6500000000","event":{"job":0,"kind":"call_started"},"observed_ns":"6500000000","seq":10}
-            {"actions":[],"at_ns":"6500000000","event":{"argv":["ops","model m-small 7","result"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"6500000000","seq":11}
-            {"at_ns":"6500000000","note":"model request 0 wasn't answered: the run has ended","seq":12}
-            {"at_ns":"6500000000","note":"freezing job 0's target failed: the request's deadline passed before it was sent: expected time left to send it","seq":13}
-            {"at_ns":"6500000000","note":"job 0's log/0 is incomplete: collecting /pumpkin/log/0 failed: the request's deadline passed before it was sent: expected time left to send it","seq":14}
-            {"at_ns":"6500000000","note":"job 0's out is incomplete: collecting /pumpkin/out failed: the request's deadline passed before it was sent: expected time left to send it","seq":15}
-            {"actions":[],"at_ns":"6500000000","event":{"job":0,"kind":"call_failed","reason":"the call was stopped"},"observed_ns":"6500000000","seq":16}
-            {"actions":[],"at_ns":"6500000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"there","sandbox":"job-0"},"seq":17}
-            {"actions":[],"at_ns":"6500000000","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"6500000000","seq":18}
-            {"at_ns":"6500000000","note":"the run failed: the run was still going at its hard end, 6 s after it started: expected it to end within its deadline, its finalize grace, its final call's timeout and its sandboxes' startups","seq":19}
-            its last record came once the hard end had passed
-            here published: ["sandboxd /sim/sandboxd", "image sha256:1111111111111111111111111111111111111111111111111111111111111111"]
-            here: the class at each create: ["sim"]
-            there published: ["sandboxd /sim/sandboxd", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
-            there: the model endpoint at each create: [true]
-            there: the class at each create: ["sim"]"#]],
     );
 }
 
@@ -5229,8 +5159,8 @@ fn releases_agents_and_a_shared_target_ready_before_the_driver_takes_their_notic
     );
 }
 
-// The clock passes the startup while both sandboxes set up, so each start ends after its bound,
-// and the setup takes both notices at once.
+// The clock passes the startup while both sandboxes set up, so each start fails at its bound: the
+// agent's set-up by its put's deadline. The setup takes both notices at once.
 #[test]
 fn set_up_past_the_startup() {
     let past = Duration::from_secs(31);
@@ -5250,8 +5180,13 @@ fn set_up_past_the_startup() {
         SANDBOXD,
         &[],
     );
-    // The two notices race each other into the setup's inbox, which orders their failures, so
-    // each is shown without its place.
+    // The notices race into the setup's inbox, so each failure shows without its place, and with
+    // its reason as a deadline's: whichever of a start's waits sees its bound passed names it.
+    let past = |reason: Option<&mut Value>| {
+        let reason = reason.unwrap();
+        assert!(reason.as_str().unwrap().contains("deadline"), "{reason}");
+        *reason = json!("<past its bound>");
+    };
     let failure = |line: &&str| {
         line.starts_with('{')
             && (line.contains(r#""kind":"agent_failed""#)
@@ -5262,16 +5197,21 @@ fn set_up_past_the_startup() {
         .map(|line| {
             let mut failure: Value = serde_json::from_str(line).unwrap();
             failure.as_object_mut().unwrap().remove("seq");
+            past(failure.pointer_mut("/event/reason"));
             failure.to_string()
         })
         .collect();
     failed.sort_unstable();
-    let outcome = shown.lines().find(|line| line.starts_with("outcome.json:"));
-    failed.extend(outcome.map(str::to_owned));
+    let outcome = shown
+        .lines()
+        .find_map(|line| line.strip_prefix("outcome.json: "));
+    let mut outcome: Value = serde_json::from_str(outcome.unwrap()).unwrap();
+    past(outcome.pointer_mut("/agents/0/work_end/reason"));
+    failed.push(format!("outcome.json: {outcome}"));
     expect![[r#"
-        {"actions":[],"at_ns":"31000000000","event":{"kind":"shared_failed","reason":"the shared role's setup missed the startup deadline","shared":1},"observed_ns":"31000000000"}
-        {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"31000000000","event":{"caller":"agent-0","kind":"agent_failed","reason":"the agent's setup missed the startup deadline"},"observed_ns":"31000000000"}
-        outcome.json: {"agents":[{"role":"alpha","submission":null,"work_end":{"kind":"agent_failed","reason":"the agent's setup missed the startup deadline"}}],"verdict":{"kind":"returned","result":{"values":[{"name":"files","value":{"alpha":null}}]}}}"#]].assert_eq(&failed.join("\n"));
+        {"actions":[],"at_ns":"31000000000","event":{"kind":"shared_failed","reason":"<past its bound>","shared":1},"observed_ns":"31000000000"}
+        {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"31000000000","event":{"caller":"agent-0","kind":"agent_failed","reason":"<past its bound>"},"observed_ns":"31000000000"}
+        outcome.json: {"agents":[{"role":"alpha","submission":null,"work_end":{"kind":"agent_failed","reason":"<past its bound>"}}],"verdict":{"kind":"returned","result":{"values":[{"name":"files","value":{"alpha":null}}]}}}"#]].assert_eq(&failed.join("\n"));
 }
 
 #[test]

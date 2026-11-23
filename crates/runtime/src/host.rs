@@ -1,21 +1,20 @@
 //! A run's host: what the run reads of time and waits on, and what makes its record last.
 //!
-//! What a run reads or waits on by the machine's time, whatever its host:
-//! - the session's and the provider's calls, and the model route's, each take a [`Deadline`]
-//!   that `deadline` makes from the clock as the time left then, so a later jump of the clock
-//!   shortens only the waits made after it;
-//! - the gateway's own deadlines and its looks at a socket, and within a start's wait for its
-//!   sandbox, each dial and the answer to its hello, which take the time left as they begin;
-//! - the simulated provider's sleeps (`SLOW`, `HUNG`, `LINGERING`);
-//! - the model route's requests upstream, through `ureq`;
+//! Every wait of a run ends by the run's clock. A session's requests, a model response's frames
+//! and a start's wait for its sandbox take the time left as a function that reads the clock
+//! (`until`, `left`), which the gateway reads again as it waits. What a run still waits on by the
+//! machine's time, whatever its host:
+//! - within a start's wait for its sandbox, each dial, its TLS and its hello, the answer to its
+//!   hello, and the private listener's wait for a check, which take the time left as they begin;
+//! - a provider's own calls, which wait on its platform;
+//! - the model route's resolve, connect and reads upstream, through `ureq`, by bounds of their
+//!   own;
 //! - [`Clock::unix`], the run's start by the machine's clock.
 
 use std::fs::File;
 use std::io;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::time::{Duration, Instant, SystemTime};
-
-use stdx::Deadline;
 
 /// The machine a run runs on, as far as the run reads time, waits, and makes its record last.
 // Sync, as each child's thread syncs the record of its sandbox's start and delete through it.
@@ -163,13 +162,17 @@ fn disconnected() -> ! {
     )
 }
 
-/// The deadline at `at`, a time since the run started by `clock`, for a call that takes one.
-pub(super) fn deadline(clock: &impl Clock, at: Duration) -> Deadline {
-    Deadline::after(at.saturating_sub(clock.now()))
-}
-
 /// The time left until `at`, a time since the run started by `clock`: never zero, and none once
-/// it has passed, as [`Deadline::remaining`] gives.
+/// it has passed, as [`stdx::Deadline::remaining`] gives.
 pub(super) fn left(clock: &impl Clock, at: Duration) -> Option<Duration> {
     (at.checked_sub(clock.now())).filter(|left| !left.is_zero())
+}
+
+/// The time left until `at`, as [`left`] gives it, for a wait to read as it goes, on any thread.
+pub(super) fn until<C: Clock>(
+    clock: &C,
+    at: Duration,
+) -> impl Fn() -> Option<Duration> + Send + 'static + use<C> {
+    let clock = clock.clone();
+    move || left(&clock, at)
 }

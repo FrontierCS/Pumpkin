@@ -24,7 +24,7 @@ use route::Serving;
 use schema::ir::{Label, ModelName};
 use schema::sandbox::op::OpReply;
 use schema::workflow::{AgentId, ByProvider, ByRole, Placed, RoleId, TargetId, Workflow};
-use stdx::{Context, Deadline};
+use stdx::Context;
 
 mod agent;
 mod body;
@@ -55,7 +55,7 @@ use budget::Budget;
 pub use budget::{Budgets, budgets};
 use child::{Message, Report};
 pub use host::{Clock, Durable, Host, Inbox, System};
-use host::{deadline, left};
+use host::{left, until};
 pub use interruption::{Signal, Stopped};
 pub use log::{
     AgentEnd, AgentSpan, CallEnd, CallOf, CallSpan, CallStart, CallerName, Closed, Cost, Direction,
@@ -841,7 +841,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         id: AgentId,
         what: &str,
         by: Duration,
-        write: impl FnOnce(&mut Agent, Deadline) -> io::Result<()>,
+        write: impl FnOnce(&mut Agent, &dyn Fn() -> Option<Duration>) -> io::Result<()>,
     ) -> Result<(), String> {
         let sent = match self.agents.get_mut(&id) {
             // A write past `by` would end the session, which the agent's teardown still needs, for
@@ -854,8 +854,8 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 "{what} wasn't sent: it was due by the core's next act, which has come"
             )),
             Some(agent) => {
-                let by = deadline(&self.clock, by);
-                write(agent, by).context(format_args!("{what} failed"))
+                let by = until(&self.clock, by);
+                write(agent, &by).context(format_args!("{what} failed"))
             }
             None => Err(format!("{what} wasn't sent: the agent's sandbox is gone")),
         };

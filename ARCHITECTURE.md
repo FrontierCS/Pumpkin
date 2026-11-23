@@ -483,6 +483,13 @@ sandboxes left, or fails.
 `Run::prepare` makes the record only once each provider has reserved, and the run holds each
 `Reservation` until its end has deleted its sandboxes.
 
+**Architecture Invariant:** every wait of a run ends by the run's clock, its `Host`'s, so that a
+simulated host decides every outcome that time decides. A session's requests, a model response's
+frames and a start's wait for its sandbox take the time left as a function of that clock, which
+the gateway reads again as it waits, and the loop ends a model route as the core stops its
+requests. Only `System` reads the machine's clock; a wait that still runs by it, such as a dial or
+an upstream's connect, takes the time left as it begins or a bound of its own.
+
 ### `crates/pumpkin`
 
 The command line and the controller's own side. `cli` parses the command line, and its `admin`

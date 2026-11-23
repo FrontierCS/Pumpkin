@@ -17,11 +17,11 @@ use schema::sandbox::{
     ExitStatus, Launch, OpPayloadLimit, command_stdin, file_mode, log_dir, out_dir, pumpkin_dir,
 };
 use schema::workflow::{self, AgentId, TargetId, Workflow};
-use stdx::{Context, Deadline};
+use stdx::Context;
 
 use super::log::Entry;
 use super::sandbox::{Sandboxes, Started, Unstarted, Which, collect, launch};
-use super::{Clock, Host, Inbox, Input, Report, Runtime, deadline, record};
+use super::{Clock, Host, Inbox, Input, Report, Runtime, record, until};
 
 /// The agent's sandbox, from when it starts until it is deleted.
 pub(super) struct Agent {
@@ -40,7 +40,7 @@ impl Agent {
         sandboxes: &Sandboxes<'_, H>,
         agent: &workflow::Agent,
         startup: Duration,
-        by: Deadline,
+        by: &dyn Fn() -> Option<Duration>,
         hard_end: UnixTime,
         inbox: Sender<Input>,
         clock: &H::Clock,
@@ -96,7 +96,12 @@ impl Agent {
         self.process.is_some() && !std::mem::replace(&mut self.launched, true)
     }
 
-    pub(super) fn reply(&mut self, op: IncomingOp, reply: OpReply, by: Deadline) -> io::Result<()> {
+    pub(super) fn reply(
+        &mut self,
+        op: IncomingOp,
+        reply: OpReply,
+        by: &dyn Fn() -> Option<Duration>,
+    ) -> io::Result<()> {
         self.sandbox.session.reply(op, reply, by)
     }
 
@@ -104,13 +109,17 @@ impl Agent {
         self.sandbox.session.trees()
     }
 
-    pub(super) fn refuse(&mut self, refused: RefusedOp, by: Deadline) -> io::Result<()> {
+    pub(super) fn refuse(
+        &mut self,
+        refused: RefusedOp,
+        by: &dyn Fn() -> Option<Duration>,
+    ) -> io::Result<()> {
         self.sandbox.session.refuse(refused, by)
     }
 
     /// Freezes the sandbox, then collects its [`out_dir()`] and [`log_dir()`] into `dir`, all by
     /// `by`. Returns what failed, if anything.
-    fn freeze_and_collect(&mut self, dir: &Path, by: Deadline) -> Vec<String> {
+    fn freeze_and_collect(&mut self, dir: &Path, by: &dyn Fn() -> Option<Duration>) -> Vec<String> {
         let session = &mut self.sandbox.session;
         let mut failures = Vec::new();
         if let Err(error) = session.freeze(by) {
@@ -170,7 +179,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 .note("the agent's sandbox never started: nothing was collected");
         };
         let dir = self.dir.join(Which::Agent(id).record_dir(self.workflow()));
-        let by = deadline(&self.clock, self.teardown_end());
+        let by = until(&self.clock, self.teardown_end());
         let sandboxes = self.sandboxes;
         let sender = self.inbox.sender();
         let clock = self.clock.clone();
@@ -179,7 +188,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 let log = |entry| {
                     let _ = sender.send(Input::Logged(entry));
                 };
-                for reason in agent.freeze_and_collect(&dir, by) {
+                for reason in agent.freeze_and_collect(&dir, &by) {
                     log(Entry::Note(reason));
                 }
                 let collected = record::collected(&dir);
@@ -221,9 +230,10 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             let clock = self.clock.clone();
             let inbox = self.inbox.sender();
             let bound = self.placed.startup(id.role());
-            let by = deadline(&clock, bound);
-            let prepare =
-                move || Agent::prepare(sandboxes, role, bound, by, hard_end, inbox, &clock);
+            let by = until(&clock, bound);
+            let prepare = move |by: &dyn Fn() -> Option<Duration>| {
+                Agent::prepare(sandboxes, role, bound, by, hard_end, inbox, &clock)
+            };
             startup = startup.max(bound);
             self.starting.insert(id, false);
             let (release, gate) = mpsc::channel();
@@ -235,7 +245,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 gate,
             };
             thread::Builder::new()
-                .spawn_scoped(scope, move || worker.start(prepare(), sandboxes, by))
+                .spawn_scoped(scope, move || worker.start(prepare(&by), sandboxes, &by))
                 .context("starting the agent's setup thread")?;
             gates.insert(id, release);
         }
@@ -340,7 +350,7 @@ impl<C: Clock> Worker<C> {
         self,
         prepared: Result<(Agent, Result<Launch, String>), Unstarted>,
         sandboxes: &Sandboxes<'_, impl Host>,
-        by: Deadline,
+        by: &dyn Fn() -> Option<Duration>,
     ) {
         let id = self.id;
         let (mut agent, launch) = match prepared {
@@ -368,7 +378,7 @@ impl<C: Clock> Worker<C> {
                 .prepare_start(by)
                 .context("reserving the agent's command")?;
             agent.process = Some(process);
-            Ok(move |by| send(launch, by))
+            Ok(move |by: &dyn Fn() -> Option<Duration>| send(launch, by))
         });
         // The driver owns the session before any command may send an op or exit.
         let _ = self.inbox.send(Input::Prepared(id, Ok(Box::new(agent))));
@@ -381,7 +391,7 @@ impl<C: Clock> Worker<C> {
             && super::interruption::signal().is_none()
         {
             let result =
-                start(deadline(&self.clock, end)).context("the agent's command didn't start");
+                start(&until(&self.clock, end)).context("the agent's command didn't start");
             let _ = self
                 .inbox
                 .send(Input::Launched(id, self.clock.now(), result));
@@ -394,7 +404,7 @@ impl<C: Clock> Worker<C> {
 fn put(
     session: &mut Session,
     agent: &workflow::Agent,
-    by: Deadline,
+    by: &dyn Fn() -> Option<Duration>,
 ) -> Result<Option<AbsolutePath>, String> {
     let dirs = (agent.dirs.iter()).map(|Dir { path, mode }| Put::Dir(path.relative(), *mode));
     let files = (agent.files.iter()).map(|file| {

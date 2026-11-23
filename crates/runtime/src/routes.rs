@@ -13,7 +13,7 @@ use schema::ir::{Api, Name};
 use schema::workflow::{AgentId, RoleId};
 
 use crate::budget::Budget;
-use crate::host::deadline;
+use crate::host::until;
 use crate::log::{Entry, ModelAnswer};
 use crate::model::{Exchange, Served};
 use crate::{Clock, Host, Inbox, Input, Runtime, Stopped};
@@ -58,7 +58,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             Caller::Agent(_) => self.teardown_end(),
             Caller::Job(job) => self.call(job).collect,
         };
-        let by = deadline(&self.clock, by);
+        let by = until(&self.clock, by);
         let reports = self.inbox.sender();
         let clock = self.clock.clone();
         let exchange = Exchange::new(self.dir, number, clock.clone());

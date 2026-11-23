@@ -39,7 +39,7 @@ use schema::sandbox::{
 };
 use serde_json::{Value, json};
 use stdx::Deadline;
-use test_support::{HUNG, TestDir, hung};
+use test_support::{HUNG, TestDir, hung, left};
 
 type Action = fn(&mut Session, &Receiver<Arrival>, &Path) -> String;
 
@@ -206,7 +206,7 @@ fn opened(dir: &Path, opening: Opening, by: Deadline) -> String {
     });
     let (sender, _arrivals) = mpsc::channel();
     let accepted = registration.accept(|| by.remaining(), None, false, sender, |a| a, || false);
-    let outcome = outcome(accepted.and_then(|mut session| session.freeze(hung())));
+    let outcome = outcome(accepted.and_then(|mut session| session.freeze(left(hung()))));
     format!("heard {}; {outcome}", sandbox.join().unwrap())
 }
 
@@ -330,7 +330,7 @@ fn collect(session: &mut Session, _: &Receiver<Arrival>, dir: &Path) -> String {
         entries: 3,
     };
     let out = AbsolutePath::try_from("/out".to_owned()).unwrap();
-    let outcome = outcome(session.collect(&out, &into, limits, hung()));
+    let outcome = outcome(session.collect(&out, &into, limits, left(hung())));
     let mut arrived = walk(&into);
     arrived.sort();
     format!("{outcome}; arrived {arrived:?}")
@@ -356,8 +356,8 @@ fn launch() -> Launch {
 }
 
 fn start_and_freeze(session: &mut Session, _: &Receiver<Arrival>, _: &Path) -> String {
-    let process = session.start(launch(), hung());
-    let frozen = session.freeze(hung());
+    let process = session.start(launch(), left(hung()));
+    let frozen = session.freeze(left(hung()));
     format!(
         "start: {}; freeze: {}",
         outcome(process.map(drop)),
@@ -374,12 +374,12 @@ fn over_the_cap(session: &mut Session, arrivals: &Receiver<Arrival>, dir: &Path)
 }
 
 fn freeze_and_take(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -> String {
-    let frozen = outcome(session.freeze(hung()));
+    let frozen = outcome(session.freeze(left(hung())));
     format!("freeze: {frozen}; {}", take(session, arrivals, None))
 }
 
 fn start_and_take(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -> String {
-    match session.start(launch(), hung()) {
+    match session.start(launch(), left(hung())) {
         Ok(process) => format!("started; {}", take(session, arrivals, Some(process))),
         Err(error) => format!(
             "start: {}; {}",
@@ -403,7 +403,7 @@ fn take(session: &mut Session, arrivals: &Receiver<Arrival>, started: Option<Pro
         match arrival {
             Arrival::Op(op) => {
                 lines.push(format!("{:?}", op.op));
-                if let Err(error) = session.reply(op, no_grants(), hung()) {
+                if let Err(error) = session.reply(op, no_grants(), left(hung())) {
                     lines.push(format!("reply: {:?}: {error}", error.kind()));
                 }
             }
@@ -415,7 +415,7 @@ fn take(session: &mut Session, arrivals: &Receiver<Arrival>, started: Option<Pro
                     refused.payload_limit().bytes(),
                     refused.message()
                 ));
-                if let Err(error) = session.refuse(refused, hung()) {
+                if let Err(error) = session.refuse(refused, left(hung())) {
                     lines.push(format!("refuse: {:?}: {error}", error.kind()));
                 }
             }
@@ -481,17 +481,17 @@ fn answer_elsewhere(session: &mut Session, arrivals: &Receiver<Arrival>, dir: &P
     });
     let [(mine, my_command), (own, its_command)] =
         [(&mut *session, arrivals), (&mut other, &others)].map(|(session, arrivals)| {
-            let process = session.start(launch(), hung()).unwrap();
+            let process = session.start(launch(), left(hung())).unwrap();
             (next_op(arrivals), process)
         });
     let message = "from another session".to_owned();
-    let elsewhere = panicked(|| other.reply(mine, OpReply::refused(message), hung()));
-    let own = outcome(other.reply(own, no_grants(), hung()));
+    let elsewhere = panicked(|| other.reply(mine, OpReply::refused(message), left(hung())));
+    let own = outcome(other.reply(own, no_grants(), left(hung())));
     let refused = match next(&others) {
         Some(Arrival::Refused(refused)) => refused,
         arrived => panic!("a refused op was to arrive, not {arrived:?}"),
     };
-    let refusal = panicked(|| session.refuse(refused, hung()));
+    let refusal = panicked(|| session.refuse(refused, left(hung())));
     let outcome = format!(
         "the sessions' commands equal: {}; op 0 on another session: {elsewhere}; that session's \
          own op 0: {own}; its op 1 refused on another session: {refusal}",
@@ -508,13 +508,13 @@ fn panicked(answer: impl FnOnce() -> std::io::Result<()> + Send) -> String {
 }
 
 fn too_long_reply(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -> String {
-    let mut lines = vec![format!("freeze: {}", outcome(session.freeze(hung())))];
+    let mut lines = vec![format!("freeze: {}", outcome(session.freeze(left(hung()))))];
     for message in ["x".repeat(frame::MAX_MESSAGE_BYTES), "no".to_owned()] {
         let op = next_op(arrivals);
         lines.push(outcome(session.reply(
             op,
             OpReply::refused(message),
-            hung(),
+            left(hung()),
         )));
     }
     lines.join("; ")
@@ -538,20 +538,22 @@ fn answer_model(incoming: IncomingModelRequest) -> String {
         }
         _ => hung(),
     };
-    let answered = incoming.respond(200, headers, by).and_then(|mut response| {
-        if path == "/stale" {
-            return response.send(&vec![0; 8 << 20]);
-        }
-        response.send(b"hel")?;
-        match path.as_str() {
-            "/cut" => response.cut(),
-            "/drop" => {
-                drop(response);
-                Ok(())
+    let answered = incoming
+        .respond(200, headers, left(by))
+        .and_then(|mut response| {
+            if path == "/stale" {
+                return response.send(&vec![0; 8 << 20]);
             }
-            _ => response.send(b"lo").and_then(|()| response.end()),
-        }
-    });
+            response.send(b"hel")?;
+            match path.as_str() {
+                "/cut" => response.cut(),
+                "/drop" => {
+                    drop(response);
+                    Ok(())
+                }
+                _ => response.send(b"lo").and_then(|()| response.end()),
+            }
+        });
     format!("{line}: {}", outcome(answered))
 }
 
@@ -559,12 +561,12 @@ fn answer_on_a_thread(_: &mut Session, _: &Receiver<Arrival>, dir: &Path) -> Str
     let (mut session, arrivals, sandbox) = connect(&dir.join("other"), None, true, |s| {
         vec![done(s), model_request(3, "/", 0), stall()]
     });
-    session.freeze(hung()).unwrap();
+    session.freeze(left(hung())).unwrap();
     let Some(Arrival::ModelRequest(incoming)) = next(&arrivals) else {
         panic!("a model request was to arrive");
     };
     let answer = thread::spawn(move || {
-        let mut response = incoming.respond(200, Vec::new(), hung())?;
+        let mut response = incoming.respond(200, Vec::new(), left(hung()))?;
         response.send(&vec![0; 8 << 20])
     });
     // Time for the answer to fill the buffers and wait on the sandbox, so that the session ends
@@ -580,18 +582,18 @@ fn then_freeze(session: &mut Session, first: std::io::Result<()>) -> String {
     format!(
         "{}; then {}",
         outcome(first),
-        outcome(session.freeze(hung()))
+        outcome(session.freeze(left(hung())))
     )
 }
 
 fn freezes(session: &mut Session, by: Deadline) -> String {
-    let first = session.freeze(by);
+    let first = session.freeze(left(by));
     then_freeze(session, first)
 }
 
 fn after_the_end(session: &mut Session, _: &Receiver<Arrival>, _: &Path) -> String {
     let ended = freezes(session, hung());
-    let late = outcome(session.freeze(Deadline::after(Duration::ZERO)));
+    let late = outcome(session.freeze(left(Deadline::after(Duration::ZERO))));
     format!("{ended}; then by a passed deadline {late}")
 }
 
@@ -600,7 +602,7 @@ fn put_large(session: &mut Session, by: Deadline) -> std::io::Result<()> {
     let file = RelativePath::try_from("big".to_owned()).unwrap();
     // More than the socket's buffers hold, so that the put waits on a sandbox that reads nothing.
     let bytes = vec![0; 8 << 20];
-    session.put(&dir, [Put::File(file, file_mode(), &bytes)], by)
+    session.put(&dir, [Put::File(file, file_mode(), &bytes)], left(by))
 }
 
 // The put's entry waits for an op that the sandbox sends after its `done`, and the reader passes on
@@ -612,13 +614,13 @@ fn put_after_op(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -
         let file = RelativePath::try_from("f".to_owned()).unwrap();
         Put::File(file, file_mode(), b"hi")
     });
-    format!("put: {}", outcome(session.put(&dir, entry, hung())))
+    format!("put: {}", outcome(session.put(&dir, entry, left(hung()))))
 }
 
 fn late_reply(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -> String {
-    session.freeze(hung()).unwrap();
+    session.freeze(left(hung())).unwrap();
     let op = next_op(arrivals);
-    let replied = session.reply(op, no_grants(), Deadline::after(Duration::ZERO));
+    let replied = session.reply(op, no_grants(), left(Deadline::after(Duration::ZERO)));
     then_freeze(session, replied)
 }
 
@@ -628,7 +630,7 @@ fn collect_short(session: &mut Session, _: &Receiver<Arrival>, dir: &Path) -> St
         entries: u64::MAX,
     };
     let out = AbsolutePath::try_from("/out".to_owned()).unwrap();
-    outcome(session.collect(&out, &dir.join("collected"), limits, short()))
+    outcome(session.collect(&out, &dir.join("collected"), limits, left(short())))
 }
 
 fn walk(dir: &Path) -> Vec<String> {
@@ -1214,7 +1216,7 @@ fn arrivals() {
                     ]
                 }),
                 (
-                    |session, _, _| outcome(session.freeze(hung())),
+                    |session, _, _| outcome(session.freeze(left(hung()))),
                     // The sandbox goes on sending, reading nothing, until the gateway hangs up.
                     |s| vec![done(s), stall()],
                 ),
@@ -1508,7 +1510,7 @@ fn twice(address: SocketAddr, said: &Sender<String>, name: &'static str) -> [Joi
 fn accept_and_freeze(registration: Registration, by: Deadline) -> String {
     let (sender, _arrivals) = mpsc::channel();
     let accepted = registration.accept(|| by.remaining(), None, false, sender, |a| a, || false);
-    outcome(accepted.and_then(|mut session| session.freeze(hung())))
+    outcome(accepted.and_then(|mut session| session.freeze(left(hung()))))
 }
 
 fn refusals(listener: &Listener, address: SocketAddr) -> Vec<String> {
@@ -1571,11 +1573,11 @@ fn awaited(listener: &Listener, address: SocketAddr) -> Vec<String> {
     let by = hung();
     let accepted = registration.accept(|| by.remaining(), ops, false, sender, |a| a, || false);
     let mut session = accepted.unwrap();
-    let frozen = outcome(session.freeze(hung()));
+    let frozen = outcome(session.freeze(left(hung())));
     let mut lines = vec![format!("{}; freeze: {frozen}", heard.recv().unwrap())];
     let op = next_op(&arrivals);
     lines.push(format!("  its op: {:?}", op.op));
-    session.reply(op, no_grants(), hung()).unwrap();
+    session.reply(op, no_grants(), left(hung())).unwrap();
     drop(session);
     sandbox.join().unwrap();
     lines.push(format!(
