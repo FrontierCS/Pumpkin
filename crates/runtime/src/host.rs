@@ -169,10 +169,15 @@ fn disconnected() -> ! {
     )
 }
 
-/// The time left until `at`, a time since the run started by `clock`: never zero, and none once
-/// it has passed, as [`stdx::Deadline::remaining`] gives.
+/// The time left until `at`, a time since the run started by `clock`: never zero, none once it
+/// has passed, and [`Duration::MAX`] if it is past what the machine's clock can hold, as
+/// [`stdx::Deadline::remaining`] gives.
 pub(super) fn left(clock: &impl Clock, at: Duration) -> Option<Duration> {
-    (at.checked_sub(clock.now())).filter(|left| !left.is_zero())
+    let left = (at.checked_sub(clock.now())).filter(|left| !left.is_zero())?;
+    Some(match Instant::now().checked_add(left) {
+        Some(_) => left,
+        None => Duration::MAX,
+    })
 }
 
 /// How long a wait for `at` may block on the machine's timers before it calls the function again,
