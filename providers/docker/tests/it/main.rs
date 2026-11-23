@@ -46,7 +46,7 @@ use schema::sandbox::{
 use stdx::process::Environment;
 use stdx::{Context, Deadline};
 use test_support::suite::{Locals, Subject, reserve_with_room};
-use test_support::{BUSYBOX, TestDir, docker, hung, left};
+use test_support::{BUSYBOX, TestDir, docker, hung};
 
 // The directory, in this variable, in which this binary, run again by `hung_create`, makes a create
 // through the stand-in `docker` and writes what came of it, to `created`.
@@ -131,7 +131,7 @@ impl Fixture {
             .map_err(|error| error.to_string())
             .and_then(|mut session| {
                 session
-                    .set_up(left(by))
+                    .set_up(move || by.remaining())
                     .context(format_args!("sandbox {}", id.as_str()))?;
                 Ok(session)
             });
@@ -376,10 +376,7 @@ fn launch(n: u32, script: &str) -> Launch {
 }
 
 fn sh(sandbox: &mut Started, n: u32, script: &str) -> ExitStatus {
-    let process = sandbox
-        .session()
-        .start(launch(n, script), left(hung()))
-        .unwrap();
+    let process = sandbox.session().start(launch(n, script), hung()).unwrap();
     match sandbox.arrivals.recv_timeout(Duration::from_secs(30)) {
         Ok(Arrival::Exited {
             process: exited,
@@ -414,7 +411,7 @@ fn collect(fixture: &Fixture, sandbox: &mut Started, dir: &str) -> Vec<String> {
     let from = absolute(&format!("/pumpkin/{dir}"));
     sandbox
         .session()
-        .collect(&from, &into, limits, left(hung()))
+        .collect(&from, &into, limits, hung())
         .unwrap();
     let mut lines = Vec::new();
     list(&into, &into, &mut lines);
@@ -477,7 +474,7 @@ fn freezes_what_it_left() {
             ];
             sandbox
                 .session()
-                .put(&absolute("/pumpkin"), put, left(hung()))
+                .put(&absolute("/pumpkin"), put, hung())
                 .unwrap();
             let script = r#"
                 printf '{"bytes": %s}' "$(wc -c < ../in/payload/raw)" > ../out/result.json
@@ -492,7 +489,7 @@ fn freezes_what_it_left() {
             let before = processes(&sandbox, |listed| sleeping(listed) == 2);
             lines.push(format!("before freezing: {before}"));
             // Freezing returns once the processes it kills are gone.
-            sandbox.session().freeze(left(hung())).unwrap();
+            sandbox.session().freeze(hung()).unwrap();
             let after = processes(&sandbox, |_| true);
             lines.push(format!("after freezing: {after}"));
             lines.extend(collect(fixture, &mut sandbox, "out"));
@@ -999,10 +996,7 @@ fn sandboxctl_on_path() {
                 ),
             ];
             let home = "/pumpkin/home";
-            sandbox
-                .session()
-                .put(&absolute(home), put, left(hung()))
-                .unwrap();
+            sandbox.session().put(&absolute(home), put, hung()).unwrap();
             let mut lines = Vec::new();
             for (program, cwd, path) in [
                 ("sandboxctl", "/workspace", "PATH=/pumpkin/home"),
@@ -1015,7 +1009,7 @@ fn sandboxctl_on_path() {
                     env: Env::try_from(vec![EnvVar::try_from(path.to_owned()).unwrap()]).unwrap(),
                     ..launch(1, "")
                 };
-                let process = sandbox.session().start(launch, left(hung())).unwrap();
+                let process = sandbox.session().start(launch, hung()).unwrap();
                 let (status, asked) = serve(&mut sandbox, process, &[]);
                 lines.push(format!("{path} {program} in {cwd}: {status:?}, {asked:?}"));
             }
@@ -1048,7 +1042,7 @@ fn ops() {
             let session = sandbox.session();
             let put = [Put::File(relative("payload"), file_mode(), &payload)];
             session
-                .put(&absolute("/pumpkin/home"), put, left(hung()))
+                .put(&absolute("/pumpkin/home"), put, hung())
                 .unwrap();
             let script = format!(
                 r#"{CTL}
@@ -1081,7 +1075,7 @@ fn ops() {
                 echo "control socket's directory: $(ls -ld /pumpkin/sandboxctl | cut -c1-10); TCP listeners: $(awk '$4 == "0A"' /proc/net/tcp /proc/net/tcp6 | wc -l)"
                 echo > /.pumpkin/bin/sandboxctl"#
             );
-            let process = session.start(launch(1, &script), left(hung())).unwrap();
+            let process = session.start(launch(1, &script), hung()).unwrap();
             let (status, arrived) = serve(&mut sandbox, process, &payload);
             let mut lines = vec![format!("{status:?}")];
             lines.extend(log(fixture, &mut sandbox));
@@ -1210,17 +1204,14 @@ fn refused_calls() {
                 echo "a second sandboxd: exit $?: $second""#,
                 huge = MAX_OP_PAYLOAD_BYTES + 1,
             );
-            let process = sandbox
-                .session()
-                .start(launch(1, &script), left(hung()))
-                .unwrap();
+            let process = sandbox.session().start(launch(1, &script), hung()).unwrap();
             // The command waits for the second `sandboxd`, which waits for its session to open, so
             // that session is accepted beside the owner's loop.
             let (status, arrived) = thread::scope(|scope| {
                 let second = scope.spawn(move || {
                     let (arrivals, _) = mpsc::channel();
                     let by = hung();
-                    second.accept(|| by.remaining(), None, false, arrivals, |a| a, || false)
+                    second.accept(by, None, false, arrivals, |a| a, || false)
                 });
                 let served = serve(&mut sandbox, process, &[]);
                 drop(second.join().unwrap().unwrap());
@@ -1309,7 +1300,7 @@ fn turns() {
             // backlog. Once each has sent its call, the script touches `ready`, which the second
             // command waits for, and the owner answers the first op.
             let session = sandbox.session();
-            let callers = session.start(launch(1, script), left(hung())).unwrap();
+            let callers = session.start(launch(1, script), hung()).unwrap();
             let first = sandbox
                 .arrivals
                 .recv_timeout(Duration::from_secs(30))
@@ -1317,7 +1308,7 @@ fn turns() {
             let held = [Put::Dir(relative("held"), dir_mode())];
             sandbox
                 .session()
-                .put(&absolute("/pumpkin/in"), held, left(hung()))
+                .put(&absolute("/pumpkin/in"), held, hung())
                 .unwrap();
             sh(&mut sandbox, 2, "until [ -e ready ]; do sleep 0.01; done");
             // No op can arrive while the first is in flight.
@@ -1388,7 +1379,7 @@ fn model_endpoint() {
                 pad = (16 << 10) - "GET / HTTP/1.1\r\nx: ".len(),
             );
             let session = sandbox.session();
-            let process = session.start(launch(1, &script), left(hung())).unwrap();
+            let process = session.start(launch(1, &script), hung()).unwrap();
             let mut asked = hold_flight(&mut sandbox);
             asked.push(respond_late(&mut sandbox));
             let (status, rest) = serve_models(&mut sandbox, process);
@@ -1448,7 +1439,7 @@ fn respond_late(sandbox: &mut Started) -> String {
     let late = [Put::Dir(relative("late"), dir_mode())];
     sandbox
         .session()
-        .put(&absolute("/pumpkin/in"), late, left(hung()))
+        .put(&absolute("/pumpkin/in"), late, hung())
         .unwrap();
     let unread = format!(
         "until awk '$2 ~ /:{MODEL_PORT:04X}$/ && $4 != \"0A\" && $5 !~ /:0+$/ {{ found = 1 }} \
@@ -1494,13 +1485,13 @@ fn respond(incoming: IncomingModelRequest) -> String {
     if request.path == "/headless" {
         // A head too long for a frame, which ends the request without a response.
         let headers = vec![("x-pad".to_owned(), "a".repeat(MAX_MESSAGE_BYTES))];
-        let refused = incoming.respond(200, headers, left(hung())).unwrap_err();
+        let refused = incoming.respond(200, headers, hung()).unwrap_err();
         return format!("{asked}: {:?}", refused.kind());
     }
     if request.path == "/late" {
         // Far more than the client's buffers hold, yet within what the kernel queues to send on
         // `sandboxd`'s socket, so that much of it is still queued there as `sandboxd` closes.
-        let mut response = incoming.respond(200, Vec::new(), left(hung())).unwrap();
+        let mut response = incoming.respond(200, Vec::new(), hung()).unwrap();
         response.send("a".repeat(1 << 20).as_bytes()).unwrap();
         response.end().unwrap();
         return asked;
@@ -1515,7 +1506,7 @@ fn respond(incoming: IncomingModelRequest) -> String {
     let headers = (headers.iter())
         .map(|&(name, value)| (name.to_owned(), value.to_owned()))
         .collect();
-    let mut response = incoming.respond(status, headers, left(hung())).unwrap();
+    let mut response = incoming.respond(status, headers, hung()).unwrap();
     response.send(b"data: 1\n\n").unwrap();
     match body.as_str() {
         "" => response.end().unwrap(),
@@ -1552,7 +1543,7 @@ fn reply(session: &mut Session, arrival: Arrival, payload: &[u8]) -> String {
                 refused.call(),
                 refused.payload_limit().bytes()
             );
-            session.refuse(refused, left(hung())).unwrap();
+            session.refuse(refused, hung()).unwrap();
             return asked;
         }
         arrival @ (Arrival::ModelRequest(_) | Arrival::Exited { .. } | Arrival::Ended { .. }) => {
@@ -1602,7 +1593,7 @@ fn reply(session: &mut Session, arrival: Arrival, payload: &[u8]) -> String {
         &Op::Status { job } => (format!("status {job}"), status(job, remaining)),
         Op::Session { grant, op } => session_reply(grant, op),
     };
-    session.reply(incoming, answer, left(hung())).unwrap();
+    session.reply(incoming, answer, hung()).unwrap();
     asked
 }
 

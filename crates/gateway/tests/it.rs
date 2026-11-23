@@ -39,7 +39,7 @@ use schema::sandbox::{
 };
 use serde_json::{Value, json};
 use stdx::Deadline;
-use test_support::{HUNG, TestDir, hung, left};
+use test_support::{HUNG, TestDir, hung};
 
 type Action = fn(&mut Session, &Receiver<Arrival>, &Path) -> String;
 
@@ -179,7 +179,7 @@ fn connect(
     let (sender, arrivals) = mpsc::channel();
     let by = hung();
     let session = registration
-        .accept(|| by.remaining(), ops, models, sender, |a| a, || false)
+        .accept(by, ops, models, sender, |a| a, || false)
         .unwrap();
     let second = UnixStream::connect(&socket).unwrap_err().kind();
     assert_eq!(second, std::io::ErrorKind::NotFound, "a second connection");
@@ -206,7 +206,7 @@ fn opened(dir: &Path, opening: Opening, by: Deadline) -> String {
     });
     let (sender, _arrivals) = mpsc::channel();
     let accepted = registration.accept(|| by.remaining(), None, false, sender, |a| a, || false);
-    let outcome = outcome(accepted.and_then(|mut session| session.freeze(left(hung()))));
+    let outcome = outcome(accepted.and_then(|mut session| session.freeze(hung())));
     format!("heard {}; {outcome}", sandbox.join().unwrap())
 }
 
@@ -282,7 +282,7 @@ fn await_hang_up(connection: &mut UnixStream, message: &Value, body: &[u8]) {
     let hung = hung();
     while frame::write(connection, message, body).is_ok() {
         assert!(
-            hung.remaining().is_some(),
+            hung().is_some(),
             "the gateway was still there after {HUNG:?}"
         );
     }
@@ -299,7 +299,7 @@ fn send_unended(connection: &mut UnixStream) {
             return;
         }
         assert!(
-            hung.remaining().is_some(),
+            hung().is_some(),
             "the gateway was still there after {HUNG:?}"
         );
         thread::sleep(Duration::from_millis(1));
@@ -330,7 +330,7 @@ fn collect(session: &mut Session, _: &Receiver<Arrival>, dir: &Path) -> String {
         entries: 3,
     };
     let out = AbsolutePath::try_from("/out".to_owned()).unwrap();
-    let outcome = outcome(session.collect(&out, &into, limits, left(hung())));
+    let outcome = outcome(session.collect(&out, &into, limits, hung()));
     let mut arrived = walk(&into);
     arrived.sort();
     format!("{outcome}; arrived {arrived:?}")
@@ -356,8 +356,8 @@ fn launch() -> Launch {
 }
 
 fn start_and_freeze(session: &mut Session, _: &Receiver<Arrival>, _: &Path) -> String {
-    let process = session.start(launch(), left(hung()));
-    let frozen = session.freeze(left(hung()));
+    let process = session.start(launch(), hung());
+    let frozen = session.freeze(hung());
     format!(
         "start: {}; freeze: {}",
         outcome(process.map(drop)),
@@ -374,12 +374,12 @@ fn over_the_cap(session: &mut Session, arrivals: &Receiver<Arrival>, dir: &Path)
 }
 
 fn freeze_and_take(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -> String {
-    let frozen = outcome(session.freeze(left(hung())));
+    let frozen = outcome(session.freeze(hung()));
     format!("freeze: {frozen}; {}", take(session, arrivals, None))
 }
 
 fn start_and_take(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -> String {
-    match session.start(launch(), left(hung())) {
+    match session.start(launch(), hung()) {
         Ok(process) => format!("started; {}", take(session, arrivals, Some(process))),
         Err(error) => format!(
             "start: {}; {}",
@@ -403,7 +403,7 @@ fn take(session: &mut Session, arrivals: &Receiver<Arrival>, started: Option<Pro
         match arrival {
             Arrival::Op(op) => {
                 lines.push(format!("{:?}", op.op));
-                if let Err(error) = session.reply(op, no_grants(), left(hung())) {
+                if let Err(error) = session.reply(op, no_grants(), hung()) {
                     lines.push(format!("reply: {:?}: {error}", error.kind()));
                 }
             }
@@ -415,7 +415,7 @@ fn take(session: &mut Session, arrivals: &Receiver<Arrival>, started: Option<Pro
                     refused.payload_limit().bytes(),
                     refused.message()
                 ));
-                if let Err(error) = session.refuse(refused, left(hung())) {
+                if let Err(error) = session.refuse(refused, hung()) {
                     lines.push(format!("refuse: {:?}: {error}", error.kind()));
                 }
             }
@@ -481,17 +481,17 @@ fn answer_elsewhere(session: &mut Session, arrivals: &Receiver<Arrival>, dir: &P
     });
     let [(mine, my_command), (own, its_command)] =
         [(&mut *session, arrivals), (&mut other, &others)].map(|(session, arrivals)| {
-            let process = session.start(launch(), left(hung())).unwrap();
+            let process = session.start(launch(), hung()).unwrap();
             (next_op(arrivals), process)
         });
     let message = "from another session".to_owned();
-    let elsewhere = panicked(|| other.reply(mine, OpReply::refused(message), left(hung())));
-    let own = outcome(other.reply(own, no_grants(), left(hung())));
+    let elsewhere = panicked(|| other.reply(mine, OpReply::refused(message), hung()));
+    let own = outcome(other.reply(own, no_grants(), hung()));
     let refused = match next(&others) {
         Some(Arrival::Refused(refused)) => refused,
         arrived => panic!("a refused op was to arrive, not {arrived:?}"),
     };
-    let refusal = panicked(|| session.refuse(refused, left(hung())));
+    let refusal = panicked(|| session.refuse(refused, hung()));
     let outcome = format!(
         "the sessions' commands equal: {}; op 0 on another session: {elsewhere}; that session's \
          own op 0: {own}; its op 1 refused on another session: {refusal}",
@@ -508,13 +508,13 @@ fn panicked(answer: impl FnOnce() -> std::io::Result<()> + Send) -> String {
 }
 
 fn too_long_reply(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -> String {
-    let mut lines = vec![format!("freeze: {}", outcome(session.freeze(left(hung()))))];
+    let mut lines = vec![format!("freeze: {}", outcome(session.freeze(hung())))];
     for message in ["x".repeat(frame::MAX_MESSAGE_BYTES), "no".to_owned()] {
         let op = next_op(arrivals);
         lines.push(outcome(session.reply(
             op,
             OpReply::refused(message),
-            left(hung()),
+            hung(),
         )));
     }
     lines.join("; ")
@@ -534,12 +534,12 @@ fn answer_model(incoming: IncomingModelRequest) -> String {
         "/stale" => short(),
         "/long" => {
             headers.push(("x-long".to_owned(), "x".repeat(frame::MAX_MESSAGE_BYTES)));
-            hung()
+            Deadline::after(HUNG)
         }
-        _ => hung(),
+        _ => Deadline::after(HUNG),
     };
     let answered = incoming
-        .respond(200, headers, left(by))
+        .respond(200, headers, move || by.remaining())
         .and_then(|mut response| {
             if path == "/stale" {
                 return response.send(&vec![0; 8 << 20]);
@@ -561,12 +561,12 @@ fn answer_on_a_thread(_: &mut Session, _: &Receiver<Arrival>, dir: &Path) -> Str
     let (mut session, arrivals, sandbox) = connect(&dir.join("other"), None, true, |s| {
         vec![done(s), model_request(3, "/", 0), stall()]
     });
-    session.freeze(left(hung())).unwrap();
+    session.freeze(hung()).unwrap();
     let Some(Arrival::ModelRequest(incoming)) = next(&arrivals) else {
         panic!("a model request was to arrive");
     };
     let answer = thread::spawn(move || {
-        let mut response = incoming.respond(200, Vec::new(), left(hung()))?;
+        let mut response = incoming.respond(200, Vec::new(), hung())?;
         response.send(&vec![0; 8 << 20])
     });
     // Time for the answer to fill the buffers and wait on the sandbox, so that the session ends
@@ -582,18 +582,18 @@ fn then_freeze(session: &mut Session, first: std::io::Result<()>) -> String {
     format!(
         "{}; then {}",
         outcome(first),
-        outcome(session.freeze(left(hung())))
+        outcome(session.freeze(hung()))
     )
 }
 
 fn freezes(session: &mut Session, by: Deadline) -> String {
-    let first = session.freeze(left(by));
+    let first = session.freeze(move || by.remaining());
     then_freeze(session, first)
 }
 
 fn after_the_end(session: &mut Session, _: &Receiver<Arrival>, _: &Path) -> String {
-    let ended = freezes(session, hung());
-    let late = outcome(session.freeze(left(Deadline::after(Duration::ZERO))));
+    let ended = freezes(session, Deadline::after(HUNG));
+    let late = outcome(session.freeze(|| None));
     format!("{ended}; then by a passed deadline {late}")
 }
 
@@ -602,7 +602,9 @@ fn put_large(session: &mut Session, by: Deadline) -> std::io::Result<()> {
     let file = RelativePath::try_from("big".to_owned()).unwrap();
     // More than the socket's buffers hold, so that the put waits on a sandbox that reads nothing.
     let bytes = vec![0; 8 << 20];
-    session.put(&dir, [Put::File(file, file_mode(), &bytes)], left(by))
+    session.put(&dir, [Put::File(file, file_mode(), &bytes)], move || {
+        by.remaining()
+    })
 }
 
 // The put's entry waits for an op that the sandbox sends after its `done`, and the reader passes on
@@ -614,13 +616,13 @@ fn put_after_op(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -
         let file = RelativePath::try_from("f".to_owned()).unwrap();
         Put::File(file, file_mode(), b"hi")
     });
-    format!("put: {}", outcome(session.put(&dir, entry, left(hung()))))
+    format!("put: {}", outcome(session.put(&dir, entry, hung())))
 }
 
 fn late_reply(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -> String {
-    session.freeze(left(hung())).unwrap();
+    session.freeze(hung()).unwrap();
     let op = next_op(arrivals);
-    let replied = session.reply(op, no_grants(), left(Deadline::after(Duration::ZERO)));
+    let replied = session.reply(op, no_grants(), || None);
     then_freeze(session, replied)
 }
 
@@ -630,7 +632,8 @@ fn collect_short(session: &mut Session, _: &Receiver<Arrival>, dir: &Path) -> St
         entries: u64::MAX,
     };
     let out = AbsolutePath::try_from("/out".to_owned()).unwrap();
-    outcome(session.collect(&out, &dir.join("collected"), limits, left(short())))
+    let by = short();
+    outcome(session.collect(&out, &dir.join("collected"), limits, move || by.remaining()))
 }
 
 fn walk(dir: &Path) -> Vec<String> {
@@ -1126,11 +1129,11 @@ fn deadlines() {
                 // entry but before reading the entry's data, and the gateway takes the answer once
                 // the put is all written.
                 (
-                    |session, _, _| freezes(session, hung()),
+                    |session, _, _| freezes(session, Deadline::after(HUNG)),
                     |s| vec![pause(), done(s)],
                 ),
                 (
-                    |session, _, _| outcome(put_large(session, hung())),
+                    |session, _, _| outcome(put_large(session, Deadline::after(HUNG))),
                     |s| vec![read_frame(), pause(), done(s), await_reply()],
                 ),
                 // The sandbox answers nothing, reads nothing past a large put's first frame, or
@@ -1216,7 +1219,7 @@ fn arrivals() {
                     ]
                 }),
                 (
-                    |session, _, _| outcome(session.freeze(left(hung()))),
+                    |session, _, _| outcome(session.freeze(hung())),
                     // The sandbox goes on sending, reading nothing, until the gateway hangs up.
                     |s| vec![done(s), stall()],
                 ),
@@ -1261,9 +1264,8 @@ fn stopped() {
                 let (sender, _) = mpsc::channel();
                 let by = hung();
                 let stopped = || first || !socket.exists();
-                let accepted =
-                    registration.accept(|| by.remaining(), None, false, sender, |a| a, stopped);
-                let returned = by.remaining().map_or("past", |_| "before");
+                let accepted = registration.accept(by, None, false, sender, |a| a, stopped);
+                let returned = by().map_or("past", |_| "before");
                 let accepted = outcome(accepted.map(drop));
                 let accepted = accepted.replace(&dir.display().to_string(), "<dir>");
                 format!("returned {returned} its deadline: {accepted}")
@@ -1288,12 +1290,12 @@ fn hellos() {
                 (
                     "this version",
                     |c| frame::write(c, &hello(), &[]).unwrap(),
-                    hung(),
+                    Deadline::after(HUNG),
                 ),
                 (
                     "a v0 sandboxd",
                     |c| frame::write(c, &json!({ "version": 0 }), &[]).unwrap(),
-                    hung(),
+                    Deadline::after(HUNG),
                 ),
                 (
                     "a later version, with a field this one lacks",
@@ -1301,7 +1303,7 @@ fn hellos() {
                         let hello = json!({ "version": PROTOCOL_VERSION + 1, "later": true });
                         frame::write(c, &hello, &[]).unwrap();
                     },
-                    hung(),
+                    Deadline::after(HUNG),
                 ),
                 (
                     "this version, with a field it lacks",
@@ -1309,7 +1311,7 @@ fn hellos() {
                         let hello = json!({ "version": PROTOCOL_VERSION, "later": true });
                         frame::write(c, &hello, &[]).unwrap();
                     },
-                    hung(),
+                    Deadline::after(HUNG),
                 ),
                 (
                     "a later version, as long as a hello may be",
@@ -1319,7 +1321,7 @@ fn hellos() {
                         hello["later"] = json!("x".repeat(pad));
                         frame::write(c, &hello, &[]).unwrap();
                     },
-                    hung(),
+                    Deadline::after(HUNG),
                 ),
                 (
                     "a length a byte over a hello's, and nothing more",
@@ -1327,27 +1329,27 @@ fn hellos() {
                         let len = u32::try_from(MAX_HELLO_BYTES + 1).unwrap();
                         c.write_all(&len.to_be_bytes()).unwrap();
                     },
-                    hung(),
+                    Deadline::after(HUNG),
                 ),
                 (
                     "this version, with an attestation",
                     |c| frame::write(c, &hello(), b"x").unwrap(),
-                    hung(),
+                    Deadline::after(HUNG),
                 ),
                 (
                     "a reply, not a hello",
                     |c| frame::write(c, &done(1).0, &[]).unwrap(),
-                    hung(),
+                    Deadline::after(HUNG),
                 ),
                 (
                     "a frame whose message, `null`, is no object",
                     |c| frame::write(c, &Value::Null, &[]).unwrap(),
-                    hung(),
+                    Deadline::after(HUNG),
                 ),
                 (
                     "a frame whose message, `hello`, isn't JSON",
                     |c| c.write_all(b"\0\0\0\x05hello\0\0\0\0").unwrap(),
-                    hung(),
+                    Deadline::after(HUNG),
                 ),
                 (
                     "part of a frame, then the connection's end",
@@ -1355,7 +1357,7 @@ fn hellos() {
                         c.write_all(b"\0\0\0\x0d{\"version\"").unwrap();
                         c.shutdown(Shutdown::Write).unwrap();
                     },
-                    hung(),
+                    Deadline::after(HUNG),
                 ),
                 (
                     "a hello's message, then the connection's end",
@@ -1365,12 +1367,12 @@ fn hellos() {
                         c.write_all(&written[..written.len() - 4]).unwrap();
                         c.shutdown(Shutdown::Write).unwrap();
                     },
-                    hung(),
+                    Deadline::after(HUNG),
                 ),
                 (
                     "nothing, then the connection's end",
                     |c| c.shutdown(Shutdown::Write).unwrap(),
-                    hung(),
+                    Deadline::after(HUNG),
                 ),
                 ("nothing, past the deadline", |_| {}, short()),
             ];
@@ -1403,7 +1405,7 @@ fn listen(hello_timeout: Duration) -> (Listener, SocketAddr) {
     let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
     let address = GatewayAddress::try_from(loopback).unwrap();
     let listener = Listener::bind(&address, hello_timeout).unwrap();
-    let (PrivateDial { gateway }, _) = listener.issue(hung());
+    let (PrivateDial { gateway }, _) = listener.issue(Deadline::after(HUNG));
     (listener, gateway)
 }
 
@@ -1459,7 +1461,7 @@ fn admitting(unattested: Unattested, attestation: &'static str, from: Ipv4Addr) 
 /// A registration whose check admits `attestation` from the loopback, where each hello comes from.
 fn admitted(listener: &Listener, address: SocketAddr, attestation: &'static str) -> Registration {
     admitting(
-        issue(listener, address, hung()),
+        issue(listener, address, Deadline::after(HUNG)),
         attestation,
         Ipv4Addr::LOCALHOST,
     )
@@ -1510,14 +1512,14 @@ fn twice(address: SocketAddr, said: &Sender<String>, name: &'static str) -> [Joi
 fn accept_and_freeze(registration: Registration, by: Deadline) -> String {
     let (sender, _arrivals) = mpsc::channel();
     let accepted = registration.accept(|| by.remaining(), None, false, sender, |a| a, || false);
-    outcome(accepted.and_then(|mut session| session.freeze(left(hung()))))
+    outcome(accepted.and_then(|mut session| session.freeze(hung())))
 }
 
 fn refusals(listener: &Listener, address: SocketAddr) -> Vec<String> {
     let late = admitted(listener, address, "late");
     let waited = accept_and_freeze(late, Deadline::after(Duration::ZERO));
     drop(admitted(listener, address, "dropped"));
-    let unspent = issue(listener, address, hung());
+    let unspent = issue(listener, address, Deadline::after(HUNG));
     let elsewhere = admitting(unspent, "elsewhere", Ipv4Addr::new(192, 0, 2, 1));
 
     // Its check never comes, and no hello waits for it, as its deadline has passed.
@@ -1571,13 +1573,13 @@ fn awaited(listener: &Listener, address: SocketAddr) -> Vec<String> {
     let ops = Some(OpPayloadLimit::NONE);
     let (sender, arrivals) = mpsc::channel();
     let by = hung();
-    let accepted = registration.accept(|| by.remaining(), ops, false, sender, |a| a, || false);
+    let accepted = registration.accept(by, ops, false, sender, |a| a, || false);
     let mut session = accepted.unwrap();
-    let frozen = outcome(session.freeze(left(hung())));
+    let frozen = outcome(session.freeze(hung()));
     let mut lines = vec![format!("{}; freeze: {frozen}", heard.recv().unwrap())];
     let op = next_op(&arrivals);
     lines.push(format!("  its op: {:?}", op.op));
-    session.reply(op, no_grants(), left(hung())).unwrap();
+    session.reply(op, no_grants(), hung()).unwrap();
     drop(session);
     sandbox.join().unwrap();
     lines.push(format!(
@@ -1597,7 +1599,7 @@ fn early(listener: &Listener, address: SocketAddr) -> Vec<String> {
     refused.sort();
     let mut lines = vec![format!("presented early: {}", refused.join("; "))];
     for (name, registration, sandboxes) in pairs.into_iter().rev() {
-        let accepted = accept_and_freeze(registration, hung());
+        let accepted = accept_and_freeze(registration, Deadline::after(HUNG));
         lines.push(format!("  {name} accepted, then a freeze: {accepted}"));
         for sandbox in sandboxes {
             sandbox.join().unwrap();
@@ -1608,7 +1610,7 @@ fn early(listener: &Listener, address: SocketAddr) -> Vec<String> {
 
 fn unchecked(listener: &Listener, address: SocketAddr) -> Vec<String> {
     let (said, heard) = mpsc::channel();
-    let [checked, withdrawn] = [(); 2].map(|()| issue(listener, address, hung()));
+    let [checked, withdrawn] = [(); 2].map(|()| issue(listener, address, Deadline::after(HUNG)));
     let hellos = ["checked", "withdrawn"].map(|name| {
         let said = (said.clone(), name);
         sandbox(address, attesting(name), Duration::ZERO, named, said)
@@ -1618,7 +1620,7 @@ fn unchecked(listener: &Listener, address: SocketAddr) -> Vec<String> {
     thread::sleep(HELLO_BOUND + PAUSE);
     let registration = admitting(checked, "checked", Ipv4Addr::LOCALHOST);
     drop(withdrawn);
-    let accepted = accept_and_freeze(registration, hung());
+    let accepted = accept_and_freeze(registration, Deadline::after(HUNG));
     let mut told: Vec<String> = (0..2).map(|_| heard.recv().unwrap()).collect();
     told.sort();
     for sandbox in hellos {
@@ -1655,9 +1657,9 @@ fn stopped_accept(listener: &Listener, address: SocketAddr) -> Vec<String> {
         looks.get() > 2
     };
     let (sender, _) = mpsc::channel();
-    let accepted = registration.accept(|| by.remaining(), None, false, sender, |a| a, stopped);
+    let accepted = registration.accept(by, None, false, sender, |a| a, stopped);
     let accepted = outcome(accepted.map(drop));
-    let returned = by.remaining().map_or("past", |_| "before");
+    let returned = by().map_or("past", |_| "before");
     let presented = present(address, &attesting("stopped"));
     vec![
         format!("an accept stopped as it waits returned {returned} its deadline: {accepted}"),
@@ -1729,7 +1731,7 @@ fn registrations() {
             let (listener, address) = listen(HELLO_BOUND);
             let mut silent = dial(address);
             let meanwhile = admitted(&listener, address, "meanwhile");
-            let waiting = thread::spawn(|| accept_and_freeze(meanwhile, hung()));
+            let waiting = thread::spawn(|| accept_and_freeze(meanwhile, Deadline::after(HUNG)));
             let mut lines = refusals(&listener, address);
             for meeting in [awaited, early, unchecked, dropped, stopped_accept] {
                 lines.extend(meeting(&listener, address));
@@ -1792,7 +1794,7 @@ fn dials() {
             };
             let (grant, unreached) = issue();
             let (port, sandbox) = listening(true, (json!(hello()), Vec::new()));
-            let session = accepted(unreached.at(endpoint(port)), hung(), false);
+            let session = accepted(unreached.at(endpoint(port)), Deadline::after(HUNG), false);
             let heard = sandbox.join().unwrap();
             let presented = heard == Some(HelloReply::Accepted { grant: Some(grant) });
             let mut lines = vec![format!(
@@ -1804,7 +1806,7 @@ fn dials() {
             for (case, hello) in [("with an attestation", attested), ("later", later)] {
                 let (_, unreached) = issue();
                 let (port, sandbox) = listening(false, hello);
-                let session = accepted(unreached.at(endpoint(port)), hung(), false);
+                let session = accepted(unreached.at(endpoint(port)), Deadline::after(HUNG), false);
                 let heard = sandbox.join().unwrap();
                 lines.push(format!("a hello {case}: {session:?}; it heard {heard:?}"));
             }
@@ -1824,7 +1826,7 @@ fn dials() {
                 untrusted()
             ));
             let (_, unreached) = issue();
-            let session = accepted(unreached.at(endpoint(closed)), hung(), true);
+            let session = accepted(unreached.at(endpoint(closed)), Deadline::after(HUNG), true);
             let session = session.map_err(|error| error.replace(&closed.to_string(), "$PORT"));
             lines.push(format!("stopped: {session:?}"));
             lines
@@ -1845,7 +1847,7 @@ fn untrusted() -> String {
     let port = edge.local_addr().unwrap().port();
     let shown = thread::spawn(move || {
         let (stream, _) = edge.accept().unwrap();
-        let shown = test_support::edge::server().accept(stream, hung());
+        let shown = test_support::edge::server().accept(stream, Deadline::after(HUNG));
         shown.map(drop).map_err(|error| error.kind())
     });
     let (sender, _) = mpsc::channel();
@@ -1870,7 +1872,9 @@ fn listening(closes_first: bool, (hello, body): Said) -> (u16, JoinHandle<Option
             drop(listener.accept().unwrap());
         }
         let (stream, _) = listener.accept().unwrap();
-        let stream = test_support::edge::server().accept(stream, hung()).unwrap();
+        let stream = test_support::edge::server()
+            .accept(stream, Deadline::after(HUNG))
+            .unwrap();
         frame::write(&mut &stream, &hello, &body).unwrap();
         frame::read::<HelloReply>(&mut &stream)
             .unwrap()

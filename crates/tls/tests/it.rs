@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use expect_test::{Expect, expect};
 use stdx::Deadline;
-use test_support::{HUNG, edge, hung};
+use test_support::{HUNG, edge};
 use tls::{Client, Stream};
 
 #[derive(Clone, Copy)]
@@ -98,7 +98,8 @@ fn check(
         let client = client.map(drop).map_err(|e| e.to_string());
         vec![format!("client: {client:?}")]
     } else {
-        let server = thread::spawn(move || edge::server().accept(server_end, hung()));
+        let server =
+            thread::spawn(move || edge::server().accept(server_end, Deadline::after(HUNG)));
         let client = client.connect(client_end, name, Deadline::after(within));
         let tell = || tell.as_ref().unwrap().send(()).unwrap();
         match (client, server.join().unwrap()) {

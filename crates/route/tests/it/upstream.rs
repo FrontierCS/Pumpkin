@@ -17,7 +17,7 @@ use route::{Admission, Answer as Told, Apart, Keep, Key, Route, Upstream, Upstre
 use schema::ir::{Api, ModelBudget};
 use stdx::Deadline;
 use test_support::http::{read_request, write_chunk};
-use test_support::{HUNG, TestDir, left};
+use test_support::{HUNG, TestDir};
 
 use super::kept::{
     CHAT_ANSWER, CHAT_STREAM, MESSAGES_CUT, MESSAGES_STREAM, RESPONSES_CUT, RESPONSES_STREAM,
@@ -337,7 +337,7 @@ fn serve_one(
         slice::from_ref(entry),
         incoming,
         |_| admission,
-        left(by),
+        move || by.remaining(),
         &kept,
         || {},
         answered,

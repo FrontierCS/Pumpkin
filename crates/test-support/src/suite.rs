@@ -74,8 +74,9 @@ pub struct Locals {
 
 // A wait that nothing can end sooner, such as a put to a `sandboxd` that has stopped reading, no
 // longer than any provider's startup, so that no outcome rests on its length.
-fn soon() -> Deadline {
-    Deadline::after(Duration::from_secs(1))
+fn soon() -> impl Fn() -> Option<Duration> {
+    let by = Deadline::after(Duration::from_secs(1));
+    move || by.remaining()
 }
 
 // The roles of the suite's run, each of which it starts sandboxes of only once those of the one
@@ -250,7 +251,11 @@ fn lifecycle(
 fn kills(suite: &mut Suite<'_>, image: &ImageRef, sandboxd: &SandboxdRef) -> Vec<String> {
     let (id, started) = suite.start("killed", image, sandboxd);
     let (mut session, arrivals) = started.unwrap();
-    let by = || crate::left(Deadline::after(suite.startup()));
+    // Each request's deadline, from as it is made.
+    let by = || {
+        let by = Deadline::after(suite.startup());
+        move || by.remaining()
+    };
     let process = session.start(sleep(), by()).unwrap();
     session.kill(process, by()).unwrap();
     let exited = match arrivals.recv_timeout(suite.startup()).unwrap() {
@@ -362,11 +367,7 @@ fn put(mut session: Session) -> String {
         vec![0; 4 << 20],
     );
     let home = AbsolutePath::try_from("/pumpkin/home".to_owned()).unwrap();
-    match session.put(
-        &home,
-        [Put::File(path, file_mode(), &bytes)],
-        crate::left(soon()),
-    ) {
+    match session.put(&home, [Put::File(path, file_mode(), &bytes)], soon()) {
         Ok(()) => "put".to_owned(),
         Err(error) => format!("{:?}: {error}", error.kind()),
     }

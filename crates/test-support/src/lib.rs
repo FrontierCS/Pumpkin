@@ -39,13 +39,10 @@ pub const WORKFLOW: &str = include_str!("workflow.json");
 /// How long a test waits for what only a test that hangs never sees, so no outcome rests on it.
 pub const HUNG: Duration = Duration::from_secs(60);
 
-/// A request's deadline, [`HUNG`] from now.
-pub fn hung() -> Deadline {
-    Deadline::after(HUNG)
-}
-
-/// The time that `by` leaves, as a function, which a session's requests take.
-pub fn left(by: Deadline) -> impl Fn() -> Option<Duration> + Copy + Send + Sync + 'static {
+/// A request's deadline, [`HUNG`] from now, as the time it leaves, which a session's requests
+/// take.
+pub fn hung() -> impl Fn() -> Option<Duration> + Copy + Send + Sync + 'static {
+    let by = Deadline::after(HUNG);
     move || by.remaining()
 }
 

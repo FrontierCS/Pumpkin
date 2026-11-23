@@ -39,8 +39,9 @@ use schema::sandbox::{
     SANDBOXD_ATTESTATION, SANDBOXD_GRANT, SOCKET_NAME, SocketDial, ToSandbox, dir_mode, file_mode,
 };
 use serde_json::{Value, json};
+use stdx::Deadline;
 use stdx::process::Environment;
-use test_support::{TestDir, hung, left};
+use test_support::{HUNG, TestDir, hung};
 
 const PATH_ONLY: Environment = Environment::Only(&["PATH"]);
 
@@ -105,7 +106,7 @@ impl Sandbox {
                 let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
                 let address = GatewayAddress::try_from(loopback).unwrap();
                 let listener = Listener::bind(&address, HELLO_TIMEOUT).unwrap();
-                let (PrivateDial { gateway }, unattested) = listener.issue(hung());
+                let (PrivateDial { gateway }, unattested) = listener.issue(Deadline::after(HUNG));
                 let registration = unattested.admitting(|attestation, peer| {
                     let ours = attestation.bytes() == ATTESTATION.as_bytes() && peer.is_loopback();
                     ours.then_some(())
@@ -137,14 +138,14 @@ impl Sandbox {
         let sandboxd = sandboxd.spawn().unwrap();
         let (sender, arrivals) = mpsc::channel();
         let by = hung();
-        let accepted = registration.accept(|| by.remaining(), None, false, sender, |a| a, || false);
+        let accepted = registration.accept(by, None, false, sender, |a| a, || false);
         let mut session = accepted.unwrap();
         let dirs = ["in", "out", "home", "log"].map(relative);
         session
             .put(
                 &absolute(&root),
                 dirs.map(|dir| Put::Dir(dir, dir_mode())),
-                left(hung()),
+                hung(),
             )
             .unwrap();
         Self {
@@ -201,9 +202,7 @@ impl Sandbox {
             entries: 100,
         };
         let into = collected.join(dir.replace('/', "-"));
-        let outcome = self
-            .session
-            .collect(&self.at(dir), &into, limits, left(hung()));
+        let outcome = self.session.collect(&self.at(dir), &into, limits, hung());
         outcome.map_err(|error| self.show(&error))?;
         let mut lines = Vec::new();
         self.list(&collected, &into, &mut lines);
@@ -395,7 +394,7 @@ fn put_run_collect(sandbox: &mut Sandbox) -> Vec<String> {
         Put::Dir(dir, dir_mode()),
         Put::File(payload, file_mode(), &raw),
     ];
-    sandbox.session.put(&root, put, left(hung())).unwrap();
+    sandbox.session.put(&root, put, hung()).unwrap();
     let script = r#"
         printf '{"bytes": %s}' "$(wc --bytes < ../in/payload/raw)" > ../out/result.json
         mkdir ../out/evidence && cp ../in/payload/raw ../out/evidence/payload
@@ -407,10 +406,10 @@ fn put_run_collect(sandbox: &mut Sandbox) -> Vec<String> {
         script,
         &["HOME=/pumpkin/home", "MODE=train", "PATH=/usr/bin:/bin"],
     );
-    let command = sandbox.session.start(launch, left(hung())).unwrap();
+    let command = sandbox.session.start(launch, hung()).unwrap();
     let exited = sandbox.exit(command, Duration::from_secs(10)).unwrap();
     let mut lines = vec![format!("exited: {exited:?}")];
-    sandbox.session.freeze(left(hung())).unwrap();
+    sandbox.session.freeze(hung()).unwrap();
     lines.extend(sandbox.collect("out").unwrap());
     let kept = fs::read(sandbox.root.join("collected/out/evidence/payload")).unwrap();
     lines.push(format!("payload collected intact: {}", kept == raw));
@@ -443,7 +442,7 @@ fn modes_and_stdin() {
             ];
             sandbox
                 .session
-                .put(&absolute(&sandbox.root), put, left(hung()))
+                .put(&absolute(&sandbox.root), put, hung())
                 .unwrap();
             let script = "cd .. && stat --format='%a %n' home in/tools in/tools/tool in/private \
                           in/private/key in/prompt in/open in/open/shared && \
@@ -451,12 +450,12 @@ fn modes_and_stdin() {
                           chmod 1700 in/private && mkdir --mode=0500 in/shut && in/tools/tool";
             let mut launch = sandbox.sh(script, &[]);
             launch.stdin = Some(sandbox.at("in/prompt"));
-            let command = sandbox.session.start(launch, left(hung())).unwrap();
+            let command = sandbox.session.start(launch, hung()).unwrap();
             let exited = sandbox.exit(command, Duration::from_secs(10)).unwrap();
             let mut lines = vec![format!("exited: {exited:?}")];
             let mut missing = sandbox.sh("true", &[]);
             missing.stdin = Some(sandbox.at("in/missing"));
-            let started = sandbox.session.start(missing, left(hung())).map(|_| ());
+            let started = sandbox.session.start(missing, hung()).map(|_| ());
             lines.push(format!("missing stdin: {}", show_error(sandbox, started)));
             lines.extend(sandbox.collect("log").unwrap());
             sandbox.collect("in").unwrap();
@@ -479,7 +478,7 @@ fn modes_and_stdin() {
             lines.push(format!("the collected tree removed: {removed:?}"));
             let trees = sandbox.session.trees();
             let again = [Put::File(relative("again"), mode("0644"), b"")];
-            let replaced = trees.put(&sandbox.at("in/tools"), Root::Replaced, again, left(hung()));
+            let replaced = trees.put(&sandbox.at("in/tools"), Root::Replaced, again, hung());
             let held: Vec<_> = (fs::read_dir(sandbox.root.join("in/tools")).unwrap())
                 .map(|entry| entry.unwrap().file_name().into_string().unwrap())
                 .collect();
@@ -527,7 +526,7 @@ fn inherited_ignored_child_signal() {
     command.args(["--ignore-signal=CHLD", env!("CARGO_BIN_EXE_sandboxd")]);
     let mut sandbox = Sandbox::start_with(Meeting::Socket, command);
     let launch = sandbox.sh("exit 0", &[]);
-    sandbox.session.start(launch, left(hung())).unwrap();
+    sandbox.session.start(launch, hung()).unwrap();
     let status = exited(&mut sandbox.sandboxd);
     expect!["exit status: 1"].assert_eq(&status.to_string());
 }
@@ -539,16 +538,16 @@ fn freezing() {
         |sandbox| {
             // The shell and both sleeps, so that freezing finds each of them to kill.
             let launch = sandbox.sh("sleep 60 & sleep 60 & wait", &[]);
-            let group = sandbox.session.start(launch, left(hung())).unwrap();
+            let group = sandbox.session.start(launch, hung()).unwrap();
             let timeout = Duration::from_secs(10);
             let running = processes(&sandbox.root, timeout, |found| found.len() == 3);
-            sandbox.session.freeze(left(hung())).unwrap();
+            sandbox.session.freeze(hung()).unwrap();
             let exited = sandbox.exit(group, Duration::ZERO);
             let mut lines = vec![
                 format!("running before freezing: {}", running.len()),
                 format!("exited when frozen: {exited:?}"),
             ];
-            let after = sandbox.session.start(sandbox.sh("true", &[]), left(hung()));
+            let after = sandbox.session.start(sandbox.sh("true", &[]), hung());
             lines.push(format!("start after freezing: {}", after.unwrap_err()));
             lines
         },
@@ -568,18 +567,16 @@ fn killing() {
         Meeting::Socket,
         |sandbox| {
             let launch = sandbox.sh("sleep 60 & sleep 60 & wait", &[]);
-            let group = sandbox.session.start(launch, left(hung())).unwrap();
+            let group = sandbox.session.start(launch, hung()).unwrap();
             let timeout = Duration::from_secs(10);
             let running = processes(&sandbox.root, timeout, |found| found.len() == 3);
-            sandbox.session.kill(group, left(hung())).unwrap();
+            sandbox.session.kill(group, hung()).unwrap();
             let exited = sandbox.exit(group, timeout);
             let left = processes(&sandbox.root, timeout, <[u32]>::is_empty);
-            let next = sandbox
-                .session
-                .start(sandbox.sh("true", &[]), test_support::left(hung()));
+            let next = sandbox.session.start(sandbox.sh("true", &[]), hung());
             let next = next.unwrap();
             let next_exited = sandbox.exit(next, timeout);
-            let again = sandbox.session.kill(group, test_support::left(hung()));
+            let again = sandbox.session.kill(group, hung());
             vec![
                 format!("running before the kill: {}", running.len()),
                 format!("exited when killed: {exited:?}"),
@@ -606,7 +603,7 @@ fn full_sandbox() {
         Meeting::Socket,
         |sandbox| {
             let launch = sandbox.sh("exec sleep 60", &[]);
-            let sleep = sandbox.session.start(launch, left(hung())).unwrap();
+            let sleep = sandbox.session.start(launch, hung()).unwrap();
             fs::write(sandbox.root.join("out/kept"), "kept").unwrap();
             // `sandboxd`'s own limit on its user's processes stands in for the sandbox's: either
             // fails a new process or thread alike.
@@ -618,7 +615,7 @@ fn full_sandbox() {
                     panic!("`prlimit` didn't run: {error}: install util-linux, which has it")
                 });
             assert!(limited.success(), "`prlimit` failed: {limited}");
-            let started = sandbox.session.start(sandbox.sh("true", &[]), left(hung()));
+            let started = sandbox.session.start(sandbox.sh("true", &[]), hung());
             let started = started.map(|_| ());
             assert!(
                 started.is_err(),
@@ -626,7 +623,7 @@ fn full_sandbox() {
                  holds to it, not root, and without `CAP_SYS_RESOURCE` or `CAP_SYS_ADMIN`"
             );
             let mut lines = vec![format!("start: {}", show_error(sandbox, started))];
-            sandbox.session.freeze(left(hung())).unwrap();
+            sandbox.session.freeze(hung()).unwrap();
             let exited = sandbox.exit(sleep, Duration::ZERO);
             lines.push(format!("exited when frozen: {exited:?}"));
             lines.extend(sandbox.collect("out").unwrap());
@@ -650,13 +647,13 @@ fn refusals() {
             let mut lines = Vec::new();
             let mut missing = sandbox.sh("", &[]);
             missing.argv = Argv::try_from(vec!["/nonexistent/program".to_owned()]).unwrap();
-            let started = sandbox.session.start(missing, left(hung())).map(|_| ());
+            let started = sandbox.session.start(missing, hung()).map(|_| ());
             lines.push(format!("missing program: {}", show_error(sandbox, started)));
             // Its name quotes its long first argument, each quote five bytes, which the reply cuts.
             let mut long = sandbox.sh("", &[]);
             let word = "'".repeat(20 << 10);
             long.argv = Argv::try_from(vec!["/nonexistent/program".to_owned(), word]).unwrap();
-            let started = sandbox.session.start(long, left(hung())).map(|_| ());
+            let started = sandbox.session.start(long, hung()).map(|_| ());
             let said = show_error(sandbox, started);
             lines.push(format!(
                 "missing program, a long word: {} bytes",
@@ -666,24 +663,24 @@ fn refusals() {
             // `sandboxd`'s own standard error, or a FIFO that nothing reads.
             let link = sandbox.sh("echo leaked", &[]);
             std::os::unix::fs::symlink("/proc/self/fd/2", link.stdout.as_str()).unwrap();
-            let started = sandbox.session.start(link, left(hung())).map(|_| ());
+            let started = sandbox.session.start(link, hung()).map(|_| ());
             lines.push(format!("stdout a link: {}", show_error(sandbox, started)));
             let fifo = sandbox.sh("true", &[]);
             let made = stdx::process::command("mkfifo", PATH_ONLY)
                 .arg(fifo.stdout.as_str())
                 .status();
             assert!(made.unwrap().success());
-            let started = sandbox.session.start(fifo, left(hung())).map(|_| ());
+            let started = sandbox.session.start(fifo, hung()).map(|_| ());
             lines.push(format!("stdout a FIFO: {}", show_error(sandbox, started)));
             // Started by name with its own PATH, a missing program is waited for by the standard
             // library itself, which must not race the reaper while another command runs.
             let sleep = sandbox.sh("exec sleep 60", &[]);
-            let _running = sandbox.session.start(sleep, left(hung())).unwrap();
+            let _running = sandbox.session.start(sleep, hung()).unwrap();
             let mut failures: Vec<String> = (0..1000)
                 .map(|_| {
                     let mut by_name = sandbox.sh("", &["PATH=/usr/bin:/bin"]);
                     by_name.argv = Argv::try_from(vec!["no-such-program".to_owned()]).unwrap();
-                    let started = sandbox.session.start(by_name, left(hung())).map(|_| ());
+                    let started = sandbox.session.start(by_name, hung()).map(|_| ());
                     show_error(sandbox, started)
                 })
                 .collect();
@@ -694,9 +691,7 @@ fn refusals() {
                 Put::File(file.clone(), file_mode(), b"first"),
                 Put::File(file, file_mode(), b"second"),
             ];
-            let put = sandbox
-                .session
-                .put(&absolute(&sandbox.root), twice, left(hung()));
+            let put = sandbox.session.put(&absolute(&sandbox.root), twice, hung());
             lines.push(format!("same file twice: {}", show_error(sandbox, put)));
             std::os::unix::fs::symlink("/etc/passwd", sandbox.root.join("out/link")).unwrap();
             lines.push(format!("link: {}", sandbox.collect("out").unwrap_err()));
@@ -734,12 +729,12 @@ fn new_roots() {
             let root = absolute(&sandbox.root.join("in/fresh/tree"));
             let put = || [Put::Dir(relative("a"), dir_mode())];
             let first = thread::scope(|scope| {
-                let put = scope.spawn(|| trees.put(&root, Root::New, put(), left(hung())));
+                let put = scope.spawn(|| trees.put(&root, Root::New, put(), hung()));
                 put.join().unwrap()
             });
             first.unwrap();
             let made = sandbox.root.join("in/fresh/tree/a").is_dir();
-            let again = trees.put(&root, Root::New, put(), left(hung()));
+            let again = trees.put(&root, Root::New, put(), hung());
             let mut lines = vec![
                 format!("put, its parents made: {made}"),
                 format!("put again: {}", show_error(sandbox, again)),
@@ -752,9 +747,7 @@ fn new_roots() {
                 absolute(&file),
                 absolute(&sandbox.root.join("in/none")),
             ] {
-                trees
-                    .put(&at, Root::Replaced, other(), left(hung()))
-                    .unwrap();
+                trees.put(&at, Root::Replaced, other(), hung()).unwrap();
                 let held: Vec<_> = (fs::read_dir(at.as_str()).unwrap())
                     .map(|entry| entry.unwrap().file_name().into_string().unwrap())
                     .collect();
@@ -781,7 +774,7 @@ fn ending_the_session() {
         Meeting::Socket,
         |sandbox| {
             let launch = sandbox.sh("exec sleep 60", &[]);
-            sandbox.session.start(launch, left(hung())).unwrap();
+            sandbox.session.start(launch, hung()).unwrap();
             let timeout = Duration::from_secs(10);
             let running = processes(&sandbox.root, timeout, |found| !found.is_empty());
             vec![format!("running: {}", running.len())]
@@ -1044,7 +1037,7 @@ fn dialed(address: SocketAddr) -> TcpStream {
             Ok(stream) => break stream,
             Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
                 assert!(
-                    by.remaining().is_some(),
+                    by().is_some(),
                     "sandboxd never listened: it should listen as it starts"
                 );
                 thread::sleep(Duration::from_millis(10));
@@ -1052,8 +1045,8 @@ fn dialed(address: SocketAddr) -> TcpStream {
             Err(error) => panic!("{error}"),
         }
     };
-    stream.set_read_timeout(hung().remaining()).unwrap();
-    stream.set_write_timeout(hung().remaining()).unwrap();
+    stream.set_read_timeout(hung()()).unwrap();
+    stream.set_write_timeout(hung()()).unwrap();
     stream
 }
 
@@ -1363,7 +1356,7 @@ fn fake_gateway(socket: &Path) -> (UnixStream, Child, Value) {
             Ok((connection, _)) => break connection,
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 assert!(
-                    by.remaining().is_some(),
+                    by().is_some(),
                     "sandboxd never connected: it should connect as it starts"
                 );
                 thread::sleep(Duration::from_millis(10));
@@ -1372,8 +1365,8 @@ fn fake_gateway(socket: &Path) -> (UnixStream, Child, Value) {
         }
     };
     connection.set_nonblocking(false).unwrap();
-    connection.set_read_timeout(hung().remaining()).unwrap();
-    connection.set_write_timeout(hung().remaining()).unwrap();
+    connection.set_read_timeout(hung()()).unwrap();
+    connection.set_write_timeout(hung()()).unwrap();
     let (hello, _) = frame::read::<Value>(&mut connection).unwrap().unwrap();
     (connection, sandboxd, hello)
 }
@@ -1412,7 +1405,7 @@ fn as_root_with_user() {
     start_as_root(&dir, &container, "1234:1235");
     let (sender, arrivals) = mpsc::channel();
     let by = hung();
-    let accepted = registration.accept(|| by.remaining(), None, false, sender, |a| a, || false);
+    let accepted = registration.accept(by, None, false, sender, |a| a, || false);
     let mut session = accepted.unwrap();
     let mut lines = as_user(&mut session, &arrivals, &root.join("collected"));
     lines.extend(left_behind(&mut session, &arrivals, &container));
@@ -1462,7 +1455,7 @@ fn as_user(session: &mut Session, arrivals: &Receiver<Arrival>, collected: &Path
     let dirs = ["home", "log"].map(relative);
     let put = dirs.map(|dir| Put::Dir(dir, dir_mode()));
     session
-        .put(&absolute(Path::new("/pumpkin")), put, left(hung()))
+        .put(&absolute(Path::new("/pumpkin")), put, hung())
         .unwrap();
     let script = r#"
         stat -c '/pumpkin: %u:%g %a' /pumpkin
@@ -1474,9 +1467,7 @@ fn as_user(session: &mut Session, arrivals: &Receiver<Arrival>, collected: &Path
         entries: 10,
     };
     let log = absolute(Path::new("/pumpkin/log"));
-    session
-        .collect(&log, collected, limits, left(hung()))
-        .unwrap();
+    session.collect(&log, collected, limits, hung()).unwrap();
     let printed = fs::read_to_string(collected.join("out")).unwrap();
     let mut lines = vec![format!("exited: {exited:?}")];
     let printed = printed.lines().map(|line| line.replace('\t', " "));
@@ -1500,7 +1491,7 @@ fn left_behind(
     // shows as the command that starts it.
     let sleeping = |listed: &str| listed.split(", ").filter(|c| *c == "sleep 600").count();
     let before = contained(container, |listed| sleeping(listed) == 2);
-    session.freeze(left(hung())).unwrap();
+    session.freeze(hung()).unwrap();
     // Freezing returns once the processes it kills are gone.
     let after = contained(container, |_| true);
     vec![
@@ -1520,7 +1511,7 @@ fn sh_as_user(session: &mut Session, arrivals: &Receiver<Arrival>, script: &str)
         stdout: out.clone(),
         stderr: out,
     };
-    let process = session.start(launch, left(hung())).unwrap();
+    let process = session.start(launch, hung()).unwrap();
     match arrivals.recv_timeout(Duration::from_secs(30)) {
         Ok(Arrival::Exited {
             process: exited,
