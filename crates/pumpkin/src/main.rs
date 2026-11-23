@@ -50,7 +50,7 @@ mod whole;
 mod workspace;
 
 use ending::{end, follow};
-use reaping::{Reaper, cancel, cancelled, reap};
+use reaping::{Reaper, cancel, reap};
 use run::{driver_run, run, start};
 
 // musl's allocator is much slower than glibc's at reading a run's records, as ripgrep found of its

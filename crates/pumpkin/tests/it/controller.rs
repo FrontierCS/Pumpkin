@@ -1520,6 +1520,17 @@ fn reap_by_writer() {
         &format!("{made}/{old}/record.json"),
         &json!({"record_version":"old"}),
     );
+    // Its provider can't be reached, as the configuration that ran it is gone.
+    let unreached = id_ago(0, "0e000004");
+    let gone = scratch.0.join("gone.toml");
+    let mut ran_gone = record.clone();
+    ran_gone["args"] = json!(["--config", gone]);
+    scratch.write(&format!("{made}/{unreached}/record.json"), &ran_gone);
+    scratch.write(&format!("{made}/{unreached}/driver.pid"), "4243\n");
+    scratch.write(
+        &format!("{made}/{unreached}/provider.json"),
+        &json!({ "providers": { "aws": { "report": { "region": "us-west-1" } } } }),
+    );
     let mut lines = Vec::new();
     for _ in 0..2 {
         let mut reap = on_client(&scratch, &client, &["reap"]);
@@ -1544,19 +1555,32 @@ fn reap_by_writer() {
     check(
         &scratch,
         &lines.join("\n"),
-        &[(&own, "<own>"), (&other, "<other>"), (&old, "<old>")],
+        &[
+            (&own, "<own>"),
+            (&other, "<other>"),
+            (&old, "<old>"),
+            (&unreached, "<unreached>"),
+        ],
         &expect![[r#"
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin reap
-            exit status: Some(0)
+            exit status: Some(3)
             pumpkin: run <own> was lost, as its driver ended without an outcome.json: it is now recorded as failed
+            pumpkin: run <unreached>'s sandboxes on provider `aws`, if it left any, can't be removed, as it can't be reached: the configuration that ran it, <scratch>/gone.toml, can't be read (No such file or directory (os error 2)): put it back there, as it was when the run ran; once it can be, `pumpkin reap` removes them, and if it is gone for good, remove the record, <scratch>/home/.pumpkin/runs/<unreached>, to stop reaping it
+            pumpkin: run <unreached> was lost, as its driver ended without an outcome.json: it is now recorded as failed
             pumpkin: to reap runs made by an older pumpkin, use that build: <old>
             pumpkin: to reap runs made by pumpkin 1.2.3, use that build: <other>
+            pumpkin: 1 run ran on a provider that can't be reached, as said above: what each left there may remain
+            pumpkin: to reap again once it can be reached: pumpkin reap
             printed:
               <own>
+              <unreached>
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin reap
-            exit status: Some(0)
+            exit status: Some(3)
+            pumpkin: run <unreached>'s sandboxes on provider `aws`, if it left any, can't be removed, as it can't be reached: the configuration that ran it, <scratch>/gone.toml, can't be read (No such file or directory (os error 2)): put it back there, as it was when the run ran; once it can be, `pumpkin reap` removes them, and if it is gone for good, remove the record, <scratch>/home/.pumpkin/runs/<unreached>, to stop reaping it
             pumpkin: to reap runs made by an older pumpkin, use that build: <old>
-            pumpkin: to reap runs made by pumpkin 1.2.3, use that build: <other>"#]],
+            pumpkin: to reap runs made by pumpkin 1.2.3, use that build: <other>
+            pumpkin: 1 run ran on a provider that can't be reached, as said above: what each left there may remain
+            pumpkin: to reap again once it can be reached: pumpkin reap"#]],
     );
 }
 
@@ -1590,7 +1614,6 @@ fn reap_after_a_cut() {
         &expect![[r#"
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin reap
             exit status: Some(0)
-            pumpkin: run <id> was lost, as its driver ended without an outcome.json: it is now recorded as failed
             pumpkin: the reap's reply was cut: the output may omit ids of runs already cleaned
             pumpkin: controller `alice` didn't answer: ended within the answer: reaping the runs again now, attempt 2 of 7"#]],
     );

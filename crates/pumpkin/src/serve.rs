@@ -105,12 +105,8 @@ fn requests(
                 let (start, credentials) = request.decode(&body)?;
                 crate::job::start(home, start, credentials, member)
             }),
-            Ask::Reap(request) => link::answer(output, request, |request| {
-                reaping::reap(home, request, &body)
-            }),
-            Ask::Cancel(request) => link::answer(output, request, |request| {
-                reaping::cancel(home, request, &body, member)
-            }),
+            Ask::Reap(request) => reaping::reap(output, home, request, &body),
+            Ask::Cancel(request) => reaping::cancel(output, home, request, &body, member),
             Ask::Follow {
                 id,
                 log_from_bytes,
