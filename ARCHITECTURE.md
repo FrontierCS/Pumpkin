@@ -61,9 +61,13 @@ attention to the **Architecture Invariant** notes: they often name something del
 ### `crates/stdx`
 
 What `std` lacks and several crates share, such as errors with context (`Context`), deadlines
-(`Deadline`), a clock that a test can script (`time::Clock`) and child processes (`process`).
+(`Deadline`), a clock that a test can script (`time::Clock`), child processes (`process`), and a
+process's loop, its one door to the operating system (`io`).
 
 **Architecture Invariant:** it knows nothing of Pumpkin.
+
+**Architecture Invariant:** a loop's callbacks run only in its batch, never in the call that
+submitted their operation, and every deadline on the loop is a time on its backend's clock.
 
 **Architecture Invariant:** a child process gets only the environment that its caller states, and
 `process::run` ends it at a bound that its caller states. Clippy's configuration bans std's ways
