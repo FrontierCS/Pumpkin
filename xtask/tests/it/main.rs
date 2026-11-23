@@ -19,8 +19,6 @@ mod aws_certificates;
 #[path = "../../src/diff.rs"]
 mod diff;
 mod entry;
-#[path = "../../src/figure.rs"]
-mod figure;
 mod live;
 mod op_stats;
 #[path = "../../src/repo.rs"]
@@ -461,74 +459,6 @@ fn figures() {
 }
 
 #[test]
-fn figure_of_crates() {
-    let package = |name: &str, bin: bool, dependencies: &[(&str, Option<&str>)]| {
-        let kind = if bin { "bin" } else { "lib" };
-        let dependencies: Vec<_> = (dependencies.iter())
-            .map(|(name, kind)| serde_json::json!({ "name": name, "kind": kind }))
-            .collect();
-        serde_json::json!({
-            "name": name,
-            "targets": [{ "name": name, "kind": [kind] }],
-            "dependencies": dependencies,
-        })
-    };
-    let metadata = serde_json::json!({ "packages": [
-        package("app", true, &[("mid", None), ("side", None), ("helper", Some("dev")), ("serde", None)]),
-        package("mid", false, &[("low", None), ("side", Some("build"))]),
-        package("low", false, &[("base", None)]),
-        package("base", false, &[]),
-        package("side", false, &[]),
-        package("tool", true, &[("side", None), ("base", None)]),
-        package("helper", false, &[]),
-    ]})
-    .to_string();
-    check(
-        &[],
-        |repo| {
-            let stale = figure::check(repo.root, &metadata).unwrap_err();
-            figure::write(repo.root, &metadata).unwrap();
-            let fresh = figure::check(repo.root, &metadata);
-            let drawn = repo.read(figure::PATH).unwrap();
-            let drawn = drawn.replace(figure::STYLE, "<style>…</style>");
-            format!("{stale}\n{fresh:?}\n{drawn}")
-        },
-        &expect![[r#"
-            docs/figures/crates.svg is not what the workspace's manifests draw, as a crate or a dependency changed: run `cargo xtask figures`
-            Ok(())
-            <!-- cargo xtask figures writes this file from `cargo metadata`: edit xtask/src/figure.rs, not this -->
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 276 316" width="276" height="316" role="img" aria-labelledby="title desc">
-            <title id="title">How the workspace's crates depend on one another</title>
-            <desc id="desc">A box for each crate of the workspace, shaded if it builds a binary, in rows: an arrow leads from a crate down to each it depends on, but for a build or a development dependency, and for one that another of its arrows already leads to.</desc>
-            <style>…</style>
-            <defs><marker id="head" viewBox="0 0 8 8" refX="8" refY="4" markerWidth="8" markerHeight="8" orient="auto"><path class="head" d="M0 0L8 4L0 8z"/></marker></defs>
-            <rect class="bg" width="276" height="316"/>
-            <path class="arrow" d="M117 48C117 73 94 73 94 99" marker-end="url(#head)"/>
-            <path class="arrow" d="M141 48C141 74 164 74 164 100V132C164 158 202 158 202 184V216C202 241 236 241 236 267" marker-end="url(#head)"/>
-            <path class="arrow" d="M62 216C62 241 40 241 40 267" marker-end="url(#head)"/>
-            <path class="arrow" d="M94 132C94 157 62 157 62 183" marker-end="url(#head)"/>
-            <path class="arrow" d="M136 216C136 241 64 241 64 267" marker-end="url(#head)"/>
-            <path class="arrow" d="M160 216C160 241 212 241 212 267" marker-end="url(#head)"/>
-            <rect class="hot" x="93" y="16" width="72" height="32" rx="6"/>
-            <text class="code mid" x="129" y="36">app</text>
-            <rect class="box" x="58" y="100" width="72" height="32" rx="6"/>
-            <text class="code mid" x="94" y="120">mid</text>
-            <rect class="box" x="26" y="184" width="72" height="32" rx="6"/>
-            <text class="code mid" x="62" y="204">low</text>
-            <rect class="hot" x="112" y="184" width="72" height="32" rx="6"/>
-            <text class="code mid" x="148" y="204">tool</text>
-            <rect class="box" x="16" y="268" width="72" height="32" rx="6"/>
-            <text class="code mid" x="52" y="288">base</text>
-            <rect class="box" x="102" y="268" width="72" height="32" rx="6"/>
-            <text class="code mid" x="138" y="288">helper</text>
-            <rect class="box" x="188" y="268" width="72" height="32" rx="6"/>
-            <text class="code mid" x="224" y="288">side</text>
-            </svg>
-        "#]],
-    );
-}
-
-#[test]
 fn test_data() {
     use Standing::{Deleted, Ignored, Tracked, Untracked};
     let file = |path| (path, "data\n".to_owned(), Tracked);
@@ -618,12 +548,25 @@ fn diff() {
                 .unwrap();
             let diff = diff::since(repo, "HEAD", &[], again).unwrap();
             let below = diff::since(repo, "HEAD", &["changed.rs".into()], again).unwrap();
+            // Git's blob IDs, which name the contents the test wrote, stand masked, as cargo's
+            // tests mask hashes.
+            let masked = |diff: String| {
+                let lines = diff.lines().map(|line| {
+                    let Some(ids) = line.strip_prefix("index ") else {
+                        return format!("{line}\n");
+                    };
+                    let mode = ids.split_once(' ').map(|(_, mode)| format!(" {mode}"));
+                    format!("index [HASH]..[HASH]{}\n", mode.unwrap_or_default())
+                });
+                lines.collect::<String>()
+            };
+            let (diff, below) = (masked(diff), masked(below));
             format!("{refused}\n{diff}below changed.rs:\n{below}")
         },
         &expect![[r#"
             the diff would leave out untracked Rust files: add them to it with `git add --intent-to-add -- <repo>/new.rs`, then run `cargo xtask mutants --in-diff HEAD` again
             diff --git a/changed.rs b/changed.rs
-            index 59760b5..e20511e 100644
+            index [HASH]..[HASH] 100644
             --- a/changed.rs
             +++ b/changed.rs
             @@ -1 +1,3 @@
@@ -633,21 +576,21 @@ fn diff() {
             +}
             diff --git a/deleted.rs b/deleted.rs
             deleted file mode 100644
-            index d68b814..0000000
+            index [HASH]..[HASH]
             --- a/deleted.rs
             +++ /dev/null
             @@ -1 +0,0 @@
             -fn d() {}
             diff --git a/new.rs b/new.rs
             new file mode 100644
-            index 0000000..ed2b5d2
+            index [HASH]..[HASH]
             --- /dev/null
             +++ b/new.rs
             @@ -0,0 +1 @@
             +fn g() {}
             below changed.rs:
             diff --git a/changed.rs b/changed.rs
-            index 59760b5..e20511e 100644
+            index [HASH]..[HASH] 100644
             --- a/changed.rs
             +++ b/changed.rs
             @@ -1 +1,3 @@
