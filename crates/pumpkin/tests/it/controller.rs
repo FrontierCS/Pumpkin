@@ -706,6 +706,8 @@ fn start_after_a_cut() {
 // No file of the client's that another user may read, but a public key.
 #[test]
 fn modes_of_what_the_client_keeps() {
+    // The public key's mode is the umask's: this test's, whatever the machine's.
+    rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o022));
     let scratch = Scratch::new();
     let (_, id, _) = started_job(&scratch);
     // The test's own, which `connect` wrote.

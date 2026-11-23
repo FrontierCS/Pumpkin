@@ -237,12 +237,6 @@ impl Sandbox {
     }
 }
 
-fn umask() -> u32 {
-    let status = fs::read_to_string("/proc/self/status").unwrap();
-    let line = status.lines().find_map(|line| line.strip_prefix("Umask:"));
-    u32::from_str_radix(line.unwrap().trim(), 8).unwrap()
-}
-
 fn absolute(path: &Path) -> AbsolutePath {
     AbsolutePath::try_from(path.to_str().unwrap().to_owned()).unwrap()
 }
@@ -427,6 +421,8 @@ fn put_run_collect(sandbox: &mut Sandbox) -> Vec<String> {
 // A tree keeps each entry's mode within the host's umask, but a directory's owner always has
 // all three bits and no set-ID or sticky bit: the receiver can always remove what it got.
 fn modes_and_stdin() {
+    // The umask that the collected modes are within: this test's, whatever the machine's.
+    rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o027));
     check(
         Meeting::Socket,
         |sandbox| {
@@ -470,19 +466,12 @@ fn modes_and_stdin() {
                 "private/key",
                 "prompt",
                 "shut",
+                "open",
+                "open/shared",
             ] {
                 let metadata = fs::metadata(collected.join(path)).unwrap();
                 let mode = metadata.permissions().mode() & 0o7777;
                 lines.push(format!("collected {path}: {mode:o}"));
-            }
-            // The host writes within its umask, whatever it is.
-            let umask = umask();
-            for (path, put) in [("open", 0o777), ("open/shared", 0o666)] {
-                let metadata = fs::metadata(collected.join(path)).unwrap();
-                let within = metadata.permissions().mode() & 0o7777 == put & !umask;
-                lines.push(format!(
-                    "collected {path}: {put:o} within the umask: {within}"
-                ));
             }
             let removed = fs::remove_dir_all(&collected);
             lines.push(format!("the collected tree removed: {removed:?}"));
@@ -508,14 +497,14 @@ fn modes_and_stdin() {
             777 in/open
             666 in/open/shared
             2
-            collected tools: 755
-            collected tools/tool: 755
+            collected tools: 750
+            collected tools/tool: 750
             collected private: 700
             collected private/key: 600
-            collected prompt: 444
+            collected prompt: 440
             collected shut: 700
-            collected open: 777 within the umask: true
-            collected open/shared: 666 within the umask: true
+            collected open: 750
+            collected open/shared: 640
             the collected tree removed: Ok(())
             in/tools replaced: Ok(()), holds ["again"]
             then Ended { reason: "the owner dropped the session" }

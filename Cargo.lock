@@ -1147,6 +1147,7 @@ dependencies = [
  "expect-test",
  "install",
  "proc-macro2",
+ "rustix",
  "serde_json",
  "sha2",
  "stdx",

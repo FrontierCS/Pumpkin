@@ -21,6 +21,8 @@ use std::process::{Command, ExitCode, Output};
 use std::time::Duration;
 
 use repo::{Repo, STEP_TIMEOUT};
+use rustix::fs::Mode;
+use rustix::process::umask;
 use stdx::Context as _;
 use stdx::process::{self, Bound, Echo, Environment, Failure, Run, Stream, printed};
 
@@ -456,6 +458,9 @@ fn ci() -> Result<()> {
     // ci checks snapshots, never rewrites them.
     test.env_remove("UPDATE_EXPECT");
     doctests.env_remove("UPDATE_EXPECT");
+    // A umask of ci's own, so that no snapshot holds a mode that the developer's umask chose.
+    // 027 takes bits that 022 and 002, the common defaults, leave.
+    umask(Mode::from_raw_mode(0o027));
     tests(&mut test, &mut doctests, "cargo xtask ci")
 }
 
