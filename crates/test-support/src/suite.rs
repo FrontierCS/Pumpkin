@@ -86,9 +86,10 @@ fn soon() -> Duration {
 // before are gone; the other run's is the first alone.
 const ROLES: [&str; 6] = ["lifecycle", "killed", "mute", "stalled", "broken", "late"];
 
-// How long the suite waits for room to reserve on its provider, which other tests may hold for as
-// long as they run.
-const ROOM: Duration = Duration::from_mins(10);
+// How long the suite waits for room to reserve on its provider, which other processes may hold for
+// as long as they run: under the 300 s at which the `live` profile kills a test, so that a test
+// that never gets room fails with the reason.
+const ROOM: Duration = Duration::from_mins(4);
 
 /// Runs the suite against each of `subjects` and checks that their outcomes are the same.
 ///
@@ -638,8 +639,8 @@ fn reserved(provider: &dyn Provider, run: &RunTag, roles: &[&str]) -> Reservatio
     reserve_with_room(provider, run, &phases)
 }
 
-/// What `provider` holds for `run`, of `phases`, once it has room beside what other tests hold,
-/// which it waits for for up to 10 minutes.
+/// What `provider` holds for `run`, of `phases`, once it has room beside what other processes
+/// hold, which it waits for for up to 4 minutes.
 ///
 /// # Panics
 ///

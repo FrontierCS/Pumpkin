@@ -48,7 +48,6 @@ struct State {
     slow: VecDeque<SlowSync>,
     held: Option<(Synced, &'static str)>,
     failed: Option<Synced>,
-    failed_file: Option<(&'static str, u32)>,
     first: Option<Arc<dyn Fill>>,
     // When the run started by the machine's clock, once it has.
     unix: SystemTime,
@@ -96,7 +95,6 @@ impl SimHost {
             slow: VecDeque::new(),
             held: None,
             failed: None,
-            failed_file: None,
             first: None,
             unix: UNIX_EPOCH,
             after_read: VecDeque::new(),
@@ -145,12 +143,6 @@ impl SimHost {
     /// Fails the first sync that makes `record` last.
     pub(crate) fn failed_sync(self, record: Synced) -> Self {
         stdx::unpoisoned(self.state.lock()).failed = Some(record);
-        self
-    }
-
-    /// Fails the sync of a file named `name`, after `before` syncs of it that succeed.
-    pub(crate) fn failed_sync_of(self, name: &'static str, before: u32) -> Self {
-        stdx::unpoisoned(self.state.lock()).failed_file = Some((name, before));
         self
     }
 
@@ -210,21 +202,7 @@ impl Host for SimHost {
             state.due = Some((thread::current().id(), at));
         }
         let awaited = (state.held.take_if(|(record, _)| reached(record))).map(|(_, logged)| logged);
-        let named = |name: &str| path.file_name() == Some(name.as_ref());
-        let file = match &mut state.failed_file {
-            Some((name, 0)) => named(name),
-            Some((name, before)) => {
-                if named(name) {
-                    *before -= 1;
-                }
-                false
-            }
-            None => false,
-        };
-        if file {
-            state.failed_file = None;
-        }
-        let failed = state.failed.take_if(|record| reached(record)).is_some() || file;
+        let failed = state.failed.take_if(|record| reached(record)).is_some();
         let first = state.first.clone();
         // Without the lock, so that the run's other threads read the clock as they hand the loop
         // its inputs.

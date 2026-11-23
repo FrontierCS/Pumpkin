@@ -1332,7 +1332,11 @@ fn writes_only_in_its_workspace() {
             held(&scratch.0.join(".pumpkin/docker"))
         ),
     ];
-    lines.extend(standard_outputs(&scratch.0.join(dir)));
+    lines.extend(
+        standard_outputs(&scratch.0.join(dir))
+            .into_iter()
+            .map(remaining),
+    );
     // So that the scratch directory can be removed.
     fs::set_permissions(home.join(".docker"), Permissions::from_mode(0o755)).unwrap();
     let shown = lines
@@ -1371,7 +1375,7 @@ fn writes_only_in_its_workspace() {
         agent `agent`'s standard output:
         {"kind":"call","job":0,"remaining":{"calls":null,"seconds":null}}
         {"kind":"status","job":0,"state":"completed","returned":{"bytes":6,"lines":1},"remaining":{"calls":null,"seconds":null}}
-        {"kind":"call","returned":{"state":"accepted"},"remaining_seconds":30}
+        {"kind":"call","returned":{"state":"accepted"},"remaining_seconds":"<s>"}
         job 0's command 0's standard output:
         job 1's command 0's standard output:"#]].assert_eq(&shown);
 }
@@ -1764,7 +1768,7 @@ fn final_call_leases_on_docker() {
         let text = fs::read_to_string(path).unwrap_or_default();
         lines.push(format!("the program's {stream}: {text:?}"));
     }
-    lines.extend(standard_outputs(&record));
+    lines.extend(standard_outputs(&record).into_iter().map(remaining));
     let shown = [(&sandboxd[..], "<sandboxd>")];
     check(
         &scratch,
@@ -1778,7 +1782,7 @@ fn final_call_leases_on_docker() {
             the program's stdout: "7\n"
             the program's stderr: "cat: can't open '/answers': No such file or directory\n"
             agent `agent`'s standard output:
-            {"kind":"call","returned":{},"remaining_seconds":60}
+            {"kind":"call","returned":{},"remaining_seconds":"<s>"}
             job 0's command 0's standard output:
             the judge reads /answers: 42
             {"kind":"lease_status","lease":0,"state":"ready","elapsed_seconds":"<s>","busy_seconds":"<s>","idle_seconds":"<s>","failure":null,"last":{"kind":"command","command":1,"end":{"exited":{"code":0}},"stdout":"7\n","stderr":"cat: can't open '/answers': No such file or directory\n"},"remaining":{"instances":0,"instance_seconds":"<s>","cumulative_seconds":null,"commands":null}}"#]],
@@ -1916,5 +1920,17 @@ impl Drop for Labelled {
                 eprintln!("the test's image tag {tag} can't be removed");
             }
         }
+    }
+}
+
+/// `line` with the seconds left of the run's deadline that a call's answer gives masked, as the
+/// run's start moves them.
+fn remaining(line: String) -> String {
+    match line.split_once(r#""remaining_seconds":"#) {
+        Some((before, after)) => {
+            let after = after.trim_start_matches(|c: char| c.is_ascii_digit());
+            format!(r#"{before}"remaining_seconds":"<s>"{after}"#)
+        }
+        None => line,
     }
 }

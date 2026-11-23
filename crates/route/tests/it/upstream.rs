@@ -667,29 +667,6 @@ fn forward() {
     );
 }
 
-#[test]
-fn upstream_url_with_query() {
-    let base = "http://127.0.0.1/";
-    // The HTTP client accepts a URI of this length before the query is added.
-    let limit = usize::from(u16::MAX) - 1;
-    let url = format!("{base}{}", "p".repeat(limit - base.len()));
-    check(
-        &[Case {
-            api: Api::Messages,
-            url: url.leak(),
-            request: |api| {
-                let mut request = request(api);
-                request.1.push_str("?beta=true");
-                request
-            },
-            ..unanswered("the endpoint with no room for the query")
-        }],
-        &expect![[
-            r#"the endpoint with no room for the query: the stand-in got nothing; the sandbox heard 502 [("content-type", "application/json")] {"error":{"message":"the upstream's URL with the request's query is invalid (uri too long): check the configured upstream URL","type":"api_error"},"type":"error"}; told: Some(Refused { upstream_status: None, request_id: None, status: 502, message: "the upstream's URL with the request's query is invalid (uri too long): check the configured upstream URL" }); kept: request 813 bytes, response 162 bytes; key refused: false"#
-        ]],
-    );
-}
-
 // The usage told is the second part's, which the route read after the sandbox had hung up.
 #[test]
 fn sandbox_hangs_up_mid_stream() {

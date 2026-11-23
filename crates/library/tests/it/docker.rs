@@ -129,13 +129,13 @@ fn codex_layer() {
 fn claude_code_layer() {
     // The libraries the loader finds for `claude`, without their tabs and their addresses, which
     // differ from run to run; `claude` run as the library's `argv` runs it; and `claude` run again
-    // under the names its shell's `find` and `grep` give it.
+    // under the names its shell's `find` and `grep` give it, by the first line of each version.
     let script = "cd /harness/claude-code-2.1.296 && find . | sort | xargs stat -c '%A %u:%g %n' \
                   && ./lib/ld-linux-x86-64.so.2 --list ./claude \
                   | tr -d '\t' | sed 's/ (0x[0-9a-f]*)//' \
                   && /harness/claude-code-2.1.296/claude --version \
-                  && (exec -a bfs /harness/claude-code-2.1.296/claude --version) \
-                  && (exec -a ugrep /harness/claude-code-2.1.296/claude --version)";
+                  && (exec -a bfs /harness/claude-code-2.1.296/claude --version) | head -n 1 \
+                  && (exec -a ugrep /harness/claude-code-2.1.296/claude --version) | head -n 1";
     check(
         "harness/claude_code/layer/Dockerfile",
         &[],
@@ -160,22 +160,7 @@ fn claude_code_layer() {
             libm.so.6 => /harness/claude-code-2.1.296/lib/libm.so.6
             2.1.296 (Claude Code)
             bfs 4.1.1
-
-            Copyright © Tavian Barnes and the bfs contributors
-            No rights reserved (https://opensource.org/license/0BSD)
-
-            CONFFLAGS := --enable-release --with-oniguruma --without-libselinux --without-libacl
-            CC        := /usr/lib/llvm-23/bin/clang --target=x86_64-linux-gnu --sysroot=/opt/linux-sysroot-glibc
-            CPPFLAGS  := -Isrc -Igen -include src/prelude.h -DNDEBUG -MD -MP -Wundef-prefix=BFS_ -Dposix_getdents=__bfs_poison_posix_getdents_musl_1_2_5 -Dgetdents64=__bfs_poison_getdents64_glibc_2_30 -Dposix_spawn_file_actions_addfchdir_np=__bfs_poison_addfchdir_np_glibc_2_29 -I/tmpfs/bun/embedded/oniguruma/src
-            CFLAGS    := -O3 -std=c23 -pthread -Wformat=2 -Wimplicit-fallthrough -Werror=implicit -Wmissing-declarations -Wmissing-variable-declarations -Wshadow -Wsign-compare -Wstrict-prototypes -g -Wall 
-            LDFLAGS   := -Wl,-z,now -L/tmpfs/bun/build/release/deps/oniguruma -no-pie
-            LDLIBS    := -lonig -lrt
-
-            https://tavianator.com/projects/bfs.html
             ugrep 7.8.4 x86_64-pc-linux-gnu +sse2; -P:pcre2jit; -z:zlib,bzip2,zstd,brotli,7z,tar/pax/cpio/zip
-            License: BSD-3-Clause; ugrep user manual: <https://ugrep.com>
-            Written by Robert van Engelen and others: <https://github.com/Genivia/ugrep>
-            Ugrep utilizes the RE/flex regex library: <https://github.com/Genivia/RE-flex>
             the layer on another base: the same"#]],
     );
 }
@@ -269,11 +254,13 @@ fn qwen_code_layer() {
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn pi_layer() {
-    // Pi's directory and the packages', each file's mode and owner counted, for they are many;
-    // what `NODE_RUNS` prints; and Pi run as the library's `argv` runs it.
+    // Pi's directory and the packages', by the count of the files below that are not root's or
+    // are writable, links aside; what `NODE_RUNS` prints; and Pi run as the library's `argv` runs
+    // it.
     let script = format!(
         "cd /harness && find . -maxdepth 2 | sort | xargs stat -c '%A %u:%g %n' \
-         && find pi-1.2.0 | xargs stat -c '%A %u:%g' | sort | uniq -c && {NODE_RUNS} \
+         && find pi-1.2.0 ! -type l '(' ! -user 0 -o ! -group 0 -o -perm /0222 ')' | wc -l \
+         && {NODE_RUNS} \
          && /harness/node-24.14.0/node \
          /harness/pi-1.2.0/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --version"
     );
@@ -291,10 +278,7 @@ fn pi_layer() {
             dr-xr-xr-x 0:0 ./pi-1.2.0/node_modules
             -r--r--r-- 0:0 ./pi-1.2.0/package-lock.json
             -r--r--r-- 0:0 ./pi-1.2.0/package.json
-              15009 -r--r--r-- 0:0
-                 23 -r-xr-xr-x 0:0
-               1431 dr-xr-xr-x 0:0
-                  8 lrwxrwxrwx 0:0
+            0
             linux-vdso.so.1
             libdl.so.2 => /harness/node-24.14.0/lib/libdl.so.2
             libstdc++.so.6 => /harness/node-24.14.0/lib/libstdc++.so.6

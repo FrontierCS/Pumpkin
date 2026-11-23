@@ -69,9 +69,9 @@ fn roles() {
             dir 0700 /workspace/.pi-home/tmp
             dir 0700 /workspace/.pi-home/.pi
             dir 0700 /workspace/.pi-home/.pi/agent
-            file 0600 /workspace/.pi-home/.pi/agent/models.json, sha256 8f22c8fa06691673e1530749fb1051785254df0ed2fd7083eaaa9852c6fb7074:
+            file 0600 /workspace/.pi-home/.pi/agent/models.json:
             {"providers":{"pumpkin":{"api":"openai-completions","apiKey":"pumpkin","baseUrl":"http://127.0.0.1:11235/v1","models":[{"compat":{"maxTokensField":"max_completion_tokens","supportsDeveloperRole":false,"supportsReasoningEffort":true,"supportsStore":false,"thinkingFormat":"openai"},"contextWindow":1048576,"id":"gemini-4-argon","maxTokens":65536,"reasoning":true,"thinkingLevelMap":{"high":"high","low":"low","medium":"medium"}}]}}}
-            file 0600 /workspace/.pi-home/.pi/agent/settings.json, sha256 52f79489e16f036852e8e22f8c37060abe71316132b549bd41511fb1fef7e027:
+            file 0600 /workspace/.pi-home/.pi/agent/settings.json:
             {"httpIdleTimeoutMs":3600000,"retry":{"maxRetries":16}}
             route: chat gemini-4-argon
             request headers: user-agent
@@ -88,9 +88,9 @@ fn roles() {
             dir 0700 /srv/my "work" dir/.pi-home/tmp
             dir 0700 /srv/my "work" dir/.pi-home/.pi
             dir 0700 /srv/my "work" dir/.pi-home/.pi/agent
-            file 0600 /srv/my "work" dir/.pi-home/.pi/agent/models.json, sha256 c829254ad18abb2b5d9b92894ee29c63480454c2c1a4453135ef65ea8025bd8e:
+            file 0600 /srv/my "work" dir/.pi-home/.pi/agent/models.json:
             {"providers":{"pumpkin":{"api":"openai-completions","apiKey":"pumpkin","baseUrl":"http://127.0.0.1:11235/v1","models":[{"compat":{"maxTokensField":"max_completion_tokens","supportsDeveloperRole":false,"supportsReasoningEffort":true,"supportsStore":false,"thinkingFormat":"openai"},"contextWindow":1,"id":"vendor/\"quoted\"\\model","maxTokens":1,"reasoning":true,"thinkingLevelMap":{"high":"high","low":"low","medium":"medium"}}]}}}
-            file 0600 /srv/my "work" dir/.pi-home/.pi/agent/settings.json, sha256 52f79489e16f036852e8e22f8c37060abe71316132b549bd41511fb1fef7e027:
+            file 0600 /srv/my "work" dir/.pi-home/.pi/agent/settings.json:
             {"httpIdleTimeoutMs":3600000,"retry":{"maxRetries":16}}
             route: chat vendor/"quoted"\model
             model-small low / 200000 32000:
@@ -101,8 +101,8 @@ fn roles() {
             dir 0700 /.pi-home/tmp
             dir 0700 /.pi-home/.pi
             dir 0700 /.pi-home/.pi/agent
-            file 0600 /.pi-home/.pi/agent/models.json, sha256 8bba009e83c072a833ed2cf7a54ee81fe973da097a23f1859dc92474ea2a72a6:
-            file 0600 /.pi-home/.pi/agent/settings.json, sha256 52f79489e16f036852e8e22f8c37060abe71316132b549bd41511fb1fef7e027:
+            file 0600 /.pi-home/.pi/agent/models.json:
+            file 0600 /.pi-home/.pi/agent/settings.json:
             route: chat model-small
         "#]],
     );

@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use std::os::unix::fs::{PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
 use std::process::Output;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use std::{env, fs, thread};
 
 use expect_test::{Expect, expect};
@@ -156,16 +156,13 @@ impl<'a> Fixture<'a> {
         thread::scope(|scope| {
             let first = scope.spawn(|| self.run("first", pin));
             let second = scope.spawn(|| self.run("repo", pin));
-            let started = Instant::now();
+            // Neither launcher ends while the gate is held, unless it fails first.
             let attempts = self.scratch.join("flock");
             let both_cold = loop {
                 if fs::read_to_string(&attempts).is_ok_and(|text| text.lines().count() == 2) {
                     break true;
                 }
-                if first.is_finished()
-                    || second.is_finished()
-                    || started.elapsed() >= Duration::from_secs(2)
-                {
+                if first.is_finished() || second.is_finished() {
                     break false;
                 }
                 thread::sleep(Duration::from_millis(5));

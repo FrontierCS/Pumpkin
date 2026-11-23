@@ -138,27 +138,20 @@ fn carries_both_ways() {
         Peer::Server,
         HUNG,
         |client, server, _| {
-            let up = sent(&client, &server, pattern()).join().unwrap();
-            let down = sent(&server, &client, pattern()).join().unwrap();
-            let mut lines = vec![
-                format!("to the server intact: {up}"),
-                format!("to the client intact: {down}"),
-            ];
             let (up, down) = (
                 sent(&client, &server, pattern()),
                 sent(&server, &client, pattern()),
             );
             let both = (up.join().unwrap(), down.join().unwrap());
-            lines.push(format!("both ways at once, intact: {both:?}"));
             client.shutdown().unwrap();
             let ended = (&server).read_to_end(&mut Vec::new());
             let ended = ended.map_err(|error| error.to_string());
-            lines.push(format!("then the server's end reads: {ended:?}"));
-            lines
+            vec![
+                format!("both ways at once, intact: {both:?}"),
+                format!("then the server's end reads: {ended:?}"),
+            ]
         },
         &expect![[r#"
-            to the server intact: true
-            to the client intact: true
             both ways at once, intact: (true, true)
             then the server's end reads: Ok(0)"#]],
     );
@@ -286,7 +279,7 @@ fn refused_peers() {
     check(
         (&edge::client(), edge::NAME),
         Peer::Sends(b""),
-        Duration::from_millis(200),
+        Duration::from_millis(1),
         unreached,
         &expect![[
             r#"client: Err("the TLS handshake wasn't done by its deadline: expected TLS 1.3 from `localhost`, with a certificate trusted for it")"#

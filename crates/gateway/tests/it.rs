@@ -18,9 +18,11 @@ use std::ops::Range;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use std::{fs, iter, panic};
 
 use expect_test::{Expect, expect};
@@ -39,10 +41,10 @@ use schema::sandbox::{
 };
 use serde_json::{Value, json};
 use stdx::Deadline;
-use stdx::time::{self, Clock as _, Machine};
+use stdx::time::{self, Clock, Machine};
 use test_support::{HUNG, TestDir, hung};
 
-type Session = gateway::Session<Machine>;
+type Session = gateway::Session<Still>;
 
 type Action = fn(&mut Session, &Receiver<Arrival>, &Path) -> String;
 
@@ -55,13 +57,56 @@ type Opening = fn(&mut UnixStream);
 // on a margin.
 const PAUSE: Duration = Duration::from_millis(30);
 
-// How long a private listener gives a peer to say its hello, where a silent one shows the bound:
-// each other peer says its hello as it dials, which the listener reads even once the bound has
-// passed, so no outcome rests on a margin.
+// How long the private listener of a peer that stays silent gives it to say its hello, which is
+// that peer's only outcome.
 const HELLO_BOUND: Duration = Duration::from_millis(50);
+
+// What the fake sandbox writes in its case's directory once it has stalled, which a `Still` of the
+// case takes as its event.
+const STALLED: &str = "stalled";
 
 fn short() -> Duration {
     Machine.now() + Duration::from_millis(100)
+}
+
+// What a `Still` reads once its event has come. A request whose deadline is `EVENT` ends on the
+// event. A deadline from `hung()` is later, so no event ends it.
+const EVENT: Duration = Duration::from_secs(HUNG.as_secs() / 2);
+
+// How long a wait on a `Still` blocks before it reads the clock again, which is how it learns of
+// the event.
+const LOOK: Duration = Duration::from_millis(10);
+
+// A clock that reads its origin until its event and `EVENT` from then on, so that a request ends on
+// the event, not on the machine's time.
+#[derive(Clone)]
+struct Still(Arc<dyn Fn() -> bool + Send + Sync>);
+
+impl Still {
+    // Its event is the fake sandbox's stall, which it marks by writing `marker`.
+    fn until_stalled(marker: PathBuf) -> Self {
+        Self(Arc::new(move || marker.exists()))
+    }
+
+    // Its event is its second read.
+    fn after_a_read() -> Self {
+        let reads = AtomicU32::new(0);
+        Self(Arc::new(move || reads.fetch_add(1, Ordering::Relaxed) > 0))
+    }
+}
+
+impl Clock for Still {
+    fn now(&self) -> Duration {
+        if (self.0)() { EVENT } else { Duration::ZERO }
+    }
+
+    fn realtime(&self) -> SystemTime {
+        SystemTime::now()
+    }
+
+    fn look(&self) -> Option<Duration> {
+        Some(LOOK)
+    }
 }
 
 fn check(scenario: impl FnOnce(&Path) -> Vec<String>, expect: &Expect) {
@@ -129,7 +174,10 @@ fn connect(
     fs::create_dir(dir).unwrap();
     let (_sockets, registration, socket) = issued(&dir.join("sockets"));
     let sandbox_socket = socket.clone();
+    let stalled = dir.join(STALLED);
+    let clock = Still::until_stalled(stalled.clone());
     let sandbox = thread::spawn(move || {
+        let stall = || fs::write(&stalled, "").unwrap();
         let mut connection = UnixStream::connect(sandbox_socket).unwrap();
         frame::write(&mut connection, &hello(), &[]).unwrap();
         let reply = frame::read::<HelloReply>(&mut connection).unwrap();
@@ -155,6 +203,14 @@ fn connect(
             } else if message == "stall" {
                 // Here and below, it reads nothing more, as a stuck sandbox: what the connection's
                 // buffers hold by the hang-up depends on their sizes.
+                stall();
+                send_unended(&mut connection);
+                return replies;
+            } else if message == "stall_in_frame" {
+                // A byte alone of a frame longer than the connection's buffers hold, so that the
+                // gateway is still writing it as the sandbox stalls.
+                connection.read_exact(&mut [0]).unwrap();
+                stall();
                 send_unended(&mut connection);
                 return replies;
             } else if message == "hang_up_unread" {
@@ -162,7 +218,7 @@ fn connect(
                 connection.read_exact(&mut [0]).unwrap();
                 return replies;
             } else if let Some(message) = message.get("until_hang_up") {
-                await_hang_up(&mut connection, message, &body);
+                await_hang_up(&mut connection, message, &body, stall);
                 return replies;
             } else {
                 frame::write(&mut connection, &message, &body).is_ok()
@@ -181,7 +237,7 @@ fn connect(
     });
     let (sender, arrivals) = mpsc::channel();
     let session = registration
-        .accept((&Machine, hung()), ops, models, sender, |a| a, || false)
+        .accept((&clock, hung()), ops, models, sender, |a| a, || false)
         .unwrap();
     let second = UnixStream::connect(&socket).unwrap_err().kind();
     assert_eq!(second, std::io::ErrorKind::NotFound, "a second connection");
@@ -280,8 +336,16 @@ fn note(message: ToSandbox, body: &[u8]) -> Option<String> {
     }
 }
 
-fn await_hang_up(connection: &mut UnixStream, message: &Value, body: &[u8]) {
+fn await_hang_up(connection: &mut UnixStream, message: &Value, body: &[u8], stall: impl Fn()) {
     let hung = Deadline::after(HUNG);
+    // It stalls after four frames, one past the three parts of a tree that the gateway holds. With
+    // full bodies, the reader then waits on the request's queue as the deadline passes.
+    for _ in 0..4 {
+        if frame::write(connection, message, body).is_err() {
+            return;
+        }
+    }
+    stall();
     while frame::write(connection, message, body).is_ok() {
         assert!(
             hung.remaining().is_some(),
@@ -375,28 +439,33 @@ fn over_the_cap(session: &mut Session, arrivals: &Receiver<Arrival>, dir: &Path)
     )
 }
 
-fn freeze_and_take(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -> String {
+fn freeze_and_take(session: &mut Session, arrivals: &Receiver<Arrival>, dir: &Path) -> String {
     let frozen = outcome(session.freeze(hung()));
-    format!("freeze: {frozen}; {}", take(session, arrivals, None))
+    format!("freeze: {frozen}; {}", take(session, arrivals, dir, None))
 }
 
-fn start_and_take(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -> String {
+fn start_and_take(session: &mut Session, arrivals: &Receiver<Arrival>, dir: &Path) -> String {
     match session.start(launch(), hung()) {
-        Ok(process) => format!("started; {}", take(session, arrivals, Some(process))),
+        Ok(process) => format!("started; {}", take(session, arrivals, dir, Some(process))),
         Err(error) => format!(
             "start: {}; {}",
             outcome(Err(error)),
-            take(session, arrivals, None)
+            take(session, arrivals, dir, None)
         ),
     }
 }
 
 fn collect_and_take(session: &mut Session, arrivals: &Receiver<Arrival>, dir: &Path) -> String {
     let collected = collect(session, arrivals, dir);
-    format!("{collected}; {}", take(session, arrivals, None))
+    format!("{collected}; {}", take(session, arrivals, dir, None))
 }
 
-fn take(session: &mut Session, arrivals: &Receiver<Arrival>, started: Option<Process>) -> String {
+fn take(
+    session: &mut Session,
+    arrivals: &Receiver<Arrival>,
+    dir: &Path,
+    started: Option<Process>,
+) -> String {
     let mut lines = Vec::new();
     loop {
         let Some(arrival) = next(arrivals) else {
@@ -421,7 +490,7 @@ fn take(session: &mut Session, arrivals: &Receiver<Arrival>, started: Option<Pro
                     lines.push(format!("refuse: {:?}: {error}", error.kind()));
                 }
             }
-            Arrival::ModelRequest(incoming) => lines.push(answer_model(incoming)),
+            Arrival::ModelRequest(incoming) => lines.push(answer_model(incoming, dir)),
             Arrival::Exited { process, status } => {
                 let whose = if started == Some(process) {
                     "the"
@@ -522,7 +591,7 @@ fn too_long_reply(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path)
     lines.join("; ")
 }
 
-fn answer_model(incoming: IncomingModelRequest) -> String {
+fn answer_model(incoming: IncomingModelRequest, dir: &Path) -> String {
     let request = &incoming.request;
     let body = String::from_utf8_lossy(&request.body);
     let line = format!(
@@ -533,28 +602,30 @@ fn answer_model(incoming: IncomingModelRequest) -> String {
     let mut headers = vec![("content-type".to_owned(), "text/plain".to_owned())];
     let by = match path.as_str() {
         "/late" => Duration::ZERO,
-        "/stale" => short(),
+        "/stale" => EVENT,
         "/long" => {
             headers.push(("x-long".to_owned(), "x".repeat(frame::MAX_MESSAGE_BYTES)));
             hung()
         }
         _ => hung(),
     };
-    let by = (&Machine, by);
-    let answered = incoming.respond(200, headers, by).and_then(|mut response| {
-        if path == "/stale" {
-            return response.send(&vec![0; 8 << 20]);
-        }
-        response.send(b"hel")?;
-        match path.as_str() {
-            "/cut" => response.cut(),
-            "/drop" => {
-                drop(response);
-                Ok(())
+    let clock = Still::until_stalled(dir.join(STALLED));
+    let answered = incoming
+        .respond(200, headers, (&clock, by))
+        .and_then(|mut response| {
+            if path == "/stale" {
+                return response.send(&vec![0; 8 << 20]);
             }
-            _ => response.send(b"lo").and_then(|()| response.end()),
-        }
-    });
+            response.send(b"hel")?;
+            match path.as_str() {
+                "/cut" => response.cut(),
+                "/drop" => {
+                    drop(response);
+                    Ok(())
+                }
+                _ => response.send(b"lo").and_then(|()| response.end()),
+            }
+        });
     format!("{line}: {}", outcome(answered))
 }
 
@@ -625,13 +696,13 @@ fn late_reply(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -> 
     then_freeze(session, replied)
 }
 
-fn collect_short(session: &mut Session, _: &Receiver<Arrival>, dir: &Path) -> String {
+fn collect_until_stalled(session: &mut Session, _: &Receiver<Arrival>, dir: &Path) -> String {
     let limits = Limits {
         bytes: u64::MAX,
         entries: u64::MAX,
     };
     let out = AbsolutePath::try_from("/out".to_owned()).unwrap();
-    outcome(session.collect(&out, &dir.join("collected"), limits, short()))
+    outcome(session.collect(&out, &dir.join("collected"), limits, EVENT))
 }
 
 fn walk(dir: &Path) -> Vec<String> {
@@ -720,8 +791,8 @@ fn flight() -> Range<u32> {
     0..u32::try_from(MAX_MODEL_REQUESTS_IN_FLIGHT).unwrap()
 }
 
-// Not frames: `await_reply`, `read_frame`, `pause`, `until_hang_up`, `stall` and `hang_up_unread`
-// mark where the fake sandbox waits, and `connect` acts on them.
+// Not frames: `await_reply`, `read_frame`, `pause`, `until_hang_up`, `stall`, `stall_in_frame` and
+// `hang_up_unread` mark where the fake sandbox waits, and `connect` acts on them.
 fn await_reply() -> (Value, Vec<u8>) {
     (Value::Null, Vec::new())
 }
@@ -740,6 +811,10 @@ fn until_hang_up((message, body): (Value, Vec<u8>)) -> (Value, Vec<u8>) {
 
 fn stall() -> (Value, Vec<u8>) {
     (Value::from("stall"), Vec::new())
+}
+
+fn stall_in_frame() -> (Value, Vec<u8>) {
+    (Value::from("stall_in_frame"), Vec::new())
 }
 
 fn hang_up_unread() -> (Value, Vec<u8>) {
@@ -1000,8 +1075,10 @@ fn sandbox_model_requests() {
                         model_data(3, b"x"),
                     ]
                 }),
+                // The sandbox stalls inside the response's first frame of data.
                 (freeze_and_take, |s| {
-                    vec![done(s), model_request(3, "/stale", 0), stall()]
+                    let stale = model_request(3, "/stale", 0);
+                    vec![done(s), stale, read_frame(), stall_in_frame()]
                 }),
                 (answer_on_a_thread, |_| Vec::new()),
                 (freeze_and_take, |s| {
@@ -1134,23 +1211,24 @@ fn deadlines() {
                     |session, _, _| outcome(put_large(session, hung())),
                     |s| vec![read_frame(), pause(), done(s), await_reply()],
                 ),
-                // The sandbox answers nothing, reads nothing past a large put's first frame, or
-                // sends a tree that never ends, until the gateway hangs up.
-                (|session, _, _| freezes(session, short()), |_| vec![stall()]),
+                // The sandbox answers nothing, stops reading inside a large put's first frame of
+                // data, after its entry's, or sends a tree that never ends, until the gateway hangs
+                // up. Each request's deadline is the sandbox's stall.
+                (|session, _, _| freezes(session, EVENT), |_| vec![stall()]),
                 (
                     |session, _, _| {
-                        let put = put_large(session, short());
+                        let put = put_large(session, EVENT);
                         then_freeze(session, put)
                     },
-                    |_| vec![stall()],
+                    |_| vec![read_frame(), stall_in_frame()],
                 ),
-                (collect_short, |s| {
+                (collect_until_stalled, |s| {
                     vec![file(s, "f", u64::MAX), until_hang_up(data(s, b"x"))]
                 }),
                 // In frames of a full body, which the request takes longer to write than the reader
                 // takes to read, so that the reader waits on the request's queue as the deadline
                 // passes, and must not go on waiting there once the request has failed.
-                (collect_short, |s| {
+                (collect_until_stalled, |s| {
                     let body = vec![b'x'; frame::MAX_BODY_BYTES];
                     vec![file(s, "f", u64::MAX), until_hang_up(data(s, &body))]
                 }),
@@ -1180,53 +1258,6 @@ fn deadlines() {
             TimedOut: the request's deadline passed before it was sent: expected time left to send it; then ConnectionAborted: the request's deadline passed before it was sent: expected time left to send it
             ok; then ConnectionAborted: the sandbox ended the session; then by a passed deadline ConnectionAborted: the sandbox ended the session
             ConnectionAborted: the sandbox ended the session; arrived ["a/"]"#]],
-    );
-}
-
-#[test]
-fn arrivals() {
-    check(
-        fakes(
-            Some(OpPayloadLimit::NONE),
-            true,
-            &[
-                // An op the command made before it exited, its exit, and an op one of its children
-                // made after.
-                (start_and_take, |s| {
-                    vec![
-                        done(s),
-                        op(7, json!({ "kind": "ops" }), 0),
-                        reply("exited", s),
-                        await_reply(),
-                        op(8, json!({ "kind": "status", "job": 3 }), 0),
-                        await_reply(),
-                    ]
-                }),
-                // Model requests, each arriving once whole, around an op, and the command's exit.
-                (start_and_take, |s| {
-                    vec![
-                        done(s),
-                        model_request(3, "/a", 0),
-                        model_request(4, "/b", 2),
-                        op(7, json!({ "kind": "ops" }), 0),
-                        model_data(4, b"hi"),
-                        reply("exited", s),
-                        await_reply(),
-                        await_reply(),
-                        await_reply(),
-                    ]
-                }),
-                (
-                    |session, _, _| outcome(session.freeze(hung())),
-                    // The sandbox goes on sending, reading nothing, until the gateway hangs up.
-                    |s| vec![done(s), stall()],
-                ),
-            ],
-        ),
-        &expect![[r#"
-            started; Ops; the command exited: Code(0); Status { job: 3 }; ended: the sandbox ended the session; the sandbox heard op 7: {"kind":"ops","role":"agent","remaining_seconds":0,"resources":{"cpu_millis":1,"memory_bytes":1},"grants":[]}, op 8: {"kind":"ops","role":"agent","remaining_seconds":0,"resources":{"cpu_millis":1,"memory_bytes":1},"grants":[]}
-            started; POST /a [("content-type", "application/json")] "": ok; Ops; POST /b [("content-type", "application/json")] "hi": ok; the command exited: Code(0); ended: the sandbox ended the session; the sandbox heard model request 3: 200 [("content-type", "text/plain")], model request 3: "hel", model request 3: "lo", model request 3: end, op 7: {"kind":"ops","role":"agent","remaining_seconds":0,"resources":{"cpu_millis":1,"memory_bytes":1},"grants":[]}, model request 4: 200 [("content-type", "text/plain")], model request 4: "hel", model request 4: "lo", model request 4: end
-            ok"#]],
     );
 }
 
@@ -1614,8 +1645,8 @@ fn unchecked(listener: &Listener, address: SocketAddr) -> Vec<String> {
         sandbox(address, attesting(name), Duration::ZERO, named, said)
     });
     // The hellos wait for the checks, which come once they have been read, as a create's do, or
-    // never, and past the time a hello gets: no outcome rests on which comes first.
-    thread::sleep(HELLO_BOUND + PAUSE);
+    // never: no outcome rests on which comes first.
+    thread::sleep(PAUSE);
     let registration = admitting(checked, "checked", Ipv4Addr::LOCALHOST);
     drop(withdrawn);
     let accepted = accept_and_freeze(registration, hung());
@@ -1726,8 +1757,9 @@ fn gateway_addresses() {
 fn registrations() {
     check(
         |_| {
-            let (listener, address) = listen(HELLO_BOUND);
-            let mut silent = dial(address);
+            let (listener, address) = listen(HELLO_TIMEOUT);
+            let (_bounded, bounded_address) = listen(HELLO_BOUND);
+            let mut silent = dial(bounded_address);
             let meanwhile = admitted(&listener, address, "meanwhile");
             let waiting = thread::spawn(|| accept_and_freeze(meanwhile, hung()));
             let mut lines = refusals(&listener, address);
@@ -1814,9 +1846,15 @@ fn dials() {
                 .unwrap()
                 .port();
             let (_, unreached) = issue();
-            // Under the first wait between dials, so that the accept gives up after one.
-            let at = Machine.now() + Duration::from_millis(300);
-            let session = accepted(unreached.at(endpoint(closed)), at, false);
+            // Its deadline passes once the first dial has failed.
+            let (sender, _) = mpsc::channel();
+            let registration = unreached.at(endpoint(closed));
+            let clock = Still::after_a_read();
+            let session =
+                registration.accept((&clock, EVENT), None, false, sender, |a| a, || false);
+            let session = session
+                .map(drop)
+                .map_err(|error| format!("{:?}: {error}", error.kind()));
             let session = session.map_err(|error| error.replace(&closed.to_string(), "$PORT"));
             lines.push(format!("nothing listening: {session:?}"));
             lines.push(format!(
@@ -1849,9 +1887,8 @@ fn untrusted() -> String {
         shown.map(drop).map_err(|error| error.kind())
     });
     let (sender, _) = mpsc::channel();
-    let by = Machine.now() + Duration::from_millis(900);
     let registration = unreached.at(endpoint(port));
-    let session = registration.accept((&Machine, by), None, false, sender, |a| a, || false);
+    let session = registration.accept((&Machine, hung()), None, false, sender, |a| a, || false);
     let session = session.map(drop).map_err(|error| {
         format!("{:?}: {error}", error.kind()).replace(&port.to_string(), "$PORT")
     });
