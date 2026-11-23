@@ -129,7 +129,6 @@ pub fn run(command: &mut Command, how: Run<'_>) -> Result<Output, Failure> {
         bound,
         started: false,
     };
-    // A command whose bound leaves it no time never starts, so a failure says it didn't.
     let by = match bound {
         Bound::Within(timeout) if timeout.is_zero() => return Err(unstarted(name)),
         Bound::Within(timeout) => Deadline::after(timeout),
@@ -189,7 +188,6 @@ pub fn run(command: &mut Command, how: Run<'_>) -> Result<Output, Failure> {
     }
 }
 
-/// Writes `command` to this process's standard error, as `$ ` and what [`shown`] shows.
 fn echoed(command: &Command) -> io::Result<()> {
     let line = format!("$ {}\n", shown(command));
     (io::stderr().write_all(line.as_bytes()))

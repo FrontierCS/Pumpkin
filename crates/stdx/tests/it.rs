@@ -42,7 +42,6 @@ enum Caller<'a> {
     /// Echoed, by a deadline that has passed, in a directory that doesn't exist, where the
     /// stand-in can't start.
     Late,
-    /// As this says, once.
     Runs(Run<'a>),
 }
 
@@ -167,6 +166,7 @@ fn reaped(pid: i32) -> String {
     ExitStatus::from_raw(status.as_raw()).to_string()
 }
 
+// Each stream is more than the 64 KiB that a pipe holds, so the run reads both as it goes.
 #[test]
 fn captures() {
     check(
@@ -298,6 +298,8 @@ fn capped() {
     );
 }
 
+// The input and the output are each more than the 64 KiB that a pipe holds, so the run writes
+// and reads as it goes.
 #[test]
 fn fed() {
     let input = vec![b'x'; 300_000];
@@ -311,6 +313,7 @@ fn fed() {
     );
 }
 
+// More than the 64 KiB that a pipe holds, so the write is cut short when the command exits.
 #[test]
 fn fed_unread() {
     let input = vec![b'x'; 300_000];
@@ -592,7 +595,6 @@ fn first_exited() {
 
 #[test]
 fn tcp_options() {
-    // What the gateway and `sandboxd` each set at their end of a session over TCP.
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
     stdx::net::set_options(&stream).unwrap();
