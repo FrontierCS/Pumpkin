@@ -1,0 +1,41 @@
+# A Pumpkin controller in one privileged container, as its README says. `.env` beside this file
+# sets PUMPKIN_RELEASE, and may set PUMPKIN_PORT.
+name: pumpkin
+services:
+  controller:
+    build:
+      context: .
+      additional_contexts:
+        aws: ../aws
+      args:
+        PUMPKIN_RELEASE: ${PUMPKIN_RELEASE:-}
+    hostname: pumpkin-controller
+    # systemd, the jobs' user units and the engine inside need it, as kind's nodes and docker:dind
+    # do. A private cgroup namespace gives the engine its own cgroup tree:
+    # https://github.com/kubernetes-sigs/kind/blob/b5bed7e9f115a19e8d9f300be66c462039937d57/pkg/cluster/internal/providers/docker/provision.go#L205-L233
+    # https://github.com/kubernetes-sigs/kind/blob/715a5d163739ec398afe8f7361c5e0fc346c83b0/pkg/cluster/internal/providers/docker/provision.go#L170-L174
+    privileged: true
+    cgroup: private
+    tmpfs:
+      - /run
+      - /run/lock
+      - /tmp
+    ports:
+      - "${PUMPKIN_PORT:-2222}:22"
+    volumes:
+      # The settings and the members' list, read-only. A directory, as an editor's save replaces
+      # a file, which a file's own bind mount would never see.
+      - ./conf:/etc/pumpkin/conf:ro
+      # Off the container's overlay, on which the engine's own can't be, and kept from one
+      # container to the next: the engine's images and build cache, the home of `pumpkin` with
+      # the store, the trees, the installs and the records, and the host key.
+      - docker:/var/lib/docker
+      - containerd:/var/lib/containerd
+      - home:/home
+      - host-key:/etc/ssh/keys
+    restart: unless-stopped
+volumes:
+  docker:
+  containerd:
+  home:
+  host-key:

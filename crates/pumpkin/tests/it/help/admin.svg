@@ -70,11 +70,11 @@
 </tspan>
     <tspan x="10px" y="460px"><tspan class="fg-bright-green bold">Examples:</tspan>
 </tspan>
-    <tspan x="10px" y="478px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">sudo ./pumpkin/bin/pumpkin-admin install --settings</tspan><tspan> \</tspan>
+    <tspan x="10px" y="478px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">sudo ./pumpkin/bin/pumpkin-admin install ec2 --settings</tspan><tspan> \</tspan>
 </tspan>
     <tspan x="10px" y="496px"><tspan>    </tspan><tspan class="fg-bright-cyan bold">arn:aws:ssm:us-west-1:123456789012:parameter/pumpkin-alice/settings</tspan>
 </tspan>
-    <tspan x="10px" y="514px"><tspan>          Install this release on the controller host, as root</tspan>
+    <tspan x="10px" y="514px"><tspan>          Install this release on the controller's EC2 instance, as root</tspan>
 </tspan>
     <tspan x="10px" y="532px">
 </tspan>

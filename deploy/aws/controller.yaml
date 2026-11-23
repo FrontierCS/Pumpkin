@@ -54,7 +54,7 @@ runcmd:
     echo "$3  pumpkin.tar.xz" | sha256sum --check --strict
     mkdir pumpkin
     tar --extract --xz --file=pumpkin.tar.xz --directory=pumpkin
-    pumpkin/bin/pumpkin-admin install --settings ${settings_arn}
+    pumpkin/bin/pumpkin-admin install ec2 --settings ${settings_arn}
     curl --fail --silent --show-error --location --proto '=https' --output uv.tar.gz \
         https://github.com/astral-sh/uv/releases/download/${uv_version}/uv-x86_64-unknown-linux-gnu.tar.gz
     echo '${uv_sha256}  uv.tar.gz' | sha256sum --check --strict

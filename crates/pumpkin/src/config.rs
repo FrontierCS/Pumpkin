@@ -53,11 +53,59 @@ struct Tables {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "ControllerTable")]
 pub(crate) struct Controller {
     pub(crate) name: crate::controller::Name,
-    pub(crate) region: aws::Region,
+    pub(crate) find: Find,
     pub(crate) modal: Option<ClientModal>,
+}
+
+/// How a client finds its controller.
+// The client names the server, as Coder's, Teleport's and GitLab's do:
+// https://github.com/coder/coder/blob/3d58e6912a48f923e29a0739fbce5f8791ce0e53/cli/root.go#L62
+// https://github.com/gravitational/teleport/blob/0c2973dbae77a1a19ebb8bb1d7f059659a674038/tool/tsh/tsh.go#L520
+// https://gitlab.com/gitlab-org/omnibus-gitlab/-/blob/9b9a2e883910b2f996fd23f4845435e0cdc71550/doc/docker/README.md#L164-L186
+#[derive(Clone)]
+pub(crate) enum Find {
+    /// By the tag of its EC2 instance in `region`, which a command starts if it is stopped.
+    Ec2 { region: aws::Region },
+    /// At a fixed address, which no command starts.
+    Address(crate::controller::Address),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ControllerTable {
+    name: crate::controller::Name,
+    region: Option<aws::Region>,
+    address: Option<crate::controller::Address>,
+    modal: Option<ClientModal>,
+}
+
+impl TryFrom<ControllerTable> for Controller {
+    type Error = String;
+
+    fn try_from(table: ControllerTable) -> Result<Self, Self::Error> {
+        let ControllerTable {
+            name,
+            region,
+            address,
+            modal,
+        } = table;
+        let find = match (region, address) {
+            (Some(region), None) => Find::Ec2 { region },
+            (None, Some(address)) => Find::Address(address),
+            (Some(_), Some(_)) | (None, None) => {
+                return Err(
+                    "`[controller]` names both or neither of `region` and `address`: name the \
+                     `region` of a controller that deploy/aws made, or the `address` of one \
+                     elsewhere"
+                        .to_owned(),
+                );
+            }
+        };
+        Ok(Self { name, find, modal })
+    }
 }
 
 /// The Modal provider of a client's jobs. A job completes it with `images`, which the

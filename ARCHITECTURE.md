@@ -28,7 +28,7 @@ runtime carries out those decisions on the providers and keeps the run's record.
 sends each model request that it admits to the model provider, with the provider's key.
 
 A run is one process, the driver, on one machine: the operator's own, or a team's controller, an
-EC2 instance that runs the runs a machine sends it.
+EC2 instance or a container on a Docker host, which runs the runs a machine sends it.
 
 ![The programs and machines of a run: the operator's pumpkin starts the driver on the operator's machine or on the controller; the driver's parts, the sandboxes that the providers create and the model provider that the route reaches.](docs/figures/run-machines.svg)
 
@@ -200,14 +200,20 @@ and says of a run what `ls` says.
 names its member, and `serve` acts for that member. This prevents accidents, not members: each
 member's build runs as the controller's one user.
 
-### `crates/test-support`, `xtask`, `dist`, `deploy/aws`, `examples`
+### `crates/test-support`, `xtask`, `dist`, `deploy`, `examples`
 
 `test-support` holds what the tests of several crates share, such as the conformance suite of the
 `Provider` trait. Only tests use it. `xtask` holds the contributor tasks: `ci` runs the checks
 every change passes, and `live` those that reach a real environment. `dist` holds the files that a
 release ships as they are, such as `./pumpkin`, a task repository's launcher. `deploy/aws` is the
 Terraform module that makes a team's Pumpkin on AWS, as [its README](deploy/aws/README.md) says.
-`examples` holds tasks.
+`deploy/docker` makes a team's controller in a privileged container on a Docker host, as
+[its README](deploy/docker/README.md) says: systemd, `sshd` and a Docker engine of the container's
+own. `examples` holds tasks.
+
+**Architecture Invariant:** a Docker controller's jobs reach the engine inside its container alone,
+never the host's, so the paths that the Docker provider mounts, its ledger of CPUs and the prune of
+images mean there what they mean on an EC2 controller.
 
 ## Cross-cutting concerns
 
