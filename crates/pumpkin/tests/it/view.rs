@@ -1154,8 +1154,7 @@ fn starts_over_a_shortened_log() {
         "GET /api/runs/<id>: end {}, log_epoch {}, a build that kept no routes: {routes:?}",
         run["end"], run["log_epoch"]
     ));
-    let records = served.get(&format!("/api/runs/{id}/since?log=0"))["records"].clone();
-    let byte = &records[20]["byte"];
+    let byte = &served.get(&format!("/api/runs/{id}/since?log=0"))["records"][20]["byte"];
     let log_path = dir.join("log.jsonl");
     let log = fs::read_to_string(&log_path).unwrap();
     // The log cut back to its first 30 lines, so that the byte still starts one.
@@ -1169,8 +1168,9 @@ fn starts_over_a_shortened_log() {
         steps.push(format!("GET {path}\n{status}\n{body}"));
     }
     let run = served.get(&format!("/api/runs/{id}"));
+    let row = served.get("/api/runs")["runs"][0]["started_over"].clone();
     steps.push(format!(
-        "then GET /api/runs/<id>: end {}, log_epoch {}",
+        "then GET /api/runs/<id>: end {}, log_epoch {}; its row's started_over: {row}",
         run["end"], run["log_epoch"]
     ));
     let path = format!("/api/runs/{id}/since?log={byte}&log_epoch=1");
@@ -1195,7 +1195,7 @@ fn starts_over_a_shortened_log() {
             GET /api/runs/<id>/log?at=3294&log_epoch=0
             HTTP/1.1 409 Conflict
             {"error":"run <id>'s log started over since the reply that gave byte 3294: read the run again, and its log from byte 0","log_epoch":1}
-            then GET /api/runs/<id>: end 4645, log_epoch 1
+            then GET /api/runs/<id>: end 4645, log_epoch 1; its row's started_over: "run <id>: its log is 4645 bytes, shorter than the 10332 bytes read of it before: reading it again from its start"
             GET /api/runs/<id>/since?log=3294&log_epoch=1
             end 4645, log_epoch 1, 10 records"#]],
     );

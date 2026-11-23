@@ -220,6 +220,8 @@ struct Held {
     ending: Option<Ending>,
     /// How many times the log has started over: a byte of an earlier epoch means nothing now.
     log_epoch: u64,
+    /// What the view found of the log when it last started over, which the run's row says.
+    started_over: Option<String>,
     /// The value of `View::reads` when it was last read.
     read: u64,
     exchanges: trace::Exchanges,
@@ -242,6 +244,7 @@ impl Held {
             recent: VecDeque::new(),
             ending: None,
             log_epoch,
+            started_over: None,
             read: 0,
             exchanges: trace::Exchanges::default(),
             ops: trace::Ops::default(),
@@ -301,12 +304,13 @@ impl Held {
             }
         })?;
         if let Some(started_over) = started_over {
-            say(format_args!("run {}: {started_over}", self.record.id()));
+            let said = format!("run {}: {started_over}", self.record.id());
             // What was derived of the log before is not of this one.
             let record = Record::open(self.record.dir())?;
             let ending = self.ending.take();
             *self = Self::new(record, self.log_epoch + 1, self.made)?;
             self.ending = ending;
+            self.started_over = Some(said);
             return self.take();
         }
         Ok(())

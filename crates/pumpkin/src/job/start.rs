@@ -67,16 +67,17 @@ pub(crate) fn start(
     let workspace = home.join(workspace::DIR);
     symlink(&workspace, tree.path().join(workspace::DIR)).context(tree.path().display())?;
     write_sent(&start, sent.path(), body)?;
-    let answer = launch(&pumpkin, &name, start, tree.path(), sent.path(), job.path())?;
+    let mut answer = launch(&pumpkin, &name, start, tree.path(), sent.path(), job.path())?;
     let job = job.keep();
     drop((sent.keep(), tree.keep()));
-    if matches!(answer, StartAnswer::Started) {
+    if let StartAnswer::Started { unrecorded } = &mut answer {
         let receipt = job.join(STARTED);
         if let Err(error) = File::create(&receipt) {
-            crate::say(format_args!(
+            let message = format!(
                 "{name} started but writing {} failed: {error}",
                 receipt.display()
-            ));
+            );
+            *unrecorded = Some(message);
         }
     }
     Ok(answer)
@@ -188,7 +189,7 @@ fn launch(
         .args(start.words);
     let how = Run::new(Bound::Within(START_TIMEOUT), Echo::Silent);
     let (problem, exited) = match &stdx::process::run(&mut unit, how) {
-        Ok(_) => return Ok(StartAnswer::Started),
+        Ok(_) => return Ok(StartAnswer::Started { unrecorded: None }),
         // Refused, as nothing started.
         Err(failure @ (Failure::Unstarted { .. } | Failure::Unended { started: false, .. })) => {
             return Err(failure.to_string());
@@ -212,7 +213,7 @@ fn after_launch(
     exited: bool,
 ) -> Result<StartAnswer, String> {
     if job.join(OWN).is_symlink() {
-        return Ok(StartAnswer::Started);
+        return Ok(StartAnswer::Started { unrecorded: None });
     }
     let absent = exited && {
         let mut show = stdx::process::command("systemctl", SYSTEMD);
@@ -223,7 +224,7 @@ fn after_launch(
     };
     // A short unit may have run ExecStopPost while systemctl was looking it up.
     match sent.try_exists() {
-        Ok(false) => Ok(StartAnswer::Started),
+        Ok(false) => Ok(StartAnswer::Started { unrecorded: None }),
         Ok(true) if absent => Err(format!(
             "{problem}: fix what `systemd-run` reports and run the command again"
         )),

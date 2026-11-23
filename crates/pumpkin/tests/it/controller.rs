@@ -1,7 +1,7 @@
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::fs::{self, File, Permissions};
-use std::io::{BufRead as _, BufReader, Read};
+use std::io::{self, BufRead as _, BufReader, Read};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
@@ -10,6 +10,7 @@ use std::sync::LazyLock;
 use std::time::{Duration, SystemTime};
 
 use expect_test::{Expect, expect};
+use rustix::fs::{OFlags, fcntl_getfl};
 use schema::ir::Sha256Digest;
 use serde_json::json;
 use stdx::process::Environment;
@@ -62,6 +63,7 @@ fn noted(scratch: &Scratch) -> Vec<String> {
 }
 
 fn check(scratch: &Scratch, text: &str, shown: &[(&str, &str)], expect: &Expect) {
+    quiet(scratch);
     let mut text = text.replace(scratch.0.to_str().unwrap(), "<scratch>");
     text = text.replace(EMPTY_TREE, "<empty tree>");
     for (value, name) in shown {
@@ -82,6 +84,20 @@ fn check(scratch: &Scratch, text: &str, shown: &[(&str, &str)], expect: &Expect)
         None => line.to_owned(),
     });
     expect.assert_eq(&lines.collect::<Vec<String>>().join("\n"));
+}
+
+// What a command on the controller wrote to its standard error, which `serve` writes only as it
+// fails; the copy is removed.
+fn said_there(scratch: &Scratch) -> String {
+    let path = scratch.0.join("bin/stderr");
+    let said = fs::read_to_string(&path).unwrap_or_default();
+    let _ = fs::remove_file(path);
+    said
+}
+
+fn quiet(scratch: &Scratch) {
+    let said = said_there(scratch);
+    assert!(said.is_empty(), "the controller's standard error: {said}");
 }
 
 // Refused before the job reads its settings: outside a user's systemd unit, a file below the
@@ -201,10 +217,13 @@ const KEY: &str = "sk-client-stand-in";
 // stream. Each before-N action runs just before the Nth connection. A client home with a
 // `.member` is a key that the admin lists under that member, so the command runs as the
 // controller's forced command runs it. A `refused` file refuses every key, as `sshd` refuses a key
-// that is unlisted.
+// that is unlisted. As OpenSSH does, it makes its standard error non-blocking, and leaves it so. It
+// copies the command's standard error to its own, as `sshd` and `ssh` do, and to `stderr` beside.
+// A `link-pid` file gets the pid of the command, which `serve` runs as.
 const SSH: &str = r#"#!/bin/sh
 dir=${0%/*}
 printf '%s\n' "$@" >> "$dir/argv"
+dd oflag=nonblock count=0 status=none >&2
 while :; do
     case $1 in
         -E) diagnostics=$2; shift 2 ;;
@@ -224,6 +243,11 @@ if [ -f "$dir/refused" ]; then
     echo "$at: Permission denied (publickey)." >> "${diagnostics:-/dev/stderr}"
     exit 255
 fi
+mkfifo "$dir/stderr-$$"
+tee --append "$dir/stderr" < "$dir/stderr-$$" >&2 &
+tee=$!
+exec 4>&2 2> "$dir/stderr-$$"
+rm "$dir/stderr-$$"
 cd "$dir/../home" || exit 1
 export HOME="$PWD" XDG_RUNTIME_DIR="$dir/../run"
 if mv "$dir/cut-in" "$dir/cut-in-$$" 2>/dev/null; then
@@ -237,8 +261,17 @@ if mv "$dir/cut-out" "$dir/cut-out-$$" 2>/dev/null; then
     dd bs=1 count="$(cat "$dir/cut-out-$$")" status=none < "$dir/fifo-$$"
     exit 1
 fi
-if [ -f "$dir/link-pid" ]; then echo $$ > "$dir/link-pid"; fi
-exec /bin/sh -c "$command" "$@"
+# The command runs apart, so that the output ends only once its standard error is copied, as
+# `ssh` writes what `sshd` sent before it ends; a test may stop it by its pid.
+exec 3<&0
+/bin/sh -c "$command" "$@" <&3 3<&- &
+served=$!
+if [ -f "$dir/link-pid" ]; then echo "$served" > "$dir/link-pid"; fi
+exec 2>&4 4>&-
+wait "$served" 2>/dev/null
+status=$?
+wait "$tee"
+exit "$status"
 "#;
 
 const SYSTEMCTL: &str = "#!/bin/sh\n";
@@ -1490,6 +1523,7 @@ fn cancel_copies_the_record_when_reaping_fails() {
         .join(format!("repo/.pumpkin/runs/{id}/outcome.json"));
     let outcome: serde_json::Value = serde_json::from_slice(&fs::read(copy).unwrap()).unwrap();
     assert_eq!(outcome["reason"], "its driver ended without an outcome");
+    quiet(&scratch);
 }
 
 #[test]
@@ -1502,22 +1536,24 @@ fn reap_by_writer() {
     let own = id_ago(0, "0e000001");
     let other = id_ago(0, "0e000002");
     let old = id_ago(0, "0e000003");
-    let record =
-        json!({"record_version":"pumpkin.record/v1","pumpkin":super::this_build(),"args":[]});
-    scratch.write(&format!("{made}/{own}/record.json"), &record);
-    scratch.write(&format!("{made}/{own}/driver.pid"), "4242\n");
-    scratch.write(
-        &format!("{made}/{own}/provider.json"),
-        &json!({"providers":{}}),
-    );
-    scratch.write(
-        &format!("{made}/{other}/record.json"),
-        &json!({"pumpkin":{"version":"1.2.3"},"record_version":"future"}),
-    );
-    scratch.write(
-        &format!("{made}/{old}/record.json"),
-        &json!({"record_version":"old"}),
-    );
+    let lost = |id: &str, args, providers| {
+        let record =
+            json!({"record_version":"pumpkin.record/v1","pumpkin":super::this_build(),"args":args});
+        scratch.write(&format!("{made}/{id}/record.json"), &record);
+        scratch.write(&format!("{made}/{id}/driver.pid"), "4242\n");
+        let providers = json!({ "providers": providers });
+        scratch.write(&format!("{made}/{id}/provider.json"), &providers);
+    };
+    lost(&own, json!([]), json!({}));
+    let future = json!({"pumpkin":{"version":"1.2.3"},"record_version":"future"});
+    for (id, record) in [(&other, future), (&old, json!({"record_version":"old"}))] {
+        scratch.write(&format!("{made}/{id}/record.json"), &record);
+    }
+    // Its provider can't be reached, as the configuration that ran it is gone.
+    let unreached = id_ago(0, "0e000004");
+    let gone = scratch.0.join("gone.toml");
+    let aws = json!({ "aws": { "report": { "region": "us-west-1" } } });
+    lost(&unreached, json!(["--config", gone]), aws);
     let mut lines = Vec::new();
     for _ in 0..2 {
         let mut reap = on_client(&scratch, &client, &["reap"]);
@@ -1525,36 +1561,37 @@ fn reap_by_writer() {
         let reaped = reap.output().unwrap();
         lines.push(report(invoked, &reaped, &scratch.0, false));
     }
-    for foreign in [&other, &old] {
-        assert!(
-            !scratch
-                .0
-                .join(format!("{made}/{foreign}/outcome.json"))
-                .exists()
-        );
-    }
-    assert!(
-        scratch
-            .0
-            .join(format!("{made}/{own}/outcome.json"))
-            .is_file()
-    );
+    let outcome = |id: &str| scratch.0.join(format!("{made}/{id}/outcome.json"));
+    assert!(outcome(&own).is_file() && !outcome(&other).exists() && !outcome(&old).exists());
     check(
         &scratch,
         &lines.join("\n"),
-        &[(&own, "<own>"), (&other, "<other>"), (&old, "<old>")],
+        &[
+            (&own, "<own>"),
+            (&other, "<other>"),
+            (&old, "<old>"),
+            (&unreached, "<unreached>"),
+        ],
         &expect![[r#"
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin reap
-            exit status: Some(0)
+            exit status: Some(3)
             pumpkin: run <own> was lost, as its driver ended without an outcome.json: it is now recorded as failed
+            pumpkin: run <unreached>'s sandboxes on provider `aws`, if it left any, can't be removed, as it can't be reached: the configuration that ran it, <scratch>/gone.toml, can't be read (No such file or directory (os error 2)): put it back there, as it was when the run ran; once it can be, `pumpkin reap` removes them, and if it is gone for good, remove the record, <scratch>/home/.pumpkin/runs/<unreached>, to stop reaping it
+            pumpkin: run <unreached> was lost, as its driver ended without an outcome.json: it is now recorded as failed
             pumpkin: to reap runs made by an older pumpkin, use that build: <old>
             pumpkin: to reap runs made by pumpkin 1.2.3, use that build: <other>
+            pumpkin: 1 run ran on a provider that can't be reached, as said above: what each left there may remain
+            pumpkin: to reap again once it can be reached: pumpkin reap
             printed:
               <own>
+              <unreached>
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin reap
-            exit status: Some(0)
+            exit status: Some(3)
+            pumpkin: run <unreached>'s sandboxes on provider `aws`, if it left any, can't be removed, as it can't be reached: the configuration that ran it, <scratch>/gone.toml, can't be read (No such file or directory (os error 2)): put it back there, as it was when the run ran; once it can be, `pumpkin reap` removes them, and if it is gone for good, remove the record, <scratch>/home/.pumpkin/runs/<unreached>, to stop reaping it
             pumpkin: to reap runs made by an older pumpkin, use that build: <old>
-            pumpkin: to reap runs made by pumpkin 1.2.3, use that build: <other>"#]],
+            pumpkin: to reap runs made by pumpkin 1.2.3, use that build: <other>
+            pumpkin: 1 run ran on a provider that can't be reached, as said above: what each left there may remain
+            pumpkin: to reap again once it can be reached: pumpkin reap"#]],
     );
 }
 
@@ -1588,7 +1625,6 @@ fn reap_after_a_cut() {
         &expect![[r#"
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin reap
             exit status: Some(0)
-            pumpkin: run <id> was lost, as its driver ended without an outcome.json: it is now recorded as failed
             pumpkin: the reap's reply was cut: the output may omit ids of runs already cleaned
             pumpkin: controller `alice` didn't answer: ended within the answer: reaping the runs again now, attempt 2 of 7"#]],
     );
@@ -2113,6 +2149,45 @@ fn ls_answered_there() {
               20261106-120000-1b8a0003 -     failed            -  -               -  -
               20261106-130300-2c9b0007 alice unstarted       <t>                  -  -: its job ended before the run started: to see why: pumpkin wait 20261106-130300-2c9b0007
               2 runs: 1 failed, 1 unstarted"#]],
+    );
+}
+
+// Its `ssh` makes its own standard error non-blocking. A stream left so fails the writes of each
+// process that shares it, as under `2>&1`.
+#[test]
+fn ls_leaves_its_streams_blocking() {
+    let scratch = Scratch::new();
+    let client = set_up_client(&scratch);
+    connect(&scratch, &client);
+    served(&scratch);
+    write_record(
+        &scratch,
+        "20261107-120000-1b8a0001",
+        true,
+        Some(returned(7.0)),
+    );
+    move_runs(&scratch, "home/.pumpkin/runs");
+    let (mut reader, writer) = io::pipe().unwrap();
+    let mut ls = on_client(&scratch, &client, &["ls"]);
+    ls.stdout(writer.try_clone().unwrap())
+        .stderr(writer.try_clone().unwrap());
+    let status = ls.status().unwrap();
+    let flags = fcntl_getfl(&writer).unwrap();
+    // The command holds copies of the pipe's write end, which would keep the pipe from its end.
+    drop((ls, writer));
+    let mut printed = String::new();
+    reader.read_to_string(&mut printed).unwrap();
+    let blocking = !flags.contains(OFlags::NONBLOCK);
+    check(
+        &scratch,
+        &format!("{status}\n{printed}blocking: {blocking}"),
+        &[],
+        &expect![[r#"
+            exit status: 0
+            pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
+            20261107-120000-1b8a0001 finished          -  -               -  -: score=7 metrics={"solved":3}
+            1 run: 1 finished
+            blocking: true"#]],
     );
 }
 
@@ -2659,6 +2734,39 @@ fn cancel_prefers_own_run() {
     );
 }
 
+// A run whose member can't be read is left out, with what of its log can't be read.
+#[test]
+fn ls_says_unread_lines_of_a_run_unlisted() {
+    let scratch = Scratch::new();
+    let client = set_up_client(&scratch);
+    connect(&scratch, &client);
+    served(&scratch);
+    let id = id_ago(0, "0c000003");
+    let log = [super::logged(5, json!({"kind":"work_started"}), json!([]))];
+    let failed = json!({ "state": "failed", "reason": "r" });
+    let places = super::lease_places(super::Prices::Nothing);
+    let asked = super::asked(&id, 90);
+    let dir = super::write_run(&scratch, &id, asked, &log, Some(failed), &places);
+    let mut written = fs::read_to_string(dir.join("log.jsonl")).unwrap();
+    written.push_str("{\"seq\":\n");
+    fs::write(dir.join("log.jsonl"), written).unwrap();
+    move_runs(&scratch, "home/.pumpkin/runs");
+    scratch.write(&format!("home/jobs/{id}/member"), "Bad!\n");
+    let ls = ran_by(&scratch, on_client(&scratch, &client, &["ls"]), &["ls"]);
+    check(
+        &scratch,
+        &ls,
+        &[(&id, "<id>")],
+        &expect![[r#"
+        $ pumpkin ls
+        exit status: Some(1)
+        pumpkin: run <id>: 1 part of its log can't be read by this pumpkin, the first at line 3: EOF while parsing a value, at column 7
+        pumpkin: run <id>: <scratch>/home/jobs/<id>/member: `Bad!` is not a member's name: give one of 1 to 32 of a-z, 0-9 and `-`, starting with a letter
+        pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
+        pumpkin: 1 run can't be listed, as said above"#]],
+    );
+}
+
 #[test]
 fn member_unread() {
     let scratch = Scratch::new();
@@ -2736,6 +2844,13 @@ fn serve_refuses_member() {
     );
     // What follows is the repair's, which finds no controller, as no `aws` answers.
     let (ls, _) = ls.split_once("; SSH at its last private address").unwrap();
+    // Each line that `serve` wrote is quoted whole.
+    let there = said_there(&scratch);
+    assert!(
+        there
+            .lines()
+            .all(|line| ls.contains(&format!("  {line}\n")))
+    );
     check(
         &scratch,
         ls,
@@ -2743,11 +2858,13 @@ fn serve_refuses_member() {
         &expect![[r#"
             $ pumpkin ls
             exit status: Some(1)
-            error: invalid value 'Bad!' for '--member <member>': `Bad!` is not a member's name: give one of 1 to 32 of a-z, 0-9 and `-`, starting with a letter
-            pumpkin: to read how to use it: pumpkin controller serve --help
+            pumpkin: the link to controller `alice` wrote to its standard error:
+              error: invalid value 'Bad!' for '--member <member>': `Bad!` is not a member's name: give one of 1 to 32 of a-z, 0-9 and `-`, starting with a letter
+              pumpkin: to read how to use it: pumpkin controller serve --help
             pumpkin: controller `alice` didn't answer: ended before its hello: opening it again now, attempt 2 of 8
-            error: invalid value 'Bad!' for '--member <member>': `Bad!` is not a member's name: give one of 1 to 32 of a-z, 0-9 and `-`, starting with a letter
-            pumpkin: to read how to use it: pumpkin controller serve --help
+            pumpkin: the link to controller `alice` wrote to its standard error:
+              error: invalid value 'Bad!' for '--member <member>': `Bad!` is not a member's name: give one of 1 to 32 of a-z, 0-9 and `-`, starting with a letter
+              pumpkin: to read how to use it: pumpkin controller serve --help
             pumpkin: controller `alice` didn't answer: ended before its hello"#]],
     );
 }

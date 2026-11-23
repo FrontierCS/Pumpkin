@@ -4,7 +4,9 @@
 //!
 //! `serve` speaks first, a [`Hello`], whose form never changes. Then the client asks one
 //! [`Request`] at a time, and each gets its own [`Request::Answer`], whose body, if it has one,
-//! follows in frames of its own, or a refusal. A group of uploads gets its answers in order.
+//! follows in frames of its own, or a refusal. A group of uploads gets its answers in order. A
+//! follow, a cancel and a reap get theirs streamed, item by item, as each happens, and a refusal
+//! may end the stream at any item.
 //! A start names the job it starts, so a client whose link ends before an answer is whole may
 //! ask again over another.
 //!
@@ -18,6 +20,7 @@
 pub(crate) mod copy;
 pub(crate) mod store;
 
+use std::fs::File;
 use std::io::{self, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
@@ -27,7 +30,8 @@ use schema::ir::Sha256Digest;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::progress::Listing;
+use crate::progress::{Listing, Unlisted};
+use crate::reaping::{Reaping, RunReaped};
 use crate::{config, manifest, workspace};
 
 // Well past the largest answer: a listing of a few thousand runs is a few MiB, and a body that a
@@ -133,7 +137,8 @@ pub(crate) enum Followed {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[serde(expecting = "it is neither an answer to the request nor a refusal")]
 enum Head<H> {
-    /// Nothing took effect, for the reason that `message` gives, with what to do.
+    /// Nothing took effect, or, in a streamed answer, nothing after the items before it, for the
+    /// reason that `message` gives, with what to do.
     Refused { message: String },
     /// The answer's head, which carries its tag itself.
     #[serde(untagged)]
@@ -207,11 +212,8 @@ pub(crate) struct ListRequest {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ListedHead {
-    /// The listing, a [`Listing`]'s JSON, in a body of `body_bytes`.
-    Listed {
-        body_bytes: u64,
-        unlisted_count: u64,
-    },
+    /// The [`Listed`]'s JSON, in a body of `body_bytes`.
+    Listed { body_bytes: u64 },
 }
 
 impl Request for ListRequest {
@@ -223,37 +225,22 @@ impl Request for ListRequest {
     }
 
     fn sent(listed: Listed) -> io::Result<(ListedHead, Vec<u8>)> {
-        let Listed {
-            listing,
-            unlisted_count,
-        } = listed;
-        let body = serde_json::to_vec(&listing)?;
+        let body = serde_json::to_vec(&listed)?;
         let body_bytes = body.len() as u64;
-        let head = ListedHead::Listed {
-            body_bytes,
-            unlisted_count,
-        };
-        Ok((head, body))
+        Ok((ListedHead::Listed { body_bytes }, body))
     }
 
     fn received(head: ListedHead, link: &mut Link) -> Result<Listed, Unanswered> {
-        let ListedHead::Listed {
-            body_bytes,
-            unlisted_count,
-        } = head;
-        let listing = serde_json::from_slice(&link.body(body_bytes)?)
-            .map_err(|error| Unanswered::Failed(format!("its listing doesn't read: {error}")))?;
-        Ok(Listed {
-            listing,
-            unlisted_count,
-        })
+        let ListedHead::Listed { body_bytes } = head;
+        link.json(body_bytes, "its listing")
     }
 }
 
-/// The runs that `serve` listed, and how many it couldn't list, as it said on its standard error.
+/// The runs that `serve` listed, and those that it couldn't list.
+#[derive(Serialize, Deserialize)]
 pub(crate) struct Listed {
     pub(crate) listing: Listing,
-    pub(crate) unlisted_count: u64,
+    pub(crate) unlisted: Vec<Unlisted>,
 }
 
 /// The runs' jobs there, as `crate::job::ids` lists them, each with its member.
@@ -375,7 +362,7 @@ impl StartRequest {
 }
 
 pub(crate) enum StartAnswer {
-    Started,
+    Started { unrecorded: Option<String> },
     AlreadyStarted,
     Unconfirmed { message: String },
 }
@@ -383,9 +370,15 @@ pub(crate) enum StartAnswer {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum StartHead {
-    Started,
+    /// The job started, though the controller couldn't record that it did, for the reason that
+    /// `unrecorded` gives, if any.
+    Started {
+        unrecorded: Option<String>,
+    },
     AlreadyStarted,
-    Unconfirmed { message: String },
+    Unconfirmed {
+        message: String,
+    },
 }
 
 impl Request for StartRequest {
@@ -398,7 +391,7 @@ impl Request for StartRequest {
 
     fn sent(answer: StartAnswer) -> io::Result<(StartHead, Vec<u8>)> {
         Ok(match answer {
-            StartAnswer::Started => (StartHead::Started, Vec::new()),
+            StartAnswer::Started { unrecorded } => (StartHead::Started { unrecorded }, Vec::new()),
             StartAnswer::AlreadyStarted => (StartHead::AlreadyStarted, Vec::new()),
             StartAnswer::Unconfirmed { message } => {
                 (StartHead::Unconfirmed { message }, Vec::new())
@@ -408,7 +401,7 @@ impl Request for StartRequest {
 
     fn received(head: StartHead, _: &mut Link) -> Result<StartAnswer, Unanswered> {
         match head {
-            StartHead::Started => Ok(StartAnswer::Started),
+            StartHead::Started { unrecorded } => Ok(StartAnswer::Started { unrecorded }),
             StartHead::AlreadyStarted => Ok(StartAnswer::AlreadyStarted),
             StartHead::Unconfirmed { message } => Ok(StartAnswer::Unconfirmed { message }),
         }
@@ -424,66 +417,124 @@ pub(crate) struct CancelRequest {
     pub(crate) modal_bytes: Option<usize>,
 }
 
+/// What `serve` streams in answer to a [`CancelRequest`]: [`Self::Stopping`] if it signalled the
+/// run's driver, then one of the rest, which ends the answer.
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum CancelHead {
+    /// The run's driver is signalled: the run ends once its sandboxes are deleted.
+    Stopping,
+    /// The run has ended, and its reap, a [`RunReaped`]'s JSON, follows in a body of
+    /// `body_bytes`.
+    Ended {
+        body_bytes: u64,
+    },
+    /// The run has ended, but its reap failed before it reached a provider: why.
+    EndedUnreaped {
+        message: String,
+    },
+    Unstarted,
+    Stopped {
+        writer: Option<String>,
+    },
+}
+
+/// How a cancel ended, as the last [`CancelHead`] of its answer gives it.
 pub(crate) enum CancelAnswer {
-    Ended,
-    EndedUnreached,
+    Ended { reaped: RunReaped },
     EndedUnreaped { message: String },
     Unstarted,
     Stopped { writer: Option<String> },
 }
 
-impl Request for CancelRequest {
-    type Answer = CancelAnswer;
-    type Head = CancelAnswer;
-
-    fn ask(self) -> Ask {
-        Ask::Cancel(self)
+impl CancelAnswer {
+    /// Writes the answer's end, which `serve` follows a [`CancelHead::Stopping`] with, if any.
+    pub(crate) fn write(self, output: &mut impl Write) -> io::Result<()> {
+        let head = match self {
+            Self::Ended { reaped } => {
+                return write_json(
+                    output,
+                    |body_bytes| CancelHead::Ended { body_bytes },
+                    &reaped,
+                );
+            }
+            Self::EndedUnreaped { message } => CancelHead::EndedUnreaped { message },
+            Self::Unstarted => CancelHead::Unstarted,
+            Self::Stopped { writer } => CancelHead::Stopped { writer },
+        };
+        frame::write(output, &head, &[])
     }
 
-    fn sent(answer: CancelAnswer) -> io::Result<(CancelAnswer, Vec<u8>)> {
-        Ok((answer, Vec::new()))
-    }
-
-    fn received(head: CancelAnswer, _: &mut Link) -> Result<CancelAnswer, Unanswered> {
-        Ok(head)
+    /// Reads the answer to a cancel, once sent, calling `stopping` if `serve` says that the run
+    /// stops; or the message of its refusal.
+    pub(crate) fn read(
+        link: &mut Link,
+        mut stopping: impl FnMut(),
+    ) -> Result<Result<Self, String>, Unanswered> {
+        loop {
+            let head = match link.item_head::<CancelHead>()? {
+                Ok(head) => head,
+                Err(message) => return Ok(Err(message)),
+            };
+            let answer = match head {
+                CancelHead::Stopping => {
+                    stopping();
+                    continue;
+                }
+                CancelHead::Ended { body_bytes } => Self::Ended {
+                    reaped: link.json(body_bytes, "its reap of the run")?,
+                },
+                CancelHead::EndedUnreaped { message } => Self::EndedUnreaped { message },
+                CancelHead::Unstarted => Self::Unstarted,
+                CancelHead::Stopped { writer } => Self::Stopped { writer },
+            };
+            return Ok(Ok(answer));
+        }
     }
 }
 
+/// Reaps the ended or lost runs that this build wrote there, with the optional Modal credentials
+/// needed to reach their providers.
 #[derive(Clone, Copy, Serialize, Deserialize)]
 pub(crate) struct ReapRequest {
     pub(crate) modal_bytes: Option<usize>,
 }
 
+/// What `serve` streams in answer to a [`ReapRequest`]: a [`Self::Run`] for each run, as it is
+/// reaped, then [`Self::Reaped`].
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ReapHead {
-    Reaped { body_bytes: u64 },
+    /// What came of a run, a [`Reaping`]'s JSON, in a body of `body_bytes`.
+    Run { body_bytes: u64 },
+    /// The reap is whole.
+    Reaped,
 }
 
-impl Request for ReapRequest {
-    type Answer = crate::reaping::ReapedRuns;
-    type Head = ReapHead;
-
-    fn ask(self) -> Ask {
-        Ask::Reap(self)
+impl ReapRequest {
+    /// Writes what came of a run, as the answer's next [`ReapHead::Run`].
+    pub(crate) fn write_run(output: &mut impl Write, reaping: &Reaping) -> io::Result<()> {
+        write_json(output, |body_bytes| ReapHead::Run { body_bytes }, reaping)
     }
 
-    fn sent(answer: Self::Answer) -> io::Result<(ReapHead, Vec<u8>)> {
-        let body = serde_json::to_vec(&answer)?;
-        Ok((
-            ReapHead::Reaped {
-                body_bytes: body.len() as u64,
-            },
-            body,
-        ))
-    }
-
-    fn received(head: ReapHead, link: &mut Link) -> Result<Self::Answer, Unanswered> {
-        let ReapHead::Reaped { body_bytes } = head;
-        serde_json::from_slice(&link.body(body_bytes)?)
-            .map_err(|error| Unanswered::Failed(format!("its reaped runs don't read: {error}")))
+    /// Reads the answer to a reap, once sent, giving `reported` what came of each run as it
+    /// arrives; or the message of its refusal, or `reported`'s error.
+    pub(crate) fn read(
+        link: &mut Link,
+        mut reported: impl FnMut(Reaping) -> Result<(), String>,
+    ) -> Result<Result<(), String>, Unanswered> {
+        loop {
+            match link.item_head::<ReapHead>()? {
+                Ok(ReapHead::Run { body_bytes }) => {
+                    let reaping = link.json(body_bytes, "its reap of a run")?;
+                    if let Err(error) = reported(reaping) {
+                        return Ok(Err(error));
+                    }
+                }
+                Ok(ReapHead::Reaped) => return Ok(Ok(())),
+                Err(message) => return Ok(Err(message)),
+            }
+        }
     }
 }
 
@@ -589,6 +640,17 @@ pub(crate) fn write_parts(output: &mut impl Write, body: &[u8]) -> io::Result<()
     Ok(())
 }
 
+/// Writes `head`, which `value`'s JSON is the body of, given its length, then that body.
+fn write_json<H: Serialize>(
+    output: &mut impl Write,
+    head: impl FnOnce(u64) -> H,
+    value: &impl Serialize,
+) -> io::Result<()> {
+    let body = serde_json::to_vec(value)?;
+    frame::write(output, &head(body.len() as u64), &[])?;
+    write_parts(output, &body)
+}
+
 /// Writes the refusal of `message`, which answers no request.
 pub(crate) fn refuse(output: &mut impl Write, message: String) -> io::Result<()> {
     frame::write(output, &Head::<()>::Refused { message }, &[])
@@ -677,11 +739,10 @@ pub(crate) struct Link {
 }
 
 impl Link {
-    /// Runs `ssh`, an `ssh` that runs [`command`], and reads its hello: `None` if it is
-    /// [`Hello::Absent`].
-    pub(crate) fn open(mut ssh: Command) -> Result<Option<Self>, Unanswered> {
-        let child =
-            stdx::process::spawn(&mut ssh, Stdio::piped(), Stdio::piped(), Stdio::inherit());
+    /// Runs `ssh`, an `ssh` that runs [`command`], with `stderr` as its standard error, which
+    /// `serve`'s goes to as well, and reads its hello: `None` if it is [`Hello::Absent`].
+    pub(crate) fn open(mut ssh: Command, stderr: File) -> Result<Option<Self>, Unanswered> {
+        let child = stdx::process::spawn(&mut ssh, Stdio::piped(), Stdio::piped(), stderr.into());
         let mut child = child.map_err(Unanswered::Failed)?;
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
             unreachable!(
@@ -737,6 +798,27 @@ impl Link {
             Head::Refused { message } if body.is_empty() => Ok(Err(message)),
             Head::Refused { .. } => Err(Unanswered::Failed("a refusal has a body".to_owned())),
         }
+    }
+
+    /// The next frame of a streamed answer, which has no body, or the peer's refusal at that
+    /// point.
+    fn item_head<H: DeserializeOwned>(&mut self) -> Result<Result<H, String>, Unanswered> {
+        let item = self.item()?;
+        match item {
+            Ok((head, body)) if body.is_empty() => Ok(Ok(head)),
+            Ok((_, body)) => Err(Unanswered::Failed(format!(
+                "an item of its answer has a {}-byte body: expected none",
+                body.len()
+            ))),
+            Err(message) => Ok(Err(message)),
+        }
+    }
+
+    /// The value whose JSON is the body of `body_bytes` that follows, which `what` names.
+    fn json<T: DeserializeOwned>(&mut self, body_bytes: u64, what: &str) -> Result<T, Unanswered> {
+        let body = self.body(body_bytes)?;
+        serde_json::from_slice(&body)
+            .map_err(|error| Unanswered::Failed(format!("{what} doesn't read: {error}")))
     }
 
     /// The body of an answer whose head gives it as of `body_bytes`.

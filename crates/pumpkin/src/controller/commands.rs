@@ -19,6 +19,7 @@ use crate::ending::Printed;
 use crate::link::{
     Ask, CancelAnswer, CancelRequest, Job, Jobs, JobsRequest, Owner, ReapRequest, Unanswered,
 };
+use crate::reaping::{ReapedRuns, Reaper};
 use crate::workspace::Workspace;
 use crate::{cli, config, next, say};
 
@@ -268,22 +269,24 @@ pub(crate) fn cancel(client: &config::Client, run: &str, any_member: bool) -> Re
         modal_bytes: modal.as_ref().map(Vec::len),
     };
     let name = &client.controller.name;
+    let ask = Ask::Cancel(request);
     let answer = reached.asked(&build, "cancelling the run", |reached, linked| {
-        linked.ask_with_body(
-            reached,
-            request.clone(),
-            modal.as_deref().unwrap_or_default(),
-        )
+        linked.stream(reached, |link| {
+            link.send(&ask, modal.as_deref().unwrap_or_default())?;
+            CancelAnswer::read(link, || {
+                say(format_args!(
+                    "stopping run {id}: {}",
+                    crate::reaping::STOPPING
+                ));
+            })
+        })
     })??;
-    match answer {
-        CancelAnswer::Unstarted => say(format_args!(
-            "run {id}'s job on controller `{name}` is stopped, before the run started"
-        )),
-        CancelAnswer::EndedUnreaped { message } => {
-            if let Err(error) = reached.copy(&build, &id) {
-                say(error);
-            }
-            return Err(message);
+    let reaped = match answer {
+        CancelAnswer::Unstarted => {
+            say(format_args!(
+                "run {id}'s job on controller `{name}` is stopped, before the run started"
+            ));
+            return Ok(Exit::Success);
         }
         CancelAnswer::Stopped { writer } => {
             let writer = reached.copy(&build, &id)?.or(writer);
@@ -296,17 +299,27 @@ pub(crate) fn cancel(client: &config::Client, run: &str, any_member: bool) -> Re
                 "stopped job {id} on controller `{name}`; copied its record to {}: read it with {writer}",
                 copy.display()
             ));
+            return Ok(Exit::Success);
         }
-        CancelAnswer::Ended | CancelAnswer::EndedUnreached => {
-            said_here(&mut reached, &build, &id, None, None, Printed::Nothing)?;
-            if matches!(answer, CancelAnswer::EndedUnreached) {
-                crate::advise(
-                    "remove what it left once its provider can be reached",
-                    &next::reap(None),
-                );
-                return Ok(Exit::Partial);
+        CancelAnswer::Ended { reaped } => reaped.said(None, Reaper::Controller),
+        CancelAnswer::EndedUnreaped { message } => Err(message),
+    };
+    let reached_all = match reaped {
+        Ok(reached_all) => reached_all,
+        Err(message) => {
+            if let Err(error) = reached.copy(&build, &id) {
+                say(error);
             }
+            return Err(message);
         }
+    };
+    said_here(&mut reached, &build, &id, None, None, Printed::Nothing)?;
+    if !reached_all {
+        crate::advise(
+            "remove what it left once its provider can be reached",
+            &next::reap(None),
+        );
+        return Ok(Exit::Partial);
     }
     Ok(Exit::Success)
 }
@@ -319,17 +332,24 @@ pub(crate) fn reap(client: &config::Client) -> Result<Exit, String> {
     let request = Ask::Reap(ReapRequest {
         modal_bytes: modal.as_ref().map(Vec::len),
     });
-    let report = reached.asked(&build, "reaping the runs", |reached, linked| {
+    let reaped = reached.asked(&build, "reaping the runs", |reached, linked| {
         linked.stream(reached, |link| {
             link.send(&request, modal.as_deref().unwrap_or_default())?;
-            link.answer::<ReapRequest>().inspect_err(|error| {
+            // A reap asked again after a cut says again each run that it leaves a problem of, so
+            // the last attempt's runs alone are counted.
+            let mut reaped = ReapedRuns::default();
+            let read = ReapRequest::read(link, |reaping| {
+                reaped.said(reaping, None, Reaper::Controller)
+            });
+            let read = read.inspect_err(|error| {
                 if matches!(error, Unanswered::Unreached(_)) {
                     say(
                         "the reap's reply was cut: the output may omit ids of runs already cleaned",
                     );
                 }
-            })
+            })?;
+            Ok(read.map(|()| reaped))
         })
     })??;
-    report.report(None, crate::Reaper::Controller)
+    Ok(reaped.report(None, Reaper::Controller))
 }

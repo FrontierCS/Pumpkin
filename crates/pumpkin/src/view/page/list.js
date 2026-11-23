@@ -19,6 +19,7 @@ import { returnedView } from "./returned.js";
  * @property {string} rest
  * @property {number | null} requests
  * @property {Tokens | null} tokens
+ * @property {string} [started_over] what the view found of the run's log when it last read it again from its start
  * @property {undefined} [error]
  * @typedef {{ id: string, error: string }} Unlisted a run whose record can't be read
  * @typedef {{ input: number | null, output: number | null, cached: number | null }} Tokens
@@ -73,6 +74,26 @@ export async function runsView() {
   // filled when the run's page has been read.
   /** @type {Map<string, HTMLTableRowElement>} */
   const opened = new Map();
+  // The row under each live run whose log started over, which says what the view found of it,
+  // made once and changed after.
+  /** @type {Map<string, HTMLTableRowElement>} */
+  const notes = new Map();
+  const note = (/** @type {ListedRun | Unlisted} */ run) => {
+    const said = run.error === undefined ? run.started_over : undefined;
+    if (said === undefined) {
+      notes.delete(run.id);
+      return [];
+    }
+    let tr = notes.get(run.id);
+    if (!tr) {
+      tr = /** @type {HTMLTableRowElement} */ (h("tr", { class: "detail" }, h("td", { class: "warn" }, said)));
+      notes.set(run.id, tr);
+    }
+    const td = /** @type {HTMLTableCellElement} */ (tr.firstElementChild);
+    td.colSpan = columns().length;
+    if (td.textContent !== said) td.textContent = said;
+    return [tr];
+  };
   const toggle = (/** @type {string} */ id) => {
     if (!opened.delete(id)) {
       const cell = h("td", { class: "detail" }, h("span", { class: "empty" }, "Reading the result…"));
@@ -161,11 +182,12 @@ export async function runsView() {
       membered = members;
       head.replaceChildren(...columns().map(([name, cls]) => h("th", { class: cls }, name)));
     }
-    // Each run's row, and under it the row of its result, if that is open.
+    // Each run's row, under it the row that says its log started over, if it did, and the row of
+    // its result, if that is open.
     const shown = runs.flatMap((run, index) => {
       const detail = opened.get(run.id);
       if (detail) /** @type {HTMLTableCellElement} */ (detail.firstElementChild).colSpan = columns().length;
-      return detail ? [row(run, index), detail] : [row(run, index)];
+      return [row(run, index), ...note(run), ...(detail ? [detail] : [])];
     });
     // Rows are moved only where the order changed, and the rows of unlisted runs removed.
     shown.forEach((tr, index) => {
@@ -175,6 +197,7 @@ export async function runsView() {
     const ids = new Set(runs.map((run) => run.id));
     for (const id of rows.keys()) if (!ids.has(id)) rows.delete(id);
     for (const id of opened.keys()) if (!ids.has(id)) opened.delete(id);
+    for (const id of notes.keys()) if (!ids.has(id)) notes.delete(id);
     fill(
       more,
       h("span", { class: "empty" }, plural(runs.length, "run") + (state.next ? " shown, the newest; older ones left out " : "")),

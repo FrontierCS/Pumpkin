@@ -521,6 +521,13 @@ records to a browser. Its `json` holds the JSON forms of its answers, and its `A
 view that `serve` keeps to answer a client.
 `Workspace` is the `.pumpkin` directory.
 
+**Architecture Invariant:** `serve` says nothing on its standard error while it answers. What a
+request has to say, such as a run that `ls` can't list or what a reap removed, crosses in its
+answer as data, which the CLI words as it words the same of this machine's runs. `serve` writes
+there only as it ends, or the first time it fails to mark its install, and `ssh` writes that stream to a file of
+the link's, which a link that fails quotes, never to the person's standard error, which `ssh`
+would leave non-blocking.
+
 **Architecture Invariant:** `view` writes no record, and reads one only through `runtime`'s
 readers (`Record`, `LogFold`), so a record's files are laid out in `runtime` alone, and a path
 that a log names is read only below its record; and it says of a run what the CLI says through

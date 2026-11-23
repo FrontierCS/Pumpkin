@@ -50,7 +50,7 @@ mod whole;
 mod workspace;
 
 use ending::{end, follow};
-use reaping::{Reaper, cancel, cancelled, reap};
+use reaping::{Reaper, cancel, reap};
 use run::{driver_run, run, start};
 
 // musl's allocator is much slower than glibc's at reading a run's records, as ripgrep found of its
@@ -224,13 +224,34 @@ fn ls(flags: cli::Ls) -> Result<Exit, String> {
     let now = unix_now();
     let since = progress::listed_since(&prefixes, now);
     let (listing, unlisted) = listed_in(Path::new(&runs), &prefixes, since, now, named.as_deref())?;
+    said_beside(&listing, &unlisted);
     let lines = progress::lines(&listing, named.as_deref());
     print(lines.as_bytes()).context("printing the runs failed")?;
-    if unlisted > 0 {
-        let runs = counted(unlisted, "run");
+    if !unlisted.is_empty() {
+        let runs = counted(unlisted.len(), "run");
         return Err(format!("{runs} can't be listed, as said above"));
     }
     Ok(Exit::Success)
+}
+
+/// Says what `ls` says before the table of `listing`, by id: each run that `unlisted` holds, and
+/// what of each run's log this `pumpkin` can't read.
+fn said_beside(listing: &progress::Listing, unlisted: &[progress::Unlisted]) {
+    let unread = listing.runs.iter().filter_map(|(id, entry)| {
+        let unread = entry.row()?.unread.as_ref()?;
+        Some((id, format!("run {id}: {unread}")))
+    });
+    let unlisted = unlisted.iter().flat_map(|run| {
+        let unread =
+            (run.unread.as_ref()).map(|unread| (&run.id, format!("run {}: {unread}", run.id)));
+        unread.into_iter().chain([(&run.id, run.message.clone())])
+    });
+    // Stable, so that a run's note comes before why it can't be listed.
+    let mut said: Vec<(&String, String)> = unread.chain(unlisted).collect();
+    said.sort_by_key(|(id, _)| *id);
+    for (_, message) in said {
+        say(message);
+    }
 }
 
 /// The time `since_epoch` after the Unix epoch, or the latest time jiff holds if that is past it.
@@ -246,26 +267,28 @@ fn unix_now() -> UnixTime {
 }
 
 /// The runs of `runs` whose ids start with one of `prefixes`, or every run if there are none, and
-/// how many can't be listed, each said as it is found. A run that ended before `since` is listed
-/// as older, and one that another build made and this can't read is an `unread` row. Each row is
-/// made at `now`, with its commands naming `named` as the runs directory. A `runs` that is missing
-/// is an empty listing unless `named` names it.
+/// those that can't be listed. A run that ended before `since` is listed as older, and one that
+/// another build made and this can't read is an `unread` row. Each row is made at `now`, with its
+/// commands naming `named` as the runs directory. A `runs` that is missing is an empty listing
+/// unless `named` names it.
 fn listed_in(
     runs: &Path,
     prefixes: &[String],
     since: Option<UnixTime>,
     now: UnixTime,
     named: Option<&str>,
-) -> Result<(progress::Listing, usize), String> {
+) -> Result<(progress::Listing, Vec<progress::Unlisted>), String> {
     let mut listing = progress::Listing::default();
+    let mut unlisted = Vec::new();
     if named.is_none() && !runs.try_exists().context(runs.display())? {
-        return Ok((listing, 0));
+        return Ok((listing, unlisted));
     }
-    let mut unlisted = 0;
     for (id, record) in Record::all(runs)? {
         if !picked(prefixes, &id) {
             continue;
         }
+        // What of its log this `pumpkin` can't read, said even of a run that then can't be listed.
+        let mut unread = None;
         let listed = record
             .and_then(|record| {
                 if let Some(since) = since
@@ -273,7 +296,14 @@ fn listed_in(
                 {
                     return Ok(None);
                 }
-                progress::Listed::run(&record, record.ending()?).map(Some)
+                let ending = record.ending()?;
+                let runtime::Readout {
+                    progress,
+                    unread: parts,
+                } = record.progress()?;
+                unread = progress::unread(&parts);
+                let listed = progress::Listed::of(&record, record.task()?, ending, progress);
+                Ok(Some(listed))
             })
             .or_else(|error| {
                 let dir = runs.join(&id);
@@ -286,16 +316,18 @@ fn listed_in(
             });
         match listed {
             Ok(Some(listed)) => {
-                let row = progress::Row::of(&id, &listed, now, named);
-                listing.runs.insert(id, progress::Entry::Row(row));
+                let mut row = progress::Row::of(&id, &listed, now, named);
+                row.unread = unread;
+                listing.runs.insert(id, progress::Entry::Row(Box::new(row)));
             }
             Ok(None) => {
                 listing.runs.insert(id, progress::Entry::Older);
             }
-            Err(error) => {
-                say(error);
-                unlisted += 1;
-            }
+            Err(message) => unlisted.push(progress::Unlisted {
+                id,
+                unread,
+                message,
+            }),
         }
     }
     Ok((listing, unlisted))

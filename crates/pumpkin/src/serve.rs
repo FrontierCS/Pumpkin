@@ -36,7 +36,7 @@ use crate::link::{
     ViewRequest,
 };
 use crate::manifest::store::{Missing, PutAnswer};
-use crate::progress::{self, Entry, Listing, Row};
+use crate::progress::{self, Entry, Listing, Row, Unlisted};
 use crate::say;
 use crate::view::Answering;
 
@@ -49,14 +49,15 @@ const UPTIME: &str = "/proc/uptime";
 /// Answers a client's link on the standard input and output, as the module says, for `member`.
 pub(crate) fn serve(member: &Member) -> Result<Exit, String> {
     let home = crate::home("run `serve` as the controller's user, whose home holds the runs")?;
-    marked();
+    let mut marks = Marks::default();
+    marks.mark();
     let stdin = io::stdin().as_fd().try_clone_to_owned();
     let mut input = BufReader::new(File::from(stdin.context("the standard input")?));
     let mut output = io::stdout().lock();
     if !delivered(frame::write(&mut output, &Hello::Serving, &[]))? {
         return Ok(Exit::Success);
     }
-    requests(&mut input, &mut output, &home, member)
+    requests(&mut input, &mut output, &home, member, &mut marks)
 }
 
 fn requests(
@@ -64,6 +65,7 @@ fn requests(
     output: &mut impl Write,
     home: &Path,
     member: &Member,
+    marks: &mut Marks,
 ) -> Result<Exit, String> {
     // Kept for the link's life: it holds what it read of the live runs.
     let mut view = Answering::new(home);
@@ -73,7 +75,7 @@ fn requests(
             Ok(None) => break,
             Err(error) => return invalid_request(output, error),
         };
-        marked();
+        marks.mark();
         let body = match ask.read_buffered_body(input) {
             Ok(body) => body,
             Err(error) => return invalid_request(output, error),
@@ -105,12 +107,8 @@ fn requests(
                 let (start, credentials) = request.decode(&body)?;
                 crate::job::start(home, start, credentials, member)
             }),
-            Ask::Reap(request) => link::answer(output, request, |request| {
-                reaping::reap(home, request, &body)
-            }),
-            Ask::Cancel(request) => link::answer(output, request, |request| {
-                reaping::cancel(home, request, &body, member)
-            }),
+            Ask::Reap(request) => reaping::reap(output, home, request, &body),
+            Ask::Cancel(request) => reaping::cancel(output, home, request, &body, member),
             Ask::Follow {
                 id,
                 log_from_bytes,
@@ -249,11 +247,23 @@ fn ready(fd: &impl AsFd, events: PollFlags, timeout: Duration) -> io::Result<boo
     }
 }
 
-/// Marks this `serve`'s install as used now, as [`mark_used`] does. Says what it can't do, and goes
-/// on.
-fn marked() {
-    if let Err(error) = mark_used() {
-        say(error);
+/// Whether a mark of this `serve`'s install as used has failed.
+#[derive(Default)]
+struct Marks {
+    failed: bool,
+}
+
+impl Marks {
+    /// Marks this `serve`'s install as used now, as [`mark_used`] does. Says the first failure
+    /// alone, and goes on.
+    // A long link asks every few seconds, and each line said lasts as long as the link.
+    fn mark(&mut self) {
+        if let Err(error) = mark_used()
+            && !self.failed
+        {
+            self.failed = true;
+            say(error);
+        }
     }
 }
 
@@ -304,7 +314,7 @@ fn listed(home: &Path, prefixes: &[String]) -> Result<Listed, String> {
     let (mut listing, mut unlisted) = crate::listed_in(&runs, prefixes, since, now, None)?;
     unstarted(home, prefixes, since, now, &mut listing)?;
     let jobs = home.join(JOBS);
-    // A run whose member can't be read is left out and said, as one whose record can't be.
+    // A run whose member can't be read is left out, as one whose record can't be read is.
     listing.runs.retain(|id, entry| {
         let Entry::Row(row) = entry else {
             return true;
@@ -315,16 +325,16 @@ fn listed(home: &Path, prefixes: &[String]) -> Result<Listed, String> {
                 true
             }
             Err(error) => {
-                say(format_args!("run {id}: {error}"));
-                unlisted += 1;
+                unlisted.push(Unlisted {
+                    id: id.clone(),
+                    unread: row.unread.take(),
+                    message: format!("run {id}: {error}"),
+                });
                 false
             }
         }
     });
-    Ok(Listed {
-        listing,
-        unlisted_count: unlisted as u64,
-    })
+    Ok(Listed { listing, unlisted })
 }
 
 /// Adds to `listing` each job in `home`'s `JOBS` whose id starts with one of `prefixes`, or each
@@ -369,7 +379,9 @@ fn unstarted(
             continue;
         };
         let row = Row::of(id, &listed, now, None);
-        listing.runs.insert(id.to_owned(), Entry::Row(row));
+        listing
+            .runs
+            .insert(id.to_owned(), Entry::Row(Box::new(row)));
     }
     Ok(())
 }
