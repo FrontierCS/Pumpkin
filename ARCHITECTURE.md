@@ -209,7 +209,7 @@ release ships as they are, such as `./pumpkin`, a task repository's launcher. `d
 Terraform module that makes a team's Pumpkin on AWS, as [its README](deploy/aws/README.md) says.
 `deploy/docker` makes a team's controller in a privileged container on a Docker host, as
 [its README](deploy/docker/README.md) says: systemd, `sshd` and a Docker engine of the container's
-own. `examples` holds tasks.
+own. Both install a controller by `deploy/controller`'s one script. `examples` holds tasks.
 
 **Architecture Invariant:** a Docker controller's jobs reach the engine inside its container alone,
 never the host's, so the paths that the Docker provider mounts, its ledger of CPUs and the prune of

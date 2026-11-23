@@ -17,7 +17,7 @@ Its state is in an S3 bucket of the account, so no laptop can lose it.
 | an AMI baked by EC2 Image Builder from a named AL2023 release, with Docker, ECR's credential helper and nftables | each sandbox's boot runs them, at the release's versions |
 | the controller's role and instance profile: access to its jobs' settings parameter, the members' parameter and the EC2 provider's resources: launches from its templates with nothing they name overridden and at their instance types, and terminations and console reads of its own sandboxes alone | the runs' launches, timers, sweeps and pushes, from the controller |
 | the controller: an on-demand instance on Ubuntu 24.04 LTS, with a public IPv4 address, IMDSv2 within one hop, an encrypted gp3 root, stopping on shutdown, tagged `pumpkin:controller=<name>`; an apply replaces it only for a new `pumpkin_release` | builds the tasks' images and runs the drivers, which a person's machine sends it, and runs no role |
-| what cloud-init installs there: Docker, which runs as root, so its `docker` group, which holds `pumpkin` alone, is root-equivalent; Buildx, AWS CLI v2 and uv at exact versions, and the rest of `controller.yaml`'s packages from a snapshot of Ubuntu's archive | builds with the containerd image store |
+| what cloud-init installs there: Docker, which runs as root, so its `docker` group, which holds `pumpkin` alone, is root-equivalent; Buildx at the exact versions that `deploy/controller/install.sh` pins, as every controller's; AWS CLI v2 and uv at exact versions; and the rest from the snapshot of Ubuntu's archive that it pins | builds with the containerd image store |
 | what the Pumpkin release `pumpkin_release` installs there, with `pumpkin-admin install` (`pumpkin-admin install --help` says what): the user `pumpkin`, lingering; an `sshd` that admits concurrent openings and ends a session whose client has gone; a unit that stops the controller after 30 minutes with no job and no SSH session; and one that runs each installed build's reap at boot | jobs that outlive every connection; a stop and a reap that need no client |
 | the SSM parameter `/pumpkin-<name>/settings` (advanced tier), of envelope 1.1: the `[deployment]` that the host reads, with the deployment's `name` and members' parameter; the Docker engine, the EC2 provider `aws`, and, with the pull role, the Modal provider `modal`'s `images` | each job's settings, which an apply changes for the next job; the rest of the Modal provider is the client's |
 | the SSM parameter `/pumpkin-<name>/members` (advanced tier): a line `<member> <key>` for each key in `members`; the controller copies it every minute into `/etc/ssh/pumpkin/members`, with a forced command that names each key's member; `sshd` admits for `pumpkin` only the keys in that file | who may reach the controller, and which member each job belongs to; an apply changes the list within a minute |
@@ -214,7 +214,8 @@ us-east-1's rates, more in other regions; beside ECR's storage.
 The controller's first boot runs the install of the release that `pumpkin_release` names. The
 install sets up Pumpkin's user, its units and `sshd`'s settings, and nothing changes them later.
 So an apply that changes `pumpkin_release` replaces the controller. The new controller also takes
-the current Ubuntu release and this module's `controller.yaml`, and its volume is new.
+the current Ubuntu release, this module's `controller.yaml` and `deploy/controller`'s `install.sh`,
+and its volume is new.
 `terraform apply -replace=module.pumpkin.aws_instance.controller` replaces it at the same
 release. Either replacement is a cutover, under "Versions".
 

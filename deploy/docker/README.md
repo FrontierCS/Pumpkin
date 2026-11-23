@@ -8,7 +8,7 @@ on the Docker provider alone, on the container's own engine.
 | What | Why |
 | --- | --- |
 | one privileged container, `pumpkin-controller-1`, with a private cgroup namespace and tmpfs at `/run`, `/run/lock` and `/tmp`, as kind runs a node | systemd as its PID 1, which runs the jobs' units and the engine |
-| Ubuntu 24.04 with systemd and `sshd` from a snapshot of Ubuntu's archive, and Docker's packages at exact versions | builds with the containerd image store |
+| Ubuntu 24.04 with systemd and `sshd`, and what every controller installs, as `deploy/controller/install.sh` pins it: Docker's packages at exact versions, and the rest from a snapshot of Ubuntu's archive | builds with the containerd image store |
 | a Docker engine of the container's own, never the host's | the sandboxes' mounts, the ledger of CPUs and the prune of images mean what they mean on EC2, and touch nothing of the host's |
 | the release that `PUMPKIN_RELEASE` pins, checked by its SHA-256, whose `pumpkin-admin install docker` runs at every start (`pumpkin-admin install --help` says what it does) | the user `pumpkin`, lingering, `sshd`'s settings, the members' keys and the boot's reap; no idle stop, as nothing would start the container again |
 | the volumes `pumpkin_docker`, `pumpkin_containerd`, `pumpkin_home` and `pumpkin_host-key` | the engine's images and build cache, the store, the trees, the installs and the records, and the host key, kept from one container to the next |

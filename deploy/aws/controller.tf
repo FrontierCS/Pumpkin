@@ -131,18 +131,18 @@ resource "aws_instance" "controller" {
   associate_public_ip_address = true
   # A shutdown stops it, keeping its volume: the build cache, the trees and the records.
   instance_initiated_shutdown_behavior = "stop"
+  # What every controller installs is deploy/controller's, beside this module in the package that
+  # a root fetches whole
+  # (https://github.com/hashicorp/web-unified-docs/blob/4ec2d604280fff09cfca1d2648fed5cb51f81f14/content/terraform/v1.16.x/docs/language/modules/sources.mdx#L484-L487).
   user_data = templatefile("${path.module}/controller.yaml", {
-    ubuntu_snapshot    = "https://snapshot.ubuntu.com/ubuntu/${local.controller_versions.ubuntu_snapshot}"
-    docker_key         = file("${path.module}/docker.asc")
-    docker_version     = local.controller_versions.docker
-    containerd_version = local.controller_versions.containerd
-    buildx_version     = local.controller_versions.buildx
-    aws_cli_version    = local.controller_versions.aws_cli
-    aws_cli_sha256     = local.controller_versions.aws_cli_sha256
-    uv_version         = local.controller_versions.uv
-    uv_sha256          = local.controller_versions.uv_sha256
-    pumpkin_release    = var.pumpkin_release
-    settings_arn       = aws_ssm_parameter.settings.arn
+    install_script  = filebase64("${path.module}/../controller/install.sh")
+    docker_key      = filebase64("${path.module}/../controller/docker.asc")
+    aws_cli_version = local.controller_versions.aws_cli
+    aws_cli_sha256  = local.controller_versions.aws_cli_sha256
+    uv_version      = local.controller_versions.uv
+    uv_sha256       = local.controller_versions.uv_sha256
+    pumpkin_release = var.pumpkin_release
+    settings_arn    = aws_ssm_parameter.settings.arn
   })
 
   # The first boot's install reads the settings and the members' keys.
@@ -178,17 +178,13 @@ resource "aws_instance" "controller" {
   }
 }
 
-# What the controller installs, at these versions: Docker's packages, as its repository names
-# them; AWS CLI v2; uv; and the rest from Ubuntu's archive as it was at the snapshot.
+# What the controller installs beside what deploy/controller's install.sh pins, at these versions:
+# AWS CLI v2 and uv.
 locals {
   controller_versions = {
-    ubuntu_snapshot = "20261101T000000Z"
-    docker          = "5:29.9.2-1~ubuntu.24.04~noble"
-    containerd      = "2.4.2-3~ubuntu.24.04~noble"
-    buildx          = "0.38.1-1~ubuntu.24.04~noble"
-    aws_cli         = "2.38.1"
-    aws_cli_sha256  = "b11ed416d91f4251da363a17706938eeaf0e520745754c104c0c1890dd8363c7"
-    uv              = "0.13.5"
-    uv_sha256       = "f68d291c75783122dad58ab77def0e13f3233f358731db5d6d7e8715603b928f"
+    aws_cli        = "2.38.1"
+    aws_cli_sha256 = "b11ed416d91f4251da363a17706938eeaf0e520745754c104c0c1890dd8363c7"
+    uv             = "0.13.5"
+    uv_sha256      = "f68d291c75783122dad58ab77def0e13f3233f358731db5d6d7e8715603b928f"
   }
 }
