@@ -1,7 +1,8 @@
 //! A simulated host, [`SimHost`], whose clock moves only as its script says, so that a test
 //! decides when the run's loop takes an input, how long a sync of its record lasts, whether it
-//! fails, and what time the run reads then, with no real waiting. It tells a [`Journal`] each
-//! sync, in order with what the simulated provider tells it.
+//! fails, and what time the run reads then, with no real waiting. Its clock only moves forward,
+//! and a move ends every wait whose time it reaches. It tells a [`Journal`] each sync, in order
+//! with what the simulated provider tells it.
 
 use std::collections::VecDeque;
 use std::fs::{self, File};
@@ -10,7 +11,7 @@ use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use runtime::{Clock, Durable, Host, Inbox};
 
@@ -23,12 +24,21 @@ const WATCHDOG: Duration = Duration::from_secs(60);
 const SCRIPTED: &str = "the test to make every input the run waits on come, as its clock moves \
                         only by script";
 
+// How long a wait on the clock blocks between its looks at it.
+const LOOK: Duration = Duration::from_millis(10);
+
+// When a simulated host's runs start by the machine's clock, 2026-01-01T00:00:00Z, so that a time
+// of the record that the run reads from it shows exactly, as TigerBeetle's `TimeSim` derives its
+// real time from its ticks:
+// https://github.com/tigerbeetle/tigerbeetle/blob/68958eb757747d0fc96a79d1f9c2fa6766b67b48/src/stdx/time.zig#L260-L269
+pub(crate) const EPOCH: Duration = Duration::from_hours(490_896);
+
 /// A host whose clock reads 0 from the run's start and never moves by itself: a [`LateTake`], a
-/// [`SlowSync`] or a call of [`SimHost::moving_to`]'s function moves it. A wait for a time to come
-/// takes an input as soon as one comes; once the time has passed it takes what the inbox holds,
-/// without waiting, but for the takes that the late take says wait. A wait for an input that
-/// never comes fails after `WATCHDOG`. A sync makes nothing last, and succeeds unless the script
-/// fails it.
+/// [`SlowSync`], a call of [`SimHost::moving_to`]'s function or the simulated provider
+/// ([`SimTime`]) moves it. A wait for a time to come takes an input as soon as one comes, or ends
+/// once the clock reaches its time; then it takes what the inbox holds, without waiting, but for
+/// the takes that the late take says wait. A wait that neither ends fails after `WATCHDOG`. A sync
+/// makes nothing last, and succeeds unless the script fails it.
 pub(crate) struct SimHost {
     state: Arc<Mutex<State>>,
     journal: Option<Journal>,
@@ -134,7 +144,14 @@ impl SimHost {
     /// Returns a function that moves the clock to `at` each time it is called.
     pub(crate) fn moving_to(&self, at: Duration) -> impl Fn() + Send + Sync + 'static {
         let state = Arc::clone(&self.state);
-        move || stdx::unpoisoned(state.lock()).now = at
+        move || stdx::unpoisoned(state.lock()).move_to(at)
+    }
+
+    /// The clock, for the simulated provider and its sandboxes to read and move.
+    pub(crate) fn time(&self) -> SimTime {
+        SimTime {
+            state: Arc::clone(&self.state),
+        }
     }
 
     pub(crate) fn journaled(mut self, journal: &Journal) -> Self {
@@ -149,7 +166,6 @@ impl Host for SimHost {
     fn start(&self) -> SimClock {
         SimClock {
             state: Arc::clone(&self.state),
-            unix: SystemTime::now(),
         }
     }
 
@@ -209,7 +225,7 @@ impl Host for SimHost {
                     "the test to make every input the slow sync waits on come into the loop's \
                      inbox, which the host takes to be the inbox the clock made first",
                 );
-            stdx::unpoisoned(self.state.lock()).now = at;
+            stdx::unpoisoned(self.state.lock()).move_to(at);
             format!(", held until the loop's inbox held {queued}, to {at:?}")
         });
         let outcome = if failed { ", failed" } else { "" };
@@ -247,10 +263,58 @@ fn last_record(path: &Path) -> io::Result<Option<u64>> {
         .and_then(|records| records.checked_sub(1)))
 }
 
+impl State {
+    fn move_to(&mut self, at: Duration) {
+        assert!(
+            at >= self.now,
+            "the simulated clock was moved back, from {:?} to {at:?}: expected a script that moves \
+             it only forward",
+            self.now
+        );
+        self.now = at;
+    }
+}
+
+/// A simulated host's clock, as the simulated provider and its sandboxes read and move it.
+#[derive(Clone)]
+pub(crate) struct SimTime {
+    state: Arc<Mutex<State>>,
+}
+
+impl SimTime {
+    pub(crate) fn now(&self) -> Duration {
+        stdx::unpoisoned(self.state.lock()).now
+    }
+
+    /// Moves the clock to `at`, unless it is past it already.
+    pub(crate) fn reach(&self, at: Duration) {
+        let mut state = stdx::unpoisoned(self.state.lock());
+        state.now = state.now.max(at);
+    }
+
+    /// Waits until the clock reaches `at`, which only another thread can move it to.
+    pub(crate) fn wait_until(&self, at: Duration) {
+        let waited = Instant::now();
+        while self.now() < at {
+            assert!(
+                waited.elapsed() < WATCHDOG,
+                "a wait on the simulated clock for {at:?} lasted {WATCHDOG:?}: expected the test \
+                 to move the clock there"
+            );
+            std::thread::sleep(LOOK);
+        }
+    }
+
+    /// The time since the run started that `unix`, a time by the machine's clock that the run
+    /// gave, names.
+    pub(crate) fn of_unix(unix: Duration) -> Duration {
+        unix.saturating_sub(EPOCH)
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct SimClock {
     state: Arc<Mutex<State>>,
-    unix: SystemTime,
 }
 
 impl Clock for SimClock {
@@ -261,7 +325,7 @@ impl Clock for SimClock {
     }
 
     fn unix(&self) -> SystemTime {
-        self.unix
+        UNIX_EPOCH + EPOCH
     }
 
     fn inbox<T: Send + 'static>(&self) -> SimInbox<T> {
@@ -320,27 +384,50 @@ impl<T: Send> Inbox<T> for SimInbox<T> {
     }
 
     fn wait(&mut self, until: Duration) -> Option<T> {
-        self.next(self.clock.now() < until)
+        self.next(Some(until))
     }
 
     fn take(&mut self) -> Option<T> {
-        self.next(false)
+        self.next(None)
     }
 }
 
 impl<T: Send> SimInbox<T> {
-    fn next(&mut self, waits: bool) -> Option<T> {
-        let waits = waits || self.then > 0;
+    // Takes the next input: waiting for one if the late take says so, else until the clock
+    // reaches `until`, if given, and then taking what the inbox holds. So a move of the clock
+    // ends the wait, as Kubernetes' `FakeClock` fires each waiter whose time has passed:
+    // https://github.com/kubernetes/utils/blob/ca04ba58ecab621c984998618739fbafa14398ad/clock/testing/fake_clock.go#L175-L222
+    fn next(&mut self, until: Option<Duration>) -> Option<T> {
+        let held = self.then > 0;
         self.then = self.then.saturating_sub(1);
         let mut queue = stdx::unpoisoned(self.queue.lock());
         let input = match queue.behind.pop_front() {
             Some(input) => input,
-            None if waits => queue.received(SCRIPTED),
-            None => match queue.receiver.try_recv() {
-                Ok(input) => input,
-                Err(TryRecvError::Empty) => return None,
-                Err(TryRecvError::Disconnected) => disconnected(),
-            },
+            None if held => queue.received(SCRIPTED),
+            None => {
+                let waited = Instant::now();
+                loop {
+                    let due = until.is_none_or(|until| self.clock.now() >= until);
+                    let next = if due {
+                        queue.receiver.try_recv().map_err(|error| match error {
+                            TryRecvError::Empty => RecvTimeoutError::Timeout,
+                            TryRecvError::Disconnected => RecvTimeoutError::Disconnected,
+                        })
+                    } else {
+                        queue.receiver.recv_timeout(LOOK)
+                    };
+                    match next {
+                        Ok(input) => break input,
+                        Err(RecvTimeoutError::Timeout) if due => return None,
+                        Err(RecvTimeoutError::Timeout) => assert!(
+                            waited.elapsed() < WATCHDOG,
+                            "the simulated host waited {WATCHDOG:?} for an input or a move of \
+                             its clock that never came: expected {SCRIPTED}"
+                        ),
+                        Err(RecvTimeoutError::Disconnected) => disconnected(),
+                    }
+                }
+            }
         };
         drop(queue);
         Some(self.late(input))
@@ -360,7 +447,7 @@ impl<T: Send> SimInbox<T> {
         self.then = then;
         // Without the clock's lock, so that the run's other threads read the clock as they wait.
         self.queue.fill(behind, SCRIPTED);
-        stdx::unpoisoned(self.clock.state.lock()).now = at;
+        stdx::unpoisoned(self.clock.state.lock()).move_to(at);
         if let Some(after) = after {
             after();
         }
