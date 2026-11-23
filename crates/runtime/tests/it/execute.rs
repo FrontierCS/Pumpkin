@@ -1369,14 +1369,11 @@ fn sweep_unrecorded() {
 fn unstarted_undeletable() {
     let mut ir = workflow(&["exit", "0"]);
     ir["roles"][0]["image"] = json!(sim::image(MUTE).as_str());
-    // The create's record lasts until the start's first look, which finds the sandbox ended.
-    let looked = SlowSync {
-        record: Synced::Holding(AGENT_SANDBOX, "sim-1"),
-        queued: 0,
-        at: Duration::from_secs(1),
-    };
+    // Once the start has read the clock past the create's record, the clock moves to its first
+    // look, which finds the sandbox ended.
+    let created = Synced::Holding(AGENT_SANDBOX, "sim-1");
     let shown = executed(
-        &SimHost::new().slow_sync(looked),
+        &SimHost::new().moving_after_read(created, Duration::from_secs(1)),
         "unstarted-undeletable",
         &[(PROVIDER, &Sim::new())],
         &ir,
@@ -1468,20 +1465,19 @@ fn stalls() {
     );
 }
 
-// Each start ends at its first look, which finds its sandbox ended, long before its 30 s
-// startup: each create's record lasts a second, past the look's interval.
+// Each start ends at its first look, which finds its sandbox ended, long before its 30 s startup:
+// the clock moves past the look's interval once the start reads it past its create's record.
 #[test]
 fn unstarted() {
     let ir = workflow(&["exit", "0"]);
     let on = |name, sandboxd| {
-        let looked = |record, id, seconds| SlowSync {
-            record: Synced::Holding(record, id),
-            queued: 0,
-            at: Duration::from_secs(seconds),
-        };
+        let looked = |record, id| Synced::Holding(record, id);
         let host = SimHost::new()
-            .slow_sync(looked(AGENT_SANDBOX, "sim-1", 1))
-            .slow_sync(looked("jobs/0/.sandbox.json.partial", "sim-2", 2));
+            .moving_after_read(looked(AGENT_SANDBOX, "sim-1"), Duration::from_secs(1))
+            .moving_after_read(
+                looked("jobs/0/.sandbox.json.partial", "sim-2"),
+                Duration::from_secs(2),
+            );
         executed(&host, name, &[(PROVIDER, &Sim::new())], &ir, sandboxd, &[])
     };
     let (listed, left_out) = (on("unstarted", MUTE), on("unstarted-left-out", VANISHING));
@@ -1779,13 +1775,10 @@ fn interrupted_during_teardown() {
 fn unlistable() {
     let mut ir = workflow(&["exit", "0"]);
     ir["roles"][2]["image"] = json!(sim::image(UNLISTABLE).as_str());
-    let startup = SlowSync {
-        record: Synced::Holding("jobs/0/.sandbox.json.partial", "sim-2"),
-        queued: 0,
-        at: Duration::from_secs(SHORT_STARTUP),
-    };
+    let created = Synced::Holding("jobs/0/.sandbox.json.partial", "sim-2");
+    let startup = Duration::from_secs(SHORT_STARTUP);
     check(
-        &SimHost::new().slow_sync(startup),
+        &SimHost::new().moving_after_read(created, startup),
         "unlistable",
         &[(PROVIDER, &Sim::with_startup(SHORT_STARTUP))],
         &ir,
@@ -2249,7 +2242,6 @@ fn sweeps_each_provider() {
 
 // Each start looks at its own provider's list.
 #[test]
-#[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
 fn watches_each_provider() {
     let argv = [
         "ops",
@@ -2271,13 +2263,9 @@ fn watches_each_provider() {
     grant["name"] = json!("near");
     grant["job"]["target"] = json!("nearer");
     grants.as_array_mut().unwrap().push(grant);
-    // The train call's create's record lasts half its class's startup, so its start's look at
-    // `there` finds its sandbox ended. A look at `here` would leave that start waiting.
-    let looked = SlowSync {
-        record: Synced::Holding("jobs/1/.sandbox.json.partial", "sim-1"),
-        queued: 0,
-        at: Duration::from_millis(500),
-    };
+    // At half the train call's startup, once its start reads the clock past its create's record,
+    // its look at `there` finds its sandbox ended, where one at `here` would leave it waiting.
+    let created = Synced::Holding("jobs/1/.sandbox.json.partial", "sim-1");
     // The run log's next record after the train call's end lasts until the near call's startup.
     let startup = SlowSync {
         record: Synced::Holding("log.jsonl", r#""event":{"job":1,"kind":"call_torn_down"}"#),
@@ -2288,7 +2276,9 @@ fn watches_each_provider() {
     let there = there(Sim::new());
     let providers = [("here", &here), ("there", &there)];
     check(
-        &SimHost::new().slow_sync(looked).slow_sync(startup),
+        &SimHost::new()
+            .moving_after_read(created, Duration::from_millis(500))
+            .slow_sync(startup),
         "watches-each-provider",
         &providers,
         &ir,
@@ -5775,14 +5765,12 @@ fn shared_start_failure_is_disposed_before_final() {
         "board",
     );
     ir["roles"][1]["image"] = json!(sim::image(MUTE).as_str());
-    // The create's record lasts until the start's first look, which finds the sandbox ended.
-    let looked = SlowSync {
-        record: Synced::Holding("shared/trainer/.sandbox.json.partial", "sim-"),
-        queued: 0,
-        at: Duration::from_secs(1),
-    };
+    // Once the start has read the clock past the create's record, the clock moves to its first
+    // look, which finds the sandbox ended.
+    let created = Synced::Holding("shared/trainer/.sandbox.json.partial", "sim-");
+    let host = SimHost::new().moving_after_read(created, Duration::from_secs(1));
     let dir = TestDir::new();
-    let (record, agents, _) = judged(&SimHost::new().slow_sync(looked), ir, &dir);
+    let (record, agents, _) = judged(&host, ir, &dir);
     assert!(agents[0].submission.as_ref().unwrap().finalized);
     let log = read_log(&record);
     let failure = log

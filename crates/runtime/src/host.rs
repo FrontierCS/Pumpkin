@@ -2,13 +2,13 @@
 //!
 //! Every wait of a run ends by the run's clock. A session's requests, a model response's frames
 //! and a start's wait for its sandbox take the time left as a function that reads the clock
-//! (`until`, `left`), which the gateway reads again as it waits. What a run still waits on by the
-//! machine's time, whatever its host:
+//! (`until`, `whole_until`, `left`), which the gateway reads again as it waits. What a run still
+//! waits on by the machine's time, whatever its host:
 //! - within a start's wait for its sandbox, each dial, its TLS and its hello, the answer to its
 //!   hello, and the private listener's wait for a check, which take the time left as they begin;
 //! - a provider's own calls, which wait on its platform;
-//! - the model route's resolve, connect and reads upstream, through `ureq`, by bounds of their
-//!   own;
+//! - the model route's exchange upstream, through `ureq`, which takes the time left as it begins,
+//!   and its resolve, connect and reads, by bounds of their own;
 //! - [`Clock::unix`], the run's start by the machine's clock.
 
 use std::fs::File;
@@ -186,4 +186,14 @@ pub(super) fn until<C: Clock>(
         let left = left(&clock, at)?;
         Some(clock.look().map_or(left, |look| left.min(look)))
     }
+}
+
+/// The time left until `at`, as [`left`] gives it, whole, for a bound that a wait takes once as it
+/// begins, on any thread.
+pub(super) fn whole_until<C: Clock>(
+    clock: &C,
+    at: Duration,
+) -> impl Fn() -> Option<Duration> + Send + 'static + use<C> {
+    let clock = clock.clone();
+    move || left(&clock, at)
 }

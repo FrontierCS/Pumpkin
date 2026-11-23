@@ -11,6 +11,7 @@ use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
+use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use runtime::{Clock, Durable, Host, Inbox};
@@ -50,6 +51,9 @@ struct State {
     first: Option<Arc<dyn Fill>>,
     // When the run started by the machine's clock, once it has.
     unix: SystemTime,
+    // The syncs that move the clock once their thread has read it next, and the move due so.
+    after_read: VecDeque<(Synced, Duration)>,
+    due: Option<(ThreadId, Duration)>,
 }
 
 /// A take comes late, after setup or the agent's initial ops query: once `behind`
@@ -94,6 +98,8 @@ impl SimHost {
             failed_file: None,
             first: None,
             unix: UNIX_EPOCH,
+            after_read: VecDeque::new(),
+            due: None,
         };
         Self {
             state: Arc::new(Mutex::new(state)),
@@ -116,6 +122,15 @@ impl SimHost {
 
     pub(crate) fn slow_sync(self, slow: SlowSync) -> Self {
         stdx::unpoisoned(self.state.lock()).slow.push_back(slow);
+        self
+    }
+
+    /// Moves the clock to `at` once the thread whose sync first makes `record` last has read the
+    /// clock next, after that read, as the machine may run other threads only once it has.
+    pub(crate) fn moving_after_read(self, record: Synced, at: Duration) -> Self {
+        stdx::unpoisoned(self.state.lock())
+            .after_read
+            .push_back((record, at));
         self
     }
 
@@ -190,6 +205,9 @@ impl Host for SimHost {
             Synced::Holding(file, text) => path.ends_with(file) && holds(text),
         };
         let slow = state.slow.pop_front_if(|slow| reached(&slow.record));
+        if let Some((_, at)) = state.after_read.pop_front_if(|(record, _)| reached(record)) {
+            state.due = Some((thread::current().id(), at));
+        }
         let awaited = (state.held.take_if(|(record, _)| reached(record))).map(|(_, logged)| logged);
         let named = |name: &str| path.file_name() == Some(name.as_ref());
         let file = match &mut state.failed_file {
@@ -299,7 +317,7 @@ impl SimTime {
                 "a wait on the simulated clock for {at:?} lasted {WATCHDOG:?}: expected the test \
                  to move the clock there"
             );
-            std::thread::sleep(LOOK);
+            thread::sleep(LOOK);
         }
     }
 
@@ -329,7 +347,15 @@ impl Clock for SimClock {
     type Inbox<T: Send + 'static> = SimInbox<T>;
 
     fn now(&self) -> Duration {
-        stdx::unpoisoned(self.state.lock()).now
+        let mut state = stdx::unpoisoned(self.state.lock());
+        let now = state.now;
+        if let Some((_, at)) = state
+            .due
+            .take_if(|(reader, _)| *reader == thread::current().id())
+        {
+            state.move_to(at);
+        }
+        now
     }
 
     fn unix(&self) -> SystemTime {

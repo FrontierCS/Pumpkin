@@ -502,7 +502,6 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         arrivals: Sender<T>,
         wrap: impl Fn(Arrival) -> T + Send + 'static,
     ) -> Result<Started, Unstarted> {
-        let name = which.name();
         let now = UnixTime::of(SystemTime::now())?;
         // The start's deadline by the machine's clock, which the provider reads, at most the hard
         // end, as the run is abandoned then.
@@ -513,7 +512,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         let hosting = self.providers.get(&placement.provider);
         let create = Create {
             run: self.run.clone(),
-            name,
+            name: which.name(),
             role: provider_role(self.workflow(), role, self.capacity.instances(role)),
             instance: which.instance(),
             class: placement.class.clone(),
@@ -524,14 +523,12 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             hard_end,
             by: by_unix.min(hard_end),
         };
-        // The private listener's wait for a check, which the machine's clock times.
         let by_machine = Deadline::after(left(clock, by).unwrap_or_default());
         let started = hosting.meets.create(&self.sockets, &create, by_machine);
         let (Created { id }, registration) = started.inspect_err(|_| {
             let mut inventory = stdx::unpoisoned(self.inventory.lock());
             inventory.unnamed.insert(&placement.provider);
         })?;
-        let looks = Looks::new(clock);
         let made = Made {
             on: &placement.provider,
             id: id.clone(),
@@ -549,6 +546,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
                 reason: error,
             });
         }
+        let looks = Looks::new(clock);
         // The wait ends at once for a signal, and for a sandbox that its provider lists as
         // ended, which will never connect.
         let stopped = || {
