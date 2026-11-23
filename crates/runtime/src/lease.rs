@@ -17,7 +17,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use decision::{Direction, Event, LeaseId};
-use gateway::{Arrival, Process, Put, Session, Trees};
+use gateway::{Arrival, Process, Put, Remote, Trees};
 use schema::ir::Argv;
 use schema::sandbox::op::{self, CommandEnd, OUTPUT_TAIL_BYTES, TransferEnd};
 use schema::sandbox::tree::Limits;
@@ -30,7 +30,7 @@ use stdx::time::Clock as _;
 
 use super::child::{Child, End, Message};
 use super::sandbox::{ENTRIES, collect};
-use super::{Clock, Host, Inbox};
+use super::{Host, Inbox};
 
 /// The directory of a lease's record that holds the tree a transfer moves, while it does.
 pub(super) const STAGING: &str = "transfer";
@@ -90,7 +90,7 @@ pub(super) fn run<H: Host>(leased: &Leased<'_>, child: &mut Child<'_, H, Order>)
 fn drive<H: Host>(
     leased: &Leased<'_>,
     child: &mut Child<'_, H, Order>,
-    session: &mut Session<H::Clock>,
+    session: &mut Remote,
 ) -> Event {
     let lease = leased.lease;
     let failed = |reason: String| Event::LeaseFailed { lease, reason };
@@ -127,10 +127,11 @@ fn drive<H: Host>(
 /// Runs the commands and transfers the core orders in `child`'s sandbox, whose session is
 /// `session`, one at a time, until the core's stop, and returns the command that still runs then,
 /// if one does; or why the runner failed first.
+#[expect(clippy::too_many_lines, reason = "one arm per message")]
 fn serve<H: Host>(
     leased: &Leased<'_>,
     child: &mut Child<'_, H, Order>,
-    session: &mut Session<H::Clock>,
+    session: &mut Remote,
     running: &mut Option<Running>,
 ) -> Result<(), String> {
     let Leased {
@@ -153,7 +154,8 @@ fn serve<H: Host>(
             }
             Some(Message::Stop) => return Ok(()),
             Some(Message::Order(Order::Transfer(order))) => {
-                let end = transfer(child, &session.trees(), &order, &mut held);
+                let runner = session.trees().in_group(lease.0);
+                let end = transfer(child, &runner, &order, &mut held);
                 let transfer = order.number;
                 child.event(Event::TransferEnded {
                     lease,
@@ -214,7 +216,7 @@ fn kill<H: Host>(
     child: &Child<'_, H, Order>,
     by_start: Duration,
     running: &mut Running,
-    session: &mut Session<H::Clock>,
+    session: &mut Remote,
 ) -> Result<(), String> {
     running.kill_at = None;
     match session.kill(running.process, by_start) {
@@ -234,7 +236,7 @@ fn kill<H: Host>(
 fn start(
     runner: &Runner,
     (run, by): (&Run, Duration),
-    session: &mut Session<impl Clock>,
+    session: &mut Remote,
 ) -> Result<Process, String> {
     let dir = command_dir(run.command);
     let put = session.put(&pumpkin_dir(), [Put::Dir(dir.clone(), dir_mode())], by);
@@ -256,7 +258,7 @@ fn start(
 fn outputs<H: Host>(
     child: &Child<'_, H, Order>,
     command: u64,
-    session: &mut Session<H::Clock>,
+    session: &mut Remote,
     required: bool,
 ) -> Result<(String, String), String> {
     let (dir, by) = (command_dir(command), child.deadlines.collect);
@@ -302,8 +304,13 @@ fn transfer<H: Host>(
         }
         held.is_some()
     };
-    let by = (&child.clock, child.deadlines.collect);
+    let by = child.deadlines.collect;
     let moved = staged_move(runner, order, &staging, by, &mut stopped);
+    // The loop sends the stop before it gives the transfer up, so a transfer that the stop cut
+    // short finds it in the inbox.
+    if moved.is_err() && held.is_none() {
+        *held = child.inbox.take();
+    }
     // The core's stop; the runner's session's end says itself why the transfer failed.
     let cut = matches!(held, Some(Message::Stop));
     if let Err(error) = fs::remove_dir_all(&staging)
@@ -326,7 +333,7 @@ fn staged_move(
     runner: &Trees,
     order: &Transfer,
     staging: &Path,
-    by: (&impl Clock, Duration),
+    by: Duration,
     stopped: &mut dyn FnMut() -> bool,
 ) -> Result<(u64, u64), String> {
     // Where the tree goes, and the rule that a failed put restates.
@@ -357,6 +364,7 @@ fn staged_move(
         bytes: order.max_bytes.get(),
         entries: ENTRIES,
     };
+    let (mut source, mut sink) = (source.clone(), sink.clone());
     let collected = source.collect(from, staging, limits, by, stopped);
     let listed = collected.context(format_args!("collecting {from} failed"))?;
     let entries = listed.len() as u64;

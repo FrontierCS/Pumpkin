@@ -12,7 +12,7 @@
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, OnceLock};
 use std::thread;
@@ -188,6 +188,19 @@ impl Stream {
 
     pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
         self.socket.set_nonblocking(nonblocking)
+    }
+
+    /// A descriptor of the session's end of the stream, which reads and writes as this does, but
+    /// that a read at the end doesn't say why the TLS connection ended: [`Stream::ended`] does.
+    pub fn descriptor(&self) -> io::Result<OwnedFd> {
+        Ok(self.socket.try_clone()?.into())
+    }
+
+    /// Why the TLS connection ended, once the relay has ended the stream; none if the peer's
+    /// `close_notify` ended it.
+    pub fn ended(&self) -> Option<io::Error> {
+        let (kind, why) = self.ended.get()?;
+        Some(io::Error::new(*kind, why.clone()))
     }
 
     pub fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {

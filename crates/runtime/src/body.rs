@@ -14,7 +14,7 @@ use std::time::Duration;
 use std::{fs, io};
 
 use decision::{Event, JobId, PayloadRef};
-use gateway::{Process, Put, Session};
+use gateway::{Process, Put, Remote};
 use schema::ir::{self, AbsolutePath, Argv, Name, TargetLifetime};
 use schema::sandbox::op::{
     CommandEnd, CommandStatus, Last, LeaseStatusReply, RunnerOutput, SessionOp, TransferEnd,
@@ -36,7 +36,7 @@ use crate::record::{Stored, reference};
 use crate::relay::{Relay, Waited};
 use crate::sandbox::{collect, collect_as};
 use crate::scoped::Waiting;
-use crate::{Clock, Entry, Host, Targeted};
+use crate::{Entry, Host, Targeted};
 
 /// The evaluator of the workflow's bodies, which the driver gives the run. The run calls it on
 /// the threads of its children, so it is shared between them.
@@ -211,7 +211,7 @@ pub(crate) fn evaluate<H: Host>(
     bodies: &dyn Bodies,
     call: &Call<'_>,
     child: &mut Child<'_, H, crate::relay::Order>,
-    session: &mut Session<H::Clock>,
+    session: &mut Remote,
     stdin: &mut Stdin,
 ) -> Ended {
     let resident = call.target.lifetime == TargetLifetime::Work;
@@ -308,11 +308,11 @@ impl Stdin {
 
     fn put(
         &mut self,
-        session: &Session<impl Clock>,
+        session: &Remote,
         bytes: &[u8],
-        by: (&impl Clock, Duration),
+        by: Duration,
     ) -> Result<AbsolutePath, String> {
-        let trees = session.trees();
+        let mut trees = session.trees();
         let dir = Self::DIR;
         if matches!(self, Self::Unused) {
             trees
@@ -330,16 +330,17 @@ impl Stdin {
         // Even a failed put can leave a partial file.
         *self = Self::Staged;
         trees
-            .put(&dir, root, [Put::File(name, file_mode(), bytes)], by)
+            .put(
+                &dir,
+                root,
+                [Put::File(name, file_mode(), bytes.to_vec())],
+                by,
+            )
             .context("staging the command's stdin failed")?;
         Ok(path)
     }
 
-    fn clear(
-        &mut self,
-        session: &Session<impl Clock>,
-        by: (&impl Clock, Duration),
-    ) -> Result<(), String> {
+    fn clear(&mut self, session: &Remote, by: Duration) -> Result<(), String> {
         if matches!(self, Self::Staged) {
             session
                 .trees()
@@ -355,7 +356,7 @@ impl Stdin {
 struct OnTarget<'a, 'c, 'r, H: Host> {
     call: &'a Call<'c>,
     child: &'a mut Child<'r, H, crate::relay::Order>,
-    session: &'a mut Session<H::Clock>,
+    session: &'a mut Remote,
     /// When the call's timeout passes, as a time since the run started.
     timeout: Duration,
     relay: Relay,
@@ -473,7 +474,7 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
             };
             self.log(Targeted::Ended { command, end });
         }
-        self.stdin.clear(self.session, (&self.child.clock, until))?;
+        self.stdin.clear(self.session, until)?;
         match self.session.ended() {
             Some(reason) => Err(format!("the shared role's session ended: {reason}")),
             None => Ok(()),
@@ -535,9 +536,7 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
         let input = self.input(slot)?;
         let bytes = input.read()?;
         let supplied = input.reference.clone();
-        let put = self
-            .stdin
-            .put(self.session, &bytes, (&self.child.clock, by));
+        let put = self.stdin.put(self.session, &bytes, by);
         Ok((self.timely(put)?, supplied))
     }
 
@@ -692,12 +691,13 @@ impl<H: Host> Target for OnTarget<'_, '_, '_, H> {
             return Err("`/` is the sandbox's root: name a file's path".to_owned());
         };
         let payload = self.input(input_slot)?.read()?;
+        let reference = reference(&payload);
         let put = self
             .session
-            .put(&dir, [Put::File(name, file_mode(), &payload)], by);
+            .put(&dir, [Put::File(name, file_mode(), payload)], by);
         let put = put.context(format_args!("putting the payload at {path} failed"));
         self.timely(put)?;
-        let put = reference(&payload);
+        let put = reference;
         self.log(Targeted::Put {
             path: path.clone(),
             put,

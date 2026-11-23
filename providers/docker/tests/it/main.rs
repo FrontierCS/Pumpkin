@@ -14,15 +14,17 @@ use std::fs::DirBuilder;
 use std::num::{NonZeroU32, NonZeroU64};
 use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 use std::{env, fs, thread};
 
 use docker::Docker;
 use engine::{BuildContext, ContextName, Engine, Recipe, Security};
 use expect_test::{Expect, expect};
-use gateway::{Arrival, IncomingModelRequest, Op, Process, Put, Registration, Session, Sockets};
+use gateway::{
+    Arrival, IncomingModelRequest, Op, Process, Put, Registration, Remote, Sockets, Takes,
+};
 use provider::{
     Create, Created, Creator, Listed, Provider, Reservation, Role, RunTag, SandboxId, Sweep,
     UnixTime,
@@ -44,6 +46,7 @@ use schema::sandbox::{
 use stdx::process::Environment;
 use stdx::time::{Clock as _, Machine};
 use stdx::{Context, Deadline};
+use test_support::gateway::Gateway;
 use test_support::suite::{Locals, Subject, reserve_with_room};
 use test_support::{BUSYBOX, TestDir, docker, hung};
 
@@ -59,7 +62,10 @@ const ROLES: [&str; 9] = [
 struct Fixture {
     sandboxd: PathBuf,
     dir: PathBuf,
-    sockets: Sockets,
+    sockets: Arc<Sockets>,
+    // The loop of the sandboxes' sessions. Its drop waits for each session's end, so each
+    // `Started` drops first.
+    gateway: Gateway,
     run: RunTag,
     other_run: RunTag,
     // Held for the fixture's life: a create takes its share of the run's reservation.
@@ -75,7 +81,8 @@ impl Fixture {
         let held = reserve_with_room(provider(), &run, &phases);
         Self {
             sandboxd: test_support::sandboxd(),
-            sockets: Sockets::create(dir.join("sockets")).unwrap(),
+            sockets: Arc::new(Sockets::create(dir.join("sockets")).unwrap()),
+            gateway: Gateway::new(),
             dir: dir.to_owned(),
             run,
             other_run: tag("-other"),
@@ -99,10 +106,11 @@ impl Fixture {
     ) -> Result<Started, String> {
         let (create, dial, registration) =
             self.publish(run, role, sandboxd, image, ops.is_some(), model)?;
-        Self::start_created(&create, dial, registration, ops, model)
+        self.start_created(&create, dial, registration, ops, model)
     }
 
     fn start_created(
+        &self,
         create: &Create,
         dial: SocketDial,
         registration: Registration,
@@ -113,7 +121,8 @@ impl Fixture {
         let by = startup();
         let Created { id } = provider().create(create, dial)?;
         let (sender, arrivals) = mpsc::channel();
-        let accepted = registration.accept((&Machine, by), ops, model, sender, |a| a, || false);
+        let takes = Takes { ops, models: model };
+        let accepted = self.gateway.accept(registration, by, takes, sender);
         let set_up = accepted
             .map_err(|error| error.to_string())
             .and_then(|mut session| {
@@ -149,7 +158,7 @@ impl Fixture {
         model: bool,
     ) -> Result<(Create, SocketDial, Registration), String> {
         let name = Name::try_from(role.to_owned()).unwrap();
-        let (dial, registration) = self.sockets.issue(&name).unwrap();
+        let (dial, registration) = self.gateway.issue(&self.sockets, &name).unwrap();
         let role = self::role(role);
         let image = provider().publish_image(image)?;
         let sandboxd = provider().publish_sandboxd(sandboxd)?;
@@ -186,10 +195,9 @@ fn role(name: &str) -> Role {
     }
 }
 
-#[derive(Debug)]
 struct Started {
     id: SandboxId,
-    session: Session<Machine>,
+    session: Remote,
     arrivals: Receiver<Arrival>,
 }
 
@@ -198,7 +206,7 @@ impl Started {
         self.id.as_str()
     }
 
-    fn session(&mut self) -> &mut Session<Machine> {
+    fn session(&mut self) -> &mut Remote {
         &mut self.session
     }
 }
@@ -457,7 +465,7 @@ fn freezes_what_it_left() {
             let (dir, payload) = (relative("in/payload"), relative("in/payload/raw"));
             let put = [
                 Put::Dir(dir, dir_mode()),
-                Put::File(payload, file_mode(), b"ledger"),
+                Put::File(payload, file_mode(), b"ledger".to_vec()),
             ];
             sandbox
                 .session()
@@ -600,7 +608,9 @@ fn cpus() {
                 let made = fixture.publish(run, name, &fixture.sandboxd, &image(), false, false);
                 let (mut create, dial, registration) = made.unwrap();
                 (create.role, create.instance) = (role, instance);
-                Fixture::start_created(&create, dial, registration, None, false).unwrap()
+                fixture
+                    .start_created(&create, dial, registration, None, false)
+                    .unwrap()
             };
             let mut started = [
                 ("the agent", start(first, "agent", sized("agent", 2), 0)),
@@ -900,11 +910,15 @@ fn sandboxctl_on_path() {
             let mut sandbox = sandbox.unwrap();
             let executable = Mode::new(0o755);
             let put = [
-                Put::File(relative("sandboxctl"), executable, b"#!/bin/sh\nexit 99\n"),
+                Put::File(
+                    relative("sandboxctl"),
+                    executable,
+                    b"#!/bin/sh\nexit 99\n".to_vec(),
+                ),
                 Put::File(
                     relative("caller"),
                     executable,
-                    b"#!/bin/sh\nexec sandboxctl ops\n",
+                    b"#!/bin/sh\nexec sandboxctl ops\n".to_vec(),
                 ),
             ];
             let home = "/pumpkin/home";
@@ -952,7 +966,7 @@ fn ops() {
             let sandbox = fixture.try_start(&fixture.run, "ops", sandboxd, &image(), ops, false);
             let mut sandbox = sandbox.unwrap();
             let session = sandbox.session();
-            let put = [Put::File(relative("payload"), file_mode(), &payload)];
+            let put = [Put::File(relative("payload"), file_mode(), payload.clone())];
             session
                 .put(&absolute("/pumpkin/home"), put, hung())
                 .unwrap();
@@ -1090,7 +1104,7 @@ fn refused_calls() {
             let mut sandbox = sandbox.unwrap();
             // The second `sandboxd`'s session, at a socket moved to where the sandbox dials.
             let name = Name::try_from("second".to_owned()).unwrap();
-            let (_, second) = fixture.sockets.issue(&name).unwrap();
+            let (_, second) = fixture.gateway.issue(&fixture.sockets, &name).unwrap();
             let issued = fixture.dir.join("sockets/second").join(SOCKET_NAME);
             fs::rename(issued, fixture.dir.join("sockets/refused/second")).unwrap();
             let script = format!(
@@ -1119,10 +1133,15 @@ fn refused_calls() {
             let process = sandbox.session().start(launch(1, &script), hung()).unwrap();
             // The command waits for the second `sandboxd`, which waits for its session to open, so
             // that session is accepted beside the owner's loop.
+            let gateway = &fixture.gateway;
             let (status, arrived) = thread::scope(|scope| {
                 let second = scope.spawn(move || {
                     let (arrivals, _) = mpsc::channel();
-                    second.accept((&Machine, hung()), None, false, arrivals, |a| a, || false)
+                    let takes = Takes {
+                        ops: None,
+                        models: false,
+                    };
+                    gateway.accept(second, hung(), takes, arrivals)
                 });
                 let served = serve(&mut sandbox, process, &[]);
                 drop(second.join().unwrap().unwrap());
@@ -1396,17 +1415,13 @@ fn respond(incoming: IncomingModelRequest) -> String {
     if request.path == "/headless" {
         // A head too long for a frame, which ends the request without a response.
         let headers = vec![("x-pad".to_owned(), "a".repeat(MAX_MESSAGE_BYTES))];
-        let refused = incoming
-            .respond(200, headers, (&Machine, hung()))
-            .unwrap_err();
+        let refused = incoming.respond(200, headers, hung()).unwrap_err();
         return format!("{asked}: {:?}", refused.kind());
     }
     if request.path == "/late" {
         // Far more than the client's buffers hold, yet within what the kernel queues to send on
         // `sandboxd`'s socket, so that much of it is still queued there as `sandboxd` closes.
-        let mut response = incoming
-            .respond(200, Vec::new(), (&Machine, hung()))
-            .unwrap();
+        let mut response = incoming.respond(200, Vec::new(), hung()).unwrap();
         response.send("a".repeat(1 << 20).as_bytes()).unwrap();
         response.end().unwrap();
         return asked;
@@ -1421,9 +1436,7 @@ fn respond(incoming: IncomingModelRequest) -> String {
     let headers = (headers.iter())
         .map(|&(name, value)| (name.to_owned(), value.to_owned()))
         .collect();
-    let mut response = incoming
-        .respond(status, headers, (&Machine, hung()))
-        .unwrap();
+    let mut response = incoming.respond(status, headers, hung()).unwrap();
     response.send(b"data: 1\n\n").unwrap();
     match body.as_str() {
         "" => response.end().unwrap(),
@@ -1451,7 +1464,7 @@ fn payload() -> Vec<u8> {
         .collect()
 }
 
-fn reply(session: &mut Session<Machine>, arrival: Arrival, payload: &[u8]) -> String {
+fn reply(session: &mut Remote, arrival: Arrival, payload: &[u8]) -> String {
     let incoming = match arrival {
         Arrival::Op(incoming) => incoming,
         Arrival::Refused(refused) => {

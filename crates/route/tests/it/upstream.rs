@@ -17,6 +17,7 @@ use gateway::{Arrival, IncomingModelRequest};
 use route::{Admission, Answer as Told, Apart, Keep, Key, Route, Upstream, UpstreamUrl};
 use schema::ir::{Api, ModelBudget};
 use stdx::time::Machine;
+use test_support::gateway::Gateway;
 use test_support::http::{read_request, write_chunk};
 use test_support::{HUNG, TestDir, hung};
 
@@ -25,7 +26,8 @@ use super::kept::{
 };
 use super::read::CHAT_CUSTOM;
 use super::{
-    Request, chat, fake_sandbox, listed, meeting, messages, models, next_model_request, post,
+    Request, chat, fake_sandbox, listed, meeting, messages, models, models_only,
+    next_model_request, post,
 };
 
 const KEY: &str = "sk-test-0123\n";
@@ -240,8 +242,9 @@ fn exchanged(cases: &[Case]) -> String {
     let (parts, heard_part) = mpsc::channel();
     let (holds, held) = mpsc::channel();
     let stand_in = thread::spawn(move || serve(&stand_in, answers, &heard_part, &holds));
+    let gateway = Gateway::new();
     // Its sockets fit in a socket's address by this path to their directory.
-    let (_sockets, registration, socket) = meeting(dir);
+    let (_sockets, registration, socket) = meeting(&gateway, dir);
     let mut requests = Vec::new();
     let mut hangs_up = None;
     for case in &forwarded {
@@ -253,7 +256,7 @@ fn exchanged(cases: &[Case]) -> String {
     }
     let sandbox = thread::spawn(move || fake_sandbox(&socket, requests, Some(&parts), hangs_up));
     let (sender, arrivals) = mpsc::channel();
-    let accepted = registration.accept((&Machine, hung()), None, true, sender, |a| a, || false);
+    let accepted = gateway.accept(registration, hung(), models_only(), sender);
     let session = accepted.unwrap();
     let mut outcomes = Vec::new();
     for (case, entry) in cases.iter().zip(&made) {
