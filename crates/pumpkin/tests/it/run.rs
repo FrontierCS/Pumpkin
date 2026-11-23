@@ -22,7 +22,7 @@ use test_support::{BUSYBOX, WORKFLOW, docker, docker_context, files, sandboxd, s
 
 use super::{
     EC2, LOCAL, PUMPKIN, RUNNER, Scratch, Step, check, containers, copy_tree, docker_table, engine,
-    final_running, invocation, machine, record, report, through_shell, with_room, workflow,
+    final_running, invocation, machine, ran, record, report, through_shell, with_room, workflow,
 };
 
 #[test]
@@ -1455,6 +1455,48 @@ fn unbuilt_on_docker() {
                 "pumpkin: the build of an image in pumpkin/unbuilt/runner failed",
             ]
             what `docker build` wrote is said: its step true, its error true
+            a record was made: false"#]],
+    );
+}
+
+#[test]
+#[ignore = "needs Docker: run cargo xtask live docker"]
+fn unplaced_provider_unreached_on_docker() {
+    let scratch = Scratch::new();
+    let sandboxd = sandboxd().into_os_string().into_string().unwrap();
+    let label = format!("pumpkin.test=unplaced-{}", std::process::id());
+    let _images = Labelled(label.clone());
+    scratch.write_task("unbuilt", &workflow("", &["true"]));
+    let failing = format!("FROM {BUSYBOX}\nLABEL {label}\nRUN false\n");
+    scratch.write("unbuilt/Dockerfile", &failing);
+    let context = docker_context();
+    // `a100`'s one class has GPUs, which no role needs, and it sorts before `aws`, which the AWS
+    // guard keeps unreachable, so a run that reached every provider would reach `a100` first.
+    let a100 = r#"[providers.a100.modal]
+profile = "pumpkin"
+images = { region = "us-west-1", repository = "pumpkin/roles", role_arn = "arn:aws:iam::123456789012:role/pumpkin-modal-pull" }
+dials_from = "203.0.113.7"
+classes.a100 = { gpu = "A100-80GB", gpu_model = "NVIDIA A100-SXM4-80GB", cpu_millis = 8000, memory_bytes = 85899345920, startup_seconds = 1800 }
+"#;
+    let config = format!("{}\n{EC2}\n{a100}", docker_table(&context));
+    scratch.write("pumpkin.toml", &config);
+    let rootful = !engine(&scratch, &context).report().security.rootless;
+    let mut run = scratch.pumpkin(&["run", "unbuilt/task.star", "--sandboxd", &sandboxd]);
+    run.args(["--runs", "runs", "--config", "pumpkin.toml"]);
+    let lines = [
+        ran(run, &scratch.0, rootful),
+        format!("a record was made: {}", scratch.0.join("runs").exists()),
+    ];
+    check(
+        &scratch,
+        lines.map(Step::Ran),
+        rootful,
+        &[(&sandboxd[..], "<sandboxd>")],
+        &expect![[r#"
+            $ pumpkin run unbuilt/task.star --sandboxd <sandboxd> --runs runs --config pumpkin.toml
+            exit status: Some(1)
+            pumpkin: reaching provider `aws` failed: `aws --version` failed with exit status: 1 and wrote nothing to standard error: expected it to exit with 0
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <sandboxd> <scratch>/unbuilt/task.star
             a record was made: false"#]],
     );
 }

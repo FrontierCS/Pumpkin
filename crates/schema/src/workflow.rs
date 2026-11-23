@@ -3,7 +3,8 @@
 //!
 //! A [`Placed`] workflow has each of its roles on a provider, in the smallest class of sandbox
 //! offered that fits it. A [`Workflow`] can only be made by [`Workflow::parse`], and a [`Placed`]
-//! by [`Workflow::place`], so code that acts on one need not check again what they established.
+//! by [`Workflow::place`], or by [`Placed::built`] from one, so code that acts on one need not
+//! check again what they established.
 //! Each kind of part has its own id type, so that, for example, the role a [`JobFunction`]
 //! targets is known to be a [`Target`]. Ids are only valid for the workflow that issued them.
 
@@ -171,6 +172,25 @@ impl Placed {
 
     pub fn placement(&self, role: RoleId) -> &Placement {
         self.placements.get(role)
+    }
+
+    /// The same placements, with `built` as the workflow: the placed workflow parsed again with
+    /// its images built, so with the same roles and needs.
+    ///
+    /// # Panics
+    ///
+    /// `built`'s roles, or their needs, are not those of the placed workflow.
+    #[must_use]
+    pub fn built(self, built: Workflow) -> Self {
+        let placed = self.workflow.roles.iter().map(|sandbox| &sandbox.needs);
+        assert!(
+            placed.eq(built.roles.iter().map(|sandbox| &sandbox.needs)),
+            "a workflow with its images built has other roles or needs than it was placed with"
+        );
+        Self {
+            workflow: built,
+            placements: self.placements,
+        }
     }
 
     /// The longest a start of one of `role`'s sandboxes takes: its class's

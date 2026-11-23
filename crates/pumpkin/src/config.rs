@@ -15,6 +15,7 @@ use gateway::GatewayAddress;
 use route::{Headers, Key, Serving, UpstreamUrl};
 use runtime::TokenPrices;
 use schema::ir::{Api, ApiRoute, ModelName, ModelRoute, Name};
+use schema::workflow::{ByProvider, Placed};
 use serde::{Deserialize, Deserializer, Serialize, de};
 use stdx::Context;
 
@@ -172,20 +173,44 @@ impl Providers<Kind> {
         }
         Ok(Self(providers))
     }
-
-    /// The providers, each made a `T` by `connect` from its name and kind, in the order of their
-    /// names. Fails as the first `connect` that fails, making no more.
-    pub(crate) fn connect<T>(
-        self,
-        mut connect: impl FnMut(&Name, Kind) -> Result<T, String>,
-    ) -> Result<Providers<T>, String> {
-        let connected =
-            (self.0.into_iter()).map(|(name, kind)| Ok((name.clone(), connect(&name, kind)?)));
-        connected.collect::<Result<_, String>>().map(Providers)
-    }
 }
 
 impl<T> Providers<T> {
+    /// The providers, each made a `U` by `make` from its name and its `T`, in the order of their
+    /// names. Fails as the first `make` that fails, making no more.
+    pub(crate) fn make<U>(
+        self,
+        mut make: impl FnMut(&Name, T) -> Result<U, String>,
+    ) -> Result<Providers<U>, String> {
+        let providers =
+            (self.0.into_iter()).map(|(name, provider)| Ok((name.clone(), make(&name, provider)?)));
+        providers.collect::<Result<_, String>>().map(Providers)
+    }
+
+    /// The providers that `placed` places a role on, each made a `U` by `make` from its name and
+    /// its `T`, in the order of their names; the others are dropped unmade. Fails as the first
+    /// `make` that fails, making no more.
+    ///
+    /// # Panics
+    ///
+    /// `placed` places a role on a provider that these lack.
+    pub(crate) fn placed<U>(
+        self,
+        placed: &Placed,
+        mut make: impl FnMut(&Name, T) -> Result<U, String>,
+    ) -> Result<ByProvider<U>, String> {
+        let mut providers = self.0;
+        placed.by_provider(|name| {
+            let Some(provider) = providers.remove(name) else {
+                unreachable!(
+                    "a role is placed on provider `{name}`, which these lack, though the caller \
+                     placed the roles on these"
+                );
+            };
+            make(name, provider)
+        })
+    }
+
     pub(crate) fn by_name(&self) -> &BTreeMap<Name, T> {
         &self.0
     }
