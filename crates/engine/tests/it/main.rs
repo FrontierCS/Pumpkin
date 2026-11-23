@@ -64,8 +64,6 @@ fn redact(fixture: &Fixture, message: &str) -> String {
         .replace(&context, "context `<context>`")
 }
 
-// `--help` is refused as a context's name, as `docker context inspect` mustn't take it for its
-// own option, which prints its help and succeeds.
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn report() {
@@ -95,6 +93,8 @@ fn report() {
         ),
         ContextName::try_from(String::new()).unwrap_err(),
     ];
+    // `--help` is refused as a context's name, as `docker context inspect` mustn't take it for its
+    // own option, which prints its help and succeeds.
     for name in ["pumpkin-missing", "--help"] {
         let context = ContextName::try_from(name.to_owned()).unwrap();
         let refused = Engine::connect(context, &engine_dir()).unwrap_err();
@@ -680,8 +680,8 @@ impl<'f> Builds<'f> {
 }
 
 impl Drop for Builds<'_> {
-    // Nothing here panics, for the reason the fixture's drop gives; a tag that can't be
-    // removed is printed.
+    // A panic in a drop that runs as a failed test unwinds would abort the test binary, so a tag
+    // that can't be removed is printed.
     fn drop(&mut self) {
         for image in &self.seen {
             for tag in self.tags(image) {
