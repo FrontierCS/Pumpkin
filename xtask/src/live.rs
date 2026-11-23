@@ -168,7 +168,6 @@ pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> 
 // is set for the minute after, and an instance takes up to 10 to be terminated.
 const LOST_BY: Duration = Duration::from_mins(94 + 2 + 10);
 
-/// How often a lost run's sandboxes are looked for.
 const LOST_EVERY: Duration = Duration::from_mins(1);
 
 fn lost(settings: &Settings, repo: &Path, again: &str) -> Result<()> {

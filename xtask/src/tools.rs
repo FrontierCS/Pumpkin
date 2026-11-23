@@ -327,7 +327,7 @@ pub(crate) fn fetched(release: Release) -> Result<PathBuf> {
 }
 
 /// Where the fetched releases are: `pumpkin/tools` in the user's cache directory, as the XDG Base
-/// Directory Specification places it. The launcher `deploy/pumpkin` caches Pumpkin's releases in
+/// Directory Specification places it. The launcher `dist/pumpkin` caches Pumpkin's releases in
 /// that cache directory too.
 fn cache() -> Result<PathBuf> {
     // The specification says to ignore a relative path.

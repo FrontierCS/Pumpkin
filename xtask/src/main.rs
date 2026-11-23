@@ -288,10 +288,10 @@ fn main() -> ExitCode {
     }
 }
 
-/// xflags exits by itself on `--help`, with 0, and on a command line it can't parse, with 2.
 // Each command is a function of its own, given its flags, as each of TigerBeetle's scripts is:
 // https://github.com/tigerbeetle/tigerbeetle/blob/3cd7cf4799f65c81ffbc36eda788b8b26fd7da72/src/scripts.zig#L86-L93
 fn try_main() -> Result<()> {
+    // Exits by itself on `--help`, with 0, and on a command line it can't parse, with 2.
     let flags = flags::Xtask::from_env_or_exit();
     match flags.subcommand {
         flags::XtaskCmd::Fmt(flags::Fmt { check }) => {
@@ -433,8 +433,6 @@ fn root() -> &'static Path {
     root
 }
 
-/// Runs the checks every change must pass, in order, and stops at the first that fails. The
-/// tests leave out those ignored, which [`live::docker`] runs.
 fn ci() -> Result<()> {
     ran(fmt()?.arg("--check"), step(STEP_TIMEOUT))?;
     let repo = Repo { root: root() };
@@ -473,7 +471,6 @@ fn metadata() -> Result<String> {
     read(&mut metadata, STEP_TIMEOUT)
 }
 
-/// The target directory, as `cargo metadata` reports it.
 fn target_dir() -> Result<PathBuf> {
     let metadata: serde_json::Value = serde_json::from_str(&metadata()?)?;
     match metadata["target_directory"].as_str() {
@@ -525,10 +522,6 @@ fn refill(package: &str, filter: Option<&str>) -> Result<()> {
     tested.map(drop)
 }
 
-/// Runs cargo-mutants on the working tree's changes since `rev`, `origin/main` by default, below
-/// `paths` alone if there are any. If the changes leave the source below `paths` as it is, it
-/// mutates that source whole. Then it runs the mutants missed again on the merge base, to name
-/// those that the changes left uncaught. Missed mutants and timeouts are findings, not failures.
 fn mutants(paths: &[PathBuf], rev: Option<&str>) -> Result<()> {
     let buildifier = star::link()?;
     let mut again = "cargo xtask mutants".to_owned();
