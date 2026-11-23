@@ -142,7 +142,7 @@ mod flags {
 
 #[expect(
     clippy::print_stderr,
-    reason = "sandboxd reports why it stopped on its standard error, which the provider keeps"
+    reason = "sandboxd reports why it stopped on its standard error"
 )]
 fn main() -> ExitCode {
     stdx::abort_on_panic();
@@ -183,8 +183,6 @@ fn main() -> ExitCode {
         eprintln!("sandboxd: making the process non-dumpable failed: {error}");
         return ExitCode::FAILURE;
     }
-    // Past its start's deadline, the slack covers a hello begun just before it, which the
-    // gateway gives `HELLO_TIMEOUT`, and clocks of the host and the sandbox that are apart.
     let by = by.map(|seconds| Deadline::at_unix(Duration::from_secs(seconds) + UNCLAIMED_SLACK));
     let gateway = match (gateway, listen, by) {
         (Address::Socket(socket), false, None) => Ok(Gateway::Socket(socket)),

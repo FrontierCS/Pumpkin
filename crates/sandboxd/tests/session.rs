@@ -295,7 +295,7 @@ fn unlistened() -> SocketAddrV4 {
 
 /// Returns once a socket listens at `address`, as `/proc/net/tcp` lists it.
 // Its local address is the IP address's bytes as a native integer, then the port, in hexadecimal,
-// and `0A` is the state LISTEN (`proc_net_tcp(5)`), as the Docker provider's tests match it.
+// and `0A` is the state LISTEN (`proc_net_tcp(5)`).
 fn listened(address: SocketAddrV4) {
     let ip = u32::from_ne_bytes(address.ip().octets());
     let local = format!("{ip:08X}:{:04X}", address.port());
