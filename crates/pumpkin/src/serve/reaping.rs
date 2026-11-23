@@ -96,7 +96,7 @@ fn cancelled<W: Write>(
     }
     let modal = modal(request.modal_bytes.map(|_| body))?;
     let (record, _) = crate::found(cli::RunName::Prefix(id.to_owned()), None)?;
-    if crate::reaping::stop(&record)? {
+    if crate::reaping::signalled(&record)? {
         stopping(output)?;
     }
     let modal_config = modal.as_ref().map(|file| file.path().to_owned());

@@ -137,7 +137,8 @@ pub(crate) enum Followed {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[serde(expecting = "it is neither an answer to the request nor a refusal")]
 enum Head<H> {
-    /// Nothing took effect, for the reason that `message` gives, with what to do.
+    /// Nothing took effect, or, in a streamed answer, nothing after the items before it, for the
+    /// reason that `message` gives, with what to do.
     Refused { message: String },
     /// The answer's head, which carries its tag itself.
     #[serde(untagged)]

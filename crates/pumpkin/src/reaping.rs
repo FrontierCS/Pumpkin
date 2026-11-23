@@ -46,7 +46,7 @@ pub(crate) fn cancel(flags: cli::CancelRun) -> Result<Exit, String> {
     } = flags;
     let (record, named) = found(run, runs)?;
     let named = named.as_deref();
-    if stop(&record)? {
+    if signalled(&record)? {
         say(format_args!(
             "stopping run {}, recorded in {}: {STOPPING}",
             record.id(),
@@ -69,7 +69,7 @@ pub(crate) fn cancel(flags: cli::CancelRun) -> Result<Exit, String> {
 }
 
 /// Signals the driver of the run of `record`, if it has one: whether it had one.
-pub(crate) fn stop(record: &Record) -> Result<bool, String> {
+pub(crate) fn signalled(record: &Record) -> Result<bool, String> {
     let id = record.id();
     let Some(pid) = record.driver()? else {
         return Ok(false);
@@ -143,7 +143,8 @@ pub(crate) fn reap(flags: cli::Reap, reaper: Reaper) -> Result<Exit, String> {
 }
 
 /// Reaps each run in `runs` that `reaper` takes, ended or lost, and gives `reported` what came of
-/// each, as it comes; leaves each live run to its driver. Fails, and stops, if `reported` fails.
+/// each that had left something, or that a problem stays with, as it comes; leaves each live run to
+/// its driver. Fails, and stops, if `reported` fails.
 pub(crate) fn sweep(
     runs: &Path,
     modal_config: Option<PathBuf>,
@@ -162,24 +163,27 @@ pub(crate) fn sweep(
                 return Ok(None);
             }
             if reaper != Reaper::Command {
-                let build = match runtime::writer(&dir)? {
-                    Writer::This => None,
-                    Writer::Other(build) => Some(Some(build)),
-                    Writer::Older => Some(None),
-                };
-                if let Some(build) = build {
+                let other = |build| {
                     let other = Reaping::Other {
                         id: id.clone(),
                         build,
                     };
-                    return Ok((reaper == Reaper::Controller).then_some(other));
+                    Ok((reaper == Reaper::Controller).then_some(other))
+                };
+                match runtime::writer(&dir)? {
+                    Writer::This => {}
+                    Writer::Other(build) => return other(Some(build)),
+                    Writer::Older => return other(None),
                 }
             }
             let record = Record::open(&dir)?;
             if record.driver()?.is_some() || reaper == Reaper::Boot && record.ended_clean()? {
                 return Ok(None);
             }
-            reaped(&record, &mut reaching).map(|run| Some(Reaping::Reaped(run)))
+            // A run that left nothing, on providers all reached, has nothing to say.
+            let run = reaped(&record, &mut reaching)?;
+            let said = run.left() || !run.reached() || run.failed.is_some();
+            Ok(said.then_some(Reaping::Reaped(run)))
         };
         let reaping = match swept() {
             Ok(Some(reaping)) => reaping,

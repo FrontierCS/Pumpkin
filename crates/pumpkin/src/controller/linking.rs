@@ -82,7 +82,7 @@ impl From<String> for Unlinked {
 pub(super) struct Linked {
     link: Link,
     // What OpenSSH says of the connection, and what the remote command writes to its standard
-    // error: of `serve`, only its error as it ends and a failure to mark its install.
+    // error, where `serve` writes only as it ends, or fails to mark its install.
     diagnostics: tempfile::NamedTempFile,
 }
 
@@ -285,9 +285,12 @@ fn unlinked(
             // OpenSSH's fatal when the server's host key cannot be verified.
             // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/sshconnect2.c#L104
             let host_refused = line.as_deref() == Some("Host key verification failed.");
+            // OpenSSH's fatal when the server refuses every key, in its own form, as the file
+            // also holds `serve`'s lines, whose errors may say `Permission denied (os error 13)`.
+            // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/sshconnect2.c#L543
             let denied = line
                 .as_ref()
-                .is_some_and(|line| line.contains("Permission denied ("));
+                .is_some_and(|line| line.contains(": Permission denied (") && line.ends_with(")."));
             // The line may be `ssh`'s or `serve`'s.
             let said = line.map_or(ended, |line| format!("the link last said: {line}"));
             let said = format!("controller `{name}` didn't answer: {said}");
