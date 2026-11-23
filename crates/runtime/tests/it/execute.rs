@@ -2057,7 +2057,7 @@ fn call_starts_past_the_deadline() {
     // logged.
     let host = SimHost::new();
     let sim = Sim::new().once_logged(
-        r#""kind":"agent_torn_down""#,
+        &[r#""kind":"agent_torn_down""#],
         host.moving_to(Duration::from_secs(2)),
     );
     check(
@@ -2376,19 +2376,19 @@ fn abandoned() {
         its last record came once the hard end had passed"#]].assert_eq(&shown);
 }
 
-// The clock passes the hard end as the agent's exit is recorded, before the call is stopped: the
-// call's failure, observed past the hard end, comes after the tick that abandons the run.
+// The clock passes the hard end once the call has taken its stop, at the agent's exit: the call's
+// failure, observed past the hard end, comes after the tick that abandons the run.
 #[test]
 fn stopped_past_the_hard_end() {
-    let argv = ["ops", "call train slow", "await_log target_run", "exit"];
-    let ir = short_workflow(&argv, 2);
-    let slow = SlowSync {
-        record: Synced::Holding("log.jsonl", r#""kind":"stop_call""#),
-        queued: 0,
-        at: PAST_THE_HARD_END,
-    };
+    let argv = ["ops", "call train 6", "await_log target_run", "exit"];
+    let mut ir = short_workflow(&argv, 2);
+    // The command stalls its sandbox, which moves the clock past the hard end as it takes the
+    // freeze that follows the call's stop, once the stop alone has cut the call.
+    let train = &mut ir["roles"][0]["runtime"]["agent"]["grants"][0]["job"];
+    train["body"]["def"] = json!("run");
+    train["keywords"] = json!({ "argv": ["stall", "7"] });
     let dir = TestDir::new();
-    let host = SimHost::new().slow_sync(slow);
+    let host = SimHost::new();
     let (record, outcome) = execute_agents(&host, SHORT_STARTUP, ir, &dir, None);
     let Err(runtime::Stopped::Failed(reason)) = outcome else {
         panic!("expected the run to be abandoned: {outcome:?}")
@@ -2403,10 +2403,8 @@ fn stopped_past_the_hard_end() {
     let failed = |line: &Value| line["event"]["kind"] == "call_failed";
     let failed = log.iter().position(failed).unwrap();
     assert!(abandoned < failed);
-    // The move passes the call's timeout too, which its thread may see before the stop.
-    let reason = &log[failed]["event"]["reason"];
-    assert!(reason == "the call was stopped" || reason == "the call's timeout passed");
-    assert_eq!(log[failed]["observed_ns"], "6500000000");
+    assert_eq!(log[failed]["event"]["reason"], "the call was stopped");
+    assert_eq!(log[failed]["observed_ns"], "7000000000");
 }
 
 // The call's delete waits for the agent's, which begins once the agent has heard the result: the
@@ -2697,6 +2695,38 @@ fn torn_down_past_the_hard_end() {
             {"actions":[],"at_ns":"6500000000","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"6500000000","seq":8}
             {"at_ns":"6500000000","note":"the run failed: the run was still going at its hard end, 6 s after it started: expected it to end within its deadline, its finalize grace, its final call's timeout and its sandboxes' startups","seq":9}
             its last record came once the hard end had passed"#]],
+    );
+}
+
+// Once it has started, the agent's sleep moves the clock past the hard end. Its model request then
+// comes at the tick's time, so the loop takes it after the tick that abandons the run.
+#[test]
+fn model_request_after_abandon() {
+    let argv = [
+        "ops",
+        "await_log agent_started",
+        "sleep 7",
+        "model m-large 7",
+    ];
+    check(
+        &SimHost::new(),
+        "model-request-after-abandon",
+        &[(PROVIDER, &Sim::with_startup(SHORT_STARTUP))],
+        &routed(short_workflow(&argv, 2)),
+        SANDBOXD,
+        &expect![[r#"
+            failed: the run was still going at its hard end, 6 s after it started: expected it to end within its deadline, its finalize grace, its final call's timeout and its sandboxes' startups
+            provider.json routes: {"agent":[{"api":"responses","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"}]}
+            log.jsonl:
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"6000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
+            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
+            {"actions":[{"kind":"abandon"}],"at_ns":"7000000000","event":{"kind":"tick"},"observed_ns":"7000000000","seq":3}
+            {"at_ns":"7000000000","note":"model request 0 wasn't answered: the run has ended","seq":4}
+            {"actions":[],"at_ns":"7000000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":5}
+            {"at_ns":"7000000000","note":"the run failed: the run was still going at its hard end, 6 s after it started: expected it to end within its deadline, its finalize grace, its final call's timeout and its sandboxes' startups","seq":6}
+            its last record came once the hard end had passed
+            the model endpoint at each create: [true]"#]],
     );
 }
 
@@ -3462,9 +3492,13 @@ fn model_provider_down_at_the_deadline() {
 fn model_stream_cut() {
     // The sleep moves the clock to the 1 s deadline once the stream's first event has come.
     let argv = ["ops", "call submit slow", "ask m-large stall", "sleep 1"];
-    // The clock reaches the slow judge's 1 s timeout once its command has started.
+    // The clock reaches the slow judge's 1 s timeout once its command has started, and the cut is
+    // logged, so that the cut's times are the deadline's.
     let host = SimHost::new();
-    let judging = r#""job":0,"kind":"target_run""#;
+    let judging = &[
+        r#""job":0,"kind":"target_run""#,
+        r#""answer":{"kind":"cut"}"#,
+    ];
     let sim = Sim::new().once_logged(judging, host.moving_to(Duration::from_secs(2)));
     // The stalled request ends as the deadline ends the agent's route, beside the agent's
     // teardown, which nothing orders it against.
@@ -4866,7 +4900,7 @@ fn lease_starts_by_its_holders_end() {
     // The clock reaches the call's 1 s timeout, where the lease's create gives up, once the
     // call's teardown is logged.
     let host = SimHost::new();
-    let torn_down = r#"{"job":0,"kind":"call_torn_down"}"#;
+    let torn_down = &[r#"{"job":0,"kind":"call_torn_down"}"#];
     let sim = Sim::new().once_logged(torn_down, host.moving_to(Duration::from_secs(1)));
     check(
         &host,

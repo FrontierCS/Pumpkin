@@ -155,8 +155,8 @@ pub(crate) struct Sim {
     once_logged: Option<OnceLogged>,
 }
 
-// What is called once the run log holds a line's part.
-type OnceLogged = (&'static str, Arc<dyn Fn() + Send + Sync>);
+// What is called once the run log holds each part in a line.
+type OnceLogged = (&'static [&'static str], Arc<dyn Fn() + Send + Sync>);
 
 /// Holds the first put of each sandbox until the first `sandboxes_count` sandboxes have each made
 /// theirs. Then it calls `then` once, before any of them is answered.
@@ -388,11 +388,11 @@ impl Sim {
         self
     }
 
-    /// Calls `then` once the run log holds `logged` in a line, as the machine may run another
-    /// thread only once the loop has recorded what the threads before it reported.
+    /// Calls `then` once the run log holds each of `logged` in a line, as the machine may run
+    /// another thread only once the loop has recorded what the threads before it reported.
     pub(crate) fn once_logged(
         mut self,
-        logged: &'static str,
+        logged: &'static [&'static str],
         then: impl Fn() + Send + Sync + 'static,
     ) -> Self {
         self.once_logged = Some((logged, Arc::new(then)));
@@ -410,10 +410,12 @@ impl Sim {
         let mut state = self.state();
         state.record = Some(record.to_owned());
         state.time = time;
-        if let Some((part, then)) = self.once_logged.clone() {
+        if let Some((parts, then)) = self.once_logged.clone() {
             let record = record.to_owned();
             thread::spawn(move || {
-                logged(&record, part);
+                for part in parts {
+                    logged(&record, part);
+                }
                 then();
             });
         }
