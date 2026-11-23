@@ -23,6 +23,7 @@ use crate::next;
 
 mod agent;
 mod child;
+mod clip;
 pub(crate) mod cost;
 mod model;
 mod row;
@@ -30,6 +31,7 @@ mod row;
 pub(crate) use agent::{caller_lane, line as agent_line};
 use child::{call_end, call_name, command, lease_end, lease_name, over_budget};
 pub(crate) use child::{called, leased};
+use clip::{Clip, clipped};
 pub(crate) use cost::usd;
 pub(crate) use model::median;
 use model::model;
@@ -692,19 +694,34 @@ fn models(models: &[&str]) -> String {
     counted.collect::<Vec<_>>().join(", ")
 }
 
-/// `values` as `name=value`, separated by spaces: a number with two decimals, four if it is below
-/// one, and no trailing zero; any other value as compact JSON.
+/// The most characters of a result's values that the words for a run show; the record keeps them
+/// whole.
+// A body may return 1 MiB. The bound is `kubectl describe`'s, past which it shortens an annotation:
+// https://github.com/kubernetes/kubernetes/blob/af46c47ce925f4c4ad5cc8d1fca46c7b77d13b38/staging/src/k8s.io/kubectl/pkg/describe/describe.go#L4966
+const RESULT_SHOWN_CHARS: usize = 140;
+
+/// `values` as `name=value`, separated by spaces, cut after [`RESULT_SHOWN_CHARS`]: a number with
+/// two decimals, four if it is below one, and no trailing zero; any other value as compact JSON.
 pub(crate) fn shown_values(values: &[(Name, Value)]) -> String {
-    let shown = values.iter().map(|(name, value)| match value.as_f64() {
-        Some(number) => {
-            let decimals = if number.abs() >= 1.0 { 2 } else { 4 };
-            let shown = format!("{number:.decimals$}");
-            let shown = shown.trim_end_matches('0').trim_end_matches('.');
-            format!("{name}={}", if shown == "-0" { "0" } else { shown })
+    let mut shown = Clip::new(RESULT_SHOWN_CHARS);
+    for (index, (name, value)) in values.iter().enumerate() {
+        let space = if index == 0 { "" } else { " " };
+        // A write fails once the words pass the bound, so a long value is never copied whole.
+        let written = match value.as_f64() {
+            Some(number) => {
+                let decimals = if number.abs() >= 1.0 { 2 } else { 4 };
+                let number = format!("{number:.decimals$}");
+                let number = number.trim_end_matches('0').trim_end_matches('.');
+                let number = if number == "-0" { "0" } else { number };
+                write!(shown, "{space}{name}={number}")
+            }
+            None => write!(shown, "{space}{name}={value}"),
+        };
+        if written.is_err() {
+            break;
         }
-        None => format!("{name}={value}"),
-    });
-    shown.collect::<Vec<_>>().join(" ")
+    }
+    shown.text()
 }
 
 /// What a call's result shows, or `a result` if it shows nothing.

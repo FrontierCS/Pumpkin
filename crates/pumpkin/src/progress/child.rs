@@ -8,7 +8,7 @@ use runtime::{CallEnd, CallOf, CallSpan, Closed, Direction, LeaseSpan, Work};
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::{CommandEnd, TransferEnd};
 
-use super::{placed, result, span};
+use super::{clipped, placed, result, span};
 
 pub(super) fn call_name(call: &CallSpan) -> String {
     match &call.of {
@@ -169,14 +169,6 @@ const COMMAND_SHOWN_CHARS: usize = 60;
 
 /// The most characters of each path of a lease's transfer that `ls` and a summary show.
 const PATH_SHOWN_CHARS: usize = 40;
-
-/// `text`, cut after `chars`, as `…` ends it then.
-fn clipped(text: &str, chars: usize) -> String {
-    match text.char_indices().nth(chars) {
-        Some((at, _)) => format!("{}…", &text[..at]),
-        None => text.to_owned(),
-    }
-}
 
 pub(super) fn exited(status: ExitStatus) -> String {
     match status {

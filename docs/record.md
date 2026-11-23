@@ -39,6 +39,9 @@ The `verdict` records the final call. If its `kind` is `returned`, the result ho
 in the order the final body returned them. If it is `no_result`, `failure` records a timeout
 or an error and its reason. A failed run instead records `state: "failed"` and a reason.
 An interrupted run records `state: "interrupted"` and the signal.
+The lines of `pumpkin ls` and `pumpkin wait`, and the page's words for a run, cut a long result
+short. `outcome.json` keeps the run's result whole, which `pumpkin wait --outcome` prints. The log
+keeps whole what each call's body returned.
 
 For example, to see who submitted and what the judge returned for `examples/hello`:
 

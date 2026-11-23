@@ -7,6 +7,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use expect_test::expect;
+use schema::sandbox::RESULT_MAX_BYTES;
 use serde_json::{Value, json};
 
 use super::{
@@ -3134,5 +3135,72 @@ fn times_a_callers_ops() {
             end_ns="10000000000" failed=false kind="lease_run" name="lease 0" op=4 result="exit 0" start_ns="6000000000"
             caller: "job-1"
         "#]],
+    );
+}
+
+// A call that returns the most its body may: each reply that says it shows its start alone.
+#[test]
+fn cuts_a_long_result_short() {
+    let scratch = Scratch::new();
+    let id = "20261110-230000-00000019";
+    let output = "a".repeat(usize::try_from(RESULT_MAX_BYTES).unwrap() - 64);
+    let values = json!([{ "name": "output", "value": output }, { "name": "score", "value": 1 }]);
+    let arrived = json!({
+        "kind": "op_arrived", "caller": "agent-0", "op": 0,
+        "request": { "kind": "call", "grant": "train" },
+    });
+    let start = json!([{ "kind": "reply", "op": 0, "reply": { "kind": "call", "job": 0 } }, {
+        "kind": "start_call", "caller": "agent-0", "job": 0, "grant": "train", "payload": payload(),
+        "timeout_ns": "60000000000",
+    }]);
+    let ended = |seconds, event| logged(seconds, event, json!([]));
+    let log = [
+        logged(1, arrived, start),
+        ended(1, json!({ "kind": "call_started", "job": 0 })),
+        ended(
+            2,
+            json!({ "kind": "call_returned", "job": 0, "returned": values }),
+        ),
+    ];
+    let outcome = Some(returned(6.0));
+    write_run(
+        &scratch,
+        id,
+        asked(id, 0),
+        &log,
+        outcome,
+        &lease_places(Prices::Nothing),
+    );
+    let served = Served::start(&scratch);
+    let (_, body) = served.get_with(&format!("/api/runs/{id}"), &[]);
+    // The reply's other fields hold some kilobytes.
+    assert!(body.len() < 32 * 1024, "{} bytes", body.len());
+    let run: Value = serde_json::from_str(&body).unwrap();
+    let summary = run["summary"].as_str().unwrap();
+    let called = summary
+        .lines()
+        .find(|line| line.contains("train job 0"))
+        .unwrap();
+    let lane = run["lanes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|lane| lane["lane"] == "job 0");
+    let ops = served.get(&format!("/api/runs/{id}/trace/agent-0/ops"));
+    let said = format!(
+        "summary: {}\nsaid: {}\nop: {}",
+        called.trim_start(),
+        lane.unwrap()["said"].as_str().unwrap(),
+        ops["ops"]["result"][0].as_str().unwrap(),
+    );
+    check(
+        &scratch,
+        [Step::Ran(said)],
+        false,
+        &[],
+        &expect![[r#"
+        summary: 0:01 train job 0 of agent 0 on modal/a100_80 with unknown GPUs, started after 0s, ran 1s: output="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa…
+        said: train job 0 of agent 0 on modal/a100_80 with unknown GPUs, started after 0s, ran 1s: output="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa…
+        op: returned output="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa…"#]],
     );
 }
