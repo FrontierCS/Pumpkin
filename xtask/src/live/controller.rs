@@ -1,8 +1,9 @@
 //! `cargo xtask live controller`: a controller on this machine's Docker engine, made by
 //! `deploy/docker` with `HEAD`'s install, which a new client joins and runs `examples/smoke`
 //! through, and whose `sshd`, members' timer and `serve` keep its members apart. It needs no
-//! cloud and no model. Everything it makes on the engine is of one compose
-//! project, [`PROJECT`], which it removes as it ends, and as it starts, of a run that ended early.
+//! cloud and no model. Everything it makes on the engine is of one compose project of the
+//! checkout's own ([`project`]), which it removes as it ends, and as it starts, of a run that ended
+//! early.
 
 use std::fmt::Write as _;
 use std::fs::Permissions;
@@ -23,8 +24,18 @@ use super::{
 use crate::repo::STEP_TIMEOUT;
 use crate::{BUILD_TIMEOUT, MUSL, Result, ran, root, step, target_dir};
 
-/// The compose project of the controller, which names its container, its volumes and its image.
-const PROJECT: &str = "pumpkin-live";
+/// The compose project of this checkout's controller, which names its container, its volumes and
+/// its image: `pumpkin-live-` and the name of the checkout's directory, so that the checks of two
+/// checkouts on one engine never remove each other's controller.
+// As compose names a project after its directory, kept to the characters a project's name takes:
+// https://github.com/compose-spec/compose-go/blob/a6c896cdf0d93008cf78ba1a61b9d72bf3a6e236/cli/options.go#L533-L539
+// https://github.com/compose-spec/compose-go/blob/a6c896cdf0d93008cf78ba1a61b9d72bf3a6e236/loader/loader.go#L699-L704
+fn project() -> String {
+    let dir = root().file_name().unwrap_or_default().to_string_lossy();
+    let kept = |c: &char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-');
+    let name: String = dir.to_ascii_lowercase().chars().filter(kept).collect();
+    format!("pumpkin-live-{name}")
+}
 
 /// The service of `deploy/docker/compose.yaml`.
 const SERVICE: &str = "controller";
@@ -87,6 +98,7 @@ pub(crate) fn controller(lost: bool) -> Result<()> {
         copy_tree(&root().join("deploy").join(dir), &deploy.join(dir))?;
     }
     let compose = Compose {
+        project: project(),
         dir: deploy.join("docker"),
         port: free_port()?,
     };
@@ -114,9 +126,10 @@ pub(crate) fn controller(lost: bool) -> Result<()> {
     }
 }
 
-/// The controller's compose project, from the copy of `deploy` in `dir`, whose `sshd` this
-/// machine reaches at loopback port `port`.
+/// The controller's compose project, `project`, from the copy of `deploy` in `dir`, whose `sshd`
+/// this machine reaches at loopback port `port`.
 struct Compose {
+    project: String,
     dir: PathBuf,
     port: u16,
 }
@@ -125,7 +138,7 @@ impl Compose {
     fn command(&self, args: &[&str]) -> Command {
         let mut docker = process::command("docker", Environment::Inherited);
         docker
-            .args(["compose", "--project-name", PROJECT])
+            .args(["compose", "--project-name", &self.project])
             .args(args)
             .current_dir(&self.dir)
             .env("PUMPKIN_PORT", format!("127.0.0.1:{}", self.port));
@@ -151,7 +164,7 @@ impl Compose {
         let args = ["down", "--volumes", "--remove-orphans"];
         self.run(&args, STEP_TIMEOUT)?;
         // Compose removes only the images it built.
-        let image = format!("{PROJECT}-{SERVICE}");
+        let image = format!("{}-{SERVICE}", self.project);
         let mut listed = process::command("docker", Environment::Inherited);
         listed.args(["image", "ls", "--quiet", &image]);
         let how = || Run::new(Bound::Within(STEP_TIMEOUT), Echo::Silent);
@@ -222,7 +235,7 @@ fn made(compose: &Compose, scratch: &Path) -> Result<()> {
     let mut build = process::command("docker", Environment::Inherited);
     build
         .args(["buildx", "build", "--load", "--tag"])
-        .arg(format!("{PROJECT}-{SERVICE}"))
+        .arg(format!("{}-{SERVICE}", compose.project))
         .arg("--build-context")
         .arg(format!("pumpkin={}", install.display()))
         .arg("--build-context")
