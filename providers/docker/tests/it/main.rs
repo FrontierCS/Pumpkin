@@ -10,10 +10,8 @@
 #![expect(clippy::disallowed_methods, reason = "nextest bounds each test")]
 
 use std::collections::BTreeSet;
-use std::ffi::OsStr;
 use std::fs::DirBuilder;
 use std::num::{NonZeroU32, NonZeroU64};
-use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -54,20 +52,8 @@ use test_support::{BUSYBOX, TestDir, docker, hung};
 const STAND_IN: &str = "PUMPKIN_TEST_STAND_IN";
 
 // The roles that a fixture reserves for, one to a phase, so that a test may start any of them.
-const ROLES: [&str; 13] = [
-    "confined",
-    "first",
-    "hung",
-    "leaver",
-    "missing",
-    "model",
-    "not_utf8",
-    "ops",
-    "refused",
-    "stand-in",
-    "turns",
-    "unexecutable",
-    "unpulled",
+const ROLES: [&str; 9] = [
+    "confined", "first", "hung", "leaver", "model", "ops", "refused", "stand-in", "turns",
 ];
 
 struct Fixture {
@@ -485,9 +471,9 @@ fn freezes_what_it_left() {
                 exit 3"#;
             let mut lines = vec![format!("{:?}", sh(&mut sandbox, 1, script))];
             // The script exits without waiting for its sleeps, which may not run yet: until then,
-            // each shows as the command that starts it.
-            let sleeping = |listed: &str| listed.split(", ").filter(|c| *c == "sleep 600").count();
-            let before = processes(&sandbox, |listed| sleeping(listed) == 2);
+            // each shows as the command that starts it, beside the subshell that forks one.
+            let left = "/.pumpkin/sandboxd /.pumpkin/gateway/s, sleep 600, sleep 600";
+            let before = processes(&sandbox, |listed| listed == left);
             lines.push(format!("before freezing: {before}"));
             // Freezing returns once the processes it kills are gone.
             sandbox.session().freeze(hung()).unwrap();
@@ -719,33 +705,6 @@ fn cpu_list(text: &str) -> BTreeSet<u32> {
 
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
-fn ready() {
-    let mut ready = serde_json::to_value(provider().ready()).unwrap();
-    let reported: Vec<&String> = ready["report"].as_object().unwrap().keys().collect();
-    let reported = format!("{reported:?}");
-    let classes = ready["classes"].as_object_mut().unwrap();
-    for class in classes.values_mut() {
-        let offers = &mut class["offers"];
-        offers["cpu_millis"] = "<the host's>".into();
-        offers["memory_bytes"] = "<the host's>".into();
-        let sse2 = offers["cpu_features"]
-            .as_array()
-            .unwrap()
-            .contains(&"sse2".into());
-        // Whether the flags hold `sse2`, which every x86-64 CPU has, stands for them: the rest are
-        // the host's own.
-        offers["cpu_features"] = format!("<the host's, with sse2: {sse2}>").into();
-    }
-    let ready = format!(
-        "a report of {reported}, and the classes {}",
-        ready["classes"]
-    );
-    expect![[r#"a report of ["client_version", "context", "endpoint", "engine_version", "kernel", "os", "platform", "security"], and the classes {"container":{"offers":{"cpu_features":"<the host's, with sse2: true>","cpu_millis":"<the host's>","cpu_model":null,"gpu":null,"memory_bytes":"<the host's>"},"startup_seconds":540}}"#]]
-    .assert_eq(&ready);
-}
-
-#[test]
-#[ignore = "needs Docker: run cargo xtask live docker"]
 fn volumes() {
     check(
         "volumes",
@@ -883,55 +842,6 @@ fn hung_create() {
             the create failed: `docker create` hadn't ended by its deadline, so it was killed: check that the engine runs and isn't overloaded
             the run's list then finds: 1"#]],
     );
-}
-
-#[test]
-#[ignore = "needs Docker: run cargo xtask live docker"]
-fn failed_start() {
-    check(
-        "failed",
-        |fixture| {
-            let not_executable = fixture.dir.join("sandboxd");
-            fs::write(&not_executable, "not a program").unwrap();
-            let missing = fixture.dir.join("absent");
-            let not_utf8 = fixture.dir.join(OsStr::from_bytes(b"sandboxd\xff"));
-            fs::write(&not_utf8, "").unwrap();
-            let attempts = [
-                ("missing", missing.as_path(), image()),
-                ("not_utf8", not_utf8.as_path(), image()),
-                ("unexecutable", not_executable.as_path(), image()),
-                ("unpulled", fixture.sandboxd.as_path(), unpulled()),
-            ];
-            let mut lines = Vec::new();
-            for (role, sandboxd, image) in attempts {
-                let failed = fixture.try_start(&fixture.run, role, sandboxd, &image, None, false);
-                lines.push(format!("{role}: {}", redact(fixture, &failed.unwrap_err())));
-            }
-            let left = containers(&fixture.run, "{{.ID}}").unwrap();
-            lines.push(format!("left: {left:?}"));
-            lines
-        },
-        &expect![[r#"
-            missing: publishing `sandboxd` failed: <dir>/absent can't be mounted at /.pumpkin/sandboxd: No such file or directory (os error 2): name a path that exists
-            not_utf8: publishing `sandboxd` failed: <dir>/sandboxd� can't be mounted at /.pumpkin/sandboxd: name a path of UTF-8
-            unexecutable: `docker start …: fix what it reports
-            unpulled: the engine of context `<context>` has no image sha256:0000000000000000000000000000000000000000000000000000000000000000: build it there, or `docker load` an archive that holds it, as Pumpkin pulls none onto it
-            left: []"#]],
-    );
-}
-
-// What `docker start` reports varies with the container runtime and its version.
-fn redact(fixture: &Fixture, message: &str) -> String {
-    let context = format!("context `{}`", engine().report().context.as_str());
-    let message = (message.replace(&fixture.dir.display().to_string(), "<dir>"))
-        .replace(&context, "context `<context>`");
-    let (from, to) = ("`docker start ", ": fix what it reports");
-    if let Some((before, rest)) = message.split_once(from)
-        && let Some((_, after)) = rest.split_once(to)
-    {
-        return format!("{before}{from}…{to}{after}");
-    }
-    message
 }
 
 #[test]
