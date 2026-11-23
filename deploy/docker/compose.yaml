@@ -6,7 +6,7 @@ services:
     build:
       context: .
       additional_contexts:
-        aws: ../aws
+        controller: ../controller
       args:
         PUMPKIN_RELEASE: ${PUMPKIN_RELEASE:-}
     hostname: pumpkin-controller

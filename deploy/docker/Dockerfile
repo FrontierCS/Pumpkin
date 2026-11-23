@@ -6,21 +6,14 @@
 # https://github.com/kubernetes-sigs/kind/blob/b5bed7e9f115a19e8d9f300be66c462039937d57/images/base/Dockerfile#L211-L218
 # https://gitlab.com/gitlab-org/omnibus-gitlab/-/blob/9b9a2e883910b2f996fd23f4845435e0cdc71550/docker/assets/wrapper#L142-L156
 
-# Ubuntu 24.04 with CA certificates and curl, which apt and the release's download use over HTTPS.
-# Docker's packages at exact versions, and the rest from a snapshot of Ubuntu's archive, as
-# deploy/aws's controller.tf pins them.
+# Ubuntu 24.04 with CA certificates and curl, which apt and the release's download use over HTTPS,
+# and the sources that every controller's install takes, from deploy/controller.
 FROM buildpack-deps:noble-curl@sha256:6b03a2e5a50d3b482003a040045952cfbd7ed8081e1d6ac85f283b6e44fbff27 AS ubuntu
-COPY --from=aws docker.asc /etc/apt/keyrings/docker.asc
-RUN <<EOF
-set -o errexit
-sed --in-place 's|http://[a-z.]*ubuntu.com/ubuntu/|https://snapshot.ubuntu.com/ubuntu/20261101T000000Z/|' \
-    /etc/apt/sources.list.d/ubuntu.sources
-echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable' \
-    > /etc/apt/sources.list.d/docker.list
-EOF
+COPY --from=controller install.sh docker.asc /usr/local/lib/pumpkin-controller/
+RUN /usr/local/lib/pumpkin-controller/install.sh sources
 
 # The release, as the `.pumpkinversion` line `<tag> <commit> <sha256>` pins it, checked by its
-# SHA-256, as deploy/aws's controller.yaml checks it.
+# SHA-256.
 FROM ubuntu AS download
 ARG PUMPKIN_RELEASE
 RUN <<EOF
@@ -31,13 +24,7 @@ if [ -z "$PUMPKIN_RELEASE" ]; then
 fi
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends xz-utils
-set -- $PUMPKIN_RELEASE
-cd "$(mktemp --directory)"
-curl --fail --silent --show-error --location --proto '=https' --output pumpkin.tar.xz \
-    "https://github.com/FrontierCS/Pumpkin/releases/download/$1/pumpkin-$1-x86_64-unknown-linux-musl.tar.xz"
-echo "$3  pumpkin.tar.xz" | sha256sum --check --strict
-mkdir /pumpkin
-tar --extract --xz --file=pumpkin.tar.xz --directory=/pumpkin
+/usr/local/lib/pumpkin-controller/install.sh release "$PUMPKIN_RELEASE" /pumpkin
 EOF
 
 # The install alone, so that `--build-context pumpkin=<dir>` puts another in its place.
@@ -45,27 +32,20 @@ EOF
 FROM scratch AS pumpkin
 COPY --from=download /pumpkin/ /
 
+# systemd and `sshd`, then the Docker engine that every controller's install takes.
 FROM ubuntu
 RUN <<EOF
 set -o errexit
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
-    systemd systemd-sysv dbus libpam-systemd openssh-server \
-    docker-ce=5:29.9.2-1~ubuntu.24.04~noble \
-    docker-ce-cli=5:29.9.2-1~ubuntu.24.04~noble \
-    containerd.io=2.4.2-3~ubuntu.24.04~noble \
-    docker-buildx-plugin=0.38.1-1~ubuntu.24.04~noble
+    systemd systemd-sysv dbus libpam-systemd openssh-server
+/usr/local/lib/pumpkin-controller/install.sh docker
 rm --recursive --force /var/lib/apt/lists/*
 # The package's host keys would be every build's. The volume keeps the container's own.
 rm --force /etc/ssh/ssh_host_*
 # The user that the install makes, at an ID that every build gives it, as the volume at /home
 # keeps its files from one container to the next. Its home is copied into an empty volume.
 useradd --uid=1001 --user-group --create-home --shell=/bin/sh --groups=docker pumpkin
-EOF
-
-# Builds find images by their manifests' digests, which only the containerd image store keeps.
-COPY <<EOF /etc/docker/daemon.json
-{"features": {"containerd-snapshotter": true}}
 EOF
 
 # The host key, in the volume at /etc/ssh/keys, made at the first start, so that it outlives each

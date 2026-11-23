@@ -140,7 +140,8 @@ us-east-1's rates, more in other regions; beside ECR's storage.
 The controller's first boot runs the install of the release that `pumpkin_release` names. The
 install sets up Pumpkin's user, its units and `sshd`'s settings, and nothing changes them later.
 So an apply that changes `pumpkin_release` replaces the controller. The new controller also takes
-the current Ubuntu release and this module's `controller.yaml`, and its volume is new.
+the current Ubuntu release, this module's `controller.yaml` and `deploy/controller`'s `install.sh`,
+and its volume is new.
 `terraform apply -replace=module.pumpkin.aws_instance.controller` replaces it at the same
 release. Either replacement is a cutover, under "Versions".
 

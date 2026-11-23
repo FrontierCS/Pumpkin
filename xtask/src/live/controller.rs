@@ -89,7 +89,7 @@ pub(crate) fn controller(lost: bool) -> Result<()> {
             .map_err(|error| format!("removing {} failed: {error}", scratch.display()))?;
     }
     let deploy = scratch.join("deploy");
-    for dir in ["docker", "aws"] {
+    for dir in ["docker", "controller"] {
         copy_tree(&root().join("deploy").join(dir), &deploy.join(dir))?;
     }
     let compose = Compose {
@@ -228,7 +228,7 @@ fn made(compose: &Compose, scratch: &Path) -> Result<(Instant, Instant)> {
     }
     let install = scratch.join("install");
     crate::build(Some(install.clone()), MUSL)?;
-    let aws = compose.dir.with_file_name("aws");
+    let controller = compose.dir.with_file_name("controller");
     let mut build = process::command("docker", Environment::Inherited);
     build
         .args(["buildx", "build", "--load", "--tag"])
@@ -236,7 +236,7 @@ fn made(compose: &Compose, scratch: &Path) -> Result<(Instant, Instant)> {
         .arg("--build-context")
         .arg(format!("pumpkin={}", install.display()))
         .arg("--build-context")
-        .arg(format!("aws={}", aws.display()))
+        .arg(format!("controller={}", controller.display()))
         .arg(&compose.dir);
     ran(&mut build, step(BUILD_TIMEOUT).named("docker buildx build"))?;
     let started = Instant::now();

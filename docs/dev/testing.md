@@ -60,7 +60,7 @@ The rules for writing Pumpkin's tests and their snapshots.
   give the run's id in the pull request
 - RUN `cargo xtask live controller` and `cargo xtask live controller --lost`, which need a Docker
   engine alone, at review of a change to `pumpkin`'s `controller`, `host`, `job`, `serve` or `link`,
-  or to `deploy/docker`
+  or to `deploy/docker` or `deploy/controller`
 - SET `test = false` on each library and binary target: tests live in the integration test
   binary, and `cargo test` would build each target again for an empty unit-test harness; SET
   `doctest = false` too on each library whose docs hold no Rust example, which rustdoc would build
