@@ -34,7 +34,7 @@ use test_support::http::{read_request, write_chunk};
 use test_support::{TestDir, WORKFLOW, files, sandboxes, standard_outputs};
 
 use crate::body::Bodies;
-use crate::host::{self, LateTake, SimHost, SimTime, SlowSync, Synced};
+use crate::host::{LateTake, SimHost, SimTime, SlowSync, Synced};
 use crate::run::{PROVIDER, compact_outcome, placed, placed_on, providers_of, serving};
 use crate::sim::{
     self, BRIEF, HUNG, Journal, LAST, LOST, MUTE, REFUSED_ONCE, SCRIBBLED, SLOW, Sim, UNDELETABLE,
@@ -1329,7 +1329,7 @@ fn deleted_by_the_sweep() {
         &expect![[r#"
             failed: deleting the sandbox failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"18270000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"18270000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
             {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
             {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"0","seq":3}
@@ -1353,7 +1353,7 @@ fn sweep_unrecorded() {
             failed: deleting the sandbox failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; <record>/agents/agent/.sandbox.json.partial: the simulated host's sync failed
             agent `agent`'s sandbox, agents/agent/sandbox.json: {"delete":{"state":"failed"},"id":"sim-1","provider":"simulated"}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"18270000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"18270000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
             {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
             {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"0","seq":3}
@@ -1388,7 +1388,7 @@ fn unstarted_undeletable() {
         record: agents/agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
         agent `agent`'s sandbox, agents/agent/sandbox.json: {"delete":{"state":"failed"},"id":"sim-1","provider":"simulated"}
         log.jsonl:
-        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"18270000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"18270000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"1000000000","event":{"kind":"work_started"},"observed_ns":"1000000000","seq":1}
         {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"agent_failed","reason":"the agent's sandbox didn't start: it ended before it met the gateway: expected its `sandboxd` to run until it connects"},"observed_ns":"1000000000","seq":2}
         {"at_ns":"1000000000","note":"the run failed: sandbox sim-1: it ended before it met the gateway: expected its `sandboxd` to run until it connects; its console ends: sandboxd: a simulated one, which never dials; deleting it failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `simulated` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","seq":3}
@@ -1415,7 +1415,7 @@ fn exits() {
         outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_exited","status":{"code":3}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
         outcome.json's usage: {"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated","usd":"<usd>","usd_per_hour":0.25}],"tokens":{"input":0,"output":0,"responses":0},"usd":"<usd>"}
         log.jsonl:
-        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
         {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":3}},"observed_ns":"0","seq":3}
@@ -1449,7 +1449,7 @@ fn stalls() {
             finished, showing [score=0]
             outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"deadline"}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"124000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"124000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
             {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
             {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"1000000000","event":{"kind":"tick"},"observed_ns":"1000000000","seq":3}
@@ -1493,7 +1493,7 @@ fn unstarted() {
         finished without a result
         outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: it ended before it met the gateway: expected its `sandboxd` to run until it connects"}}],"verdict":{"failure":{"kind":"error","reason":"the job's sandbox didn't start: sandbox sim-2: it ended before it met the gateway: expected its `sandboxd` to run until it connects; its console ends: sandboxd: a simulated one, which never dials"},"kind":"no_result"}}
         log.jsonl:
-        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"18270000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"18270000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"1000000000","event":{"kind":"work_started"},"observed_ns":"1000000000","seq":1}
         {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"agent_failed","reason":"the agent's sandbox didn't start: it ended before it met the gateway: expected its `sandboxd` to run until it connects"},"observed_ns":"1000000000","seq":2}
         {"actions":[],"at_ns":"1000000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":3}
@@ -1604,7 +1604,7 @@ fn interrupted_call_start() {
         it published: ["sandboxd /sim/sandboxd", "image sha256:1111111111111111111111111111111111111111111111111111111111111111", "image sha256:2f73696d2f68756e670000000000000000000000000000000000000000000000", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
         payloads hold: ["xxxxxx"]
         log.jsonl:
-        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"420000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"420000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
         {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
@@ -1794,7 +1794,7 @@ fn unlistable() {
             finished without a result
             outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"failure":{"kind":"error","reason":"the job's sandbox didn't start: sandbox sim-2: no sandbox connected to <sockets>/job-0/s by the deadline: expected its sandbox to connect while the deadline lasts; the last list of its provider failed: the simulated list failed while sim-2 lasts: delete it, or create one with another `sandboxd`; its console ends: sandboxd: a simulated one, which never dials"},"kind":"no_result"}}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"18183000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"18183000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
             {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
             {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"0","seq":3}
@@ -1894,7 +1894,7 @@ fn ops() {
             payloads hold: ["slow", "xxxxxx"]
             outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
             {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
             {"actions":[{"kind":"reply","reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"job","name":"train","payload_max_bytes":8},{"arguments":{"finalize":{"default":false,"type":"bool"}},"kind":"now","name":"submit","payload_max_bytes":16}],"kind":"ops","remaining_seconds":30,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"role":"agent"}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"kind":"ops"}},"observed_ns":"0","seq":3}
@@ -1950,7 +1950,7 @@ fn swapped_payload() {
         payloads hold: ["yyyyyyyyy"]
         outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"failure":{"kind":"error","reason":"<record>/payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd holds 9 bytes of digest sha256:cf0da94d4b6a0de4d83a79dfe964489ba50a38aef90bc406aed5558fee383781: expected the payload's 6 bytes of digest sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd"},"kind":"no_result"}}
         log.jsonl:
-        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
         {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":30,"returned":{"state":"accepted"}}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"evaluated":{"effects":["set_submission","end_work"],"returned":[{"name":"state","value":"accepted"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
@@ -1982,7 +1982,7 @@ fn result_over_the_limit() {
         payloads hold: ["large"]
         outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9","size":5}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"failure":{"kind":"error","reason":"getting /pumpkin/out/result.json failed: the tree's files hold more than 1048576 bytes"},"kind":"no_result"}}
         log.jsonl:
-        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
         {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":30,"returned":{"state":"accepted"}}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"evaluated":{"effects":["set_submission","end_work"],"returned":[{"name":"state","value":"accepted"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9","size":5}}},"observed_ns":"0","seq":3}
@@ -2022,7 +2022,7 @@ fn crashes_with_an_op_in_flight() {
             payloads hold: ["xxxxxxxxxxxx"]
             outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
             {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
             {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:59ffe12a70df15109e0345955e3230a978f31ebc28d8fe3e42d306afb28b8e81","size":12},"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:59ffe12a70df15109e0345955e3230a978f31ebc28d8fe3e42d306afb28b8e81","size":12}}},"observed_ns":"0","seq":3}
@@ -2071,7 +2071,7 @@ fn call_starts_past_the_deadline() {
             payloads hold: ["xxxxxx"]
             outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"272000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"272000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
             {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
             {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
@@ -2115,7 +2115,7 @@ fn call_placed_apart() {
             payloads hold: ["xxxxxx"]
             outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
             {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
             {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
@@ -2173,7 +2173,7 @@ fn spans_providers() {
             outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
             outcome.json's usage: {"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"here"},{"class":"brief","count":1,"lasted_ns":"<ns>","provider":"there"},{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"there"}],"tokens":{"input":0,"output":0,"responses":0}}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
             {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
             {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
@@ -2227,7 +2227,7 @@ fn sweeps_each_provider() {
             payloads hold: ["xxxxxx"]
             provider.json places the roles: {"agent":{"class":"sim","provider":"here"},"final_judge":{"class":"sim","provider":"there"},"trainer":{"class":"sim","provider":"there"}}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
             {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
             {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
@@ -2299,7 +2299,7 @@ fn watches_each_provider() {
             provider.json places the roles: {"agent":{"class":"sim","provider":"here"},"final_judge":{"class":"sim","provider":"there"},"nearer":{"class":"sim","provider":"here"},"trainer":{"class":"brief","provider":"there"}}
             outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"248000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"248000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
             {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
             {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"near","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"near","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
@@ -2357,7 +2357,7 @@ fn abandoned() {
         failed: the run was still going at its hard end, 6 s after it started: expected it to end within its deadline, its finalize grace, its final call's timeout and its sandboxes' startups
         payloads hold: ["xxxxxx"]
         log.jsonl:
-        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"6000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"6000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
         {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
@@ -2431,7 +2431,7 @@ fn returns_before_its_delete() {
             payloads hold: ["xxxxxx"]
             outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"121000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"121000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
             {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
             {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
@@ -2480,7 +2480,7 @@ fn undeleted_after_its_return() {
         job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"failed"},"id":"sim-2","provider":"simulated"}
         payloads hold: ["xxxxxx"]
         log.jsonl:
-        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"121000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"121000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
         {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
@@ -2610,7 +2610,7 @@ fn reported_past_the_deadline() {
             payloads hold: ["xxxxxx"]
             outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"deadline"}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"121000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"121000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
             {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
             {"actions":[{"kind":"reply","reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"job","name":"train","payload_max_bytes":8},{"arguments":{"finalize":{"default":false,"type":"bool"}},"kind":"now","name":"submit","payload_max_bytes":16}],"kind":"ops","remaining_seconds":30,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"role":"agent"}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"kind":"ops"}},"observed_ns":"0","seq":3}
@@ -2653,7 +2653,7 @@ fn reported_past_the_hard_end() {
             failed: the run was still going at its hard end, 121 s after it started: expected it to end within its deadline, its finalize grace, its final call's timeout and its sandboxes' startups
             payloads hold: ["xxxxxx"]
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"121000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"121000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
             {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
             {"actions":[{"kind":"reply","reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"job","name":"train","payload_max_bytes":8},{"arguments":{"finalize":{"default":false,"type":"bool"}},"kind":"now","name":"submit","payload_max_bytes":16}],"kind":"ops","remaining_seconds":30,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"role":"agent"}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"kind":"ops"}},"observed_ns":"0","seq":3}
@@ -2688,7 +2688,7 @@ fn torn_down_past_the_hard_end() {
             failed: the run was still going at its hard end, 6 s after it started: expected it to end within its deadline, its finalize grace, its final call's timeout and its sandboxes' startups
             payloads hold: ["xxxxxx"]
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"6000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"6000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
             {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
             {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":0,"returned":{"state":"accepted"}}},{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"evaluated":{"effects":["set_submission","end_work"],"returned":[{"name":"state","value":"accepted"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
@@ -2722,7 +2722,7 @@ fn model_request_after_abandon() {
             failed: the run was still going at its hard end, 6 s after it started: expected it to end within its deadline, its finalize grace, its final call's timeout and its sandboxes' startups
             provider.json routes: {"agent":[{"api":"responses","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"}]}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"6000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"6000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
             {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
             {"actions":[{"kind":"abandon"}],"at_ns":"7000000000","event":{"kind":"tick"},"observed_ns":"7000000000","seq":3}
@@ -2846,7 +2846,7 @@ fn held_by_a_slow_sync() {
             finished, showing [score=0]
             outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"121000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"121000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
             {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
             {"actions":[{"kind":"reply","reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"job","name":"train","payload_max_bytes":8},{"arguments":{"finalize":{"default":false,"type":"bool"}},"kind":"now","name":"submit","payload_max_bytes":16}],"kind":"ops","remaining_seconds":30,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"role":"agent"}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"kind":"ops"}},"observed_ns":"0","seq":3}
@@ -2891,7 +2891,7 @@ fn started_late() {
             finished, showing [score=0]
             outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"deadline"}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"121000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"121000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"25000000000","event":{"kind":"work_started"},"observed_ns":"25000000000","seq":1}
             {"actions":[],"at_ns":"25000000000","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"25000000000","seq":2}
             {"actions":[{"kind":"reply","reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"job","name":"train","payload_max_bytes":8},{"arguments":{"finalize":{"default":false,"type":"bool"}},"kind":"now","name":"submit","payload_max_bytes":16}],"kind":"ops","remaining_seconds":30,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"role":"agent"}}],"at_ns":"25000000000","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"kind":"ops"}},"observed_ns":"25000000000","seq":3}
@@ -2949,7 +2949,7 @@ fn sync_fails() {
         &expect![[r#"
             failed: <record>/log.jsonl: the simulated host's sync failed
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
             {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
             {"actions":[{"kind":"reply","reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"job","name":"train","payload_max_bytes":8},{"arguments":{"finalize":{"default":false,"type":"bool"}},"kind":"now","name":"submit","payload_max_bytes":16}],"kind":"ops","remaining_seconds":30,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"role":"agent"}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"kind":"ops"}},"observed_ns":"0","seq":3}
@@ -2976,7 +2976,7 @@ fn refusal_held_by_a_slow_sync() {
             finished, showing [score=0]
             outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"deadline"}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"121000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"121000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
             {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
             {"actions":[{"kind":"reply","reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"job","name":"train","payload_max_bytes":8},{"arguments":{"finalize":{"default":false,"type":"bool"}},"kind":"now","name":"submit","payload_max_bytes":16}],"kind":"ops","remaining_seconds":30,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"role":"agent"}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"kind":"ops"}},"observed_ns":"0","seq":3}
@@ -3009,7 +3009,7 @@ fn syncs() {
             finished, showing [score=0]
             outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
             {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
             {"actions":[{"kind":"reply","reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"job","name":"train","payload_max_bytes":8},{"arguments":{"finalize":{"default":false,"type":"bool"}},"kind":"now","name":"submit","payload_max_bytes":16}],"kind":"ops","remaining_seconds":30,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"role":"agent"}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"kind":"ops"}},"observed_ns":"0","seq":3}
@@ -3093,7 +3093,7 @@ fn model_requests() {
         outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
         outcome.json's usage: {"model_requests":6,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"cached":8,"input":12,"output":5,"reasoning":3,"responses":1}}
         log.jsonl:
-        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"model_request_started","request":0},"observed_ns":"0","seq":3}
@@ -3183,7 +3183,7 @@ fn model_requests_kept_whole() {
         provider.json routes: {"agent":[{"api":"responses","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"},{"api":"chat","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"}]}
         outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
         log.jsonl:
-        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"model_request_started","request":0},"observed_ns":"0","seq":3}
@@ -3286,7 +3286,7 @@ fn model_upstream_refusals() {
         provider.json routes: {"agent":[{"api":"responses","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"}]}
         outcome.json: {"agents":[{"role":"agent","route_failure":"the upstream `stand-in` refused its key, with a 401, which ended the agent's model route: give it a key that it takes, and run again","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
         log.jsonl:
-        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"model_request_started","request":0},"observed_ns":"0","seq":3}
@@ -3349,7 +3349,7 @@ fn model_provider_down() {
         provider.json routes: {"agent":[{"api":"responses","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"}]}
         outcome.json: {"agents":[{"role":"agent","route_failure":"the upstream `stand-in` failed the agent's last model request, 2 (502; failing since request 1), and the agent exited: a deployment fault, not the agent's result; run it again","submission":null,"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
         log.jsonl:
-        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"model_request_started","request":0},"observed_ns":"0","seq":3}
@@ -3404,7 +3404,7 @@ fn model_provider_recovers() {
         provider.json routes: {"agent":[{"api":"responses","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"}]}
         outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
         log.jsonl:
-        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"model_request_started","request":0},"observed_ns":"0","seq":3}
@@ -3459,7 +3459,7 @@ fn model_provider_down_at_the_deadline() {
         provider.json routes: {"agent":[{"api":"responses","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"}]}
         outcome.json: {"agents":[{"role":"agent","submission":{"finalized":false,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"deadline"}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
         log.jsonl:
-        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"93000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"93000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
         {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":2,"returned":{"state":"stored"}}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"evaluated":{"effects":["set_submission"],"returned":[{"name":"state","value":"stored"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
@@ -3529,7 +3529,7 @@ fn model_stream_cut() {
         provider.json routes: {"agent":[{"api":"responses","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"}]}
         outcome.json: {"agents":[{"role":"agent","submission":{"finalized":false,"payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}},"work_end":{"kind":"deadline"}}],"verdict":{"failure":{"kind":"timeout"},"kind":"no_result"}}
         log.jsonl:
-        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"92000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"92000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
         {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":1,"returned":{"state":"stored"}}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"evaluated":{"effects":["set_submission"],"returned":[{"name":"state","value":"stored"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"observed_ns":"0","seq":3}
@@ -3587,7 +3587,7 @@ fn model_grace_cut() {
         provider.json routes: {"agent":[{"api":"responses","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"}]}
         outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"finalized"}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
         log.jsonl:
-        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"241000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"241000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"model_request_started","request":0},"observed_ns":"0","seq":3}
@@ -3673,7 +3673,7 @@ fn final_call_model() {
         outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":7},{"name":"raw","value":7}]}}}
         outcome.json's usage: {"calls":[{"grant":null,"job":0,"model_requests":3,"tokens":{"cached":8,"input":12,"output":5,"reasoning":3,"responses":1}}],"model_requests":4,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"cached":8,"input":12,"output":5,"reasoning":3,"responses":1},"unpriced_models":["m-large"],"usd":"<usd>"}
         log.jsonl:
-        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"model_request_started","request":0},"observed_ns":"0","seq":3}
@@ -3739,7 +3739,7 @@ fn call_and_agent_model() {
         outcome.json: {"agents":[{"role":"solver","submission":{"finalized":false,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
         outcome.json's usage: {"calls":[{"grant":"train","job":0,"model_requests":2,"tokens":{"input":0,"output":0,"responses":0}}],"model_requests":3,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":3,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}}
         log.jsonl:
-        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-2","kind":"agent_started"},"observed_ns":"0","seq":2}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-2","kind":"model_request_started","request":0},"observed_ns":"0","seq":3}
@@ -3809,7 +3809,7 @@ fn call_key_refused() {
         outcome.json: {"agents":[{"role":"agent","route_failure":"the upstream `stand-in` refused its key, with a 401, which ended job 0's model route: give it a key that it takes, and run again","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
         outcome.json's usage: {"calls":[{"grant":"train","job":0,"model_requests":1,"tokens":{"input":0,"output":0,"responses":0}}],"model_requests":1,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":3,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}}
         log.jsonl:
-        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
         {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:cd2eb0837c9b4c962c22d2ff8b5441b7b45805887f051d39bf133b583baf6860","size":3},"timeout_ns":"20000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:cd2eb0837c9b4c962c22d2ff8b5441b7b45805887f051d39bf133b583baf6860","size":3}}},"observed_ns":"0","seq":3}
@@ -3889,7 +3889,7 @@ fn budgets_spent() {
         outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
         outcome.json's usage: {"calls":[{"grant":"train","job":0,"model_requests":6,"tokens":{"cached":16,"input":24,"output":10,"reasoning":6,"responses":2}},{"grant":"train","job":1,"model_requests":6,"tokens":{"cached":16,"input":24,"output":10,"reasoning":6,"responses":2}}],"model_requests":14,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":4,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"cached":40,"input":60,"output":25,"reasoning":15,"responses":5},"unpriced_models":["m-large"],"unreported_responses":6,"usd":"<usd>"}
         log.jsonl:
-        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"model_request_started","request":0},"observed_ns":"0","seq":3}
@@ -3951,7 +3951,8 @@ fn budgets_spent() {
 
 // A simulated host's time, as the Unix time that its runs read.
 fn sim_unix_ns(time: &SimTime) -> u64 {
-    u64::try_from((host::EPOCH + time.now()).as_nanos()).unwrap()
+    let unix = time.unix().duration_since(UNIX_EPOCH).unwrap();
+    u64::try_from(unix.as_nanos()).unwrap()
 }
 
 fn unix_ns() -> u64 {
@@ -4101,7 +4102,7 @@ fn now_calls() {
             payloads hold: ["xxxxxx"]
             outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
             {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
             {"actions":[{"kind":"reply","reply":{"kind":"refused","message":"`--arg finalize` is `\"yes\"`, which is no bool: give it `true` or `false`"}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"evaluated":{"unread":"`--arg finalize` is `\"yes\"`, which is no bool: give it `true` or `false`"},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
@@ -4172,7 +4173,7 @@ fn job_calls() {
         payloads hold: ["large", "xxxxxx"]
         outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
         log.jsonl:
-        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
         {"actions":[{"kind":"reply","reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"job","name":"train","payload_max_bytes":8},{"arguments":{"label":{"type":"str"}},"call_timeout_seconds":1,"calls":null,"cumulative_seconds":null,"kind":"job","name":"check","payload_max_bytes":8},{"call_timeout_seconds":1,"calls":null,"cumulative_seconds":null,"kind":"job","name":"slow","payload_max_bytes":8},{"arguments":{"finalize":{"default":false,"type":"bool"}},"kind":"now","name":"submit","payload_max_bytes":16},{"kind":"now","name":"broken","payload_max_bytes":8}],"kind":"ops","remaining_seconds":30,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"role":"agent"}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"kind":"ops"}},"observed_ns":"0","seq":3}
@@ -4262,7 +4263,7 @@ fn commands_past_the_startup() {
             payloads hold: ["xxxxxx"]
             outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"213000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"213000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
             {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
             {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"4000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
@@ -4319,7 +4320,7 @@ fn times_out_between_commands() {
             payloads hold: ["xxxxxx"]
             outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
             {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
             {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
@@ -4365,7 +4366,7 @@ fn stopped_between_commands() {
             payloads hold: ["xxxxxx"]
             outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
             {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
             {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"20000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
@@ -4410,7 +4411,7 @@ fn body_fails() {
             payloads hold: ["xxxxxx"]
             outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
             {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
             {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
@@ -4485,7 +4486,7 @@ fn deep_returns() {
             payloads hold: ["xxxxxx"]
             outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"failure":{"kind":"error","reason":"the body's return takes 1048588 bytes as JSON, over the limit of 1048576: return at most that"},"kind":"no_result"}}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
             {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
             {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":null,"seconds":null}}},{"caller":"agent-0","grant":"deep","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"deep","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
@@ -4636,7 +4637,7 @@ fn lease_transfers() {
         payloads hold: ["xxxxxx"]
         outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
         log.jsonl:
-        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
         {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":8,"cumulative_seconds":null,"instance_seconds":600,"instances":1}}},{"grant":"gpu","holder":"agent-0","instance":0,"kind":"start_lease","lease":0,"start_by_ns":"30000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"gpu","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"0","seq":3}
@@ -4714,7 +4715,7 @@ fn transfer_cut() {
         payloads hold: ["xxxxxx"]
         outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
         log.jsonl:
-        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
         {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":4,"cumulative_seconds":null,"instance_seconds":600,"instances":1}}},{"grant":"gpu","holder":"agent-0","instance":0,"kind":"start_lease","lease":0,"start_by_ns":"30000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"gpu","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"0","seq":3}
@@ -4792,7 +4793,7 @@ fn call_leases() {
             payloads hold: ["xxxxxx"]
             outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
             {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
             {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"20000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
@@ -4861,7 +4862,7 @@ fn lease_starts_by_its_holders_end() {
             payloads hold: ["xxxxxx"]
             outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"1767225600000000000"},"observed_ns":"0","seq":0}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
             {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
             {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}

@@ -27,12 +27,6 @@ const SCRIPTED: &str = "the test to make every input the run waits on come, as i
 // How long a wait on the clock blocks between its looks at it.
 const LOOK: Duration = Duration::from_millis(10);
 
-// When a simulated host's runs start by the machine's clock, 2026-01-01T00:00:00Z, so that a time
-// of the record that the run reads from it shows exactly, as TigerBeetle's `TimeSim` derives its
-// real time from its ticks:
-// https://github.com/tigerbeetle/tigerbeetle/blob/68958eb757747d0fc96a79d1f9c2fa6766b67b48/src/stdx/time.zig#L260-L269
-pub(crate) const EPOCH: Duration = Duration::from_hours(490_896);
-
 /// A host whose clock reads 0 from the run's start and never moves by itself: a [`LateTake`], a
 /// [`SlowSync`], a call of [`SimHost::moving_to`]'s function or the simulated provider
 /// ([`SimTime`]) moves it. A wait for a time to come takes an input as soon as one comes, or ends
@@ -54,6 +48,8 @@ struct State {
     failed: Option<Synced>,
     failed_file: Option<(&'static str, u32)>,
     first: Option<Arc<dyn Fill>>,
+    // When the run started by the machine's clock, once it has.
+    unix: SystemTime,
 }
 
 /// A take comes late, after setup or the agent's initial ops query: once `behind`
@@ -97,6 +93,7 @@ impl SimHost {
             failed: None,
             failed_file: None,
             first: None,
+            unix: UNIX_EPOCH,
         };
         Self {
             state: Arc::new(Mutex::new(state)),
@@ -164,6 +161,7 @@ impl Host for SimHost {
     type Clock = SimClock;
 
     fn start(&self) -> SimClock {
+        stdx::unpoisoned(self.state.lock()).unix = SystemTime::now();
         SimClock {
             state: Arc::clone(&self.state),
         }
@@ -305,10 +303,20 @@ impl SimTime {
         }
     }
 
-    /// The time since the run started that `unix`, a time by the machine's clock that the run
-    /// gave, names.
-    pub(crate) fn of_unix(unix: Duration) -> Duration {
-        unix.saturating_sub(EPOCH)
+    /// The time on this clock that `unix`, a time by the machine's clock that the run gave as the
+    /// time left from now, names: none past now if it has passed.
+    pub(crate) fn of_unix(&self, unix: Duration) -> Duration {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        self.now() + unix.saturating_sub(now)
+    }
+
+    /// The Unix time that the clock reads now, as the run's start by the machine's clock and the
+    /// clock's time since.
+    pub(crate) fn unix(&self) -> SystemTime {
+        let state = stdx::unpoisoned(self.state.lock());
+        state.unix + state.now
     }
 }
 
@@ -325,7 +333,7 @@ impl Clock for SimClock {
     }
 
     fn unix(&self) -> SystemTime {
-        UNIX_EPOCH + EPOCH
+        stdx::unpoisoned(self.state.lock()).unix
     }
 
     // A move of the clock ends no wait on the machine's timers, which looks again this often.

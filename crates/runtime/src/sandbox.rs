@@ -12,7 +12,7 @@ use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::mpsc::Sender;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use std::{fmt, io};
 
 use decision::{JobId, LeaseId};
@@ -503,7 +503,10 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         wrap: impl Fn(Arrival) -> T + Send + 'static,
     ) -> Result<Started, Unstarted> {
         let name = which.name();
-        let run_start = UnixTime::of(clock.unix())?;
+        let now = UnixTime::of(SystemTime::now())?;
+        // The start's deadline by the machine's clock, which the provider reads, at most the hard
+        // end, as the run is abandoned then.
+        let by_unix = left(clock, by).map_or(now, |left| now.saturating_add(left));
         let role = which.role();
         let model = self.workflow().model(role).is_some();
         let placement = self.placed.placement(role);
@@ -519,9 +522,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             ops: ops.is_some(),
             model,
             hard_end,
-            // The start's deadline as the provider reads it, by the run's start on the machine's
-            // clock, at most the hard end, as the run is abandoned then.
-            by: run_start.saturating_add(by).min(hard_end),
+            by: by_unix.min(hard_end),
         };
         // The private listener's wait for a check, which the machine's clock times.
         let by_machine = Deadline::after(left(clock, by).unwrap_or_default());

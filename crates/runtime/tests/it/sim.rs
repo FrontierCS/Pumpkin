@@ -840,7 +840,7 @@ impl Sim {
     fn by(&self, create: &Create) -> By {
         let unix = create.by.since_epoch();
         match &self.state().time {
-            Some(time) => By::Run(time.clone(), SimTime::of_unix(unix)),
+            Some(time) => By::Run(time.clone(), time.of_unix(unix)),
             None => By::Machine(Deadline::at_unix(unix)),
         }
     }
