@@ -57,9 +57,9 @@ struct State {
 }
 
 /// A take comes late, after setup or the agent's initial ops query: once `behind`
-/// more inputs are queued behind it, and at `at`, as if the loop had been busy until then. Then
-/// each of the next `then` takes from that inbox waits for an input, whatever the time, as if the
-/// loop had been busy until one came.
+/// more inputs are queued behind it, and at `at`, as if the loop had been busy until then. During
+/// setup, it waits for its input whatever the time. Then each of the next `then` takes from that
+/// inbox waits for an input, whatever the time, as if the loop had been busy until one came.
 pub(crate) struct LateTake {
     pub(crate) behind: usize,
     pub(crate) at: Duration,
@@ -398,7 +398,7 @@ impl<T: Send> SimInbox<T> {
     // ends the wait, as Kubernetes' `FakeClock` fires each waiter whose time has passed:
     // https://github.com/kubernetes/utils/blob/ca04ba58ecab621c984998618739fbafa14398ad/clock/testing/fake_clock.go#L175-L222
     fn next(&mut self, until: Option<Duration>) -> Option<T> {
-        let held = self.then > 0;
+        let held = self.then > 0 || self.during_setup();
         self.then = self.then.saturating_sub(1);
         let mut queue = stdx::unpoisoned(self.queue.lock());
         let input = match queue.behind.pop_front() {
@@ -452,6 +452,14 @@ impl<T: Send> SimInbox<T> {
             after();
         }
         input
+    }
+}
+
+impl<T> SimInbox<T> {
+    // Whether a late take during setup, which waits for its input whatever the time, is next.
+    fn during_setup(&self) -> bool {
+        let state = stdx::unpoisoned(self.clock.state.lock());
+        state.late_armed && state.after_take.is_some() && state.late.is_some()
     }
 }
 

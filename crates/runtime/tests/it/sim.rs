@@ -158,8 +158,8 @@ pub(crate) struct Sim {
 // What is called once the run log holds each part in a line.
 type OnceLogged = (&'static [&'static str], Arc<dyn Fn() + Send + Sync>);
 
-/// Holds the first put of each sandbox until the first `sandboxes_count` sandboxes have each made
-/// theirs. Then it calls `then` once, before any of them is answered.
+/// Holds the end of the first put of each sandbox until the first `sandboxes_count` sandboxes have
+/// each sent theirs whole. Then it calls `then` once, before any of them is answered.
 struct SetUps {
     sandboxes_count: usize,
     put_count: Mutex<usize>,
@@ -2067,9 +2067,19 @@ struct Served {
     printed: BTreeMap<String, String>,
     running: BTreeSet<u32>,
     held: Option<(u32, AbsolutePath)>,
+    // The held set-ups, which the sandbox's first put passes as it ends.
+    set_up: Option<Arc<SetUps>>,
 }
 
 impl Served {
+    // Ends a put, which the held set-ups hold first, once the put has come whole.
+    fn end(&mut self, stream: u32, replies: &mut Vec<(FromSandbox, Vec<u8>)>) {
+        if let Some(set_ups) = self.set_up.take() {
+            set_ups.pass();
+        }
+        self.files.end(stream, replies);
+    }
+
     fn start(
         &mut self,
         stream: u32,
@@ -2245,15 +2255,12 @@ fn serve(mut connection: Connection, model: bool, shared: &Mutex<Status>) {
         }
         match request {
             ToSandbox::Put { stream, dir, root } => {
-                let set_ups = status(shared).set_ups.take();
-                if let Some(set_ups) = set_ups {
-                    set_ups.pass();
-                }
+                served.set_up = status(shared).set_ups.take();
                 served.files.begin(stream, dir, root, &mut replies);
             }
             ToSandbox::Entry { entry, .. } => served.files.entry(entry),
             ToSandbox::Data { .. } => served.files.data(&body),
-            ToSandbox::End { stream } => served.files.end(stream, &mut replies),
+            ToSandbox::End { stream } => served.end(stream, &mut replies),
             ToSandbox::Freeze { stream } => {
                 let (reply, froze) = freezing.freeze(stream);
                 frozen |= froze;

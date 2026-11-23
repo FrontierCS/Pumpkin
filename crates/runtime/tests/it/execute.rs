@@ -5271,8 +5271,8 @@ fn releases_agents_and_a_shared_target_ready_before_the_driver_takes_their_notic
     );
 }
 
-// The clock passes the startup while both sandboxes set up, so each start fails at its bound: the
-// agent's set-up by its put's deadline. The setup takes both notices at once.
+// The clock passes the startup once both sandboxes have sent their set-up's put, so each put fails
+// at its bound, waiting for its answer, and the setup takes both notices at once.
 #[test]
 fn set_up_past_the_startup() {
     let past = Duration::from_secs(31);
@@ -5292,13 +5292,8 @@ fn set_up_past_the_startup() {
         SANDBOXD,
         &[],
     );
-    // The notices race into the setup's inbox, so each failure shows without its place, and with
-    // its reason as a deadline's: whichever of a start's waits sees its bound passed names it.
-    let past = |reason: Option<&mut Value>| {
-        let reason = reason.unwrap();
-        assert!(reason.as_str().unwrap().contains("deadline"), "{reason}");
-        *reason = json!("<past its bound>");
-    };
+    // The two notices race each other into the setup's inbox, which orders their failures, so
+    // each is shown without its place.
     let failure = |line: &&str| {
         line.starts_with('{')
             && (line.contains(r#""kind":"agent_failed""#)
@@ -5309,21 +5304,16 @@ fn set_up_past_the_startup() {
         .map(|line| {
             let mut failure: Value = serde_json::from_str(line).unwrap();
             failure.as_object_mut().unwrap().remove("seq");
-            past(failure.pointer_mut("/event/reason"));
             failure.to_string()
         })
         .collect();
     failed.sort_unstable();
-    let outcome = shown
-        .lines()
-        .find_map(|line| line.strip_prefix("outcome.json: "));
-    let mut outcome: Value = serde_json::from_str(outcome.unwrap()).unwrap();
-    past(outcome.pointer_mut("/agents/0/work_end/reason"));
-    failed.push(format!("outcome.json: {outcome}"));
+    let outcome = shown.lines().find(|line| line.starts_with("outcome.json:"));
+    failed.extend(outcome.map(str::to_owned));
     expect![[r#"
-        {"actions":[],"at_ns":"31000000000","event":{"kind":"shared_failed","reason":"<past its bound>","shared":1},"observed_ns":"31000000000"}
-        {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"31000000000","event":{"caller":"agent-0","kind":"agent_failed","reason":"<past its bound>"},"observed_ns":"31000000000"}
-        outcome.json: {"agents":[{"role":"alpha","submission":null,"work_end":{"kind":"agent_failed","reason":"<past its bound>"}}],"verdict":{"kind":"returned","result":{"values":[{"name":"files","value":{"alpha":null}}]}}}"#]].assert_eq(&failed.join("\n"));
+        {"actions":[],"at_ns":"31000000000","event":{"kind":"shared_failed","reason":"the directories under `/pumpkin` can't be put in the sandbox: the sandbox didn't answer before the request's deadline: expected its answer while the deadline lasts","shared":1},"observed_ns":"31000000000"}
+        {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"31000000000","event":{"caller":"agent-0","kind":"agent_failed","reason":"the agent's sandbox didn't start: the directories under `/pumpkin` can't be put in the sandbox: the sandbox didn't answer before the request's deadline: expected its answer while the deadline lasts"},"observed_ns":"31000000000"}
+        outcome.json: {"agents":[{"role":"alpha","submission":null,"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: the directories under `/pumpkin` can't be put in the sandbox: the sandbox didn't answer before the request's deadline: expected its answer while the deadline lasts"}}],"verdict":{"kind":"returned","result":{"values":[{"name":"files","value":{"alpha":null}}]}}}"#]].assert_eq(&failed.join("\n"));
 }
 
 #[test]

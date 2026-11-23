@@ -516,7 +516,7 @@ impl Shared {
         // the request serves knows how long to wait out, as its deadline says; a sandbox that is
         // gone closes its connection, which ends the session at once. A deadline that has passed
         // fails at once, even with a frame waiting, so that a tree sent faster than it is written
-        // ends by it too.
+        // ends by it too; so does one that passes while the wait takes a frame.
         loop {
             let Some(left) = by.left() else {
                 return Err(self.timed_out(
@@ -526,8 +526,8 @@ impl Shared {
                 ));
             };
             match replies.recv_timeout(left.min(POLL)) {
-                Ok(reply) => return Ok(reply),
-                Err(RecvTimeoutError::Timeout) => {}
+                Ok(reply) if by.left().is_some() => return Ok(reply),
+                Ok(_) | Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return Err(self.ended()),
             }
         }
