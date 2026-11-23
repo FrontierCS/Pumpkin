@@ -274,8 +274,9 @@ pub enum Action {
         instance: u32,
         start_by: Duration,
     },
-    /// Runs `argv` as lease `lease`'s `command`th command, killing it once it has run for
-    /// `timeout`, from its start, if given; without one, it runs until the lease is closed.
+    /// Runs `argv` as lease `lease`'s `command`th command, killing it once `timeout` has passed
+    /// since this action, its start included, if given; without one, it runs until the lease is
+    /// closed.
     RunCommand {
         lease: LeaseId,
         command: u64,

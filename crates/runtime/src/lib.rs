@@ -444,8 +444,10 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         core: &mut Core<'_>,
         mut actions: Vec<Action>,
     ) -> Result<Result<Outcome, String>, Stopped> {
+        // When the core decided the actions, which `Core::start` does as the run starts.
+        let mut decided = Duration::ZERO;
         loop {
-            if let Some(end) = self.perform(scope, core, actions)? {
+            if let Some(end) = self.perform(scope, core, actions, decided)? {
                 return Ok(end);
             }
             let (at, event) = self.next_event(scope, core)?;
@@ -457,7 +459,8 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 } if !core.submission_locked(*agent) => Some(*agent),
                 _ => None,
             };
-            actions = core.handle(at, event.clone());
+            // The core's time, which an input stamped before a tick it took already doesn't move.
+            (decided, actions) = (decided.max(at), core.handle(at, event.clone()));
             // A call's route is open from its command's or its body's start, as the agent's is
             // from the run's.
             if let Event::CallStarted { job } = event {
@@ -705,6 +708,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         scope: &'s Scope<'s, 'r>,
         core: &Core<'_>,
         actions: Vec<Action>,
+        decided: Duration,
     ) -> Result<Option<Result<Outcome, String>>, Stopped> {
         let mut end = None;
         for action in actions {
@@ -746,6 +750,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                     let run = lease::Run {
                         command,
                         argv,
+                        ordered: decided,
                         timeout,
                         required_output: self.waiting.contains_key(&lease),
                     };

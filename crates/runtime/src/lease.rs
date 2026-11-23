@@ -30,7 +30,7 @@ use stdx::Context;
 use super::child::{Child, End, Message};
 use super::host::until;
 use super::sandbox::{ENTRIES, collect};
-use super::{Clock, Host, Inbox};
+use super::{Host, Inbox};
 
 /// The directory of a lease's record that holds the tree a transfer moves, while it does.
 pub(super) const STAGING: &str = "transfer";
@@ -55,7 +55,9 @@ pub(super) struct Transfer {
 pub(super) struct Run {
     pub(super) command: u64,
     pub(super) argv: Argv,
-    /// The longest it may run, if it has a bound of its own.
+    /// When the core ordered it, as a time since the run started.
+    pub(super) ordered: Duration,
+    /// The longest it may run from `ordered`, its start included, if it has a bound of its own.
     pub(super) timeout: Option<Duration>,
     pub(super) required_output: bool,
 }
@@ -164,7 +166,11 @@ fn serve<H: Host>(
             Some(Message::Order(Order::Run(run))) => {
                 match start(runner, child, (&run, by_start), session) {
                     Ok(process) => {
-                        let kill_at = run.timeout.map(|timeout| child.clock.now() + timeout);
+                        // From the order, on the run's clock, as TigerBeetle's replica starts a
+                        // prepare's timeout as it queues the prepare, not as a peer acknowledges
+                        // it:
+                        // https://github.com/tigerbeetle/tigerbeetle/blob/68958eb757747d0fc96a79d1f9c2fa6766b67b48/src/vsr/replica.zig#L7449-L7460
+                        let kill_at = run.timeout.map(|timeout| run.ordered + timeout);
                         *running = Some(Running {
                             command: run.command,
                             process,
