@@ -34,7 +34,7 @@ use schema::workflow::{
 use serde::{Deserialize, Deserializer, de};
 use stdx::{Context, Deadline};
 
-use super::{Clock, Host, Input, Stopped, interruption, left, log, record};
+use super::{Clock, Host, Input, Stopped, interruption, left, log, record, until};
 
 /// The most entries, files and directories, that the host collects from a sandbox in one tree.
 pub(super) const ENTRIES: u64 = 100_000;
@@ -564,7 +564,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             }
             (false, _) => error.to_string(),
         });
-        let set_up = |mut session: Session| session.set_up(|| left(clock, by)).map(|()| session);
+        let set_up = |mut session: Session| session.set_up(until(clock, by)).map(|()| session);
         let session = accepted.and_then(set_up);
         let session = session.and_then(|session| match session.gpus() {
             Some(gpus) => self.saw(which, &id, gpus).map(|()| session),

@@ -8,11 +8,6 @@ use stdx::Deadline;
 
 use crate::Connection;
 
-// How long a wait sleeps, or blocks on a socket or a channel, between looks at its stop, its
-// deadline and what it waits for. A socket's or a channel's timeout says only when to look at the
-// caller's clock again, which alone says when the wait fails.
-pub(crate) const POLL: Duration = Duration::from_millis(10);
-
 // The time left of a request, by its caller's clock.
 #[derive(Clone, Copy)]
 pub(crate) struct Bound<'a> {
@@ -51,11 +46,12 @@ impl Write for Until<'_> {
         loop {
             // Set before each write, since the socket's timeout bounds each call on its own. A
             // deadline that has passed fails here, not in the socket, whose `None` would mean no
-            // timeout at all. A write that times out has written nothing, so it is made again.
+            // timeout at all. A write that times out has written nothing, so it is made again,
+            // once `left` says time is left.
             let Some(left) = self.by.left() else {
                 return Err(io::ErrorKind::TimedOut.into());
             };
-            self.connection.set_write_timeout(Some(left.min(POLL)))?;
+            self.connection.set_write_timeout(Some(left))?;
             match (&mut &*self.connection).write(buf) {
                 Err(error) if passed(&error) => {}
                 written => return written,

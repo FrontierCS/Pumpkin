@@ -328,6 +328,11 @@ impl Clock for SimClock {
         UNIX_EPOCH + EPOCH
     }
 
+    // A move of the clock ends no wait on the machine's timers, which looks again this often.
+    fn look(&self) -> Option<Duration> {
+        Some(LOOK)
+    }
+
     fn inbox<T: Send + 'static>(&self) -> SimInbox<T> {
         let (sender, receiver) = mpsc::channel();
         let queue = Arc::new(Mutex::new(Queue {

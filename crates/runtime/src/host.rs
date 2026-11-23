@@ -56,6 +56,13 @@ pub trait Clock: Clone + Send + 'static {
 
     /// An empty inbox, whose waits this clock times.
     fn inbox<T: Send + 'static>(&self) -> Self::Inbox<T>;
+
+    /// The longest that a wait on the machine's timers may block before it reads this clock
+    /// again, where the clock can move while the wait blocks; none where only the wait's own time
+    /// left bounds it.
+    fn look(&self) -> Option<Duration> {
+        None
+    }
 }
 
 /// What other threads send a thread, in the order they sent it, for it to wait on. It never
@@ -168,11 +175,15 @@ pub(super) fn left(clock: &impl Clock, at: Duration) -> Option<Duration> {
     (at.checked_sub(clock.now())).filter(|left| !left.is_zero())
 }
 
-/// The time left until `at`, as [`left`] gives it, for a wait to read as it goes, on any thread.
+/// How long a wait for `at` may block on the machine's timers before it calls the function again,
+/// on any thread: the time left, as [`left`] gives it, at most `clock`'s [`Clock::look`].
 pub(super) fn until<C: Clock>(
     clock: &C,
     at: Duration,
 ) -> impl Fn() -> Option<Duration> + Send + 'static + use<C> {
     let clock = clock.clone();
-    move || left(&clock, at)
+    move || {
+        let left = left(&clock, at)?;
+        Some(clock.look().map_or(left, |look| left.min(look)))
+    }
 }

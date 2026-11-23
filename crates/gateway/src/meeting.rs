@@ -26,7 +26,7 @@ use schema::sandbox::{
 };
 use stdx::Deadline;
 
-use crate::{Arrival, Bound, Connection, POLL, Session, Until, context, lock, passed};
+use crate::{Arrival, Bound, Connection, Session, Until, context, lock, passed};
 
 // Names each file this process holds open by its descriptor's number: a path through one resolves
 // as through the file, a directory included. A socket's path holds 107 bytes at most, which a deep
@@ -34,6 +34,9 @@ use crate::{Arrival, Bound, Connection, POLL, Session, Until, context, lock, pas
 const OPEN_FILES: &str = "/proc/self/fd";
 
 const RANDOM: &str = "/dev/urandom";
+
+// How long a wait sleeps between looks at its stop, its deadline and what it waits for.
+const POLL: Duration = Duration::from_millis(10);
 
 // A dial that fails is tried again after this wait, which doubles up to `REDIAL_MOST`. It starts
 // as gRPC's connection backoff does, at its INITIAL_BACKOFF of 1 s:

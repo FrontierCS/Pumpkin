@@ -16,9 +16,9 @@
 //! # Deadlines
 //!
 //! Every request waits on the sandbox until its caller's deadline, so a slow link makes it wait,
-//! never fail. The caller gives the deadline as `left`, a function that gives the time left by a
-//! clock of the caller's, as [`Deadline::remaining`](stdx::Deadline::remaining) gives it by the
-//! machine's: none once it has passed. A request whose deadline passes fails with
+//! never fail. The deadline is `left`: the longest a wait may block before it calls `left` again,
+//! none once the deadline has passed, which is the time left by the machine's clock, and less by a
+//! clock that moves while a wait blocks. A request whose deadline passes fails with
 //! [`io::ErrorKind::TimedOut`] and ends the session; so does a sandbox that closes its connection,
 //! at once. A frame may also wait behind another writer's, until that writer's deadline.
 
@@ -34,7 +34,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use std::{fmt, fs};
 
-use bound::{Bound, Left, POLL, Until, passed};
+use bound::{Bound, Left, Until, passed};
 pub use meeting::{Dialer, GatewayAddress, Listener, Registration, Sockets, Unattested, Unreached};
 pub use op::Op;
 pub use process::Process;
@@ -525,7 +525,7 @@ impl Shared {
                         .to_owned(),
                 ));
             };
-            match replies.recv_timeout(left.min(POLL)) {
+            match replies.recv_timeout(left) {
                 Ok(reply) if by.left().is_some() => return Ok(reply),
                 Ok(_) | Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return Err(self.ended()),
