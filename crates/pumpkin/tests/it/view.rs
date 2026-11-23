@@ -13,8 +13,8 @@ use schema::sandbox::RESULT_MAX_BYTES;
 use serde_json::{Value, json};
 
 use super::{
-    Prices, Scratch, Step, asked, check, cut, lease_places, logged, payload, poll, returned,
-    whole_log, write_record, write_run,
+    Prices, Scratch, Step, asked, check, cut, lease_places, lock_driver, logged, payload, poll,
+    returned, whole_log, write_record, write_run,
 };
 
 /// A `pumpkin view` process that listens on loopback, and is killed when dropped.
@@ -209,8 +209,7 @@ fn write_served(scratch: &Scratch) -> File {
         None,
         &priced,
     );
-    let driver = File::open(dir.join("driver.pid")).unwrap();
-    driver.lock().unwrap();
+    let driver = lock_driver(&dir);
     // A record with no log.
     write_record(scratch, "20261110-120000-0000000d", true, None);
     // A run whose agent made no model request used no tokens; one whose requests none of the
@@ -555,7 +554,7 @@ fn serves_runs() {
 
 /// A `pumpkin controller serve` process, which answers a request for the view in each frame of
 /// its standard input.
-pub(super) struct Piped {
+struct Piped {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
@@ -563,7 +562,7 @@ pub(super) struct Piped {
 
 impl Piped {
     /// Starts it as the user whose home is the scratch directory, and reads its hello.
-    pub(super) fn start(scratch: &Scratch) -> Self {
+    fn start(scratch: &Scratch) -> Self {
         let mut command = scratch.pumpkin(&["controller", "serve", "--member", "alice"]);
         command.env("HOME", &scratch.0);
         command.stdin(Stdio::piped()).stdout(Stdio::piped());
@@ -578,8 +577,7 @@ impl Piped {
         }
     }
 
-    /// Returns the answer to a request for `target`, and its body.
-    pub(super) fn ask(&mut self, target: &str, deflate: bool) -> (Value, Vec<u8>) {
+    fn ask(&mut self, target: &str, deflate: bool) -> (Value, Vec<u8>) {
         let asking =
             json!({ "type": "view", "target": target, "deflate": deflate, "controller": "alice" });
         schema::frame::write(&mut self.stdin, &asking, &[]).unwrap();
@@ -716,8 +714,7 @@ fn follows_a_live_run() {
         None,
         &lease_places(Prices::Both),
     );
-    let driver = File::open(dir.join("driver.pid")).unwrap();
-    driver.lock().unwrap();
+    let driver = lock_driver(&dir);
     let mut grown = Vec::new();
     for request in 0..1500 {
         let caller = json!({ "caller": "agent-0", "request": request });
@@ -1145,8 +1142,7 @@ fn starts_over_a_shortened_log() {
         None,
         &places,
     );
-    let driver = File::open(dir.join("driver.pid")).unwrap();
-    driver.lock().unwrap();
+    let driver = lock_driver(&dir);
     let served = Served::start(&scratch);
     let mut steps = Vec::new();
     let run = served.get(&format!("/api/runs/{id}"));
@@ -1520,14 +1516,13 @@ fn pages_the_list() {
 
 /// The model exchanges that a run's record keeps under `model/`, with each item stored once and
 /// named by its number, as a test needs no SHA-256.
-pub(super) struct Model {
+struct Model {
     dir: std::path::PathBuf,
     items: Vec<String>,
 }
 
 impl Model {
-    /// Starts the store in the run's directory `dir`.
-    pub(super) fn new(dir: &std::path::Path) -> Self {
+    fn new(dir: &std::path::Path) -> Self {
         fs::create_dir_all(dir.join("model/items")).unwrap();
         Self {
             dir: dir.join("model"),
@@ -1552,7 +1547,7 @@ impl Model {
     ///
     /// The request holds `items` in its `field`, each of `whole` as one item of its own, and
     /// `rest`. A response of `None` is named by `kept` but not written.
-    pub(super) fn keep(
+    fn keep(
         &mut self,
         n: u64,
         field: &str,
@@ -1584,7 +1579,7 @@ impl Model {
 }
 
 /// The record of `caller` starting model request `n` at `seconds`.
-pub(super) fn started(seconds: u64, caller: &str, n: u64) -> Value {
+fn started(seconds: u64, caller: &str, n: u64) -> Value {
     let event = json!({ "kind": "model_request_started", "caller": caller, "request": n });
     let mut record = logged(seconds, event, json!([]));
     record["observed_ns"] = json!((seconds * 1_000_000_000 - 1).to_string());
@@ -1595,7 +1590,7 @@ pub(super) fn started(seconds: u64, caller: &str, n: u64) -> Value {
 ///
 /// With an `api`, the record also names the upstream and model and times the first byte and
 /// token, as a forwarded answer does.
-pub(super) fn answered(
+fn answered(
     seconds: u64,
     caller: &str,
     n: u64,
@@ -1672,12 +1667,12 @@ fn entries_counted(served: &Served, trace: &str, steps: &Value) {
 }
 
 /// A user message of the Responses API.
-pub(super) fn user(text: &str) -> Value {
+fn user(text: &str) -> Value {
     json!({ "type": "message", "role": "user", "content": [{ "type": "input_text", "text": text }] })
 }
 
 /// An assistant message of the Responses API.
-pub(super) fn said(text: &str) -> Value {
+fn said(text: &str) -> Value {
     json!({ "type": "message", "role": "assistant", "content": [{ "type": "output_text", "text": text }] })
 }
 
@@ -2398,8 +2393,7 @@ fn follows_a_trace() {
         None,
         &lease_places(Prices::Both),
     );
-    let driver = File::open(dir.join("driver.pid")).unwrap();
-    driver.lock().unwrap();
+    let driver = lock_driver(&dir);
     // Request 1 is in flight, its answer begun, its last line torn.
     let response = dir.join("model/1.response");
     let begun = done(said("part one"));
@@ -2778,8 +2772,7 @@ fn places_steps_whatever_their_answers_order() {
     let whole: Vec<&str> = whole.split_inclusive('\n').collect();
     let first = whole.len() - order.len();
     fs::write(&log_path, whole[..first].concat()).unwrap();
-    let driver = File::open(dir.join("driver.pid")).unwrap();
-    driver.lock().unwrap();
+    let driver = lock_driver(&dir);
     let served = Served::start(&scratch);
     let trace = |run: &str| format!("/api/runs/{run}/trace/job-0");
     let first_reply = served.get(&format!("{}/steps", trace(live)));
@@ -2875,10 +2868,6 @@ fn places_steps_whatever_their_answers_order() {
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "most of it is the reads and their snapshot"
-)]
 fn holds_each_live_trace_and_the_last_three_ended() {
     let scratch = Scratch::new();
     let (ended, live) = ("20261110-210000-00000017", "20261110-210000-00000018");
@@ -2899,8 +2888,7 @@ fn holds_each_live_trace_and_the_last_three_ended() {
         let places = lease_places(Prices::Both);
         write_run(&scratch, id, since, &log, outcome, &places);
     }
-    let driver = File::open(scratch.0.join("runs").join(live).join("driver.pid")).unwrap();
-    driver.lock().unwrap();
+    let _driver = lock_driver(&scratch.0.join("runs").join(live));
     let served = Served::start(&scratch);
     let path = |id: &str, caller: &str| format!("/api/runs/{id}/trace/{caller}/steps");
     // Each caller's held read costs the bytes of its request alone.

@@ -10,7 +10,7 @@ const LOST: &str = "20261108-120000-0b000001";
 
 const FAILED: &str = "20261108-120100-0b000002";
 
-/// A record made before records were locked.
+/// A record that holds no `driver.pid`.
 const UNLOCKED: &str = "20261108-120200-0b000003";
 
 /// A lost run whose Docker provider cannot be reached.

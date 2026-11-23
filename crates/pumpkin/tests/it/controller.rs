@@ -17,8 +17,8 @@ use stdx::process::Environment;
 
 use super::view::Served;
 use super::{
-    PUMPKIN, Prices, Scratch, asked, cut, ended, install, invocation, lease_places, masked_members,
-    poll, report, returned, whole_log, workflow, write_record, write_run,
+    PUMPKIN, Prices, Scratch, asked, cut, ended, install, invocation, lease_places, lock_driver,
+    masked_members, poll, report, returned, whole_log, workflow, write_record, write_run,
 };
 
 const SENT_MODAL: &str = r#"[modal]
@@ -320,6 +320,14 @@ fn set_up_client(scratch: &Scratch) -> [(String, String); 2] {
         ),
         ("PATH".to_owned(), path),
     ]
+}
+
+/// A client of [`set_up_client`] whose workspace has found the controller and holds its install.
+fn connected_client(scratch: &Scratch) -> [(String, String); 2] {
+    let client = set_up_client(scratch);
+    connect(scratch, &client);
+    served(scratch);
+    client
 }
 
 fn on_client(scratch: &Scratch, environment: &[(String, String); 2], args: &[&str]) -> Command {
@@ -1515,17 +1523,12 @@ fn ended_job(scratch: &Scratch, id: &str, log: &str) {
 #[test]
 fn cancel_stops_the_unit_once() {
     let scratch = Scratch::new();
-    let client = set_up_client(&scratch);
-    connect(&scratch, &client);
-    served(&scratch);
+    let client = connected_client(&scratch);
     let id = id_ago(0, "0c000006");
     scratch.write(&format!("home/jobs/{id}/log"), "a job still building\n");
     scratch.write(&format!("home/jobs/{id}/member"), "alice\n");
     scratch.write(&format!("run/pumpkin/{id}/held"), "");
-    let ctl = r#"#!/bin/sh
-echo "$*" >> "${0%/*}/units"
-"#;
-    scratch.write_executable("bin/systemctl", ctl.as_bytes());
+    scratch.write_executable("bin/systemctl", SYSTEMCTL_NOTED.as_bytes());
     let mut lines = Vec::new();
     for _ in 0..2 {
         let cancel = on_client(&scratch, &client, &["cancel", &id])
@@ -1553,9 +1556,7 @@ echo "$*" >> "${0%/*}/units"
 #[test]
 fn cancel_copies_the_record_when_reaping_fails() {
     let scratch = Scratch::new();
-    let client = set_up_client(&scratch);
-    connect(&scratch, &client);
-    served(&scratch);
+    let client = connected_client(&scratch);
     let id = id_ago(0, "0c000008");
     scratch.write(&format!("home/jobs/{id}/log"), "");
     scratch.write(&format!("home/jobs/{id}/member"), "alice\n");
@@ -1582,9 +1583,7 @@ fn cancel_copies_the_record_when_reaping_fails() {
 #[test]
 fn reap_by_writer() {
     let scratch = Scratch::new();
-    let client = set_up_client(&scratch);
-    connect(&scratch, &client);
-    served(&scratch);
+    let client = connected_client(&scratch);
     let made = "home/.pumpkin/runs";
     let own = id_ago(0, "0e000001");
     let other = id_ago(0, "0e000002");
@@ -1651,9 +1650,7 @@ fn reap_by_writer() {
 #[test]
 fn reap_after_a_cut() {
     let scratch = Scratch::new();
-    let client = set_up_client(&scratch);
-    connect(&scratch, &client);
-    served(&scratch);
+    let client = connected_client(&scratch);
     let id = id_ago(0, "0e000004");
     write_record(&scratch, &id, true, None);
     move_runs(&scratch, "home/.pumpkin/runs");
@@ -1701,9 +1698,7 @@ fn named_bytes(id: &str) -> usize {
 #[test]
 fn follow_carries_on() {
     let scratch = Scratch::new();
-    let client = set_up_client(&scratch);
-    connect(&scratch, &client);
-    served(&scratch);
+    let client = connected_client(&scratch);
     let id = id_ago(0, "0f000001");
     let log = "building\0task\nstep 1\nstep 1\npublish";
     ended_job(&scratch, &id, log);
@@ -1790,9 +1785,7 @@ fn said_bytes(message: &str) -> usize {
 #[test]
 fn follow_repeats_no_milestone() {
     let scratch = Scratch::new();
-    let client = set_up_client(&scratch);
-    connect(&scratch, &client);
-    served(&scratch);
+    let client = connected_client(&scratch);
     let id = id_ago(0, "0f000005");
     let [work, agent] = super::started_work(1);
     let dir = write_run(
@@ -1803,8 +1796,7 @@ fn follow_repeats_no_milestone() {
         None,
         &lease_places(Prices::Nothing),
     );
-    let driver = File::open(dir.join("driver.pid")).unwrap();
-    driver.lock().unwrap();
+    let driver = lock_driver(&dir);
     move_runs(&scratch, "home/.pumpkin/runs");
     scratch.write(&format!("home/jobs/{id}/out"), &id);
     scratch.write(&format!("home/jobs/{id}/member"), "alice\n");
@@ -1861,9 +1853,7 @@ fn follow_repeats_no_milestone() {
 #[test]
 fn follow_cut_often() {
     let scratch = Scratch::new();
-    let client = set_up_client(&scratch);
-    connect(&scratch, &client);
-    served(&scratch);
+    let client = connected_client(&scratch);
     let id = id_ago(0, "0f000002");
     ended_job(&scratch, &id, "");
     let hello = frame_bytes(&json!({ "type": "serving" }), &[]);
@@ -1912,9 +1902,7 @@ fn follow_cut_often() {
 #[test]
 fn follow_cut_before_a_line() {
     let scratch = Scratch::new();
-    let client = set_up_client(&scratch);
-    connect(&scratch, &client);
-    served(&scratch);
+    let client = connected_client(&scratch);
     let id = id_ago(0, "0f000003");
     ended_job(&scratch, &id, "line 01 of 01\n");
     let _ = calls(&scratch);
@@ -1961,9 +1949,7 @@ fn follow_cut_before_a_line() {
 #[test]
 fn follow_copies_another_writers_record() {
     let scratch = Scratch::new();
-    let client = set_up_client(&scratch);
-    connect(&scratch, &client);
-    served(&scratch);
+    let client = connected_client(&scratch);
     let id = id_ago(0, "0f000006");
     ended_job(&scratch, &id, "build output\n");
     let path = scratch
@@ -2093,9 +2079,7 @@ fn ls_ran(scratch: &Scratch, client: &[(String, String); 2], args: &[&str]) -> S
 #[test]
 fn ls_answered_there() {
     let scratch = Scratch::new();
-    let client = set_up_client(&scratch);
-    connect(&scratch, &client);
-    served(&scratch);
+    let client = connected_client(&scratch);
     let (ended, live, old) = (
         "20261107-120000-1b8a0001",
         "20261107-120100-1b8a0002",
@@ -2108,8 +2092,7 @@ fn ls_answered_there() {
     move_runs(&scratch, "home/.pumpkin/runs");
     let there = scratch.0.join("home/.pumpkin/runs");
     days_ago(&there.join(format!("{old}/outcome.json")), 2);
-    let driver = File::open(there.join(format!("{live}/driver.pid"))).unwrap();
-    driver.lock().unwrap();
+    let driver = lock_driver(&there.join(live));
     // The jobs: one of a run that has a record, and one of each state yet to start a run.
     let (waiting, building) = ("20261107-130000-2c9b0004", "20261107-130100-2c9b0005");
     let unstarted = ["20261107-130200-2c9b0006", "20261106-130300-2c9b0007"];
@@ -2165,9 +2148,7 @@ fn ls_answered_there() {
 #[test]
 fn ls_leaves_its_streams_blocking() {
     let scratch = Scratch::new();
-    let client = set_up_client(&scratch);
-    connect(&scratch, &client);
-    served(&scratch);
+    let client = connected_client(&scratch);
     write_record(
         &scratch,
         "20261107-120000-1b8a0001",
@@ -2268,9 +2249,7 @@ fn ls_installs_its_serve_there() {
 #[test]
 fn ls_refusals() {
     let scratch = Scratch::new();
-    let client = set_up_client(&scratch);
-    connect(&scratch, &client);
-    served(&scratch);
+    let client = connected_client(&scratch);
     let mut steps = Vec::new();
     // A run of this build that doesn't read, beside one that does.
     write_record(
@@ -2327,9 +2306,7 @@ fn repair_uses_the_failure_at_the_new_location() {
 
 fn repair_while_waiting(failure: Option<&str>, expected: &Expect) {
     let scratch = Scratch::new();
-    let client = set_up_client(&scratch);
-    connect(&scratch, &client);
-    served(&scratch);
+    let client = connected_client(&scratch);
     let dir = scratch.0.join(SHARED);
     let lock = File::open(dir.join("lock")).unwrap();
     lock.lock().unwrap();
@@ -2386,9 +2363,7 @@ fn repair_while_waiting(failure: Option<&str>, expected: &Expect) {
 #[test]
 fn commands_share_a_recent_failed_repair() {
     let scratch = Scratch::new();
-    let client = set_up_client(&scratch);
-    connect(&scratch, &client);
-    served(&scratch);
+    let client = connected_client(&scratch);
     let _ = calls(&scratch);
     let dir = scratch.0.join("bin");
     for call in 1..=2 {
@@ -2635,9 +2610,7 @@ fn waiting_jobs(scratch: &Scratch, jobs: &[(&str, &str)]) {
 #[test]
 fn cancel_prefers_own_run() {
     let scratch = Scratch::new();
-    let client = set_up_client(&scratch);
-    connect(&scratch, &client);
-    served(&scratch);
+    connected_client(&scratch);
     let bob = set_up_member(&scratch, "bob");
     scratch.write_executable("bin/systemctl", SYSTEMCTL_NOTED.as_bytes());
     let (alices, bobs) = (id_ago(0, "0b000001"), id_ago(0, "0b000002"));
@@ -2669,9 +2642,7 @@ fn cancel_prefers_own_run() {
 #[test]
 fn ls_says_unread_lines_of_a_run_unlisted() {
     let scratch = Scratch::new();
-    let client = set_up_client(&scratch);
-    connect(&scratch, &client);
-    served(&scratch);
+    let client = connected_client(&scratch);
     let id = id_ago(0, "0c000003");
     let log = [super::logged(5, json!({"kind":"work_started"}), json!([]))];
     let failed = json!({ "state": "failed", "reason": "r" });
@@ -2701,9 +2672,7 @@ fn ls_says_unread_lines_of_a_run_unlisted() {
 #[test]
 fn member_unread() {
     let scratch = Scratch::new();
-    let client = set_up_client(&scratch);
-    connect(&scratch, &client);
-    served(&scratch);
+    connected_client(&scratch);
     let bob = set_up_member(&scratch, "bob");
     scratch.write_executable("bin/systemctl", SYSTEMCTL_NOTED.as_bytes());
     let (unread, other) = (id_ago(0, "0c000001"), id_ago(0, "0c000002"));
@@ -2763,9 +2732,7 @@ fn member_unread() {
 #[test]
 fn serve_refuses_member() {
     let scratch = Scratch::new();
-    let client = set_up_client(&scratch);
-    connect(&scratch, &client);
-    served(&scratch);
+    connected_client(&scratch);
     let bad = set_up_member(&scratch, "bob");
     scratch.write("client-bob/.member", "Bad!\n");
     let ls = ran_by(
@@ -3282,9 +3249,7 @@ fn copy_with_unreadable_directories() {
 #[test]
 fn copy_refuses_a_live_run_or_linked_directory() {
     let scratch = Scratch::new();
-    let client = set_up_client(&scratch);
-    connect(&scratch, &client);
-    served(&scratch);
+    let client = connected_client(&scratch);
     let id = id_ago(0, "0d000002");
     ended_job(&scratch, &id, "built\n");
     let record = scratch.0.join(format!("home/.pumpkin/runs/{id}"));
@@ -3295,8 +3260,7 @@ fn copy_refuses_a_live_run_or_linked_directory() {
         &[],
     )
     .unwrap();
-    let driver = File::open(record.join("driver.pid")).unwrap();
-    driver.lock().unwrap();
+    let driver = lock_driver(&record);
     let mut lines = vec![serve_fed(&scratch, &request)];
     drop(driver);
     let copy = scratch.0.join(format!("repo/.pumpkin/runs/alice/{id}"));
@@ -3368,8 +3332,7 @@ fn viewed(scratch: &Scratch) -> ([(String, String); 2], File, [&'static str; 2])
         None,
         &places,
     );
-    let driver = File::open(dir.join("driver.pid")).unwrap();
-    driver.lock().unwrap();
+    let driver = lock_driver(&dir);
     fs::create_dir_all(scratch.0.join("home/.pumpkin")).unwrap();
     fs::rename(scratch.0.join("runs"), scratch.0.join("home/.pumpkin/runs")).unwrap();
     (client, driver, [ended, live])

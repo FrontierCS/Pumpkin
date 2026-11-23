@@ -98,7 +98,6 @@ fn usage() {
     // What `--version` prints: this build, which names its commit if it was made in a git
     // checkout of Pumpkin's repository.
     let this = format!("pumpkin {}\n", runtime::BUILD);
-    // Filled in by `UPDATE_EXPECT=1` once the crate builds.
     check(
         &scratch,
         steps,
@@ -429,8 +428,8 @@ fn unrunnable() {
     assert!(!scratch.0.join("runs").exists(), "a refusal made a record");
 }
 
-/// `wait` finds the `outcome.json` of each run recorded in `scratch`'s `runs`, which have
-/// ended, and with `sandboxd`, shown as `<sandboxd>`: the engine is not reached.
+/// Runs `wait` on each ended run recorded in `scratch`'s `runs`, which doesn't reach the engine,
+/// and shows `sandboxd` as `<sandboxd>`.
 fn wait_for_each_run(scratch: &Scratch, sandboxd: &str) {
     let mut ids: Vec<String> = (fs::read_dir(scratch.0.join("runs")).unwrap())
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
@@ -960,14 +959,11 @@ fn configurations() {
     );
 }
 
-/// Writes into `scratch` the stand-in `sandboxd` that [`configurations`] and [`refusals`] give
-/// `run`, and the machine's configurations, each named for what it holds: `conf/served`, of the
-/// context `nowhere` and two upstreams, one of whose models has a price, its key in `conf/key`;
-/// `docked`, without upstreams; and, to be refused, one for each rule a configuration breaks, as
-/// its name says (a missing context, TOML errors, keys, upstreams, URLs, prices, unserved models,
-/// `[placement]`, provider kinds and their
-/// settings, [`EC2`]'s and Modal's tables, the gateway's address); and `conf/unkeyed`, whose key
-/// file is missing. Each but `undocked` ends with [`LOCAL`]'s tables, changed as its name says.
+/// Writes into `scratch` the `sandboxd` that [`configurations`] and [`refusals`] give `run`, the
+/// key `conf/key`, and a machine configuration `<name>.toml` for each name they run: `conf/served`
+/// and `docked`, which are accepted, and each other, which breaks the rule that its name says.
+/// Each but `undocked`, which names no Docker context, ends with [`LOCAL`]'s tables, changed as
+/// its name says.
 #[expect(
     clippy::too_many_lines,
     reason = "most of it is the configurations, a line or a few each"
@@ -1622,7 +1618,6 @@ fn held(dir: &Path) -> String {
     names.join(", ")
 }
 
-/// Copies the tree at `from`, whose files are regular ones, to `to`, which doesn't exist yet.
 const OPS_FINAL: &str = r#"
     payload=/pumpkin/in/payload/raw
     bytes=$(wc -c < $payload)
@@ -1630,7 +1625,6 @@ const OPS_FINAL: &str = r#"
     echo kept > /pumpkin/out/evidence.txt
     echo "judged $bytes bytes as $(id -u), with HOME=$HOME, in $(pwd)""#;
 
-/// `sandboxctl` exits with 1 for a refusal and 2 for a job that gave no result.
 const AGENT: &str = r#"#!/bin/sh
     cd /workspace && stat -c '%a %n' .codex .codex/skills .codex/config.toml .tmp agent
     echo "standard input: $(cat)"
@@ -1650,28 +1644,27 @@ const AGENT: &str = r#"#!/bin/sh
     ctl status 0
     ctl call submit six --arg finalize=true --wait 15"#;
 
-/// The workflow of the run whose agent makes ops: [`workflow`]'s, whose agent runs
-/// [`AGENT`], which the run puts in its sandbox with the fixture's directories, files and
-/// standard input, and a directory listed before the one that holds it; whose job function
-/// `train` takes payloads of up to 8 bytes, and whose final call runs [`OPS_FINAL`] on a payload
-/// of up to 16 bytes, the most an op of the agent's may carry; and whose calls of `train` have a
-/// timeout of 5 s, room for the body's put and command on a loaded engine, without a cumulative
-/// limit, so that it is each call's timeout, and what a reply has left depends on no command's
-/// time.
+/// The workflow of the run whose agent makes ops: [`workflow`]'s, whose agent runs [`AGENT`] and
+/// whose final call runs [`OPS_FINAL`].
 fn ops_workflow() -> Value {
     // Spliced in, since `format!` would need each of the shell's braces doubled.
     let script = AGENT.replace("SANDBOXCTL", SANDBOXCTL_PATH);
     let mut ir = workflow("", &["/workspace/agent"]);
     let agent = &mut ir["roles"][0]["runtime"]["agent"];
     agent["prepend_grant_help"] = json!(true);
+    // Listed before the directory that holds it.
     let skills = json!({ "path": "/workspace/.codex/skills", "mode": "0750" });
     agent["dirs"].as_array_mut().unwrap().insert(0, skills);
     let launcher = json!({ "path": "/workspace/agent", "mode": "0755", "content": script });
     agent["files"].as_array_mut().unwrap().push(launcher);
     let train = &mut ir["roles"][0]["runtime"]["agent"]["grants"][0]["job"];
     train["payload_max_bytes"] = json!(8);
+    // Room for the body's put and command on a loaded engine.
     train["call_timeout_seconds"] = json!(5);
+    // With no cumulative limit, the timeout is each call's alone, and what a reply has left
+    // depends on no command's time.
     train.as_object_mut().unwrap().remove("cumulative_seconds");
+    // The most that an op of the agent's may carry.
     ir["final"]["payload_max_bytes"] = json!(16);
     ir["roles"][0]["runtime"]["agent"]["grants"][1]["now"]["payload_max_bytes"] = json!(16);
     ir
