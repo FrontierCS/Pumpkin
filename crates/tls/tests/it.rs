@@ -113,8 +113,8 @@ fn check(
     expect.assert_eq(&shown.join("\n"));
 }
 
-// 8 MiB of a pattern, four times what the sockets between the ends hold of a session that reads
-// nothing.
+// 8 MiB of a pattern: twice the 4 MiB under which `backpressure` expects a write to stall when
+// the other end reads nothing.
 fn pattern() -> Vec<u8> {
     (0..8u32 << 20).map(|i| (i % 251) as u8).collect()
 }
