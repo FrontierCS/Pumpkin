@@ -780,12 +780,16 @@ fn target_refusals() {
         fs::read_to_string(&config).unwrap()
     );
     scratch.write("both.toml", &both);
-    // A class that Modal's settings refuse, so that it is refused before anything is sent.
+    // A class with a key that Modal's settings lack, a typo of `usd_per_hour`, so that it is
+    // refused before anything is sent.
     let misnamed = SENT_MODAL.replace("[modal]", "[controllers.alice.modal]");
     let misnamed = format!(
         "{}\n{}",
         fs::read_to_string(&config).unwrap(),
-        misnamed.replace("cpu_millis", "cpus_millis")
+        misnamed.replace(
+            "startup_seconds = 1800",
+            "startup_seconds = 1800, usd_per_hr = 4"
+        )
     );
     scratch.write("misnamed.toml", &misnamed);
     // Both or neither of `region` and `address`, and an address that `ssh` would take as an option.
@@ -906,11 +910,7 @@ fn target_refusals() {
             pumpkin: ../both.toml: it names `[controllers]` beside `[providers]`: a machine's runs go either to its controllers or to its own providers, so keep `[controllers]`, beside `[upstreams]`, or remove it
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --config ../misnamed.toml
             exit status: Some(1)
-            pumpkin: ../misnamed.toml: TOML parse error at line 11, column 78
-               |
-            11 | classes = { a100 = { gpu = "A100-80GB", gpu_model = "NVIDIA A100-SXM4-80GB", cpus_millis = 8000, memory_bytes = 68719476736, startup_seconds = 1800 } }
-               |                                                                              ^^^^^^^^^^^
-            unknown field `cpus_millis`, expected one of `gpu`, `gpu_model`, `cpu_millis`, `memory_bytes`, `startup_seconds`, `usd_per_hour`
+            pumpkin: ../misnamed.toml: no table of a configuration takes `controllers.alice.modal.classes.a100.usd_per_hr`: remove it, as `pumpkin help config` says what each table takes
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --config ../single.toml
             exit status: Some(1)
             pumpkin: ../single.toml: a configuration names each controller in `[controllers.<name>]`, not `[controller]`: rename `[controller]` to `[controllers.alice]`, `[controller.modal]` to `[controllers.alice.modal]` and so on, and remove `name`

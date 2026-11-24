@@ -105,8 +105,8 @@ struct Images {
 /// "H100!", gpu_model = "NVIDIA H100 80GB HBM3", cpu_millis = 4000, memory_bytes = 8589934592,
 /// startup_seconds = 1800 }`; without `gpu` and `gpu_model`, it has none. With `usd_per_hour`,
 /// such as `3.95`, it has the price that the operator says a sandbox costs.
+// Without `deny_unknown_fields`, as `Settings`.
 #[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 struct ClassTable {
     gpu: Option<Gpu>,
     gpu_model: Option<GpuModel>,
