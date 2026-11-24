@@ -12,7 +12,7 @@ use gateway::{IncomingModelRequest, ModelRequest, ModelResponse};
 use schema::frame;
 use schema::ir::{Api, ModelBudget, ModelName, Name};
 use serde_json::{Map, Value};
-use stdx::Deadline;
+use stdx::time::{self, Clock};
 use ureq::http::header::{AUTHORIZATION, CONTENT_ENCODING};
 use ureq::http::{HeaderMap, HeaderName, HeaderValue, Uri};
 
@@ -55,7 +55,6 @@ pub struct Key(HeaderValue);
 /// The model provider's endpoint, with its key, which forwards closed requests.
 pub struct Upstream {
     url: Uri,
-    /// The header that carries the key, and its value.
     authorization: (HeaderName, HeaderValue),
     // One for the upstream's every exchange, so that `shutdown` ends them all at once.
     agent: ureq::Agent,
@@ -124,8 +123,7 @@ pub enum Bar {
     Budget,
 }
 
-/// How a run serves a model route's entry for one API: the upstream that its requests reach, of
-/// which the run makes an [`Upstream`] for each sandbox that it serves.
+/// How a run serves a model route's entry for one API: the upstream that its requests reach.
 pub struct Serving {
     /// The name that the deployment gives the upstream.
     pub name: Name,
@@ -286,7 +284,7 @@ impl Upstream {
     pub(crate) fn forward(
         &self,
         closed: &Closed<'_>,
-        client: Client<'_>,
+        client: Client<'_, impl Clock>,
         forwarding: impl FnOnce(),
         answered: impl FnOnce(Answer),
     ) -> io::Result<()> {
@@ -417,7 +415,7 @@ impl Upstream {
     fn serve(
         &self,
         route: &Route,
-        client: Client<'_>,
+        client: Client<'_, impl Clock>,
         body: Result<Map<String, Value>, Refusal>,
         admission: Admission<'_>,
         forwarding: impl FnOnce(),
@@ -483,7 +481,7 @@ pub enum Admission<'b> {
     },
 }
 
-/// Answers `request` for the sandbox that made it, by `by`, through an entry of `entries`.
+/// Answers `request` for its sandbox by `by`, a time on `clock`, through an entry of `entries`.
 ///
 /// Each is a route's entry and its upstream. The one whose endpoint the request names takes it,
 /// and of several, the one that allows the model it names; else it is refused with a 404 or a 400
@@ -493,17 +491,21 @@ pub enum Admission<'b> {
 /// It gives `keep` the exchange ([`Keep`]), and tells `answered` how it answered ([`Answer`]) and
 /// through which entry's index, once `keep` has the whole answer and before its end is written.
 // Whether the answer reached the sandbox isn't told: writing it fails only for a response's head
-// too long for a frame, or as the sandbox's session ends, which the run log shows.
-pub fn serve<'b>(
+// too long for a frame, or as the sandbox's session ends.
+pub fn serve<'b, C: Clock>(
     entries: &[(Route, Upstream)],
     request: IncomingModelRequest,
     admission: impl FnOnce(usize) -> Admission<'b>,
-    by: Deadline,
+    (clock, by): (&C, Duration),
     keep: &dyn Keep,
     forwarding: impl FnOnce(),
     answered: impl FnOnce(Option<usize>, Answer),
 ) {
-    let client = Client { request, by, keep };
+    let client = Client {
+        request,
+        by: (clock, by),
+        keep,
+    };
     let request = &client.request.request;
     let taking = || (entries.iter().enumerate()).filter(|(_, (route, _))| route.takes(request));
     let Some((first, _)) = taking().next() else {
@@ -550,9 +552,10 @@ pub fn serve<'b>(
     upstream.serve(route, client, body, admission(index), forwarding, answered);
 }
 
-pub(crate) struct Client<'k> {
+pub(crate) struct Client<'k, C> {
     request: IncomingModelRequest,
-    by: Deadline,
+    // The deadline, as a time on the clock.
+    by: (&'k C, Duration),
     keep: &'k dyn Keep,
 }
 
@@ -562,7 +565,7 @@ pub(crate) struct Client<'k> {
 fn barred(
     (bar, refusal): (Bar, Refusal),
     api: Api,
-    client: Client<'_>,
+    client: Client<'_, impl Clock>,
     answered: impl FnOnce(Answer),
 ) -> io::Result<()> {
     let Client { request, by, keep } = client;
@@ -572,10 +575,10 @@ fn barred(
     refusal.answer(api, request, by)
 }
 
-/// The time that `until` leaves the exchange: none once it has passed, and no bound if it is
-/// never reached.
-fn bound(until: Deadline) -> Option<Duration> {
-    match until.remaining() {
+/// The time that `until`, a time on its clock, leaves the exchange: none once it has passed, and
+/// no bound if it is never reached.
+fn bound((clock, until): (&impl Clock, Duration)) -> Option<Duration> {
+    match time::left(clock, until) {
         None => Some(Duration::ZERO),
         Some(Duration::MAX) => None,
         left @ Some(_) => left,
@@ -588,7 +591,7 @@ fn refuse(
     refusal: Refusal,
     answer: Answer,
     closed: &Closed<'_>,
-    client: Client<'_>,
+    client: Client<'_, impl Clock>,
     answered: impl FnOnce(Answer),
 ) -> io::Result<()> {
     let Client { request, by, keep } = client;
@@ -606,7 +609,7 @@ fn replaced(
     (status, request_id): (u16, Option<String>),
     closed: &Closed<'_>,
     body: &mut impl Read,
-    client: Client<'_>,
+    client: Client<'_, impl Clock>,
     answered: impl FnOnce(Answer),
 ) -> io::Result<()> {
     let Client { request, by, keep } = client;
@@ -632,7 +635,7 @@ enum Relayed {
 /// how it went.
 fn relay(
     body: &mut impl Read,
-    client: &mut ModelResponse,
+    client: &mut ModelResponse<impl Clock>,
     scan: &mut Scan,
     keep: &dyn Keep,
 ) -> Relayed {

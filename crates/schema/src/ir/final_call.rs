@@ -9,7 +9,7 @@ use super::{Label, Name};
 /// The body receives a fresh sandbox of `target` and every agent's submission, by role, in
 /// declaration order. A submission is a payload of zero or more bytes, or `None` if absent.
 ///
-/// The host starts the target, calls the body, and ends
+/// The host starts the target, calls the body even if every submission is `None`, and ends
 /// the target once the body returns. What it returns is the run's result: each of its entries is
 /// a value the run shows, in the order the body gives them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

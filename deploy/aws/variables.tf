@@ -18,13 +18,14 @@ variable "subnet_id" {
   type        = string
 }
 
-variable "modal_workspace" {
-  description = "The ID of the team's Modal workspace, `ac-…`, whose tokens alone may assume the Modal pull role."
-  type        = string
+variable "modal_workspaces" {
+  description = "The IDs of the Modal workspaces, `ac-…`, whose tokens alone may assume the Modal pull role: the workspace of each member who runs roles on Modal. With none, the module makes no pull role, and its settings name no Modal provider."
+  type        = set(string)
+  default     = []
 
   validation {
-    condition     = can(regex("^ac-[A-Za-z0-9]+$", var.modal_workspace))
-    error_message = "The Modal workspace ID is not one: give one such as `ac-zrUhjAwtDAP4iR3aWkCHl2`."
+    condition     = alltrue([for workspace in var.modal_workspaces : can(regex("^ac-[A-Za-z0-9]+$", workspace))])
+    error_message = "A Modal workspace ID is not one: give one such as `ac-zrUhjAwtDAP4iR3aWkCHl2`."
   }
 }
 
@@ -86,25 +87,25 @@ variable "controller_instance_type" {
 }
 
 variable "controller_volume_gib" {
-  description = "The controller's root volume, in GiB, which holds the build cache and the images of recent tasks, at 20 to 70 GB a task, which each job prunes as the volume fills, the trees and the records."
+  description = "The controller's data volume, in GiB, which outlives each instance of the controller. It holds the build cache and the images of recent tasks, at 20 to 70 GB a task, which each job prunes as the volume fills, the trees and the records."
   type        = number
   default     = 1000
 }
 
 variable "controller_volume_iops" {
-  description = "The controller's root volume's IOPS, a gp3's provisioned I/O operations a second, which the builds of several tasks at once, each unpacking and writing its layers, and the prunes share: gp3's baseline is 3000."
+  description = "The controller's data volume's IOPS, a gp3's provisioned I/O operations a second, which the builds of several tasks at once, each unpacking and writing its layers, and the prunes share: gp3's baseline is 3000."
   type        = number
   default     = 6000
 }
 
 variable "controller_volume_throughput" {
-  description = "The controller's root volume's throughput, in MiB/s, a gp3's provisioned throughput, which the builds' layers and the pushes of their images read and write: gp3's baseline is 125."
+  description = "The controller's data volume's throughput, in MiB/s, a gp3's provisioned throughput, which the builds' layers and the pushes of their images read and write: gp3's baseline is 125."
   type        = number
   default     = 500
 }
 
 variable "pumpkin_release" {
-  description = "A Pumpkin release's `pumpkinversion` line: its tag, its commit and its archive's SHA-256. The controller runs that release's `pumpkin-admin install --settings` at its first boot. An apply that changes it replaces the controller: change it in a cutover, as the module's README says under Versions."
+  description = "A Pumpkin release's `pumpkinversion` line: its tag, its commit and its archive's SHA-256. The controller runs that release's `pumpkin-admin install ec2 --settings` at its first boot. An apply that changes it replaces the controller: change it in a cutover, as the module's README says under Versions."
   type        = string
 
   validation {
@@ -114,18 +115,8 @@ variable "pumpkin_release" {
 }
 
 variable "members" {
-  description = "The team's members, by name, each with the `ssh-ed25519` lines of their machines' `~/.config/pumpkin/ssh/key.pub`. The controller admits only these keys, and names each key's jobs by its member."
+  description = "The team's members, by name, each with the `ssh-ed25519` lines of their machines' `~/.config/pumpkin/ssh/key.pub`. The controller admits only these keys, and names each key's jobs by its member. With none, it admits no one."
   type        = map(list(string))
-
-  validation {
-    condition     = length(var.members) > 0
-    error_message = "`members` lists no one, so no key reaches the controller: list each member's key, such as `{ alice = [\"ssh-ed25519 AAAA… alice-laptop\"] }`."
-  }
-
-  validation {
-    condition     = alltrue([for keys in values(var.members) : length(keys) > 0])
-    error_message = "A member lists no key, so they can't reach the controller: list the line of each of their machines' `~/.config/pumpkin/ssh/key.pub`, or leave them out."
-  }
 
   # The members' list holds a line for each key, so a key with a newline would start a line of its
   # own, under whatever member it names.

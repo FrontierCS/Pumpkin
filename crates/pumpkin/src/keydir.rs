@@ -23,31 +23,17 @@ pub(crate) fn check(dir: &Path) -> Result<Exit, String> {
         }
     }
     files.sort();
-    // deploy/aws refuses a list of no member, and a member of no key.
-    if files.is_empty() {
-        return Err(format!(
-            "{} holds no `<member>.pub`: add one for each member",
-            dir.display()
-        ));
-    }
     let mut keys = Vec::new();
     for path in &files {
         let text = fs::read_to_string(path).context(path.display())?;
         // A name that isn't UTF-8 is refused as any other name is.
         let name = path.file_stem().unwrap_or_default().to_string_lossy();
-        let listed = keys.len();
         for (index, line) in text.lines().enumerate() {
             let line = line.trim();
             if !line.is_empty() {
                 let at = format!("{}, line {}", path.display(), index + 1);
                 keys.push((at, name.clone(), line.to_owned()));
             }
-        }
-        if keys.len() == listed {
-            return Err(format!(
-                "{} lists no key: list each of the member's keys on a line, or remove the file",
-                path.display()
-            ));
         }
     }
     let keys = keys

@@ -8,8 +8,8 @@ use expect_test::expect;
 use serde_json::{Value, json};
 
 use super::{
-    Prices, Scratch, Step, asked, check, cut, lease_places, lease_task, logged, masked, ran,
-    returned, whole_log, write_record, write_run,
+    Prices, Scratch, Step, agent_answer, answered_log, asked, check, cut, lease_places, lease_task,
+    lock_driver, logged, masked, ran, returned, started_work, whole_log, write_record, write_run,
 };
 
 #[test]
@@ -54,8 +54,7 @@ fn lists() {
     let live = "20261107-120400-5f2e0004";
     write_record(&scratch, live, true, None);
     task(live, "examples/hello");
-    let driver = File::open(scratch.0.join(format!("runs/{live}/driver.pid"))).unwrap();
-    driver.lock().unwrap();
+    let _driver = lock_driver(&scratch.0.join(format!("runs/{live}")));
     write_record(&scratch, "20261107-120500-602f0005", true, None);
     write_record(&scratch, "20261107-120600-7130006", false, None);
     let ls = |runs: &str| Step::from(scratch.pumpkin(&["ls", "--runs", runs]));
@@ -259,13 +258,10 @@ fn lists_phases() {
     );
     let late = "20261110-110000-0000000b";
     let unsubmitted = super::unsubmitted();
+    let [work, agent] = started_work(5);
     let late_log = [
-        logged(5, json!({"kind":"work_started"}), json!([])),
-        logged(
-            5,
-            json!({"kind":"agent_started","caller":"agent-0"}),
-            json!([]),
-        ),
+        work,
+        agent,
         logged(
             1805,
             json!({ "kind": "tick" }),
@@ -312,18 +308,8 @@ fn lists_phases() {
     .collect();
     // As its upstream answered its agent's requests otherwise: with a 200 whose stream states a
     // rate limit, or a failure with no code; with a 429; or cut short.
-    let answer = |status: u64, more: Value| {
-        let mut answer = json!({
-            "kind": "model_answered", "caller": "agent-0",
-            "answer": { "kind": "forwarded" }, "upstream_status": status,
-        });
-        for (field, value) in more.as_object().unwrap() {
-            answer[field] = value.clone();
-        }
-        answer
-    };
-    let good = || answer(200, json!({}));
-    let limited = || answer(200, json!({ "failed": { "code": "rate_limit_exceeded" } }));
+    let good = || agent_answer(200, json!({}));
+    let limited = || agent_answer(200, json!({ "failed": { "code": "rate_limit_exceeded" } }));
     let answered = [
         (
             "20261111-090000-0000000g",
@@ -331,39 +317,32 @@ fn lists_phases() {
         ),
         (
             "20261111-090000-0000000h",
-            vec![limited(), answer(200, json!({ "failed": {} })), limited()],
+            vec![
+                limited(),
+                agent_answer(200, json!({ "failed": {} })),
+                limited(),
+            ],
         ),
         (
             "20261111-090000-0000000i",
-            vec![good(), answer(429, json!({}))],
+            vec![good(), agent_answer(429, json!({}))],
         ),
         (
             "20261111-090000-0000000j",
-            vec![good(), answer(200, json!({ "answer": { "kind": "cut" } }))],
+            vec![
+                good(),
+                agent_answer(200, json!({ "answer": { "kind": "cut" } })),
+            ],
         ),
     ];
     for (id, answers) in answered {
-        let mut log = vec![
-            logged(5, json!({"kind":"work_started"}), json!([])),
-            logged(
-                5,
-                json!({"kind":"agent_started","caller":"agent-0"}),
-                json!([]),
-            ),
-        ];
-        for (request, (seconds, mut answer)) in (0_u64..).zip((10..).step_by(10).zip(answers)) {
-            answer["request"] = json!(request);
-            log.push(logged(seconds, answer, json!([])));
-        }
-        held.push(live(&scratch, id, &log, ago));
+        held.push(live(&scratch, id, &answered_log(answers), ago));
     }
     // And one whose images are still being published, with no log yet.
     let publishing = "20261111-090000-0000000f";
     write_record(&scratch, publishing, true, None);
     scratch.write(&format!("runs/{publishing}/ir.json"), &lease_task());
-    let driver = File::open(scratch.0.join(format!("runs/{publishing}/driver.pid"))).unwrap();
-    driver.lock().unwrap();
-    held.push(driver);
+    held.push(lock_driver(&scratch.0.join(format!("runs/{publishing}"))));
     let ls = |prefixes: &[&str]| {
         let mut args = vec!["ls", "--runs", "runs"];
         args.extend(prefixes);
@@ -496,13 +475,10 @@ fn lists_leases() {
 fn says_unread_lines() {
     let scratch = Scratch::new();
     let id = "20261110-110000-0000000b";
+    let [work, agent] = started_work(5);
     let log = [
-        logged(5, json!({"kind":"work_started"}), json!([])),
-        logged(
-            5,
-            json!({"kind":"agent_started","caller":"agent-0"}),
-            json!([]),
-        ),
+        work,
+        agent,
         logged(10, json!({ "kind": "later" }), json!([])),
         logged(
             20,
@@ -600,7 +576,5 @@ fn live(scratch: &Scratch, id: &str, log: &[Value], ago: Duration) -> File {
         None,
         &lease_places(Prices::Both),
     );
-    let driver = File::open(dir.join("driver.pid")).unwrap();
-    driver.lock().unwrap();
-    driver
+    lock_driver(&dir)
 }

@@ -8,12 +8,15 @@ use expect_test::expect;
 use super::settings::{Provider, Settings};
 use super::wait;
 
-/// A configuration whose controller has two Modal classes, one of whose GPU two classes share.
-const CONFIG: &str = r#"[controller]
-name = "alice"
+/// A configuration whose controller has two Modal classes, one of whose GPU two classes share,
+/// beside a controller at an address.
+const CONFIG: &str = r#"[controllers.lab]
+address = "lab.example.org:2222"
+
+[controllers.alice]
 region = "us-west-1"
 
-[controller.modal]
+[controllers.alice.modal]
 profile = "alice"
 classes.a100 = { gpu = "A100-40GB", gpu_model = "NVIDIA A100-SXM4-40GB", cpu_millis = 8000, memory_bytes = 68719476736, startup_seconds = 1800 }
 classes.a100_2 = { gpu = "A100-40GB:2", gpu_model = "NVIDIA A100-SXM4-40GB", cpu_millis = 8000, memory_bytes = 68719476736, startup_seconds = 1800 }
@@ -25,7 +28,8 @@ classes.h100 = { gpu = "H100!", gpu_model = "NVIDIA H100 80GB HBM3", cpu_millis 
 fn settings() {
     let path = Path::new("/home/alice/.config/pumpkin/pumpkin.toml");
     let a100 = Some("NVIDIA A100-SXM4-40GB");
-    let without_modal = CONFIG.split("[controller.modal]").next().unwrap();
+    let without_modal = CONFIG.split("[controllers.alice.modal]").next().unwrap();
+    let several = format!("{CONFIG}\n[controllers.bob]\nregion = \"us-east-1\"\n");
     let cases = [
         ("ec2", CONFIG, Provider::Ec2, None),
         ("modal", CONFIG, Provider::Modal, a100),
@@ -37,17 +41,18 @@ fn settings() {
             Some("NVIDIA B200"),
         ),
         (
-            "modal without [controller.modal]",
+            "modal without its modal",
             without_modal,
             Provider::Modal,
             a100,
         ),
         (
-            "no [controller]",
+            "no controller",
             "[providers.local.docker]\n",
             Provider::Ec2,
             None,
         ),
+        ("several with a region", &several, Provider::Ec2, None),
     ];
     let lines: Vec<String> = cases
         .into_iter()
@@ -62,10 +67,11 @@ fn settings() {
     expect![[r#"
         ec2: Settings { name: "alice", region: "us-west-1", modal: None }
         modal: Settings { name: "alice", region: "us-west-1", modal: Some(Modal { profile: "alice", gpu_model: "NVIDIA A100-SXM4-40GB" }) }
-        modal without a GPU: a live run on Modal needs the model of a GPU that a class of `[controller.modal]` has, the cheapest best: give one of `NVIDIA A100-SXM4-40GB`, `NVIDIA H100 80GB HBM3` with `--gpu-model`
-        modal with a GPU no class has: no class of /home/alice/.config/pumpkin/pumpkin.toml's `[controller.modal]` has the GPU `NVIDIA B200`: give one of `NVIDIA A100-SXM4-40GB`, `NVIDIA H100 80GB HBM3`
-        modal without [controller.modal]: /home/alice/.config/pumpkin/pumpkin.toml names no `[controller.modal]`, which a live run on Modal needs: name the workspace's profile and classes there, as the README says
-        no [controller]: /home/alice/.config/pumpkin/pumpkin.toml names no `[controller]`, which a live run goes through: name the one `deploy/aws` made, as the README says"#]].assert_eq(&lines.join("\n"));
+        modal without a GPU: a live run on Modal needs the model of a GPU that a class of `[controllers.alice.modal]` has, the cheapest best: give one of `NVIDIA A100-SXM4-40GB`, `NVIDIA H100 80GB HBM3` with `--gpu-model`
+        modal with a GPU no class has: no class of /home/alice/.config/pumpkin/pumpkin.toml's `[controllers.alice.modal]` has the GPU `NVIDIA B200`: give one of `NVIDIA A100-SXM4-40GB`, `NVIDIA H100 80GB HBM3`
+        modal without its modal: /home/alice/.config/pumpkin/pumpkin.toml names no `[controllers.alice.modal]`, which a live run on Modal needs: name the workspace's profile and classes there, as the README says
+        no controller: /home/alice/.config/pumpkin/pumpkin.toml names no `[controllers.<name>]` with a `region`, which a live run goes through: name the one `deploy/aws` made, as the README says
+        several with a region: /home/alice/.config/pumpkin/pumpkin.toml names several controllers with a `region`, `alice`, `bob`: keep there the one that a live run goes through"#]].assert_eq(&lines.join("\n"));
 }
 
 // Lines that `./pumpkin wait` says, as its own tests pin them.

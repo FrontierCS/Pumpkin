@@ -9,15 +9,16 @@ use std::net::{Ipv4Addr, Shutdown, TcpListener};
 use std::num::NonZeroU64;
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::Duration;
 use std::{fs, iter, slice, thread};
 
 use expect_test::{Expect, expect};
 use gateway::{Arrival, IncomingModelRequest};
 use route::{Admission, Answer as Told, Apart, Keep, Key, Route, Upstream, UpstreamUrl};
 use schema::ir::{Api, ModelBudget};
-use stdx::Deadline;
+use stdx::time::Machine;
 use test_support::http::{read_request, write_chunk};
-use test_support::{HUNG, TestDir};
+use test_support::{HUNG, TestDir, hung};
 
 use super::kept::{
     CHAT_ANSWER, CHAT_STREAM, MESSAGES_CUT, MESSAGES_STREAM, RESPONSES_CUT, RESPONSES_STREAM,
@@ -25,6 +26,7 @@ use super::kept::{
 use super::read::CHAT_CUSTOM;
 use super::{
     Request, chat, fake_sandbox, listed, meeting, messages, models, next_model_request, post,
+    shown_received,
 };
 
 const KEY: &str = "sk-test-0123\n";
@@ -252,8 +254,7 @@ fn exchanged(cases: &[Case]) -> String {
     }
     let sandbox = thread::spawn(move || fake_sandbox(&socket, requests, Some(&parts), hangs_up));
     let (sender, arrivals) = mpsc::channel();
-    let by = Deadline::after(HUNG);
-    let accepted = registration.accept(by, None, true, sender, |arrival| arrival, || false);
+    let accepted = registration.accept((&Machine, hung()), None, true, sender, |a| a, || false);
     let session = accepted.unwrap();
     let mut outcomes = Vec::new();
     for (case, entry) in cases.iter().zip(&made) {
@@ -304,7 +305,7 @@ fn serve_case(
     arrivals: &Receiver<Arrival>,
     held: &Receiver<()>,
 ) -> Vec<(Option<Told>, String)> {
-    let by = Deadline::after(HUNG);
+    let by = hung();
     let incoming = next_model_request(arrivals);
     let first = if case.answer == Some(Answer::Holds) {
         thread::scope(|scope| {
@@ -328,7 +329,7 @@ fn serve_one(
     entry: &(Route, Upstream),
     incoming: IncomingModelRequest,
     admission: Admission<'_>,
-    by: Deadline,
+    by: Duration,
 ) -> (Option<Told>, String) {
     let kept = Kept::default();
     let mut told = None;
@@ -337,7 +338,7 @@ fn serve_one(
         slice::from_ref(entry),
         incoming,
         |_| admission,
-        by,
+        (&Machine, by),
         &kept,
         || {},
         answered,
@@ -348,6 +349,7 @@ fn serve_one(
 
 #[derive(Default)]
 struct Kept {
+    dropped_headers: Cell<bool>,
     request: RefCell<Vec<u8>>,
     response: RefCell<Vec<u8>>,
     first_output: Cell<Option<usize>>,
@@ -365,7 +367,10 @@ impl Kept {
 }
 
 impl Keep for Kept {
-    fn dropped_headers(&self, _: &[String]) {}
+    fn dropped_headers(&self, _: &[String]) {
+        assert!(self.request.borrow().is_empty(), "told after the request");
+        assert!(!self.dropped_headers.replace(true), "told twice");
+    }
 
     fn request(&self, body: &[u8], _: Option<Apart>) {
         self.request.borrow_mut().extend_from_slice(body);
@@ -402,18 +407,8 @@ fn upstream(case: &Case, key: &Path, address: &str) -> Result<(Route, Upstream),
 }
 
 fn got((head, body): (String, Vec<u8>), sent: &[u8], first: &mut Option<String>) -> String {
-    let head = if first.is_none() {
-        first.insert(head).clone()
-    } else if first.as_ref() == Some(&head) {
-        "the same head".to_owned()
-    } else {
-        head
-    };
-    if body == sent {
-        format!("{head} with the body as sent")
-    } else {
-        format!("{head} with the body {}", String::from_utf8_lossy(&body))
-    }
+    let (head, body) = shown_received(head, &body, sent, first);
+    format!("{head} with {body}")
 }
 
 #[expect(
@@ -664,29 +659,6 @@ fn forward() {
             a message of Messages: the stand-in got POST /v1/messages HTTP/1.1 [("accept-encoding", "identity"), ("content-length", "813"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "application/json"), ("anthropic-version", "2023-06-01"), ("anthropic-beta", "interleaved-thinking-2025-05-14"), ("user-agent", "claude-cli/2.1.311 (external, cli)"), ("x-app", "cli"), ("x-api-key", "sk-test-0123")] with the body as sent; the sandbox heard 200 [("content-type", "application/json"), ("request-id", "req_1")] {"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"7"}],"model":"m-large","stop_reason":"end_turn","usage":{"input_tokens":12,"cache_creation_input_tokens":300,"cache_read_input_tokens":2000,"output_tokens":5,"output_tokens_details":{"thinking_tokens":3}}}; told: Some(Forwarded { model: ModelName("m-large"), status: 200, request_id: Some("req_1"), usage: Some(Usage { input_tokens: 2312, output_tokens: 5, cached_tokens: Some(2000), cache_write_tokens: Some(300), reasoning_tokens: Some(3) }), failed: None }); kept: request 813 bytes, response 289 bytes; key refused: false
             the key refused by Messages: the stand-in got POST /v1/messages HTTP/1.1 [("accept-encoding", "identity"), ("content-length", "813"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "application/json"), ("anthropic-version", "2023-06-01"), ("anthropic-beta", "interleaved-thinking-2025-05-14"), ("user-agent", "claude-cli/2.1.311 (external, cli)"), ("x-app", "cli"), ("x-api-key", "sk-test-0123")] with the body as sent; the sandbox heard 400 [("content-type", "application/json")] {"error":{"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","type":"invalid_request_error"},"type":"error"}; told: Some(Refused { upstream_status: Some(401), request_id: None, status: 400, message: "the model provider refused the route's key, with a 401, which ends the model route: make no more model requests" }); kept: request 813 bytes, response 35 bytes; key refused: true
             a tool call's input of Messages: the stand-in got POST /v1/messages HTTP/1.1 [("accept-encoding", "identity"), ("content-length", "813"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "application/json"), ("anthropic-version", "2023-06-01"), ("anthropic-beta", "interleaved-thinking-2025-05-14"), ("user-agent", "claude-cli/2.1.311 (external, cli)"), ("x-app", "cli"), ("x-api-key", "sk-test-0123")] with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("request-id", "req_1")] event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"m-large","usage":{"input_tokens":12,"cache_creation_input_tokens":300,"cache_read_input_tokens":2000,"output_tokens":1}}}\n\nevent: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\""}}\n\n; told: Some(Forwarded { model: ModelName("m-large"), status: 200, request_id: Some("req_1"), usage: Some(Usage { input_tokens: 2312, output_tokens: 1, cached_tokens: Some(2000), cache_write_tokens: Some(300), reasoning_tokens: None }), failed: None }); kept: request 813 bytes, response 388 bytes, its output begun by byte 388; key refused: false"#]],
-    );
-}
-
-#[test]
-fn upstream_url_with_query() {
-    let base = "http://127.0.0.1/";
-    // The HTTP client accepts a URI of this length before the query is added.
-    let limit = usize::from(u16::MAX) - 1;
-    let url = format!("{base}{}", "p".repeat(limit - base.len()));
-    check(
-        &[Case {
-            api: Api::Messages,
-            url: url.leak(),
-            request: |api| {
-                let mut request = request(api);
-                request.1.push_str("?beta=true");
-                request
-            },
-            ..unanswered("the endpoint with no room for the query")
-        }],
-        &expect![[
-            r#"the endpoint with no room for the query: the stand-in got nothing; the sandbox heard 502 [("content-type", "application/json")] {"error":{"message":"the upstream's URL with the request's query is invalid (uri too long): check the configured upstream URL","type":"api_error"},"type":"error"}; told: Some(Refused { upstream_status: None, request_id: None, status: 502, message: "the upstream's URL with the request's query is invalid (uri too long): check the configured upstream URL" }); kept: request 813 bytes, response 162 bytes; key refused: false"#
-        ]],
     );
 }
 

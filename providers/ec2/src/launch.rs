@@ -203,6 +203,8 @@ impl Ec2<'_> {
             "UTC",
             "--flexible-time-window",
             "Mode=OFF",
+            // A schedule that a lost run leaves fires on an instance gone already, then deletes
+            // itself.
             "--action-after-completion",
             "DELETE",
             "--target",

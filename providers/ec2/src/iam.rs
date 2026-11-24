@@ -70,6 +70,31 @@ const SANDBOXES: &[Condition] = &[
 
 const TERMINATE: Allow = Allow::new(&["ec2:TerminateInstances"], INSTANCES).when(SANDBOXES);
 
+/// What a launch tags (`launch::tag_specifications`): its instance and its volumes.
+const TAGGED: &[Resource] = &[
+    Resource::In("ec2", &[Part::Text("instance/*")]),
+    Resource::In("ec2", &[Part::Text("volume/*")]),
+];
+
+const FROM_TEMPLATE: Condition = Condition::new(
+    Test::ArnEquals,
+    Key::Named("ec2:LaunchTemplate"),
+    Values::Listed(&LAUNCH_TEMPLATES),
+);
+
+const TEMPLATE_RESOURCE: Condition = Condition::new(
+    Test::Bool,
+    Key::Named("ec2:IsLaunchTemplateResource"),
+    Values::Are(&[Part::Text("true")]),
+);
+
+// The timer and a delete end only an instance that carries the run's tag.
+const RUN_TAGGED: Condition = Condition::new(
+    Test::Null,
+    Key::RequestTag(RUN_TAG),
+    Values::Are(&[Part::Text("false")]),
+);
+
 /// The calls on the envelope's repositories.
 pub(crate) const ECR: Ecr = Ecr::on(REPOSITORIES);
 
@@ -86,25 +111,22 @@ pub(crate) struct Calls {
 
 pub(crate) const CALLS: Calls = Calls {
     identity: Call::open(["sts", "get-caller-identity"]),
-    // From the envelope's templates alone, with none of the resources they name overridden:
+    // From the envelope's templates alone, with none of the resources they name overridden. Only
+    // the resources that a request tags have `aws:RequestTag`, so the others, which the second
+    // statement allows, don't require the run's tag, as EC2's example and Karpenter's split them:
     // https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ExamplePolicies_EC2.html#iam-example-runinstances-launch-templates
+    // https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ExamplePolicies_EC2.html#iam-example-runinstances-tags
+    // https://github.com/aws/karpenter-provider-aws/blob/475815f556945b1ce8cf4f38b478e39523bcb772/website/content/en/docs/reference/cloudformation.md#L164-L197
+    // https://github.com/salesforce/policy_sentry/blob/2575f2b873e1c1f0fb604a448dee392f39ad74ad/policy_sentry/shared/data/iam-definition.json#L112453-L112698
     launch: Call::new(
         ["ec2", "run-instances"],
-        Allow::new(&["ec2:RunInstances"], &[Resource::Any]).when(&[
-            Condition::new(
-                Test::ArnEquals,
-                Key::Named("ec2:LaunchTemplate"),
-                Values::Listed(&LAUNCH_TEMPLATES),
-            ),
-            Condition::new(
-                Test::Bool,
-                Key::Named("ec2:IsLaunchTemplateResource"),
-                Values::Are(&[Part::Text("true")]),
-            ),
+        Allow::new(&["ec2:RunInstances"], TAGGED).when(&[
+            FROM_TEMPLATE,
+            TEMPLATE_RESOURCE,
             // A launch may override a template's instance type, which is no resource. So the
             // statement holds the instance to the templates' types. Of RunInstances' resource
             // types, only the instance has this key. IAM's guide holds a launch's type in one
-            // statement on `*` this way:
+            // statement this way:
             // https://github.com/salesforce/policy_sentry/blob/2575f2b873e1c1f0fb604a448dee392f39ad74ad/policy_sentry/shared/data/iam-definition.json#L112478-L112507
             // https://github.com/awsdocs/iam-user-guide/blob/e2b8637a825b9f292bb04af61277d067dfcc5676/doc_source/reference_policies_elements_condition_operators.md?plain=1#L332-L374
             Condition::new(
@@ -112,22 +134,20 @@ pub(crate) const CALLS: Calls = Calls {
                 Key::Named("ec2:InstanceType"),
                 Values::Listed(&INSTANCE_TYPES),
             ),
+            RUN_TAGGED,
         ]),
     )
     .also(&[
+        Allow::all_but(&["ec2:RunInstances"], TAGGED).when(&[FROM_TEMPLATE, TEMPLATE_RESOURCE]),
         // The launch's tags, on the instance and its volumes (`launch::tag_specifications`).
-        Allow::new(
-            &["ec2:CreateTags"],
-            &[
-                Resource::In("ec2", &[Part::Text("instance/*")]),
-                Resource::In("ec2", &[Part::Text("volume/*")]),
-            ],
-        )
-        .when(&[Condition::new(
-            Test::StringEquals,
-            Key::Named("ec2:CreateAction"),
-            Values::Are(&[Part::Text("RunInstances")]),
-        )]),
+        Allow::new(&["ec2:CreateTags"], TAGGED).when(&[
+            Condition::new(
+                Test::StringEquals,
+                Key::Named("ec2:CreateAction"),
+                Values::Are(&[Part::Text("RunInstances")]),
+            ),
+            RUN_TAGGED,
+        ]),
         // The templates' instance profile's role.
         Allow::new(&["iam:PassRole"], &[Resource::Arn(&SANDBOX_ROLE)]).when(&[Condition::new(
             Test::StringEquals,
@@ -171,7 +191,6 @@ const TIMER_SCHEDULES: &[Resource] = &[Resource::In(
     ],
 )];
 
-/// The calls that [`crate::envelope`] makes to read the envelope. Each is a read.
 pub(crate) struct Checks {
     pub(crate) templates: Call,
     pub(crate) profile: Call,

@@ -38,11 +38,11 @@ impl Printed {
 
 /// Says how `record`'s run ended, following it first if it is live, after printing what
 /// `printed` asks for. `command` is the command that follows it, which the following names, and
-/// `runs` is as [`crate::runs_dir`]'s second.
+/// `at` is where the commands to run next find it.
 pub(crate) fn follow(
     record: &Record,
     command: &str,
-    runs: Option<&str>,
+    at: &next::At,
     printed: Printed,
 ) -> Result<Exit, String> {
     let ending = if let Some(ending) = record.ending()? {
@@ -51,7 +51,7 @@ pub(crate) fn follow(
         following(record, command);
         followed(record)?
     };
-    end(record, &ending, printed, runs, record.args())
+    end(record, &ending, printed, at, record.args())
 }
 
 // The first pause is short, to see soon what has just happened, the run's end most of all, and it
@@ -71,8 +71,8 @@ impl Polls {
         Self(FIRST_FOLLOW_POLL)
     }
 
-    /// The pause before the next poll: 10 ms at first and after a restart, then twice the last,
-    /// up to a second.
+    /// The pause before the next poll: `FIRST_FOLLOW_POLL` at first and after a restart, then
+    /// twice the last, up to `LAST_FOLLOW_POLL`.
     pub(crate) fn pause(&mut self) -> Duration {
         let pause = self.0;
         self.0 = (pause * 2).min(LAST_FOLLOW_POLL);
@@ -165,7 +165,7 @@ pub(crate) fn end(
     record: &Record,
     ending: &Ending,
     printed: Printed,
-    runs: Option<&str>,
+    at: &next::At,
     args: &[String],
 ) -> Result<Exit, String> {
     let id = record.id();
@@ -180,11 +180,8 @@ pub(crate) fn end(
             summarize(record);
             say(closing(id, how, record.dir()));
             again(record, args);
-            advise("remove what it left", &next::of_run("cancel", runs, id));
-            advise(
-                "remove what every run that has ended left",
-                &next::reap(runs),
-            );
+            advise("remove what it left", &next::of_run("cancel", at, id));
+            advise("remove what every run that has ended left", &next::reap(at));
             return Ok(Exit::Failure);
         }
     };

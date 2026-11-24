@@ -3,7 +3,8 @@
 //! page marks it.
 //!
 //! A failure's subject is what the record that states it names, by that record's own fields, and
-//! its reason is that record's, whole: nothing here is read out of a reason's words.
+//! its reason is that record's, cut as a reply cuts each string: nothing here is read out of a
+//! reason's words.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -43,7 +44,8 @@ impl Failure {
     fn stated(byte: u64, record: &Value, subject: Value, lane: String) -> Self {
         Self {
             subject,
-            reason: record["event"]["reason"].as_str().map(str::to_owned),
+            reason: (record["event"]["reason"].as_str())
+                .map(|reason| super::json::cut_text(reason.to_owned())),
             evidence: Vec::new(),
             lane: Some(lane),
             at: super::when(record),

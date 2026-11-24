@@ -1,10 +1,10 @@
 //! The simulated provider, `Sim`, which passes the suite that every provider passes
 //! ([`suite`](test_support::suite)). Each sandbox is a thread of the test process.
 //!
-//! A sandbox says hello to the gateway as `sandboxd` does, dialing it at once, or for a provider
-//! made [listening](Sim::listening) waiting for its dial behind the stand-in TLS edge, and keeps
+//! A sandbox says hello to the gateway as `sandboxd` does, dialing its socket at once, and keeps
 //! its files in memory. The program of a command that a run starts in it scripts the command:
-//! - `exit <code>`; `stall` (the sandbox stops answering); `crash` (its connection ends);
+//! - `exit <code>`; `stall [<seconds>]` (the sandbox stops answering, and moves the clock there
+//!   as it takes its next request);
 //! - `print <words>` and `fill <n> <words>` (`n` `x`es first) leave their text as the command's
 //!   stdout, and `list <dir>` leaves a listing of what was put under `dir`;
 //! - `worker <code>` decodes its stdin's JSON byte array to stdout, or prints `absent` for no
@@ -13,7 +13,11 @@
 //!   never ends) and `large` (a result over its limit), and puts its result at `file` too, if
 //!   named; with no payload it exits 1;
 //! - `ops <step>...` plays its steps (`step`) in turn, one op at a time, and exits 0 after the
-//!   last; any other program runs until it is killed.
+//!   last, or stalls at a `stall [<seconds>]` step as the `stall` program does; any other program
+//!   runs until it is killed.
+//!
+//! On a simulated host ([`Sim::records`]), the provider and its sandboxes wait on the run's clock:
+//! a create's deadline is the clock's, and a step's `sleep <seconds>` moves the clock on that far.
 //!
 //! A test chooses a fault by naming a sentinel, such as `HUNG`, as the sandboxd's path or, through
 //! [`image`], as the image. What a run acts on may go to a [`Journal`], in order with what other
@@ -27,8 +31,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
-use std::io::{self, Read, Write};
-use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::Shutdown;
 use std::num::{NonZeroU32, NonZeroU64};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
@@ -38,8 +41,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use provider::{
-    Admits, Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready,
-    Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
+    Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation,
+    Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
 use schema::frame;
 use schema::ir::{AbsolutePath, Argv, CpuModel, Image, Mode, Name, Sha256Digest};
@@ -47,14 +50,16 @@ use schema::sandbox::op::{
     JobState, Last, LeaseStatusReply, OpCall, OpReply, SessionOp, StatusReply, TransferStatus,
 };
 use schema::sandbox::{
-    Endpoint, Entry, ExitStatus, FromSandbox, HelloReply, Launch, Listening, PROTOCOL_VERSION,
-    PrivateDial, RESULT_MAX_BYTES, RegistrationGrant, RelativePath, Root, SOCKET_NAME, SocketDial,
-    ToSandbox, dir_mode, file_mode, log_dir, out_dir, pumpkin_dir,
+    Entry, ExitStatus, FromSandbox, HelloReply, Launch, PROTOCOL_VERSION, RESULT_MAX_BYTES,
+    RelativePath, Root, SOCKET_NAME, SocketDial, ToSandbox, dir_mode, file_mode, log_dir, out_dir,
+    pumpkin_dir,
 };
 use schema::workflow::{Class, Offers, UsdPerHour};
 use serde_json::{Map, Value, json};
 use stdx::Deadline;
 use test_support::suite::{Locals, Subject};
+
+use crate::host::SimTime;
 
 /// A sandbox that never dials, and ends at once.
 pub(crate) const MUTE: &str = "/sim/mute";
@@ -79,7 +84,7 @@ pub(crate) const UNCREATED: &str = "/sim/uncreated";
 
 /// A create that takes two seconds of real time, or until its deadline if that comes first, in
 /// which case it fails, leaving the sandbox for the run's list to find, which, where it listens,
-/// ends itself as no gateway claims it.
+/// ends itself as no gateway claims it. On a simulated host it lasts until its deadline.
 pub(crate) const SLOW: &str = "/sim/slow";
 
 // Far longer than a run takes to act on what its agent does as the create begins, or a `sandboxd`
@@ -138,17 +143,20 @@ const ENDING: Duration = Duration::from_millis(100);
 pub(crate) struct Sim {
     platform: &'static str,
     ready: Ready,
-    reach: Reach,
     // `Provider`'s methods take `&self`, and it is `Sync`, so what they change is behind a lock,
     // which each instance that `Subject::connect` makes shares, as a platform's instances share
     // its sandboxes.
     state: Arc<Mutex<State>>,
     journal: Option<Journal>,
     set_ups: Option<Arc<SetUps>>,
+    once_logged: Option<OnceLogged>,
 }
 
-/// Holds the first put of each sandbox until the first `sandboxes_count` sandboxes have each made
-/// theirs. Then it calls `then` once, before any of them is answered.
+// What is called once the run log holds each part in a line.
+type OnceLogged = (&'static [&'static str], Arc<dyn Fn() + Send + Sync>);
+
+/// Holds the end of the first put of each sandbox until the first `sandboxes_count` sandboxes have
+/// each sent theirs whole. Then it calls `then` once, and none of them is answered.
 struct SetUps {
     sandboxes_count: usize,
     put_count: Mutex<usize>,
@@ -156,9 +164,13 @@ struct SetUps {
 }
 
 impl SetUps {
-    fn pass(&self) {
+    // Whether it held this put, one of the first `sandboxes_count`.
+    fn pass(&self) -> bool {
         let mut put_count = stdx::unpoisoned(self.put_count.lock());
         *put_count += 1;
+        if *put_count > self.sandboxes_count {
+            return false;
+        }
         if *put_count == self.sandboxes_count {
             // Under the lock, so that no sandbox is answered before `then` has returned.
             (self.then)();
@@ -175,14 +187,8 @@ impl SetUps {
             thread::sleep(AWAIT_POLL);
             put_count = stdx::unpoisoned(self.put_count.lock());
         }
+        true
     }
-}
-
-#[derive(Clone, Copy)]
-enum Reach {
-    Local,
-    Private,
-    Listen,
 }
 
 #[derive(Clone, Default)]
@@ -216,6 +222,8 @@ struct State {
     reserved: Vec<Reserved>,
     /// The record of the run whose sandboxes these are, once `Sim::records` names it.
     record: Option<PathBuf>,
+    /// The run's clock, on a simulated host.
+    time: Option<SimTime>,
 }
 
 struct Reserved {
@@ -261,12 +269,15 @@ enum Listing {
 #[derive(Default)]
 struct Status {
     console: String,
-    connection: Option<Connection>,
+    connection: Option<UnixStream>,
     stalled: bool,
+    // Where a stalled sandbox moves the clock to as it takes its next request.
+    stall_to: Option<Duration>,
     deleted: bool,
     freezing: Freezing,
     journal: Option<Journal>,
     record: Option<PathBuf>,
+    time: Option<SimTime>,
     // Taken by the sandbox's first put.
     set_ups: Option<Arc<SetUps>>,
 }
@@ -302,10 +313,11 @@ impl Freezing {
 }
 
 impl Status {
-    fn new(journal: Option<Journal>, record: Option<PathBuf>) -> Self {
+    fn new(journal: Option<Journal>, record: Option<PathBuf>, time: Option<SimTime>) -> Self {
         Self {
             journal,
             record,
+            time,
             ..Self::default()
         }
     }
@@ -322,7 +334,6 @@ impl Sim {
         Self {
             platform: "sim",
             ready: ready(NonZeroU64::new(seconds).unwrap()),
-            reach: Reach::Local,
             state: Arc::new(Mutex::new(State {
                 next: 1,
                 sandboxes: BTreeMap::new(),
@@ -335,9 +346,11 @@ impl Sim {
                 cpus: 1 << 10,
                 reserved: Vec::new(),
                 record: None,
+                time: None,
             })),
             journal: None,
             set_ups: None,
+            once_logged: None,
         }
     }
 
@@ -354,8 +367,8 @@ impl Sim {
         self
     }
 
-    /// Holds the set-ups of the first `sandboxes_count` sandboxes until each has begun, and calls
-    /// `then` before any of them ends.
+    /// Holds the set-ups of the first `sandboxes_count` sandboxes until each has sent its put
+    /// whole, then calls `then`, and leaves them unanswered.
     pub(crate) fn holding_set_ups(
         mut self,
         sandboxes_count: usize,
@@ -369,14 +382,37 @@ impl Sim {
         self
     }
 
+    /// Calls `then` once the run log holds each of `logged` in a line, as the machine may run
+    /// another thread only once the loop has recorded what the threads before it reported.
+    pub(crate) fn once_logged(
+        mut self,
+        logged: &'static [&'static str],
+        then: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        self.once_logged = Some((logged, Arc::new(then)));
+        self
+    }
+
     pub(crate) fn journal(&self) -> Option<&Journal> {
         self.journal.as_ref()
     }
 
     /// Names `record` as the record of the run whose sandboxes it creates, whose log `await_log`
-    /// reads.
-    pub(crate) fn records(&self, record: &Path) {
-        self.state().record = Some(record.to_owned());
+    /// reads, and `time` as the simulated host's clock that it and its sandboxes wait on, if the
+    /// run's host is one.
+    pub(crate) fn records(&self, record: &Path, time: Option<SimTime>) {
+        let mut state = self.state();
+        state.record = Some(record.to_owned());
+        state.time = time;
+        if let Some((parts, then)) = self.once_logged.clone() {
+            let record = record.to_owned();
+            thread::spawn(move || {
+                for part in parts {
+                    logged(&record, part);
+                }
+                then();
+            });
+        }
     }
 
     fn holds(&self, create: &Create) -> Result<(), String> {
@@ -413,14 +449,6 @@ impl Sim {
     }
 
     #[must_use]
-    pub(crate) fn private(self) -> Self {
-        Self {
-            reach: Reach::Private,
-            ..self
-        }
-    }
-
-    #[must_use]
     /// Sets the simulated CPUs that reservations share, 1024 at first.
     pub(crate) fn with_cpus(self, cpus: u64) -> Self {
         self.state().cpus = cpus;
@@ -433,14 +461,6 @@ impl Sim {
             class.offers.memory_bytes = NonZeroU64::new(memory_bytes).unwrap();
         }
         self
-    }
-
-    #[must_use]
-    pub(crate) fn listening(self) -> Self {
-        Self {
-            reach: Reach::Listen,
-            ..self
-        }
     }
 
     /// The mode of the sockets directory at each create that met by a socket.
@@ -664,11 +684,7 @@ impl Provider for Sim {
     }
 
     fn meeting(&self) -> Meeting<'_> {
-        match self.reach {
-            Reach::Local => Meeting::Local(self),
-            Reach::Private => Meeting::Private(self),
-            Reach::Listen => Meeting::Listen(self),
-        }
+        Meeting::Local(self)
     }
 
     fn console(&self, run: &RunTag, id: &SandboxId) -> Result<Console, String> {
@@ -678,47 +694,16 @@ impl Provider for Sim {
 
 impl Creator<SocketDial> for Sim {
     fn create(&self, create: &Create, dial: SocketDial) -> Result<Created, String> {
-        let gateway = Gateway::Socket(dial.dir.join(SOCKET_NAME));
-        self.made(create, (gateway, Vec::new(), None))
-    }
-}
-
-impl Creator<PrivateDial, (Created, Admits)> for Sim {
-    fn create(&self, create: &Create, dial: PrivateDial) -> Result<(Created, Admits), String> {
-        let PrivateDial { gateway } = dial;
-        // The sandbox's name, which no other sandbox of the run has, from the loopback.
-        let attestation = format!("the simulated sandbox {}", create.name).into_bytes();
-        let ours = attestation.clone();
-        let admits: Admits = Box::new(move |presented, peer| {
-            let admitted = presented.bytes() == ours.as_slice() && peer.is_loopback();
-            admitted
-                .then_some(())
-                .ok_or_else(|| "it attests another sandbox".to_owned())
-        });
-        let created = self.made(create, (Gateway::Tcp(gateway), attestation, None))?;
-        Ok((created, admits))
-    }
-}
-
-impl Creator<Listening, (Created, Endpoint)> for Sim {
-    fn create(&self, create: &Create, dial: Listening) -> Result<(Created, Endpoint), String> {
-        let loopback = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|error| {
-            format!("the simulated sandbox can't listen on the loopback: {error}")
-        })?;
-        let port = loopback.local_addr().unwrap().port();
-        let endpoint = Endpoint::new(test_support::edge::NAME.to_owned(), port).unwrap();
-        let gateway = Gateway::Listen(loopback, Deadline::at_unix(create.by.since_epoch()));
-        let created = self.made(create, (gateway, Vec::new(), Some(dial.grant)))?;
-        Ok((created, endpoint))
+        self.made(create, dial.dir.join(SOCKET_NAME))
     }
 }
 
 impl Sim {
     // A sandbox, a thread of this process, ends with it, so the hard end needs nothing more; and
     // the name needs no use, as each sandbox is created once.
-    fn made(&self, create: &Create, met: Met) -> Result<Created, String> {
-        let by = Deadline::at_unix(create.by.since_epoch());
-        if by.remaining().is_none() {
+    fn made(&self, create: &Create, socket: PathBuf) -> Result<Created, String> {
+        let by = self.by(create);
+        if by.passed() {
             let passed =
                 "the simulated create's deadline had passed: expected time left to make it";
             return Err(passed.to_owned());
@@ -729,7 +714,6 @@ impl Sim {
         if digest == image(UNCREATED).as_str() {
             return Err("the platform declined to create this sandbox".to_owned());
         }
-        let (gateway, presented, awaited) = met;
         let Faults {
             made,
             dialing,
@@ -739,10 +723,13 @@ impl Sim {
             freezing,
         } = Faults::of(|fault: &str| path == fault || digest == image(fault).as_str());
         let (mute, hung) = dialing.silent();
-        let hello = (json!({ "version": PROTOCOL_VERSION }), presented);
-        let mode = gateway.mode();
-        let record = self.state().record.clone();
-        let shared = Arc::new(Mutex::new(Status::new(self.journal.clone(), record)));
+        let hello = json!({ "version": PROTOCOL_VERSION });
+        let sockets = fs::metadata(socket.parent().unwrap().parent().unwrap()).unwrap();
+        let mode = sockets.permissions().mode() & 0o777;
+        let state = self.state();
+        let (record, time) = (state.record.clone(), state.time.clone());
+        drop(state);
+        let shared = Arc::new(Mutex::new(Status::new(self.journal.clone(), record, time)));
         // Before its thread starts, so that the console shows it once the create returns, however
         // late the thread runs.
         (status(&shared).console).push_str(if mute { NEVER_DIALS } else { "" });
@@ -751,16 +738,14 @@ impl Sim {
         let (ours, model) = (Arc::clone(&shared), create.model);
         let thread = thread::Builder::new()
             .name("sim-sandboxd".to_owned())
-            .spawn(move || sandboxd(&gateway, mute, hung, (&hello, awaited), model, &ours))
+            .spawn(move || sandboxd(&socket, mute, hung, &hello, model, &ours))
             .map_err(|error| format!("the sandbox's thread didn't start: {error}"))?;
-        let late = made == Made::Slow && {
-            thread::sleep(SLOW_CREATE.min(by.remaining().unwrap_or_default()));
-            by.remaining().is_none()
-        };
+        ended(&thread, mute && !hung);
+        let late = made == Made::Slow && by.slept();
         let mut state = self.state();
         let id = format!("sim-{}", state.next);
         state.next += 1;
-        state.modes.extend(mode);
+        state.modes.push(mode);
         state.models.push(model);
         state.classes.push(create.class.clone());
         let sandbox = Sandbox {
@@ -789,6 +774,15 @@ impl Sim {
         })
     }
 
+    // When `create` gives up, by the run's clock on a simulated host.
+    fn by(&self, create: &Create) -> By {
+        let unix = create.by.since_epoch();
+        match &self.state().time {
+            Some(time) => By::Run(time.clone(), time.of_unix(unix)),
+            None => By::Machine(Deadline::at_unix(unix)),
+        }
+    }
+
     fn console_of(&self, run: &RunTag, id: &SandboxId) -> Result<Console, String> {
         let state = self.state();
         let ours = state.sandboxes.get(id.as_str());
@@ -804,113 +798,28 @@ impl Sim {
     }
 }
 
-enum Gateway {
-    Socket(PathBuf),
-    Tcp(SocketAddr),
-    Listen(TcpListener, Deadline),
+// A create's deadline: by the run's clock on a simulated host, as a time since the run started,
+// and else by the machine's.
+enum By {
+    Run(SimTime, Duration),
+    Machine(Deadline),
 }
 
-// Where the sandbox dials, the attestation its hello's body presents, and the grant that the
-// gateway's answer must present.
-type Met = (Gateway, Vec<u8>, Option<RegistrationGrant>);
-
-// A hello's message and its body.
-type Hello = (Value, Vec<u8>);
-
-impl Gateway {
-    fn mode(&self) -> Option<u32> {
+impl By {
+    fn passed(&self) -> bool {
         match self {
-            Self::Socket(socket) => {
-                let parent = fs::metadata(socket.parent()?.parent()?).unwrap();
-                Some(parent.permissions().mode() & 0o777)
-            }
-            Self::Tcp(_) | Self::Listen(..) => None,
-        }
-    }
-}
-
-enum Connection {
-    Unix(UnixStream),
-    Tcp(TcpStream),
-    Tls(tls::Stream),
-}
-
-impl Connection {
-    fn dial(gateway: &Gateway, shared: &Mutex<Status>) -> io::Result<Self> {
-        match gateway {
-            Gateway::Socket(socket) => UnixStream::connect(socket).map(Self::Unix),
-            Gateway::Tcp(address) => TcpStream::connect(address).map(Self::Tcp),
-            Gateway::Listen(listener, by) => {
-                listener.set_nonblocking(true)?;
-                let stream = loop {
-                    match listener.accept() {
-                        Ok((stream, _)) => break stream,
-                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                            if status(shared).deleted {
-                                return Err(io::Error::other("the sandbox was deleted"));
-                            }
-                            if by.remaining().is_none() {
-                                let given_up = "no gateway claimed the sandbox by its deadline";
-                                return Err(io::Error::other(given_up));
-                            }
-                            thread::sleep(AWAIT_POLL);
-                        }
-                        Err(error) => return Err(error),
-                    }
-                };
-                stream.set_nonblocking(false)?;
-                let by = Deadline::after(Duration::from_secs(60));
-                test_support::edge::server()
-                    .accept(stream, by)
-                    .map(Self::Tls)
-            }
+            Self::Run(time, at) => time.now() >= *at,
+            Self::Machine(by) => by.remaining().is_none(),
         }
     }
 
-    fn try_clone(&self) -> io::Result<Self> {
+    // Waits as a `SLOW` create does, and returns whether it gave up at the deadline.
+    fn slept(&self) -> bool {
         match self {
-            Self::Unix(stream) => stream.try_clone().map(Self::Unix),
-            Self::Tcp(stream) => stream.try_clone().map(Self::Tcp),
-            Self::Tls(stream) => stream.try_clone().map(Self::Tls),
+            Self::Run(time, at) => time.wait_until(*at),
+            Self::Machine(by) => thread::sleep(SLOW_CREATE.min(by.remaining().unwrap_or_default())),
         }
-    }
-
-    fn shutdown(&self, how: Shutdown) -> io::Result<()> {
-        match self {
-            Self::Unix(stream) => stream.shutdown(how),
-            Self::Tcp(stream) => stream.shutdown(how),
-            // A TLS stream ends both ways at once; no test of a listening sandbox ends only its
-            // reads.
-            Self::Tls(stream) => stream.shutdown(),
-        }
-    }
-}
-
-impl Read for Connection {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match self {
-            Self::Unix(stream) => stream.read(buf),
-            Self::Tcp(stream) => stream.read(buf),
-            Self::Tls(stream) => (&*stream).read(buf),
-        }
-    }
-}
-
-impl Write for Connection {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        match self {
-            Self::Unix(stream) => stream.write(buf),
-            Self::Tcp(stream) => stream.write(buf),
-            Self::Tls(stream) => (&*stream).write(buf),
-        }
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        match self {
-            Self::Unix(stream) => stream.flush(),
-            Self::Tcp(stream) => stream.flush(),
-            Self::Tls(stream) => (&*stream).flush(),
-        }
+        self.passed()
     }
 }
 
@@ -929,10 +838,10 @@ impl Subject for Sim {
                 report: self.ready.report.clone(),
                 classes: self.ready.classes.clone(),
             },
-            reach: self.reach,
             state: Arc::clone(&self.state),
             journal: self.journal.clone(),
             set_ups: self.set_ups.clone(),
+            once_logged: self.once_logged.clone(),
         }))
     }
 
@@ -1086,13 +995,21 @@ fn stop(sandbox: Sandbox) {
     thread.join().unwrap();
 }
 
+// Waits for the thread of a sandbox that `ends` at once to end, so that every list after its
+// create finds it ended.
+fn ended(thread: &JoinHandle<()>, ends: bool) {
+    while ends && !thread.is_finished() {
+        thread::sleep(AWAIT_POLL);
+    }
+}
+
 const NEVER_DIALS: &str = "sandboxd: a simulated one, which never dials\n";
 
 fn sandboxd(
-    gateway: &Gateway,
+    socket: &Path,
     mute: bool,
     hung: bool,
-    hello: (&Hello, Option<RegistrationGrant>),
+    hello: &Value,
     model: bool,
     shared: &Mutex<Status>,
 ) {
@@ -1102,20 +1019,15 @@ fn sandboxd(
             thread::park();
         }
     } else {
-        dial(gateway, hello, model, shared);
+        dial(socket, hello, model, shared);
     }
     if status(shared).deleted {
         thread::sleep(ENDING);
     }
 }
 
-fn dial(
-    gateway: &Gateway,
-    (hello, awaited): (&Hello, Option<RegistrationGrant>),
-    model: bool,
-    shared: &Mutex<Status>,
-) {
-    let dialed = Connection::dial(gateway, shared).and_then(|connection| {
+fn dial(socket: &Path, hello: &Value, model: bool, shared: &Mutex<Status>) {
+    let dialed = UnixStream::connect(socket).and_then(|connection| {
         let other = connection.try_clone()?;
         Ok((connection, other))
     });
@@ -1126,42 +1038,32 @@ fn dial(
         Ok((mut connection, other)) => {
             status.connection = Some(other);
             drop(status);
-            if open(&mut connection, hello, awaited.as_ref()) {
+            if open(&mut connection, hello) {
                 serve(connection, model, shared);
             }
         }
         Err(error) => {
-            let at = match gateway {
-                Gateway::Socket(socket) => socket.display().to_string(),
-                Gateway::Tcp(address) => address.to_string(),
-                Gateway::Listen(listener, _) => listener.local_addr().unwrap().to_string(),
-            };
+            let at = socket.display();
             let failed = format!("sandboxd: connecting to the gateway at {at} failed: {error}");
             status.console.push_str(&failed);
         }
     }
 }
 
-fn open(
-    connection: &mut Connection,
-    (hello, body): &Hello,
-    awaited: Option<&RegistrationGrant>,
-) -> bool {
-    let sent = frame::write(connection, hello, body);
+fn open(connection: &mut UnixStream, hello: &Value) -> bool {
+    let sent = frame::write(connection, hello, &[]);
     let answer = sent.and_then(|()| frame::read::<HelloReply>(connection));
     // Unlike `sandboxd`, it prints no refusal: a run reads the console of a start that failed as
     // soon as the refusal is sent, so what it found would depend on a race. A connection may also
     // end before the session opens, as a delete ends it.
-    matches!(answer, Ok(Some((HelloReply::Accepted { grant }, _))) if grant.as_ref() == awaited)
+    matches!(answer, Ok(Some((HelloReply::Accepted { grant: None }, _))))
 }
 
 enum Step {
-    /// An op, whose payload follows it, and which `less` bounds the remaining seconds of, made
-    /// again while it is refused as busy if `retried`.
+    /// An op, whose payload follows it, made again while it is refused as busy if `retried`.
     Op {
         call: OpCall,
         payload: Vec<u8>,
-        less: Option<u64>,
         retried: bool,
     },
     /// A `status` or a session's `status` made until its reply gives `state`.
@@ -1181,6 +1083,8 @@ enum Step {
     },
     /// A wait of that many seconds.
     Sleep(u64),
+    /// The sandbox's stall, as the `stall` program's, with no step after it.
+    Stall(Duration),
     /// The `<kind>` of `await_log <kind>`.
     Logged(String),
     File(String),
@@ -1214,8 +1118,6 @@ struct Caller {
     stream: u32,
     steps: VecDeque<Step>,
     op: u32,
-    less: Option<u64>,
-    left: Option<u64>,
     awaiting: Option<(OpCall, String, Option<String>)>,
     /// The call made last, with its payload, until its reply other than a busy refusal comes.
     calling: Option<(OpCall, Vec<u8>)>,
@@ -1229,18 +1131,24 @@ struct Caller {
     result: Option<Vec<u8>>,
     end: Option<End>,
     released: bool,
+    // Where the sandbox's stall moves the clock to, once a `stall` step says so.
+    stall: Option<Duration>,
     /// The run's record, if `Sim::records` named it.
     record: Option<PathBuf>,
+    time: Option<SimTime>,
 }
 
 impl Caller {
-    fn new(stream: u32, steps: VecDeque<Step>, endpoint: bool, record: Option<PathBuf>) -> Self {
+    fn new(
+        stream: u32,
+        steps: VecDeque<Step>,
+        endpoint: bool,
+        (record, time): (Option<PathBuf>, Option<SimTime>),
+    ) -> Self {
         Self {
             stream,
             steps,
             op: 0,
-            less: None,
-            left: None,
             awaiting: None,
             calling: None,
             exited: false,
@@ -1253,7 +1161,9 @@ impl Caller {
             result: None,
             end: None,
             released: false,
+            stall: None,
             record,
+            time,
         }
     }
 
@@ -1265,30 +1175,18 @@ impl Caller {
         {
             self.read.clone_from(&command.stdout);
         }
-        if let OpReply::Ops(ops) = reply {
-            let left = ops.remaining_seconds;
-            if let Some(less) = self.less
-                && self
-                    .left
-                    .is_none_or(|last| left.saturating_add(less) > last)
-            {
-                self.steps.clear();
-                self.exit(1, replies);
-            }
-            self.left = Some(left);
-        }
         if let Some((call, payload)) = self.calling.take()
             && matches!(reply, OpReply::Refused { busy: true, .. })
         {
             thread::sleep(AWAIT_POLL);
-            self.make(call.clone(), payload.clone(), None, replies);
+            self.make(call.clone(), payload.clone(), replies);
             self.calling = Some((call, payload));
             return false;
         }
         if let Some((call, state, then)) = self.awaiting.take() {
             if !reached(reply, &state) {
                 thread::sleep(AWAIT_POLL);
-                self.make(call.clone(), Vec::new(), None, replies);
+                self.make(call.clone(), Vec::new(), replies);
                 self.awaiting = Some((call, state, then));
                 return false;
             }
@@ -1302,17 +1200,16 @@ impl Caller {
     #[expect(clippy::too_many_lines, reason = "one arm per kind of step")]
     fn next(&mut self, replies: &mut Vec<(FromSandbox, Vec<u8>)>) -> bool {
         loop {
-            let (call, payload, less) = match self.steps.pop_front() {
+            let (call, payload) = match self.steps.pop_front() {
                 Some(Step::Op {
                     call,
                     payload,
-                    less,
                     retried,
                 }) => {
                     if retried {
                         self.calling = Some((call.clone(), payload.clone()));
                     }
-                    (call, payload, less)
+                    (call, payload)
                 }
                 Some(Step::Model {
                     model,
@@ -1329,10 +1226,16 @@ impl Caller {
                 }
                 Some(Step::Await { call, state, then }) => {
                     self.awaiting = Some((call.clone(), state, then));
-                    (call, Vec::new(), None)
+                    (call, Vec::new())
                 }
                 Some(Step::Sleep(seconds)) => {
-                    thread::sleep(Duration::from_secs(seconds));
+                    // On a simulated host, as Kubernetes' fake `Sleep` steps its clock:
+                    // https://github.com/kubernetes/utils/blob/ca04ba58ecab621c984998618739fbafa14398ad/clock/testing/fake_clock.go#L244-L247
+                    let seconds = Duration::from_secs(seconds);
+                    match &self.time {
+                        Some(time) => time.reach(time.now() + seconds),
+                        None => thread::sleep(seconds),
+                    }
                     continue;
                 }
                 Some(Step::File(path)) => {
@@ -1353,6 +1256,10 @@ impl Caller {
                     self.released = true;
                     continue;
                 }
+                Some(Step::Stall(to)) => {
+                    self.stall = Some(to);
+                    return false;
+                }
                 Some(Step::Result) => {
                     let score: i64 = self.read.trim().parse().unwrap();
                     self.result = Some(json!({ "raw_score": score }).to_string().into_bytes());
@@ -1371,7 +1278,7 @@ impl Caller {
                     return false;
                 }
             };
-            self.make(call, payload, less, replies);
+            self.make(call, payload, replies);
             if let Some(&Step::End(end)) = self.steps.front() {
                 self.end = Some(end);
             }
@@ -1379,14 +1286,8 @@ impl Caller {
         }
     }
 
-    fn make(
-        &mut self,
-        call: OpCall,
-        payload: Vec<u8>,
-        less: Option<u64>,
-        replies: &mut Vec<(FromSandbox, Vec<u8>)>,
-    ) {
-        (self.op, self.less) = (self.op + 1, less);
+    fn make(&mut self, call: OpCall, payload: Vec<u8>, replies: &mut Vec<(FromSandbox, Vec<u8>)>) {
+        self.op += 1;
         let (op, size) = (self.op, u64::try_from(payload.len()).unwrap());
         replies.push((FromSandbox::Op { op, call, size }, Vec::new()));
         if size > 0 {
@@ -1532,15 +1433,13 @@ fn state_name(reply: &OpReply) -> String {
     }
 }
 
-// A step is an op, `ops`, which `ops at least <seconds> less` bounds, `status <job>` or `call
-// <function> <payload> [<name>=<value>]...`, where a payload that is a number is that many bytes
-// of `x`, and any other is its own bytes; `<session>.open [<seconds>]`, `<session>.run <lease>
-// <seconds>|- <argv>...`, without a timeout for `-`, `<session>.status <lease>` or
-// `<session>.close <lease>`; `<session>.put <lease> <tree> <to> [replace]` or `<session>.get
-// <lease> <from> <to>`. An op is made once the one before it is answered. `ops at least <seconds>
-// less` exits 1 unless the reply's remaining seconds fell by `seconds` since an earlier ops reply.
-// A call refused as busy is made again, as `sandboxctl call --wait` makes it; `try_call`, alike,
-// takes that refusal as its answer, as `sandboxctl call` does.
+// A step is an op, `ops`, `status <job>` or `call <function> <payload> [<name>=<value>]...`, where
+// a payload that is a number is that many bytes of `x`, and any other is its own bytes;
+// `<session>.open [<seconds>]`, `<session>.run <lease> <seconds>|- <argv>...`, without a timeout
+// for `-`, `<session>.status <lease>` or `<session>.close <lease>`; `<session>.put <lease> <tree>
+// <to> [replace]` or `<session>.get <lease> <from> <to>`. An op is made once the one before it is
+// answered. A call refused as busy is made again, as `sandboxctl call --wait` makes it;
+// `try_call`, alike, takes that refusal as its answer, as `sandboxctl call` does.
 //
 // `await <job> <state>` makes `status <job>` until its reply's state is `state`, then waits until
 // the run log holds the job's teardown, if `Sim::records` named the record, so that the log orders
@@ -1571,14 +1470,11 @@ fn step(arg: &str) -> Step {
         Err(_) if words[2] == "binary" => vec![0, 255, 1],
         Err(_) => words[2].as_bytes().to_vec(),
     };
-    let (call, payload, less) = match words[..] {
-        ["ops"] => (OpCall::Ops, Vec::new(), None),
-        ["ops", "at", "least", seconds, "less"] => {
-            (OpCall::Ops, Vec::new(), Some(seconds.parse().unwrap()))
-        }
+    let (call, payload) = match words[..] {
+        ["ops"] => (OpCall::Ops, Vec::new()),
         ["status", job] => {
             let job = job.parse().unwrap();
-            (OpCall::Status { job }, Vec::new(), None)
+            (OpCall::Status { job }, Vec::new())
         }
         [kind @ ("call" | "try_call"), _, _, ref given @ ..] => {
             let arguments = arguments(given);
@@ -1590,11 +1486,10 @@ fn step(arg: &str) -> Step {
                 return Step::Op {
                     call,
                     payload: payload(),
-                    less: None,
                     retried: false,
                 };
             }
-            (call, payload(), None)
+            (call, payload())
         }
         [kind @ ("await" | "await_result"), job, state] => {
             let job: u64 = job.parse().unwrap();
@@ -1603,7 +1498,7 @@ fn step(arg: &str) -> Step {
             let (call, state) = (OpCall::Status { job }, state.to_owned());
             return Step::Await { call, state, then };
         }
-        [function, ..] if function.contains('.') => (session_call(&words), Vec::new(), None),
+        [function, ..] if function.contains('.') => (session_call(&words), Vec::new()),
         ["await_lease", grant, lease, state] => {
             let call = lease_status(grant, lease);
             return Step::Await {
@@ -1627,10 +1522,16 @@ fn step(arg: &str) -> Step {
         ["sleep", seconds] => return Step::Sleep(seconds.parse().unwrap()),
         ["await_file", path] => return Step::File((*path).to_owned()),
         ["await_log", kind] => return Step::Logged(format!(r#""kind":"{kind}""#)),
+        ["await_log", kind, field] if field.contains('=') => {
+            let (name, value) = field.split_once('=').unwrap();
+            return Step::Logged(format!(r#""kind":"{kind}","{name}":{value}"#));
+        }
         ["await_log", kind, caller] => {
             return Step::Logged(format!(r#""caller":"{caller}","kind":"{kind}""#));
         }
         ["exit"] => return Step::Exit,
+        ["stall"] => return Step::Stall(Duration::ZERO),
+        ["stall", seconds] => return Step::Stall(Duration::from_secs(seconds.parse().unwrap())),
         ["release"] => return Step::Release,
         ["result"] => return Step::Result,
         ["crash"] => return Step::End(End::Crash),
@@ -1641,7 +1542,6 @@ fn step(arg: &str) -> Step {
     Step::Op {
         call,
         payload,
-        less,
         retried,
     }
 }
@@ -1958,9 +1858,26 @@ struct Served {
     printed: BTreeMap<String, String>,
     running: BTreeSet<u32>,
     held: Option<(u32, AbsolutePath)>,
+    // The held set-ups, which the sandbox's first put passes as it ends.
+    set_up: Option<Arc<SetUps>>,
 }
 
 impl Served {
+    // Ends a put, which the held set-ups hold once it has come whole, and then leave unanswered,
+    // as the sandbox stalls.
+    fn end(
+        &mut self,
+        stream: u32,
+        replies: &mut Vec<(FromSandbox, Vec<u8>)>,
+        shared: &Mutex<Status>,
+    ) {
+        if self.set_up.take().is_some_and(|set_ups| set_ups.pass()) {
+            status(shared).stalled = true;
+            return;
+        }
+        self.files.end(stream, replies);
+    }
+
     fn start(
         &mut self,
         stream: u32,
@@ -1975,15 +1892,16 @@ impl Served {
                 replies.push(exited(stream, code));
                 return launch.argv.program() == "exit-close";
             }
-            "stall" => status(shared).stalled = true,
-            "crash" => return true,
+            "stall" => stall(launch, shared),
             "mark" => {
                 fs::write(status(shared).record.as_ref().unwrap().join("launched"), "").unwrap();
             }
             "ops" | "ops_before_started" => {
                 let steps = launch.argv.args().iter().map(|arg| step(arg)).collect();
-                let record = status(shared).record.clone();
-                let made = (self.caller).insert(Caller::new(stream, steps, model, record));
+                let status = status(shared);
+                let (record, time) = (status.record.clone(), status.time.clone());
+                drop(status);
+                let made = (self.caller).insert(Caller::new(stream, steps, model, (record, time)));
                 return made.next(replies);
             }
             "worker" => self.worker(launch, stream, replies),
@@ -2090,13 +2008,43 @@ impl Served {
     }
 }
 
-fn serve(mut connection: Connection, model: bool, shared: &Mutex<Status>) {
+fn stall(launch: &Launch, shared: &Mutex<Status>) {
+    let mut status = status(shared);
+    status.stalled = true;
+    let to = launch
+        .argv
+        .args()
+        .first()
+        .map(|seconds| seconds.parse().unwrap());
+    status.stall_to = to.map(Duration::from_secs);
+}
+
+// Whether the sandbox has stalled, which it reads nothing more for, after it moves the clock as
+// its stall says.
+fn stalled(shared: &Mutex<Status>) -> bool {
+    let status = status(shared);
+    if let (true, Some(time), Some(to)) = (status.stalled, &status.time, status.stall_to) {
+        time.reach(to);
+    }
+    status.stalled
+}
+
+// Stalls the sandbox once `caller` has played a `stall` step.
+fn stall_after(caller: Option<&Caller>, shared: &Mutex<Status>) {
+    if let Some(to) = caller.and_then(|caller| caller.stall) {
+        let mut status = status(shared);
+        status.stalled = true;
+        status.stall_to = Some(to);
+    }
+}
+
+fn serve(mut connection: UnixStream, model: bool, shared: &Mutex<Status>) {
     let (mut replies, mut crashed) = (Vec::<(FromSandbox, Vec<u8>)>::new(), false);
     let mut served = Served::default();
     let (freezing, mut frozen) = (status(shared).freezing, false);
     // A connection that ends, cleanly or not, ends the session, as a delete's does.
     while let Ok(Some((request, body))) = frame::read::<ToSandbox>(&mut connection) {
-        if status(shared).stalled {
+        if stalled(shared) {
             // It reads nothing more, as a stuck `sandboxd`, and answers nothing; the connection
             // stays open, by the clone its status keeps until a delete shuts it down, so the
             // session's writes fill the connection's buffers.
@@ -2104,15 +2052,12 @@ fn serve(mut connection: Connection, model: bool, shared: &Mutex<Status>) {
         }
         match request {
             ToSandbox::Put { stream, dir, root } => {
-                let set_ups = status(shared).set_ups.take();
-                if let Some(set_ups) = set_ups {
-                    set_ups.pass();
-                }
+                served.set_up = status(shared).set_ups.take();
                 served.files.begin(stream, dir, root, &mut replies);
             }
             ToSandbox::Entry { entry, .. } => served.files.entry(entry),
             ToSandbox::Data { .. } => served.files.data(&body),
-            ToSandbox::End { stream } => served.files.end(stream, &mut replies),
+            ToSandbox::End { stream } => served.end(stream, &mut replies, shared),
             ToSandbox::Freeze { stream } => {
                 let (reply, froze) = freezing.freeze(stream);
                 frozen |= froze;
@@ -2162,6 +2107,7 @@ fn serve(mut connection: Connection, model: bool, shared: &Mutex<Status>) {
             collect(stream, &dir, &mut served, &mut replies);
         }
         let caller = served.caller.as_ref();
+        stall_after(caller, shared);
         let close = caller.and_then(|caller| caller.end) == Some(End::Close);
         if !send(&mut connection, &mut replies, crashed, close) {
             return;
@@ -2170,7 +2116,7 @@ fn serve(mut connection: Connection, model: bool, shared: &Mutex<Status>) {
 }
 
 fn send(
-    connection: &mut Connection,
+    connection: &mut UnixStream,
     replies: &mut Vec<(FromSandbox, Vec<u8>)>,
     crashed: bool,
     close: bool,

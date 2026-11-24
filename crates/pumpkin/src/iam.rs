@@ -19,7 +19,7 @@ pub(crate) enum Principal {
     Sandbox,
     /// The role that Modal assumes to import the roles' images.
     ModalPull,
-    /// What a machine whose configuration names `[controller]` needs.
+    /// What a machine whose configuration names `[controllers.<name>]` needs.
     Client,
     /// What `pumpkin-admin check` needs to read the deployment.
     Check,
@@ -55,7 +55,6 @@ impl Principal {
 
 /// The calls of a job of its own.
 pub(crate) struct Job {
-    /// Its read of its settings.
     pub(crate) settings: Call,
 }
 
@@ -116,17 +115,34 @@ pub(crate) const CHECK: Check = Check {
         ["ec2", "describe-instances"],
         Allow::new(&["ec2:DescribeInstances"], &[Resource::Any]),
     ),
-    // On any profile and any principal. The controller's instance names its profile, and so its
-    // role, and no placeholder stands for either.
     profile: Call::new(
         ["iam", "get-instance-profile"],
-        Allow::new(&["iam:GetInstanceProfile"], &[Resource::Any]),
+        Allow::new(
+            &["iam:GetInstanceProfile"],
+            &[Resource::Arn(&CONTROLLER_PROFILE)],
+        ),
     ),
     simulate: Call::new(
         ["iam", "simulate-principal-policy"],
-        Allow::new(&["iam:SimulatePrincipalPolicy"], &[Resource::Any]),
+        Allow::new(
+            &["iam:SimulatePrincipalPolicy"],
+            &[
+                Resource::Arn(&CONTROLLER_ROLE),
+                Resource::Arn(&ec2::iam::TIMER_ROLE),
+                Resource::Arn(&ec2::iam::SANDBOX_ROLE),
+                Resource::Arn(&modal::iam::PULL_ROLE),
+            ],
+        ),
     ),
 };
+
+const CONTROLLER_PROFILE: Placeholder = Placeholder::new(
+    "controller_profile_arn",
+    "the ARN of the controller's instance profile",
+);
+
+const CONTROLLER_ROLE: Placeholder =
+    Placeholder::new("controller_role_arn", "the ARN of the controller's role");
 
 /// What `cargo xtask live` allows itself beyond the client's calls and the check's: it lists the
 /// schedules of the timer that a run left, as `aws scheduler list-schedules` does, which
@@ -139,19 +155,7 @@ const LIST_SCHEDULES: Allow = Allow::new(&["scheduler:ListSchedules"], &[Resourc
 // `AccessDenied` once a deployment applies these policies.
 pub(crate) fn allows(principal: Principal) -> Vec<&'static Allow> {
     match principal {
-        Principal::Controller => {
-            let Job { settings } = &JOB;
-            let Host {
-                settings: host_settings,
-                members,
-            } = &HOST;
-            (ec2::iam::caller())
-                .chain(modal::iam::caller())
-                .chain(settings.allows())
-                .chain(host_settings.allows())
-                .chain(members.allows())
-                .collect()
-        }
+        Principal::Controller => controller(true),
         Principal::Timer => ec2::iam::timer().collect(),
         Principal::Sandbox => ec2::iam::sandbox().collect(),
         Principal::ModalPull => modal::iam::puller().collect(),
@@ -183,6 +187,22 @@ pub(crate) fn allows(principal: Principal) -> Vec<&'static Allow> {
             allows
         }
     }
+}
+
+/// What IAM must allow the controller's role, whose jobs run the Modal provider if `runs_modal`.
+pub(crate) fn controller(runs_modal: bool) -> Vec<&'static Allow> {
+    let Job { settings } = &JOB;
+    let Host {
+        settings: host_settings,
+        members,
+    } = &HOST;
+    let modal_calls = runs_modal.then(modal::iam::caller).into_iter().flatten();
+    (ec2::iam::caller())
+        .chain(modal_calls)
+        .chain(settings.allows())
+        .chain(host_settings.allows())
+        .chain(members.allows())
+        .collect()
 }
 
 /// `principal`'s policy, as IAM's JSON, with each value that only a deployment knows as

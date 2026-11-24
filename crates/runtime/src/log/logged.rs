@@ -321,7 +321,7 @@ pub(super) struct Kept {
 
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct KeptRequest {
-    // None in a log written before the route named them.
+    // A line leaves them out when the route dropped none.
     #[serde(default)]
     pub(super) dropped_headers: Vec<String>,
 }

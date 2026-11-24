@@ -50,7 +50,6 @@ mod sandboxes;
 /// The bytes in a MiB, the unit in which Modal gives a sandbox memory.
 const MIB: u64 = 1024 * 1024;
 
-/// The memory that `role` asks for, in MiB, or why Modal can't give it.
 fn memory_mib(role: &Role) -> Result<u64, String> {
     let memory_bytes = role.resources.memory_bytes.get();
     if !memory_bytes.is_multiple_of(MIB) {
@@ -64,9 +63,6 @@ fn memory_mib(role: &Role) -> Result<u64, String> {
 }
 
 /// The provider's settings, in a table such as [the crate's](crate#settings).
-///
-/// They name the workspace's profile, and Modal's configuration file that holds it, the images'
-/// repository, the address the gateway dials from, and the classes of sandbox.
 // Without `deny_unknown_fields`, so that a reader of settings may ignore a key that a later
 // version adds. A reader that refuses such a key finds it through `serde_ignored`.
 #[derive(Debug, Deserialize)]
@@ -80,6 +76,17 @@ pub struct Settings {
     /// which alone a sandbox's tunnel takes them.
     dials_from: Ipv4Addr,
     classes: BTreeMap<Name, SandboxClass>,
+}
+
+impl Settings {
+    /// The classes of sandbox that the settings state, by name, which [`Provider::ready`] gives
+    /// once [`Modal::connect`] has reached the workspace.
+    pub fn classes(&self) -> BTreeMap<Name, Class> {
+        let classes = self.classes.iter();
+        classes
+            .map(|(name, sandbox)| (name.clone(), sandbox.class.clone()))
+            .collect()
+    }
 }
 
 /// Where Modal imports the provider's images from: an ECR repository in `region`, which Modal
@@ -98,8 +105,8 @@ struct Images {
 /// "H100!", gpu_model = "NVIDIA H100 80GB HBM3", cpu_millis = 4000, memory_bytes = 8589934592,
 /// startup_seconds = 1800 }`; without `gpu` and `gpu_model`, it has none. With `usd_per_hour`,
 /// such as `3.95`, it has the price that the operator says a sandbox costs.
+// Without `deny_unknown_fields`, as `Settings`.
 #[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 struct ClassTable {
     gpu: Option<Gpu>,
     gpu_model: Option<GpuModel>,
@@ -123,7 +130,6 @@ pub struct SandboxClass {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(try_from = "String", into = "String")]
 struct Gpu {
-    /// As the settings write it.
     written: String,
     count: NonZeroU32,
 }
@@ -241,8 +247,6 @@ pub struct Modal<'e> {
     repository: Repository,
     dials_from: Ipv4Addr,
     classes: BTreeMap<Name, SandboxClass>,
-    /// What `Provider::ready` gives: what names the workspace and the repository's account, and
-    /// the classes of sandbox.
     ready: Ready,
 }
 
@@ -277,8 +281,6 @@ impl<'e> Modal<'e> {
         let cli = Cli::connect(images.region.clone())?;
         let [repository] = cli.repositories(&ECR, [&images.repository])?;
         let repository = repository?;
-        let declared =
-            (classes.iter()).map(|(name, sandbox)| (name.clone(), sandbox.class.clone()));
         let ready = Ready {
             report: json!({
                 "profile": profile,
@@ -287,7 +289,7 @@ impl<'e> Modal<'e> {
                 "repository": repository.uri(),
                 "dials_from": dials_from,
             }),
-            classes: declared.collect(),
+            classes: settings.classes(),
         };
         Ok(Self {
             reached: Reached { helper },

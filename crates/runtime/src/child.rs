@@ -1,13 +1,10 @@
 //! The run's children: a sandbox the core starts for a part of the run, on a thread of its own,
 //! which a driver of its kind drives.
 //!
-//! [`run`] starts a child's sandbox on the run's one start path, hands it to its driver, and
-//! reports a lease's end once its sandbox is deleted, and a call's as it comes, before the delete,
-//! whose end the call's teardown reports ([`Event::CallTornDown`]); a sandbox that can't be
-//! deleted fails the run. A child's thread waits on an inbox of its own ([`Message`]), into which
-//! its session hands what its reader reads, and the loop the core's stop and its driver's orders.
-//! A stop takes effect before the child's command starts, as the thread takes what its inbox holds
-//! then, and while it waits.
+//! A child's thread waits on an inbox of its own ([`Message`]), into which its session hands what
+//! its reader reads, and the loop the core's stop and its driver's orders. A stop takes effect
+//! before the child's command starts, as the thread takes what its inbox holds then, and while it
+//! waits.
 
 use std::iter;
 use std::num::NonZeroU64;
@@ -20,8 +17,8 @@ use decision::{CallResult, Caller, Core, Event, JobId, Request};
 use gateway::{Arrival, IncomingModelRequest, Session, Trees};
 use provider::UnixTime;
 use schema::sandbox::OpPayloadLimit;
+use stdx::time::Clock as _;
 
-use super::host::deadline;
 use super::log::Entry;
 use super::sandbox::{Sandboxes, Which};
 use super::{Asked, Clock, Host, Inbox, Input, Runtime};
@@ -40,7 +37,7 @@ pub(super) struct Child<'r, H: Host, O: Send + 'static> {
     pub(super) clock: H::Clock,
     pub(super) inbox: <H::Clock as Clock>::Inbox<Message<O>>,
     /// A sender into the loop's inbox, which outlives every child's thread, so a send can't fail.
-    pub(super) reports: Sender<Input>,
+    pub(super) reports: Sender<Input<H::Clock>>,
 }
 
 /// By when each of a child's steps is to be done, as times since the run started.
@@ -136,7 +133,7 @@ impl End {
 pub(super) fn run<H: Host, O: Send + 'static>(
     child: &mut Child<'_, H, O>,
     ops: Option<OpPayloadLimit>,
-    drive: impl FnOnce(&mut Child<'_, H, O>, &mut Session) -> End,
+    drive: impl FnOnce(&mut Child<'_, H, O>, &mut Session<H::Clock>) -> End,
 ) {
     let which = child.which;
     let noun = which.noun();
@@ -148,7 +145,7 @@ pub(super) fn run<H: Host, O: Send + 'static>(
             format!("{noun} sandbox wasn't created: its start was due by a time that had passed");
         return child.close(End::failed(which, reason), || Ok(()));
     }
-    let by = deadline(&child.clock, child.deadlines.startup);
+    let by = (&child.clock, child.deadlines.startup);
     let inbox = child.inbox.sender();
     let started = (child.sandboxes).start(which, ops, by, child.hard_end, inbox, Message::Session);
     let mut sandbox = match started {

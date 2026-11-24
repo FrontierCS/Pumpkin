@@ -9,6 +9,7 @@ pub mod net;
 pub mod process;
 pub mod signal;
 pub mod slots;
+pub mod time;
 
 /// Prefixes an error with what failed, as `<context>: <error>`, rendering it as a `String`.
 ///
@@ -45,9 +46,9 @@ pub fn abort_on_panic() {
 
 /// What `run` returns, run at the top of a stack of `stack_bytes` on a thread named `name`.
 ///
-/// This waits for the thread, to which `run` may lend borrows: an evaluator's bound on nesting
-/// holds only on a stack of the size it was made for, which the calling thread's may not be. A
-/// panic of `run`'s passes on to the caller.
+/// This waits for the thread, to which `run` may lend borrows: a bound on nesting depth holds
+/// only on a stack of the size it was made for, which the calling thread's may not be. A panic of
+/// `run`'s passes on to the caller.
 ///
 /// # Errors
 ///

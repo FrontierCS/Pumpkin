@@ -64,8 +64,6 @@ fn redact(fixture: &Fixture, message: &str) -> String {
         .replace(&context, "context `<context>`")
 }
 
-// `--help` is refused as a context's name, as `docker context inspect` mustn't take it for its
-// own option, which prints its help and succeeds.
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn report() {
@@ -95,6 +93,8 @@ fn report() {
         ),
         ContextName::try_from(String::new()).unwrap_err(),
     ];
+    // `--help` is refused as a context's name, as `docker context inspect` mustn't take it for its
+    // own option, which prints its help and succeeds.
     for name in ["pumpkin-missing", "--help"] {
         let context = ContextName::try_from(name.to_owned()).unwrap();
         let refused = Engine::connect(context, &engine_dir()).unwrap_err();
@@ -245,7 +245,12 @@ fn builds() {
             let repository = "pumpkin-docker-tests/Builds";
             let uppercase = engine().build(&context, &dockerfile, &Given::default(), repository);
             let refused = redact(fixture, &uppercase.unwrap_err());
-            lines.push(format!("an uppercase repository: {refused}"));
+            // What Docker reports varies with its version; what to do is said once, after it.
+            let (failed, _) = refused.split_once(" failed with ").unwrap();
+            let (_, todo) = refused.rsplit_once(": ").unwrap();
+            lines.push(format!(
+                "an uppercase repository: {failed} failed with …: {todo}"
+            ));
             lines
         },
         &expect![[r#"
@@ -263,7 +268,7 @@ fn builds() {
             a symbolic link: <dir>/context/link is neither a directory nor a regular file: give a build's context only those
             a name with a space: `<dir>/context/a b` holds whitespace or a control character: name a build context's files without them
             a name with a tab: `<dir>/context/a\tb` holds whitespace or a control character: name a build context's files without them
-            an uppercase repository: the image tagged `pumpkin-docker-tests/Builds:700c07c0f69ca70bceeae61d7f8c0fb3d3bc44e9e3f4d8a084cf9f706de50dc9` can't be looked up: `docker image inspect` failed with exit status: 1: Error response from daemon: invalid reference format: repository name (pumpkin-docker-tests/Builds) must be lowercase: fix what it reports"#]],
+            an uppercase repository: the image tagged `pumpkin-docker-tests/Builds:700c07c0f69ca70bceeae61d7f8c0fb3d3bc44e9e3f4d8a084cf9f706de50dc9` can't be looked up: `docker image inspect` failed with …: fix what it reports"#]],
     );
 }
 
@@ -675,8 +680,8 @@ impl<'f> Builds<'f> {
 }
 
 impl Drop for Builds<'_> {
-    // Nothing here panics, for the reason the fixture's drop gives; a tag that can't be
-    // removed is printed.
+    // A panic in a drop that runs as a failed test unwinds would abort the test binary, so a tag
+    // that can't be removed is printed.
     fn drop(&mut self) {
         for image in &self.seen {
             for tag in self.tags(image) {

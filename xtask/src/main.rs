@@ -34,6 +34,7 @@ mod release;
 mod repo;
 mod settings;
 mod star;
+mod terraform;
 mod tidy;
 mod tools;
 mod wait;
@@ -82,25 +83,27 @@ mod flags {
             /// without reaching the network.
             cmd aws-certificates {}
 
-            /// Runs the checks that reach a real environment, which `ci` leaves out. `docker`
-            /// runs the ignored tests, which need a Docker engine, the static sandboxd or a server
-            /// elsewhere. They use the context that `PUMPKIN_DOCKER_CONTEXT` names, or `default`.
-            /// `ec2` and `modal` cost money. Each runs `pumpkin-admin check`, then `examples/smoke`
-            /// on that provider through the controller that `~/.config/pumpkin/pumpkin.toml`
-            /// names, with Pumpkin at `HEAD`, which `./pumpkin` builds below the target directory.
-            /// Every probe of a sandbox's confinement must pass, and every sandbox must be deleted.
-            /// If anything tagged with the run is left on EC2, EventBridge Scheduler or Modal, the
-            /// check fails and runs `pumpkin cancel` to remove it.
+            /// Runs the checks that reach a real environment, which `ci` leaves out. `docker` runs
+            /// the ignored tests, which need a Docker engine, the static sandboxd or a server
+            /// elsewhere, on the context that `PUMPKIN_DOCKER_CONTEXT` names, or `default`.
+            /// `controller` makes a controller with `deploy/docker`, runs `examples/smoke` through
+            /// it, and checks its members. `ec2` and `modal` cost money: each runs `pumpkin-admin
+            /// check`, then `examples/smoke` on that provider through the controller that
+            /// `~/.config/pumpkin/pumpkin.toml` names. Each runs Pumpkin at `HEAD`. Every probe of
+            /// a sandbox must pass, and every sandbox must be deleted. Anything of the run left on
+            /// EC2, EventBridge Scheduler or Modal fails the check, which cancels the run.
             cmd live {
-                /// `docker`, `ec2` or `modal`.
+                /// `docker`, `controller`, `ec2` or `modal`.
                 required target: String
-                /// With `modal`, the model of the GPU, of a class of `[controller.modal]`, that
+                /// With `modal`, the model of the GPU, of a class of the controller's `modal`, that
                 /// the smoke's GPU runner needs.
                 optional --gpu-model model: String
                 /// With `ec2` or `modal`, kills the run's job on the controller once the agent
                 /// holds a lease of each grant. Checks that each sandbox ends by itself at the
                 /// run's hard end, about 95 minutes after its start, and that `pumpkin reap` then
-                /// removes what is left. Costs at most about $1 on EC2 and $4 on Modal.
+                /// removes what is left. Costs at most about $1 on EC2 and $4 on Modal. With
+                /// `controller`, kills the job likewise, makes the controller's container anew, and
+                /// checks that its boot reaped the run.
                 optional --lost
             }
 
@@ -128,7 +131,11 @@ mod flags {
             }
 
             /// Builds and checks the Linux x86-64 archive, launcher and pin from this checkout
-            /// in `target/release-assets/<tag>/`.
+            /// in `target/release-assets/<tag>/`. Without `--publish`, it builds `HEAD`, under any
+            /// tag, such as `preview`. Pushing a tag runs the release workflow, which builds its
+            /// assets and publishes them with `--publish`. If the workflow leaves a draft, check
+            /// its assets against those that this command builds in a checkout of the tag, attach
+            /// any missing file, and publish the draft as the latest release.
             cmd release {
                 /// The tag to put in the archive's name.
                 required tag: String
@@ -137,12 +144,15 @@ mod flags {
                 optional --publish
             }
 
-            /// Runs cargo-mutants on the working tree's changes. Each missed mutant, which
-            /// `mutants.out` lists, is a finding to read, not a failure. Given paths that the
-            /// changes leave as they are, it mutates their source whole. It then names the missed
-            /// mutants that the tests of the merge base catch.
+            /// Runs cargo-mutants on the working tree's changes below its paths. Each missed
+            /// mutant, which `mutants.out` lists, is a finding to read, not a failure. Where the
+            /// changes leave the paths as they are, it mutates their source whole. It then names
+            /// the missed mutants that the tests of the merge base catch.
             cmd mutants {
-                /// The paths whose changes alone are taken, if any are given.
+                /// The paths whose changes are taken. By default, they are the crates whose tests
+                /// guard the most: `decision`, `schema` and `route` guard the operator's key,
+                /// `retention` decides what the controller's prune removes, and `members` guards
+                /// the controller's forced command. `crates providers xtask` takes every change.
                 repeated paths: PathBuf
                 /// The revision since whose merge base with `HEAD` the changes are taken,
                 /// `origin/main` by default.
@@ -285,10 +295,10 @@ fn main() -> ExitCode {
     }
 }
 
-/// xflags exits by itself on `--help`, with 0, and on a command line it can't parse, with 2.
 // Each command is a function of its own, given its flags, as each of TigerBeetle's scripts is:
 // https://github.com/tigerbeetle/tigerbeetle/blob/3cd7cf4799f65c81ffbc36eda788b8b26fd7da72/src/scripts.zig#L86-L93
 fn try_main() -> Result<()> {
+    // Exits by itself on `--help`, with 0, and on a command line it can't parse, with 2.
     let flags = flags::Xtask::from_env_or_exit();
     match flags.subcommand {
         flags::XtaskCmd::Fmt(flags::Fmt { check }) => {
@@ -306,25 +316,29 @@ fn try_main() -> Result<()> {
             gpu_model,
             lost,
         }) => {
-            let provider = match target.as_str() {
-                "docker" if lost => {
-                    return Err("`--lost` is for `ec2` and `modal`: leave it out".into());
-                }
-                "docker" => return live::docker(),
-                "ec2" => settings::Provider::Ec2,
-                "modal" => settings::Provider::Modal,
-                _ => {
-                    return Err(format!(
-                        "`{target}` is no live target: give `docker`, `ec2` or `modal`"
-                    )
-                    .into());
-                }
-            };
-            if gpu_model.is_some() && provider != settings::Provider::Modal {
+            if gpu_model.is_some() && target != "modal" {
                 return Err(
                     "`--gpu-model` is for `cargo xtask live modal` alone: leave it out".into(),
                 );
             }
+            let provider = match target.as_str() {
+                "docker" if lost => {
+                    return Err(
+                        "`--lost` is for `controller`, `ec2` and `modal`: leave it out".into(),
+                    );
+                }
+                "docker" => return live::docker(),
+                "controller" => return live::controller(lost),
+                "ec2" => settings::Provider::Ec2,
+                "modal" => settings::Provider::Modal,
+                _ => {
+                    return Err(format!(
+                        "`{target}` is no live target: give `docker`, `controller`, `ec2` or \
+                         `modal`"
+                    )
+                    .into());
+                }
+            };
             live::smoke(provider, gpu_model.as_deref(), lost)
         }
         flags::XtaskCmd::OpStats(flags::OpStats { run_dir, caller }) => {
@@ -426,12 +440,11 @@ fn root() -> &'static Path {
     root
 }
 
-/// Runs the checks every change must pass, in order, and stops at the first that fails. The
-/// tests leave out those ignored, which [`live::docker`] runs.
 fn ci() -> Result<()> {
     ran(fmt()?.arg("--check"), step(STEP_TIMEOUT))?;
     let repo = Repo { root: root() };
     tidy::check(&repo)?;
+    terraform::check()?;
     figure::check(root(), &metadata()?)?;
     let mut clippy = cargo(&["clippy", "--workspace", "--all-targets", "--locked"]);
     ran(
@@ -465,7 +478,6 @@ fn metadata() -> Result<String> {
     read(&mut metadata, STEP_TIMEOUT)
 }
 
-/// The target directory, as `cargo metadata` reports it.
 fn target_dir() -> Result<PathBuf> {
     let metadata: serde_json::Value = serde_json::from_str(&metadata()?)?;
     match metadata["target_directory"].as_str() {
@@ -517,10 +529,15 @@ fn refill(package: &str, filter: Option<&str>) -> Result<()> {
     tested.map(drop)
 }
 
-/// Runs cargo-mutants on the working tree's changes since `rev`, `origin/main` by default, below
-/// `paths` alone if there are any. If the changes leave the source below `paths` as it is, it
-/// mutates that source whole. Then it runs the mutants missed again on the merge base, to name
-/// those that the changes left uncaught. Missed mutants and timeouts are findings, not failures.
+/// The paths that `mutants` takes when it is given none, as its help says.
+const GUARDED: [&str; 5] = [
+    "crates/decision",
+    "crates/schema",
+    "crates/route",
+    "crates/retention",
+    "crates/members",
+];
+
 fn mutants(paths: &[PathBuf], rev: Option<&str>) -> Result<()> {
     let buildifier = star::link()?;
     let mut again = "cargo xtask mutants".to_owned();
@@ -530,9 +547,19 @@ fn mutants(paths: &[PathBuf], rev: Option<&str>) -> Result<()> {
     if let Some(rev) = rev {
         again = format!("{again} --in-diff {rev}");
     }
+    let guarded = GUARDED.map(PathBuf::from);
+    let paths = if paths.is_empty() {
+        &guarded[..]
+    } else {
+        paths
+    };
     let repo = Repo { root: root() };
     let base = repo.git(["merge-base", rev.unwrap_or("origin/main"), "HEAD"])?;
     let diff = diff::since(&repo, &base, paths, &again)?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "cargo-mutants' input and the base's tree belong to no directory of the checkout's"
+    )]
     let scratch = tempfile::tempdir().context("making a scratch directory failed")?;
     let diff_path = scratch.path().join("changes.diff");
     fs::write(&diff_path, diff).context(format_args!("writing {} failed", diff_path.display()))?;
@@ -545,7 +572,7 @@ fn mutants(paths: &[PathBuf], rev: Option<&str>) -> Result<()> {
         .collect();
     let mut list = cargo_mutants()?;
     list.arg("--list-files");
-    let whole = !paths.is_empty() && unchanged(&repo, list, &base, &files)?;
+    let whole = unchanged(&repo, list, &base, &files)?;
     let mut run = cargo_mutants()?;
     if whole {
         run.args(&files);

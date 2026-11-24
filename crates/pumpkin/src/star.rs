@@ -424,22 +424,33 @@ pub(crate) fn reached(entry: &Entry, args: &Args) -> Result<Result<Reach, Proble
     })
 }
 
+/// What [`check`] found of a task that evaluated and checked.
+pub(crate) struct Checked {
+    /// What the lint found.
+    pub(crate) lint: Result<(), Problems>,
+    /// What the check of the workflow's model routes found.
+    pub(crate) models: Result<(), String>,
+}
+
 /// Checks the task as `checked` does, then lints each of its files but the library's, by
-/// `formatter`.
+/// `formatter`, and checks its workflow's model routes by `models`.
 pub(crate) fn check(
     entry: &Entry,
     args: &Args,
     formatter: &Formatter,
-) -> Result<Result<(), Problems>, String> {
-    checked(entry, args, |Task { plan, .. }| {
-        plan.lint(|label, text| {
+    models: impl FnOnce(&Workflow) -> Result<(), String> + Send,
+) -> Result<Result<Checked, Problems>, String> {
+    checked(entry, args, |Task { plan, workflow, .. }| {
+        let lint = plan.lint(|label, text| {
             // The standard library is checked with this `pumpkin`, and no task can change it.
             if label.root() == lang::Root::Library {
                 return Ok(Vec::new());
             }
             let linted = formatter.lint(text);
             linted.map_err(|error| format!("linting `{}` failed: {error}", label.path()))
-        })
+        })?;
+        let models = models(&workflow);
+        Ok(Ok(Checked { lint, models }))
     })
 }
 

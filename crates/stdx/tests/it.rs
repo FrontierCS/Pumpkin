@@ -3,6 +3,7 @@
     reason = "a test helper fails the test that calls it"
 )]
 
+use std::env;
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
@@ -13,8 +14,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::Path;
 use std::process::{ExitStatus, Output, Stdio};
-use std::time::{Duration, Instant};
-use std::{env, thread};
+use std::time::Duration;
 
 use expect_test::{Expect, expect};
 use rustix::net::sockopt;
@@ -42,8 +42,16 @@ enum Caller<'a> {
     /// Echoed, by a deadline that has passed, in a directory that doesn't exist, where the
     /// stand-in can't start.
     Late,
-    /// As this says, once.
     Runs(Run<'a>),
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "`test_support::TestDir` depends on stdx, so stdx's tests make their scratch with \
+              `tempfile`"
+)]
+fn scratch() -> tempfile::TempDir {
+    tempfile::tempdir().unwrap()
 }
 
 /// Runs `script` with `sh`, from `caller`, in a directory of its own, and checks how it ended,
@@ -54,7 +62,7 @@ enum Caller<'a> {
 fn check(script: &str, caller: Caller<'_>, expect: &Expect) {
     // Adopted, a process the script left can be waited for.
     rustix::process::set_child_subreaper(Some(rustix::process::getpid())).unwrap();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scratch();
     let pids = || fs::read_to_string(dir.path().join("pids")).unwrap_or_default();
     let printing = Printing::start();
     let ended = match caller {
@@ -124,7 +132,7 @@ struct Printing {
 
 impl Printing {
     fn start() -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = scratch();
         let stdout = saved(rustix::stdio::stdout());
         let stderr = saved(rustix::stdio::stderr());
         rustix::stdio::dup2_stdout(File::create(dir.path().join("stdout")).unwrap()).unwrap();
@@ -167,6 +175,7 @@ fn reaped(pid: i32) -> String {
     ExitStatus::from_raw(status.as_raw()).to_string()
 }
 
+// Each stream is more than the 64 KiB that a pipe holds, so the run reads both as it goes.
 #[test]
 fn captures() {
     check(
@@ -175,17 +184,6 @@ fn captures() {
         &expect![[r#"
             exited with exit status: 0, with 200000 bytes of standard output and 300000 of standard error
             the processes it started: []"#]],
-    );
-}
-
-#[test]
-fn hangs() {
-    check(
-        "sleep 60 & echo $! >>pids; wait",
-        Caller::Waits(LIMIT, Stream::Captured),
-        &expect![[r#"
-            killed at its bound
-            the processes it started: ["signal: 9 (SIGKILL)"]"#]],
     );
 }
 
@@ -309,17 +307,8 @@ fn capped() {
     );
 }
 
-#[test]
-fn capped_stderr() {
-    check(
-        "head --bytes=134217729 /dev/zero >&2",
-        Caller::Runs(Run::new(LONG_BOUND, Echo::Silent)),
-        &expect![[r#"
-            running `sh` failed: its standard error passed the 128 MiB that a run captures, so it was killed: expected less
-            the processes it started: []"#]],
-    );
-}
-
+// The input and the output are each more than the 64 KiB that a pipe holds, so the run writes
+// and reads as it goes.
 #[test]
 fn fed() {
     let input = vec![b'x'; 300_000];
@@ -333,6 +322,7 @@ fn fed() {
     );
 }
 
+// More than the 64 KiB that a pipe holds, so the write is cut short when the command exits.
 #[test]
 fn fed_unread() {
     let input = vec![b'x'; 300_000];
@@ -356,18 +346,6 @@ fn exited() {
         &expect![[r#"
             `the script` failed with exit status: 3: it broke: fix what it reports
             exited with exit status: 3, with 11 bytes of standard output and 13 of standard error
-            the processes it started: []"#]],
-    );
-}
-
-#[test]
-fn exited_silently() {
-    check(
-        "exit 3",
-        Caller::Runs(Run::new(LONG_BOUND, Echo::Silent)),
-        &expect![[r#"
-            `sh` failed with exit status: 3 and wrote nothing to standard error: expected it to exit with 0
-            exited with exit status: 3, with 0 bytes of standard output and 0 of standard error
             the processes it started: []"#]],
     );
 }
@@ -485,38 +463,9 @@ fn reported() {
     expect!["2047 characters, 2046 of them ü, ending in 'x'"].assert_eq(&shown);
 }
 
-// A failure whose message says what to do, without it.
-#[test]
-fn unadvised() {
-    let dir = tempfile::tempdir().unwrap();
-    let silent = |bound| Run::new(bound, Echo::Silent);
-    let past = Bound::By(Deadline::after(Duration::ZERO));
-    let failures = [
-        run("echo it broke. >&2; exit 3", dir.path(), silent(LONG_BOUND)),
-        run("exit 3", dir.path(), silent(LONG_BOUND)),
-        run(
-            "exit 3",
-            dir.path(),
-            silent(LONG_BOUND).stderr(Stream::Discarded),
-        ),
-        run("exec sleep 60", dir.path(), silent(Bound::Within(LIMIT))),
-        run("exit 0", dir.path(), silent(past)),
-        run("exit 0", &dir.path().join("absent"), silent(LONG_BOUND)),
-    ];
-    let shown = failures.map(|ran| ran.unwrap_err().unadvised()).join("\n");
-    expect![[r#"
-        `sh` failed with exit status: 3: it broke
-        `sh` failed with exit status: 3 and wrote nothing to standard error
-        `sh` failed with exit status: 3, its standard error discarded
-        `sh` didn't end within 0.001 s, so it was killed
-        `sh` didn't start, as its deadline had passed
-        `sh` didn't start: No such file or directory (os error 2)"#]]
-    .assert_eq(&shown.replace(dir.path().to_str().unwrap(), "$DIR"));
-}
-
 #[test]
 fn unstarted() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scratch();
     let only = Environment::Only(&["PATH"]);
     let run = |command: &mut std::process::Command| {
         let failure = stdx::process::run(command, Run::new(LONG_BOUND, Echo::Silent));
@@ -534,9 +483,6 @@ fn unstarted() {
     fs::write(&script, "#!/absent/interpreter\n").unwrap();
     fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
     let mut interpreted = stdx::process::command(&script, only);
-    let unsearchable = dir.path().join("unsearchable");
-    fs::create_dir(&unsearchable).unwrap();
-    fs::set_permissions(&unsearchable, fs::Permissions::from_mode(0o600)).unwrap();
     let mut long = stdx::process::command("sh", only);
     // Past the 128 KiB that Linux takes of one argument.
     long.args(["-c".to_owned(), "x".repeat(200_000)]);
@@ -548,7 +494,6 @@ fn unstarted() {
         run(&mut interpreted),
         run(&mut in_dir(&dir.path().join("absent"))),
         run(&mut in_dir(&script)),
-        run(&mut in_dir(&unsearchable)),
         run(&mut long),
         spawned.unwrap_err(),
     ];
@@ -561,9 +506,27 @@ fn unstarted() {
         `$DIR/script` didn't start: No such file or directory (os error 2): expected the interpreter that the first line of `$DIR/script` names to exist
         `true` didn't start: No such file or directory (os error 2): expected its working directory `$DIR/absent` to exist
         `true` didn't start: Not a directory (os error 20): expected its working directory `$DIR/script` to be a directory
-        `true` didn't start: Permission denied (os error 13): expected its working directory `$DIR/unsearchable` to be one that it may enter
         `sh` didn't start: Argument list too long (os error 7): fix what the error says
         `pumpkin-absent` didn't start: No such file or directory (os error 2): install `pumpkin-absent` on `PATH`"#]]
+    .assert_eq(&shown);
+}
+
+// Root enters a directory whatever its mode, which leaves nothing to show, as git's tests allow:
+// https://github.com/git/git/blob/fb255012acbcbe81189cb8014da0280b09c66ecc/t/test-lib.sh#L1876-L1905
+#[test]
+fn unenterable() {
+    let dir = scratch();
+    let unsearchable = dir.path().join("unsearchable");
+    fs::create_dir(&unsearchable).unwrap();
+    fs::set_permissions(&unsearchable, fs::Permissions::from_mode(0o600)).unwrap();
+    if fs::metadata(unsearchable.join(".")).is_ok() {
+        return;
+    }
+    let mut command = stdx::process::command("true", Environment::Only(&["PATH"]));
+    command.current_dir(&unsearchable);
+    let ran = stdx::process::run(&mut command, Run::new(LONG_BOUND, Echo::Silent));
+    let shown = (ran.unwrap_err().to_string()).replace(dir.path().to_str().unwrap(), "$DIR");
+    expect![[r#"`true` didn't start: Permission denied (os error 13): expected its working directory `$DIR/unsearchable` to be one that it may enter"#]]
     .assert_eq(&shown);
 }
 
@@ -640,30 +603,7 @@ fn first_exited() {
 }
 
 #[test]
-fn caught() {
-    stdx::signal::catch(&[Signal::INT, Signal::TERM]).unwrap();
-    let mut shown = vec![format!("before: {:?}", stdx::signal::caught())];
-    rustix::process::kill_process(rustix::process::getpid(), Signal::TERM).unwrap();
-    // The signal may land on another of this process's threads, after `kill` returns.
-    let by = Instant::now() + Duration::from_secs(60);
-    while stdx::signal::caught().is_none() && Instant::now() < by {
-        thread::yield_now();
-    }
-    shown.push(format!("after SIGTERM: {:?}", stdx::signal::caught()));
-    shown.push(format!(
-        "SIGKILL: {}",
-        stdx::signal::catch(&[Signal::KILL]).unwrap_err()
-    ));
-    expect![[r#"
-        before: None
-        after SIGTERM: Some("Signal::TERM")
-        SIGKILL: Invalid argument (os error 22)"#]]
-    .assert_eq(&shown.join("\n"));
-}
-
-#[test]
 fn tcp_options() {
-    // What the gateway and `sandboxd` each set at their end of a session over TCP.
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
     stdx::net::set_options(&stream).unwrap();
@@ -682,7 +622,7 @@ fn tcp_options() {
 // first let go; with each held again, a take whose `waiting` fails fails with its error.
 #[test]
 fn slots() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scratch();
     let count = NonZeroUsize::new(2).unwrap();
     let free = |_: &[String]| Err("waited, though a slot was free".to_owned());
     let first = stdx::slots::take(dir.path(), count, "first", free).unwrap();

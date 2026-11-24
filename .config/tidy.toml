@@ -1,5 +1,29 @@
-# The source files over tidy's cap on a file's lines, each with its ceiling, the most lines it may
-# hold (`FILE_CAP` and `CEILINGS` in `xtask/src/tidy.rs`).
+# The files over a cap of tidy's, each with its ceiling, the most it may hold, which only goes down
+# (`CEILINGS` in `xtask/src/tidy.rs`).
+
+# The source files over `FILE_CAP` lines.
 [long_files]
-"crates/gateway/src/lib.rs" = 1220
+"crates/gateway/src/lib.rs" = 1210
 "crates/runtime/src/record.rs" = 1213
+
+# The Markdown documents over `WORD_CAP` words, as `wc -w` counts them.
+[words]
+"ARCHITECTURE.md" = 2787
+"deploy/aws/README.md" = 2126
+"docs/language.md" = 1534
+
+# The Markdown documents with sentences to split: those over `SENTENCE_CAP` words in
+# `xtask/src/tidy/sentences.rs`, or with a semicolon that chains clauses.
+[sentences]
+"ARCHITECTURE.md" = 28
+"deploy/aws/README.md" = 12
+"deploy/docker/README.md" = 3
+"docs/language.md" = 11
+"docs/models.md" = 13
+"docs/providers.md" = 19
+"docs/record.md" = 11
+"docs/workflows.md" = 1
+"examples/hypergraph-benchmark/README.md" = 3
+"examples/hypergraph-benchmark/base/repo/README.md" = 16
+"examples/hypergraph/README.md" = 4
+"examples/team/README.md" = 6

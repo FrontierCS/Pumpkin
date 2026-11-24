@@ -7,20 +7,27 @@
 //! can't be opened, it asks EC2 whether the controller runs, and while it is stopped or on its
 //! way to running or to being stopped, or its `sshd` doesn't answer, each request asks EC2 and
 //! that `sshd` again in place of opening a link; the controller starts only when
-//! [`Viewing::start`] is called. A request opens a link with one attempt, as the page asks again
-//! after a pause of its own, and the view answers no other request while one waits.
+//! [`Viewing::start`] is called. A controller at the address that the configuration names is
+//! never stopped, and only its `sshd` is asked. A request opens a link with one attempt, as the
+//! page asks again after a pause of its own, and the view answers no other request while one
+//! waits.
+
+use std::io;
+use std::net::{TcpStream, ToSocketAddrs as _};
 
 use ::aws::Cli;
 
-use super::aws::{self, Located, answers, unanswered};
+use super::aws::{self, answers, unanswered};
 use super::linking::{Build, Linked, Unlinked};
-use super::{Name, Reached};
+use super::{Address, CONNECT_TIMEOUT, Located, Name, Reached};
+use crate::config::Find;
 use crate::link::{ViewRequest, Viewed};
 use crate::{config, say};
 
 /// Why the view on the controller gave no reply.
 pub(crate) enum Unviewed {
-    /// The controller is stopped, as EC2 says, so that a start would end that.
+    /// The controller is stopped, as EC2 says, so that a start would end that. Only an EC2
+    /// controller is.
     Stopped,
     /// The controller can't answer now, as EC2 or a probe of its `sshd` says: why.
     Down(String),
@@ -53,10 +60,6 @@ pub(crate) struct Viewing {
 impl Viewing {
     /// Reaches the controller that `client` names ([`Reached::reach`]), which starts it if it is
     /// stopped.
-    ///
-    /// # Errors
-    ///
-    /// Fails if this executable can't be read, or the controller can't be reached.
     pub(crate) fn reach(client: &config::Client) -> Result<Self, String> {
         let expected = "expected to send it to the controller, to read the runs there";
         let build = Build::of_this(expected)?;
@@ -122,10 +125,17 @@ impl Viewing {
     ///
     /// # Errors
     ///
-    /// Fails if EC2 refuses, as when the instance is stopping.
+    /// Fails if EC2 refuses, as when the instance is stopping, or the controller is at the
+    /// address that the configuration names, which has no instance to start.
     pub(crate) fn start(&mut self) -> Result<(), String> {
         let Self { reached, cli, .. } = self;
-        let id = &self.located.instance;
+        let Located::Ec2 { instance: id, .. } = &self.located else {
+            return Err(format!(
+                "controller `{}` is at the address that the configuration names, which no client \
+                 starts: ask its admin to start it",
+                reached.name
+            ));
+        };
         say(format_args!(
             "starting controller `{}`, {id}, as the page asked",
             reached.name
@@ -137,10 +147,18 @@ impl Viewing {
     fn answerable(&mut self) -> Result<(), Unviewed> {
         let Self { reached, cli, .. } = self;
         let name = &reached.name;
-        let located = &self.located;
-        let state =
-            connected(cli, reached).and_then(|cli| aws::state(cli, name, &located.instance));
-        let address = located.address;
+        let (instance, address) = match &self.located {
+            Located::Ec2 { instance, address } => (instance, *address),
+            Located::Address(address) => {
+                return probed(address).map_err(|error| {
+                    Unviewed::Down(format!(
+                        "controller `{name}`'s `sshd` doesn't answer at {address}: {error}: ask \
+                         its admin whether it runs"
+                    ))
+                });
+            }
+        };
+        let state = connected(cli, reached).and_then(|cli| aws::state(cli, name, instance));
         let down = match state.map_err(Unviewed::Failed)?.as_str() {
             "running" => match answers(address) {
                 Ok(()) => return Ok(()),
@@ -156,9 +174,8 @@ impl Viewing {
             // As when it was terminated, and another made in its place, which `reach` finds.
             state => {
                 return Err(Unviewed::Failed(format!(
-                    "controller `{name}`, {}, is {state}: stop this view and start it again, \
-                     which finds the controller anew",
-                    located.instance
+                    "controller `{name}`, {instance}, is {state}: stop this view and start it \
+                     again, which finds the controller anew"
                 )));
             }
         };
@@ -177,8 +194,12 @@ impl Viewing {
         };
         // What is left of the exchange would be read as the next one's, so a link that fails is
         // dropped, which ends its `ssh`.
-        let target = target.to_owned();
-        match linked.ask(&self.reached, ViewRequest { target, deflate }) {
+        let request = ViewRequest {
+            target: target.to_owned(),
+            deflate,
+            controller: self.reached.name.clone(),
+        };
+        match linked.ask(&self.reached, request) {
             Ok(Ok(viewed)) => {
                 self.linked = Some(linked);
                 Over::Viewed(viewed)
@@ -200,8 +221,29 @@ impl Viewing {
 
 /// The connection to EC2 in the controller's region, made at its first use.
 fn connected<'a>(cli: &'a mut Option<Cli>, reached: &Reached) -> Result<&'a Cli, String> {
-    match cli {
-        Some(made) => Ok(made),
-        None => Ok(cli.insert(Cli::connect(reached.region.clone())?)),
+    if let Some(made) = cli {
+        return Ok(made);
     }
+    let Find::Ec2 { region } = &reached.find else {
+        return Err(format!(
+            "controller `{}` is at the address that the configuration names, which EC2 knows \
+             nothing of: remove the workspace's `.pumpkin/controller`, which holds where an EC2 \
+             controller was found",
+            reached.name
+        ));
+    };
+    Ok(cli.insert(Cli::connect(region.clone())?))
+}
+
+/// Whether a connection to `address` opens within `CONNECT_TIMEOUT`, as `ssh` waits for one, to
+/// the first of its host's addresses that takes one, or why not.
+fn probed(address: &Address) -> io::Result<()> {
+    let mut last = None;
+    for socket in (address.host.as_str(), address.port).to_socket_addrs()? {
+        match TcpStream::connect_timeout(&socket, CONNECT_TIMEOUT) {
+            Ok(_) => return Ok(()),
+            Err(error) => last = Some(error),
+        }
+    }
+    Err(last.unwrap_or_else(|| io::Error::other("its host has no address")))
 }

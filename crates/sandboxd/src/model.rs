@@ -111,7 +111,6 @@ impl Model {
             .context(format_args!("127.0.0.1:{MODEL_PORT}"))?;
         let model = self.clone();
         thread::Builder::new()
-            // Accepts clients while the session's thread serves the gateway.
             .name("model".to_owned())
             .spawn(move || model.accept(&listener, &sender))
             .context("the thread that accepts clients didn't start")?;

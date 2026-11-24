@@ -4,21 +4,21 @@
 //! A run follows its job over a link. The client copies an ended run's record into this machine's
 //! runs directory, and says its ending there.
 
-use std::path::PathBuf;
 use std::time::SystemTime;
 
 use retention::KEPT_DAYS;
 use stdx::Context as _;
 
-use super::Reached;
 use super::follow::{self, Finished};
 use super::linking::Build;
 use super::send::{send, tree};
+use super::{Name, Reached};
 use crate::cli::Exit;
 use crate::ending::Printed;
 use crate::link::{
     Ask, CancelAnswer, CancelRequest, Job, Jobs, JobsRequest, Owner, ReapRequest, Unanswered,
 };
+use crate::reaping::{ReapedRuns, Reaper};
 use crate::workspace::Workspace;
 use crate::{cli, config, next, say};
 
@@ -50,6 +50,7 @@ pub(crate) fn run(client: &config::Client, flags: cli::Run) -> Result<Exit, Stri
         args: cli::TaskArgs(args),
         runs,
         config,
+        controller: _,
         sandboxd,
         wait: cli::Waiting(wait),
     } = flags;
@@ -63,10 +64,9 @@ pub(crate) fn run(client: &config::Client, flags: cli::Run) -> Result<Exit, Stri
     let id = runtime::new_id(SystemTime::now())?;
     let name = &client.controller.name;
     let tree = tree(&entry, &args)?;
-    // The job refuses a budget that the prices sent with it can't count: refused here, before
-    // anything is sent.
-    let prices = client.upstreams.prices();
-    runtime::budgets(&tree.workflow, &prices).context(client.path.display())?;
+    // The job refuses a model that the upstreams sent with it don't serve, or a budget that their
+    // prices can't count: refused here, before anything is sent.
+    (client.upstreams.models(&tree.workflow)).context(client.path.display())?;
     say(format_args!(
         "run {} goes to controller `{name}`",
         id.as_str()
@@ -80,8 +80,9 @@ pub(crate) fn run(client: &config::Client, flags: cli::Run) -> Result<Exit, Stri
     if let Some(printed) = wait {
         return follow(&mut reached, &build, id, config.as_deref(), printed);
     }
-    crate::advise("follow it", &next::of_run("wait", None, id));
-    crate::advise("stop it", &next::of_run("cancel", None, id));
+    let at = next::At::Controller(name.clone());
+    crate::advise("follow it", &next::of_run("wait", &at, id));
+    crate::advise("stop it", &next::of_run("cancel", &at, id));
     crate::print(format!("{id}\n").as_bytes())
         .context(format_args!("run {id} is sent, but printing its id failed"))?;
     Ok(Exit::Success)
@@ -129,26 +130,33 @@ fn job_id(reached: &mut Reached, run: &str, among: Among) -> Result<(Build, Stri
     let every = ids(false);
     let id = match (runtime::named(&every, run, &on), among) {
         (Ok(id), _) => id,
-        (Err(error), Among::Every) => return Err(unnamed(&every, run, error)),
+        (Err(error), Among::Every) => return Err(unnamed(name, &every, run, error)),
         // A prefix that matches several runs, of which one is the member's own, names that one.
         (Err(error), Among::Own) => {
             let own = ids(true);
-            let id = runtime::named(&own, run, &on).map_err(|_| unnamed(&every, run, error))?;
+            let id =
+                runtime::named(&own, run, &on).map_err(|_| unnamed(name, &every, run, error))?;
             return Ok((build, id.to_owned()));
         }
     };
     if let Among::Own = among
         && let Some(whose) = jobs.iter().find(|job| job.id == id).and_then(whose)
     {
-        let any = next::again("cancel", &["--any-member".to_owned()], &[id.to_owned()]);
+        let flags = [
+            "--controller".to_owned(),
+            name.to_string(),
+            "--any-member".to_owned(),
+        ];
+        let any = next::again("cancel", &flags, &[id.to_owned()]);
         return Err(format!("run {id} {on} {whose}: to stop it: {any}"));
     }
     Ok((build, id.to_owned()))
 }
 
-/// `error`, which says that `run` names none of the jobs `ids` or several. If `run` names a run
-/// whose record the controller may have removed, it adds where the record may be instead.
-fn unnamed(ids: &[String], run: &str, error: String) -> String {
+/// `error`, which says that `run` names none of the jobs `ids` on controller `name` or several. If
+/// `run` names a run whose record the controller may have removed, it adds where the record may be
+/// instead.
+fn unnamed(name: &Name, ids: &[String], run: &str, error: String) -> String {
     // The controller removes a run's job directory with its record. Such a run has expired.
     let old = retention::jobs::expired(crate::job::started(run), SystemTime::now());
     let none = (ids.iter()).all(|id| runtime::named(std::slice::from_ref(id), run, "").is_err());
@@ -158,8 +166,7 @@ fn unnamed(ids: &[String], run: &str, error: String) -> String {
     let removed = format!(
         "{error}; the controller removes a run's record {KEPT_DAYS} days after its member copied it"
     );
-    let copy = crate::default_runs().ok().and_then(|runs| {
-        let runs = PathBuf::from(runs);
+    let copy = super::copies(name).ok().and_then(|runs| {
         let names = runtime::Record::names(&runs).ok()?;
         let id = runtime::named(&names, run, "").ok()?;
         Some(runs.join(id))
@@ -185,7 +192,7 @@ fn follow(
             "run {id}'s job on controller `{name}` ended before the run started, as its log \
              says above: once that is fixed, run the task again as it was sent; to see that log \
              again: {}",
-            next::of_run("wait", None, id)
+            next::of_run("wait", &next::At::Controller(name.clone()), id)
         )),
     }
 }
@@ -202,7 +209,9 @@ fn said_here(
     printed: Printed,
 ) -> Result<Exit, String> {
     let writer = reached.copy(build, id)?.or(writer);
-    let dir = PathBuf::from(crate::default_runs()?).join(id);
+    let name = &reached.name;
+    let at = next::At::Controller(name.clone());
+    let dir = super::copies(name)?.join(id);
     if let Some(writer) = writer {
         return Err(format!(
             "copied run {id}'s record to {}; it was made by pumpkin {writer}: read it with that build",
@@ -215,17 +224,23 @@ fn said_here(
             "run {id}'s copy, {}, reads as live, though its run has ended: wait for what holds \
              its driver.pid, then follow it again: {}",
             record.dir().display(),
-            next::of_run("wait", None, id)
+            next::of_run("wait", &at, id)
         ));
     };
-    crate::end(&record, &ending, printed, None, &here(&record, config)?)
+    let args = here(&record, config, Some(name))?;
+    crate::end(&record, &ending, printed, &at, &args)
 }
 
 /// The command line of a run that went to the controller, for this machine: the task's entry as
 /// its path in this machine's repository, whose files the run's tree holds where the repository
-/// does, and `config`, if given, in place of the `--config` it had. A record whose command doesn't
-/// end with an entry below the run's tree on the controller gives its command as it is.
-pub(crate) fn here(record: &runtime::Record, config: Option<&str>) -> Result<Vec<String>, String> {
+/// does, `config`, if given, in place of the `--config` it had, and `controller`, if given, by
+/// `--controller`. A record whose command doesn't end with an entry below the run's tree on the
+/// controller gives its command as it is.
+pub(crate) fn here(
+    record: &runtime::Record,
+    config: Option<&str>,
+    controller: Option<&Name>,
+) -> Result<Vec<String>, String> {
     let args = record.args();
     let tree = format!("/{}/", record.id());
     let below = args.split_last().and_then(|(entry, flags)| {
@@ -241,6 +256,9 @@ pub(crate) fn here(record: &runtime::Record, config: Option<&str>) -> Result<Vec
             "--config".to_owned(),
             crate::absolute_utf8(config, "the configuration")?,
         ]);
+    }
+    if let Some(controller) = controller {
+        words.extend(["--controller".to_owned(), controller.to_string()]);
     }
     let mut flags = flags.iter();
     while let Some(flag) = flags.next() {
@@ -268,26 +286,29 @@ pub(crate) fn cancel(client: &config::Client, run: &str, any_member: bool) -> Re
         modal_bytes: modal.as_ref().map(Vec::len),
     };
     let name = &client.controller.name;
+    let at = next::At::Controller(name.clone());
+    let ask = Ask::Cancel(request);
     let answer = reached.asked(&build, "cancelling the run", |reached, linked| {
-        linked.ask_with_body(
-            reached,
-            request.clone(),
-            modal.as_deref().unwrap_or_default(),
-        )
+        linked.stream(reached, |link| {
+            link.send(&ask, modal.as_deref().unwrap_or_default())?;
+            CancelAnswer::read(link, || {
+                say(format_args!(
+                    "stopping run {id}: {}",
+                    crate::reaping::STOPPING
+                ));
+            })
+        })
     })??;
-    match answer {
-        CancelAnswer::Unstarted => say(format_args!(
-            "run {id}'s job on controller `{name}` is stopped, before the run started"
-        )),
-        CancelAnswer::EndedUnreaped { message } => {
-            if let Err(error) = reached.copy(&build, &id) {
-                say(error);
-            }
-            return Err(message);
+    let reaped = match answer {
+        CancelAnswer::Unstarted => {
+            say(format_args!(
+                "run {id}'s job on controller `{name}` is stopped, before the run started"
+            ));
+            return Ok(Exit::Success);
         }
         CancelAnswer::Stopped { writer } => {
             let writer = reached.copy(&build, &id)?.or(writer);
-            let copy = PathBuf::from(crate::default_runs()?).join(&id);
+            let copy = super::copies(name)?.join(&id);
             let writer = writer.map_or_else(
                 || "the pumpkin that made it".to_owned(),
                 |build| format!("pumpkin {build}"),
@@ -296,17 +317,27 @@ pub(crate) fn cancel(client: &config::Client, run: &str, any_member: bool) -> Re
                 "stopped job {id} on controller `{name}`; copied its record to {}: read it with {writer}",
                 copy.display()
             ));
+            return Ok(Exit::Success);
         }
-        CancelAnswer::Ended | CancelAnswer::EndedUnreached => {
-            said_here(&mut reached, &build, &id, None, None, Printed::Nothing)?;
-            if matches!(answer, CancelAnswer::EndedUnreached) {
-                crate::advise(
-                    "remove what it left once its provider can be reached",
-                    &next::reap(None),
-                );
-                return Ok(Exit::Partial);
+        CancelAnswer::Ended { reaped } => reaped.said(&at, Reaper::Controller),
+        CancelAnswer::EndedUnreaped { message } => Err(message),
+    };
+    let reached_all = match reaped {
+        Ok(reached_all) => reached_all,
+        Err(message) => {
+            if let Err(error) = reached.copy(&build, &id) {
+                say(error);
             }
+            return Err(message);
         }
+    };
+    said_here(&mut reached, &build, &id, None, None, Printed::Nothing)?;
+    if !reached_all {
+        crate::advise(
+            "remove what it left once its provider can be reached",
+            &next::reap(&at),
+        );
+        return Ok(Exit::Partial);
     }
     Ok(Exit::Success)
 }
@@ -314,22 +345,30 @@ pub(crate) fn cancel(client: &config::Client, run: &str, any_member: bool) -> Re
 /// Removes on the controller what runs left, as `pumpkin reap` does there.
 pub(crate) fn reap(client: &config::Client) -> Result<Exit, String> {
     let mut reached = Reached::reach(&client.controller)?;
+    let at = next::At::Controller(client.controller.name.clone());
     let build = Build::of_this("expected to send it to the controller, to reap the runs there")?;
     let modal = client.modal_file()?;
     let request = Ask::Reap(ReapRequest {
         modal_bytes: modal.as_ref().map(Vec::len),
     });
-    let report = reached.asked(&build, "reaping the runs", |reached, linked| {
+    let reaped = reached.asked(&build, "reaping the runs", |reached, linked| {
         linked.stream(reached, |link| {
             link.send(&request, modal.as_deref().unwrap_or_default())?;
-            link.answer::<ReapRequest>().inspect_err(|error| {
+            // A reap asked again after a cut says again each run that it leaves a problem of, so
+            // the last attempt's runs alone are counted.
+            let mut reaped = ReapedRuns::default();
+            let read = ReapRequest::read(link, |reaping| {
+                reaped.said(reaping, &at, Reaper::Controller)
+            });
+            let read = read.inspect_err(|error| {
                 if matches!(error, Unanswered::Unreached(_)) {
                     say(
                         "the reap's reply was cut: the output may omit ids of runs already cleaned",
                     );
                 }
-            })
+            })?;
+            Ok(read.map(|()| reaped))
         })
     })??;
-    report.report(None, crate::Reaper::Controller)
+    Ok(reaped.report(&at, Reaper::Controller))
 }

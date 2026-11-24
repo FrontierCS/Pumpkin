@@ -5,40 +5,42 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
 use std::sync::mpsc::{Receiver, TryRecvError};
+use std::time::Duration;
 
 use schema::frame;
 use schema::ir::{AbsolutePath, Mode};
 use schema::sandbox::tree::{self, Limits, Modes};
 use schema::sandbox::{Entry, RelativePath, Root, ToSandbox};
-use stdx::Deadline;
+use stdx::time::Clock;
 
-use crate::{Part, Put, Reply, Route, Shared, Trees, broke, context, out_of_turn};
+use crate::{Bound, Part, Put, Reply, Route, Shared, Trees, broke, context, out_of_turn};
 
 impl Trees {
-    /// As [`crate::Session::put`], with `root` saying how `dir` is made. [`Root::New`] requires
-    /// a new directory.
+    /// As [`crate::Session::put`], by `by`, a time on `clock`, with `root` saying how `dir` is
+    /// made. [`Root::New`] requires a new directory.
     pub fn put<'a>(
         &self,
         dir: &AbsolutePath,
         root: Root,
         entries: impl IntoIterator<Item = Put<'a>>,
-        by: Deadline,
+        (clock, by): (&impl Clock, Duration),
     ) -> io::Result<()> {
-        self.shared.put(dir, root, entries, by)
+        self.shared.put(dir, root, entries, Bound { clock, by })
     }
 
-    /// Collects as [`crate::Session::collect`] does. Once `stopped` returns true before a part
-    /// of the tree, returns [`io::ErrorKind::Interrupted`] and keeps the session open.
-    /// Returns the tree's entries, each with its mode as the sandbox sent it, which the host's
-    /// umask may have narrowed in `into`.
+    /// Collects as [`crate::Session::collect`] does, by `by`, a time on `clock`. Once `stopped`
+    /// returns true before a part of the tree, returns [`io::ErrorKind::Interrupted`] and keeps
+    /// the session open. Returns the tree's entries, each with its mode as the sandbox sent it,
+    /// which the host's umask may have narrowed in `into`.
     pub fn collect(
         &self,
         path: &AbsolutePath,
         into: &Path,
         limits: Limits,
-        by: Deadline,
+        (clock, by): (&impl Clock, Duration),
         stopped: &mut dyn FnMut() -> bool,
     ) -> io::Result<Vec<Entry>> {
+        let by = Bound { clock, by };
         self.shared.collect(path, into, limits, by, stopped)
     }
 }
@@ -49,7 +51,7 @@ impl Shared {
         dir: &AbsolutePath,
         root: Root,
         entries: impl IntoIterator<Item = Put<'a>>,
-        by: Deadline,
+        by: Bound<'_, impl Clock>,
     ) -> io::Result<()> {
         let (stream, replies) = self.open(Route::Reply, by)?;
         let put = self.send_tree(stream, dir, root, entries, &replies, by);
@@ -62,7 +64,7 @@ impl Shared {
         path: &AbsolutePath,
         into: &Path,
         limits: Limits,
-        by: Deadline,
+        by: Bound<'_, impl Clock>,
         stopped: &mut dyn FnMut() -> bool,
     ) -> io::Result<Vec<Entry>> {
         let (stream, parts) = self.open(Route::Tree, by)?;
@@ -86,7 +88,7 @@ impl Shared {
         root: Root,
         entries: impl IntoIterator<Item = Put<'a>>,
         replies: &Receiver<Result<(), String>>,
-        by: Deadline,
+        by: Bound<'_, impl Clock>,
     ) -> io::Result<()> {
         let dir = dir.clone();
         self.send(&ToSandbox::Put { stream, dir, root }, &[], by)?;
@@ -141,7 +143,7 @@ impl Shared {
         path: RelativePath,
         mode: Mode,
         file: fs::File,
-        by: Deadline,
+        by: Bound<'_, impl Clock>,
     ) -> io::Result<io::Result<()>> {
         let size = match file.metadata() {
             Ok(metadata) => metadata.len(),
@@ -174,7 +176,7 @@ impl Shared {
         stream: u32,
         parts: &Receiver<Result<Part, String>>,
         mut tree: tree::Writer,
-        by: Deadline,
+        by: Bound<'_, impl Clock>,
         stopped: &mut dyn FnMut() -> bool,
     ) -> io::Result<Vec<Entry>> {
         let mut entries = Vec::new();
@@ -182,6 +184,14 @@ impl Shared {
             if stopped() {
                 let cut = "stopped before the tree was whole";
                 return Err(io::Error::new(io::ErrorKind::Interrupted, cut));
+            }
+            // A deadline that has passed fails the collect at once, even with a part waiting.
+            // Else a tree sent faster than it is written could outlast it.
+            if by.left().is_none() {
+                return Err(match self.ended.get() {
+                    Some(_) => self.ended(),
+                    None => self.unanswered(),
+                });
             }
             match self.receive(parts, by)? {
                 Ok(Part::Entry(entry)) => {

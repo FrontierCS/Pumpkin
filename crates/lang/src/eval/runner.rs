@@ -1,5 +1,5 @@
 //! A runner belongs to one invocation of its callback. The callback runs on the same evaluator
-//! with its usual step, stack and byte limits. Only the host translates a grant into a lease.
+//! with its usual step, stack and byte limits.
 
 use alloc::format;
 use alloc::string::String;

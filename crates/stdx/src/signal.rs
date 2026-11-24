@@ -66,7 +66,6 @@ pub fn caught() -> Option<Signal> {
     }))
 }
 
-/// The handler [`catch`] sets: notes signal `number`, unless one was noted before.
 extern "C" fn note(number: libc::c_int) {
     // Failing to exchange means that a signal was noted before, which stays the one noted.
     let _ = CAUGHT.compare_exchange(0, number, Ordering::SeqCst, Ordering::SeqCst);

@@ -11,12 +11,12 @@ use std::{env, io, thread};
 use aws::iam::Call;
 use aws::{Bound, Cli, Region};
 use jiff::Timestamp;
+use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 use stdx::process::{self, Echo, Environment, Run};
 use stdx::{Context as _, Deadline};
 
-use super::{Name, SHORT_TIMEOUT};
+use super::{Located, Name, SHORT_TIMEOUT};
 use crate::iam::CLIENT;
 use crate::say;
 
@@ -61,14 +61,6 @@ struct Instance {
 #[serde(rename_all = "PascalCase")]
 struct State {
     name: String,
-}
-
-/// Where a controller was found: its instance, and the private address at which its `sshd`
-/// answered.
-#[derive(Deserialize, Serialize)]
-pub(super) struct Located {
-    pub(super) instance: String,
-    pub(super) address: IpAddr,
 }
 
 /// The directory that holds this machine's `ssh` key to its controllers, `key` and `key.pub`,
@@ -247,7 +239,7 @@ fn answering(name: &Name, instance: Instance, started: Option<Instant>) -> Resul
                     started.elapsed().as_secs()
                 ));
             }
-            return Ok(Located {
+            return Ok(Located::Ec2 {
                 instance: id,
                 address,
             });

@@ -11,7 +11,8 @@
 //! - IAM allows each role its policy, as `pumpkin-admin policy` prints it, filled with the
 //!   deployment's values. The policies of a module of another tag, or a service control policy,
 //!   may deny it. The controller's role is the one of its instance profile, so an instance with
-//!   no profile, or a profile with no role, is a problem too.
+//!   no profile, or a profile with no role, is a problem too. The controller's statements for the
+//!   Modal provider are checked only if the settings name one.
 //!
 //! Every check runs, and each problem it finds is a [`Problem`], said on a line of its own once
 //! all have run; with none, the command says nothing. What only a running controller shows, a
@@ -36,7 +37,7 @@ use crate::cli::Exit;
 use crate::config::{self, Config, Kind};
 use crate::controller::{self, Name};
 use crate::iam::{self, CHECK, Principal};
-use crate::job::{self, Deployment, Taken};
+use crate::job::{self, Deployment, Source, Taken};
 use crate::say;
 
 /// How a job's messages name the settings, in a problem that names them already.
@@ -61,15 +62,31 @@ pub(crate) fn check(settings: &ParameterArn) -> Result<Exit, String> {
     let Read { config, deployment } = read(&cli, settings, &mut found.problems);
     let mut controller = None;
     if let Some(Deployment { name, members }) = deployment {
-        self::members(&members, &name, &mut found.problems);
-        filling.set(&iam::MEMBERS, members.as_str().to_owned());
+        match members {
+            Source::Parameter(members) => {
+                self::members(&members, &name, &mut found.problems);
+                filling.set(&iam::MEMBERS, members.as_str().to_owned());
+            }
+            Source::File(path) => found.problems.push(Problem::new(
+                format!("settings {settings}"),
+                format!(
+                    "their `[deployment] members` names the file {}, which a controller on EC2 \
+                     doesn't read: name the members' SSM parameter, as deploy/aws writes it",
+                    path.display()
+                ),
+            )),
+        }
         controller = self::controller(&cli, settings.region(), &name, &mut found);
     }
+    // The controller's jobs make the Modal provider's calls only if the settings name one.
+    let runs_modal = (config.iter().flat_map(|config| config.providers.by_name()))
+        .any(|(_, kind)| matches!(kind, Kind::Modal(_)));
     let mut principals = Vec::new();
     if let Some(Controller { id, role }) = controller {
         let arn = filling.arn("ec2", &format!("instance/{id}"));
         filling.set(&iam::CONTROLLER, arn);
-        principals.extend(role.map(|role| (Principal::Controller, role)));
+        principals
+            .extend(role.map(|role| (Principal::Controller, role, iam::controller(runs_modal))));
     }
     if let Some(config) = &config {
         providers(config, &mut filling, &mut found.problems);
@@ -81,7 +98,8 @@ pub(crate) fn check(settings: &ParameterArn) -> Result<Exit, String> {
         (Principal::ModalPull, &modal::iam::PULL_ROLE),
     ];
     for (principal, role) in roles {
-        principals.extend(filling.get(role).map(|arn| (principal, arn.to_owned())));
+        let arn = filling.get(role).map(str::to_owned);
+        principals.extend(arn.map(|arn| (principal, arn, iam::allows(principal))));
     }
     simulation::allowed(&cli, &filling, &principals, &mut found);
     let Found {
@@ -148,19 +166,24 @@ fn read(cli: &Cli, settings: &ParameterArn, problems: &mut Vec<Problem>) -> Read
     else {
         return Read::default();
     };
+    let deployment = job::deployment(&mut tables.clone(), NAMED).map(|(_, deployment)| deployment);
     // A drain is the admin's own, and each job that it refuses says so.
-    let Taken {
-        version,
+    let taken = deployment.and_then(|deployment| Ok((deployment, job::take(&mut tables, NAMED)?)));
+    let (
         deployment,
-        draining: _,
-    } = match job::take(&mut tables, NAMED) {
+        Taken {
+            version,
+            draining: _,
+        },
+    ) = match taken {
         Ok(taken) => taken,
         Err(error) => {
             problem(error);
             return Read::default();
         }
     };
-    let modal = has_modal(&tables).then(|| {
+    // A Modal provider's job the client completes.
+    let modal = job::names_kind(&tables, "modal").then(|| {
         toml::Table::from_iter([
             ("profile".to_owned(), "check".into()),
             ("classes".to_owned(), toml::Table::new().into()),
@@ -168,8 +191,14 @@ fn read(cli: &Cli, settings: &ParameterArn, problems: &mut Vec<Problem>) -> Read
         ])
     });
     let upstreams = toml::Value::Table(toml::Table::new());
-    let configured =
-        job::configuration(tables, NAMED, version, STAND_IN, modal.as_ref(), upstreams);
+    let configured = job::configuration(
+        tables,
+        NAMED,
+        version,
+        Some(STAND_IN),
+        modal.as_ref(),
+        upstreams,
+    );
     let config = match configured {
         // Its errors name the path, which is the settings' ARN here.
         Ok(text) => config::parse(Path::new(settings.as_str()), &text)
@@ -184,13 +213,6 @@ fn read(cli: &Cli, settings: &ParameterArn, problems: &mut Vec<Problem>) -> Read
         config,
         deployment: Some(deployment),
     }
-}
-
-/// Whether `tables`, a controller's settings, name a Modal provider, whose job the client
-/// completes.
-fn has_modal(tables: &toml::Table) -> bool {
-    let providers = tables.get("providers").and_then(toml::Value::as_table);
-    (providers.into_iter().flatten()).any(|(_, kinds)| kinds.get("modal").is_some())
 }
 
 /// Checks that the members' list of controller `name`, SSM parameter `members`, parses.
@@ -246,7 +268,7 @@ fn controller(cli: &Cli, region: &Region, name: &Name, found: &mut Found) -> Opt
     let described = Described { instance, profile };
     let resource = format!("controller `{name}`, {}", described.instance.id);
     (found.problems).extend(described.problems(&resource));
-    (found.unchecked).extend(described.unchecked(&resource));
+    (found.unchecked).extend(described.unchecked(&resource, &name.to_string()));
     let role = described.role().map(str::to_owned);
     let id = described.instance.id;
     Some(Controller { id, role })

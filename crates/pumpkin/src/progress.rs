@@ -23,6 +23,7 @@ use crate::next;
 
 mod agent;
 mod child;
+mod clip;
 pub(crate) mod cost;
 mod model;
 mod row;
@@ -30,6 +31,8 @@ mod row;
 pub(crate) use agent::{caller_lane, line as agent_line};
 use child::{call_end, call_name, command, lease_end, lease_name, over_budget};
 pub(crate) use child::{called, leased};
+use clip::Clip;
+pub(crate) use clip::clipped;
 pub(crate) use cost::usd;
 pub(crate) use model::median;
 use model::model;
@@ -57,11 +60,20 @@ pub(crate) struct Listing {
     pub(crate) runs: BTreeMap<String, Entry>,
 }
 
+/// A run that `ls` can't list, and why, as `ls` says it. `unread` is what of the run's log this
+/// `pumpkin` can't read, as a row's is, if it read the log before it failed.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Unlisted {
+    pub(crate) id: String,
+    pub(crate) unread: Option<String>,
+    pub(crate) message: String,
+}
+
 /// A run in a listing.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Entry {
-    Row(Row),
+    Row(Box<Row>),
     /// A run that ended before `listed_since`, which `ls` names in a line, not a row.
     Older,
 }
@@ -108,16 +120,6 @@ pub(crate) struct Run {
 }
 
 impl Listed {
-    /// The run of `record`, which says on the standard error what of its log this `pumpkin`
-    /// can't read.
-    pub(crate) fn run(record: &Record, ending: Option<Ending>) -> Result<Self, ReadError> {
-        let Readout { progress, unread } = record.progress()?;
-        if let Some(unread) = self::unread(&unread) {
-            crate::say(format_args!("run {}: {unread}", record.id()));
-        }
-        Ok(Self::of(record, record.task()?, ending, progress))
-    }
-
     /// The run in `dir`, whose record failed to read with `error`, if the record is in a form
     /// that this build doesn't read and another build made it; else `error`.
     pub(crate) fn unread(dir: &Path, error: ReadError) -> Result<Self, String> {
@@ -182,8 +184,8 @@ impl State {
 /// started last, nearest the line of totals that follows them, each live run with a line for
 /// each of its calls and leases that hasn't ended, and a column of each run's member if one
 /// names one. The totals line ends with the command that lists the runs left out, unless there
-/// are none; `runs` is their runs directory, as commands name it.
-pub(crate) fn lines(listing: &Listing, runs: Option<&str>) -> String {
+/// are none, naming where `at` says.
+pub(crate) fn lines(listing: &Listing, at: &next::At) -> String {
     let mut lines = String::new();
     let mut totals = Totals::default();
     let mut older = Vec::new();
@@ -232,7 +234,7 @@ pub(crate) fn lines(listing: &Listing, runs: Option<&str>) -> String {
         parts.push(format!(
             "{} that ended over a day ago {are} listed: to list {them}: {}",
             crate::counted(older.len(), "run"),
-            next::of_run("ls", runs, &prefixes(&older).join(" "))
+            next::of_run("ls", at, &prefixes(&older).join(" "))
         ));
     }
     if !parts.is_empty() {
@@ -283,6 +285,7 @@ impl Totals {
             stage,
             spent,
             member: _,
+            unread: _,
         } = row;
         *self.states.entry(stage.state()).or_default() += 1;
         match stage {
@@ -363,7 +366,7 @@ pub(crate) struct Columns {
     pub(crate) rest: String,
 }
 
-fn columns(id: &str, listed: &Listed, state: State, now: UnixTime, runs: Option<&str>) -> Columns {
+fn columns(id: &str, listed: &Listed, state: State, now: UnixTime, named: &next::At) -> Columns {
     let column = |state: &str, time: &str, bound: &str, usd: &str, rest: &str| Columns {
         state: state.to_owned(),
         time: time.to_owned(),
@@ -382,7 +385,7 @@ fn columns(id: &str, listed: &Listed, state: State, now: UnixTime, runs: Option<
         Listed::Unstarted => {
             let why = format!(
                 "-: its job ended before the run started: to see why: {}",
-                next::of_run("wait", runs, id)
+                next::of_run("wait", named, id)
             );
             return column(state, "-", "", "-", &why);
         }
@@ -411,7 +414,7 @@ fn columns(id: &str, listed: &Listed, state: State, now: UnixTime, runs: Option<
             );
         };
         let at = now.since(progress.started);
-        let cancel = next::of_run("cancel", runs, id);
+        let cancel = next::of_run("cancel", named, id);
         let (name, time, bound, doing) = shown(phase(progress, at), at, &cancel);
         return column(&name, &time, &bound, &usd, &format!("{task}: {doing}"));
     };
@@ -430,10 +433,10 @@ fn columns(id: &str, listed: &Listed, state: State, now: UnixTime, runs: Option<
 
 /// The lines under a live run that has begun its log, each ending in a newline: one for each of
 /// its calls and leases that hasn't ended.
-fn under(id: &str, progress: &Progress, now: UnixTime, runs: Option<&str>) -> String {
+fn under(id: &str, progress: &Progress, now: UnixTime, named: &next::At) -> String {
     let mut lines = String::new();
     let at = now.since(progress.started);
-    let cancel = next::of_run("cancel", runs, id);
+    let cancel = next::of_run("cancel", named, id);
     for child in children(progress, at) {
         let (name, time, bound, doing) = shown(child, at, &cancel);
         let _ = writeln!(
@@ -692,19 +695,50 @@ fn models(models: &[&str]) -> String {
     counted.collect::<Vec<_>>().join(", ")
 }
 
-/// `values` as `name=value`, separated by spaces: a number with two decimals, four if it is below
-/// one, and no trailing zero; any other value as compact JSON.
+/// The most bytes of a result's values that the words for a run show; the record keeps them
+/// whole.
+// A body may return 1 MiB. The bound is `kubectl describe`'s, past which it shortens an annotation:
+// https://github.com/kubernetes/kubernetes/blob/af46c47ce925f4c4ad5cc8d1fca46c7b77d13b38/staging/src/k8s.io/kubectl/pkg/describe/describe.go#L4966
+const RESULT_SHOWN_BYTES: usize = 140;
+
+/// The most bytes of a text, such as the reason a call failed or a string of a log's record, that
+/// is shown whole; the record keeps it whole.
+// Pumpkin's own reasons say what is wrong, then what to do. They run to a few hundred bytes, and a
+// bound of 140 would cut off what to do. A body may also fail with a command's 1 MiB of output.
+// 8 KiB holds each reason that Pumpkin writes, and a page that shows many cut ones stays light.
+pub(crate) const TEXT_SHOWN_BYTES: usize = 8 * 1024;
+
+/// `values` as `name=value`, separated by spaces, cut after [`RESULT_SHOWN_BYTES`]: a number with
+/// two decimals, four if it is below one, and no trailing zero; any other value as compact JSON.
 pub(crate) fn shown_values(values: &[(Name, Value)]) -> String {
-    let shown = values.iter().map(|(name, value)| match value.as_f64() {
-        Some(number) => {
-            let decimals = if number.abs() >= 1.0 { 2 } else { 4 };
-            let shown = format!("{number:.decimals$}");
-            let shown = shown.trim_end_matches('0').trim_end_matches('.');
-            format!("{name}={}", if shown == "-0" { "0" } else { shown })
+    let mut shown = Clip::new(RESULT_SHOWN_BYTES);
+    for (index, (name, value)) in values.iter().enumerate() {
+        let space = if index == 0 { "" } else { " " };
+        // A write fails once the words pass the bound, so a long value is never copied whole.
+        let written = match value.as_f64() {
+            Some(number) => {
+                let decimals = if number.abs() >= 1.0 { 2 } else { 4 };
+                let number = format!("{number:.decimals$}");
+                let number = number.trim_end_matches('0').trim_end_matches('.');
+                let number = if number == "-0" { "0" } else { number };
+                write!(shown, "{space}{name}={number}")
+            }
+            None => write!(shown, "{space}{name}={value}"),
+        };
+        if written.is_err() {
+            break;
         }
-        None => format!("{name}={value}"),
-    });
-    shown.collect::<Vec<_>>().join(" ")
+    }
+    shown.text()
+}
+
+/// How a call that failed for `reason` ended, in words: `failed: ` and the reason, escaped onto
+/// one line and cut after [`TEXT_SHOWN_BYTES`].
+pub(crate) fn call_failed(reason: &str) -> String {
+    format!(
+        "failed: {}",
+        clipped(crate::Escaped(reason), TEXT_SHOWN_BYTES)
+    )
 }
 
 /// What a call's result shows, or `a result` if it shows nothing.

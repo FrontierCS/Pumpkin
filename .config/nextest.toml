@@ -1,3 +1,4 @@
+# nextest runs each test in a process of its own, so tests share no per-process state.
 [profile.default]
 # A test still running at 5 s is killed and fails ci: a test that hangs, or one far slower than
 # it was. Every test not named below ends within about 3 s, as a bound it waits for on the real
@@ -10,13 +11,16 @@ slow-timeout = { period = "5s", terminate-after = 1 }
 filter = 'package(runtime) & test(=conformance::suite)'
 slow-timeout = { period = "15s", terminate-after = 1 }
 
-# It waits about 4 s on the real clock for bounds the IR states in whole seconds, at the least
-# that keeps the case apart: a 4 s startup that must outlast a second start at a 2 s one.
-[[profile.default.overrides]]
-filter = 'package(runtime) & test(=execute::watches_each_provider)'
-slow-timeout = { period = "10s", terminate-after = 1 }
-
 # The tests that need a Docker engine, which `cargo xtask live docker` runs: they build and run
 # images, and take a minute or more.
 [profile.live]
 slow-timeout = { period = "60s", terminate-after = 5 }
+
+# The tests that reserve whole cores in the machine-wide ledger run one at a time: a machine with
+# few cores would otherwise keep a test waiting for room past the profile's 300 s kill.
+[test-groups]
+docker-cores = { max-threads = 1 }
+
+[[profile.live.overrides]]
+filter = 'package(docker) | (package(pumpkin) & test(/^(driver|run)::/))'
+test-group = 'docker-cores'

@@ -282,8 +282,9 @@ struct ClientInfoJson {
 
 impl Engine {
     /// Reaches the engine through `context`, and reports it, refusing one that keeps no containerd
-    /// image store. What it writes on this machine goes in `dir`, made once a build or a load needs
-    /// it: a directory of its own for each while it runs, and Buildx's state, in `buildx`.
+    /// image store. What it writes on this machine goes in `dir`, made once something needs it.
+    /// Each build and load gets a directory of its own there while it runs. Buildx keeps its state
+    /// in `buildx`, and the publish slots' lock files are in `publish-slots`.
     pub fn connect(context: ContextName, dir: &Path) -> Result<Self, String> {
         let Reach { endpoint, info } = reach(&context)?;
         let InfoJson {

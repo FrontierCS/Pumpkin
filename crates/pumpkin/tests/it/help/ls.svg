@@ -1,4 +1,4 @@
-<svg width="860px" height="650px" xmlns="http://www.w3.org/2000/svg">
+<svg width="860px" height="740px" xmlns="http://www.w3.org/2000/svg">
   <style>
     .fg { fill: #AAAAAA }
     .bg { fill: #000000 }
@@ -30,65 +30,75 @@
 </tspan>
     <tspan x="10px" y="100px"><tspan>run's line gives its phase and the bound on it. An ended run's line gives its state, how long it ran</tspan>
 </tspan>
-    <tspan x="10px" y="118px"><tspan>and its result's values. If a run can't be listed, `ls` says why and lists the others. With</tspan>
+    <tspan x="10px" y="118px"><tspan>and its result's values, cut short if they are long. `pumpkin wait --outcome` prints them whole. If</tspan>
 </tspan>
-    <tspan x="10px" y="136px"><tspan>`[controller]` in the configuration and no `--runs`, `ls` lists the controller's runs beside this</tspan>
+    <tspan x="10px" y="136px"><tspan>a run can't be listed, `ls` says why and lists the others. With `[controllers.&lt;name&gt;]` in the</tspan>
 </tspan>
-    <tspan x="10px" y="154px"><tspan>machine's copies.</tspan>
+    <tspan x="10px" y="154px"><tspan>configuration and no `--runs`, `ls` lists the controller's runs beside this machine's copies of</tspan>
 </tspan>
-    <tspan x="10px" y="172px">
+    <tspan x="10px" y="172px"><tspan>them.</tspan>
 </tspan>
-    <tspan x="10px" y="190px"><tspan class="fg-bright-green bold">Usage:</tspan><tspan> </tspan><tspan class="fg-bright-cyan bold">pumpkin ls</tspan><tspan> </tspan><tspan class="fg-cyan">[OPTIONS]</tspan><tspan> </tspan><tspan class="fg-cyan">[prefix]...</tspan>
+    <tspan x="10px" y="190px">
 </tspan>
-    <tspan x="10px" y="208px">
+    <tspan x="10px" y="208px"><tspan class="fg-bright-green bold">Usage:</tspan><tspan> </tspan><tspan class="fg-bright-cyan bold">pumpkin ls</tspan><tspan> </tspan><tspan class="fg-cyan">[OPTIONS]</tspan><tspan> </tspan><tspan class="fg-cyan">[prefix]...</tspan>
 </tspan>
-    <tspan x="10px" y="226px"><tspan class="fg-bright-green bold">Arguments:</tspan>
+    <tspan x="10px" y="226px">
 </tspan>
-    <tspan x="10px" y="244px"><tspan>  </tspan><tspan class="fg-cyan">[prefix]...</tspan>
+    <tspan x="10px" y="244px"><tspan class="fg-bright-green bold">Arguments:</tspan>
 </tspan>
-    <tspan x="10px" y="262px"><tspan>          A prefix of the ids of the runs to list, such as a day's in UTC, as `20261110`</tspan>
+    <tspan x="10px" y="262px"><tspan>  </tspan><tspan class="fg-cyan">[prefix]...</tspan>
 </tspan>
-    <tspan x="10px" y="280px">
+    <tspan x="10px" y="280px"><tspan>          A prefix of the ids of the runs to list, such as a day's in UTC, as `20261110`</tspan>
 </tspan>
-    <tspan x="10px" y="298px"><tspan class="fg-bright-green bold">Options:</tspan>
+    <tspan x="10px" y="298px">
 </tspan>
-    <tspan x="10px" y="316px"><tspan>      </tspan><tspan class="fg-bright-cyan bold">--runs</tspan><tspan class="fg-cyan"> </tspan><tspan class="fg-cyan">&lt;dir&gt;</tspan>
+    <tspan x="10px" y="316px"><tspan class="fg-bright-green bold">Options:</tspan>
 </tspan>
-    <tspan x="10px" y="334px"><tspan>          The directory of the runs to list (default: `runs` in the repository's `.pumpkin`)</tspan>
+    <tspan x="10px" y="334px"><tspan>      </tspan><tspan class="fg-bright-cyan bold">--runs</tspan><tspan class="fg-cyan"> </tspan><tspan class="fg-cyan">&lt;dir&gt;</tspan>
 </tspan>
-    <tspan x="10px" y="352px">
+    <tspan x="10px" y="352px"><tspan>          The directory of the runs to list (default: `runs` in the repository's `.pumpkin`)</tspan>
 </tspan>
-    <tspan x="10px" y="370px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">-h</tspan><tspan>, </tspan><tspan class="fg-bright-cyan bold">--help</tspan>
+    <tspan x="10px" y="370px">
 </tspan>
-    <tspan x="10px" y="388px"><tspan>          Print help</tspan>
+    <tspan x="10px" y="388px"><tspan>      </tspan><tspan class="fg-bright-cyan bold">--controller</tspan><tspan class="fg-cyan"> </tspan><tspan class="fg-cyan">&lt;name&gt;</tspan>
 </tspan>
-    <tspan x="10px" y="406px">
+    <tspan x="10px" y="406px"><tspan>          The controller of the configuration's `[controllers.&lt;name&gt;]` to reach (default: its one</tspan>
 </tspan>
-    <tspan x="10px" y="424px"><tspan class="fg-bright-green bold">Examples:</tspan>
+    <tspan x="10px" y="424px"><tspan>          controller)</tspan>
 </tspan>
-    <tspan x="10px" y="442px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">pumpkin ls</tspan>
+    <tspan x="10px" y="442px">
 </tspan>
-    <tspan x="10px" y="460px"><tspan>          List the runs that are live or ended within the last day</tspan>
+    <tspan x="10px" y="460px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">-h</tspan><tspan>, </tspan><tspan class="fg-bright-cyan bold">--help</tspan>
 </tspan>
-    <tspan x="10px" y="478px">
+    <tspan x="10px" y="478px"><tspan>          Print help</tspan>
 </tspan>
-    <tspan x="10px" y="496px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">pumpkin ls 20261110-1</tspan>
+    <tspan x="10px" y="496px">
 </tspan>
-    <tspan x="10px" y="514px"><tspan>          List the runs whose ids start with `20261110-1`</tspan>
+    <tspan x="10px" y="514px"><tspan class="fg-bright-green bold">Examples:</tspan>
 </tspan>
-    <tspan x="10px" y="532px">
+    <tspan x="10px" y="532px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">pumpkin ls</tspan>
 </tspan>
-    <tspan x="10px" y="550px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">pumpkin ls --runs runs</tspan>
+    <tspan x="10px" y="550px"><tspan>          List the runs that are live or ended within the last day</tspan>
 </tspan>
-    <tspan x="10px" y="568px"><tspan>          List the runs recorded in `runs`</tspan>
+    <tspan x="10px" y="568px">
 </tspan>
-    <tspan x="10px" y="586px">
+    <tspan x="10px" y="586px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">pumpkin ls 20261110-1</tspan>
 </tspan>
-    <tspan x="10px" y="604px"><tspan>The phases and states:</tspan>
+    <tspan x="10px" y="604px"><tspan>          List the runs whose ids start with `20261110-1`</tspan>
 </tspan>
-    <tspan x="10px" y="622px"><tspan>https://github.com/FrontierCS/Pumpkin/blob/main/docs/running.md#following-and-listing-runs</tspan>
+    <tspan x="10px" y="622px">
 </tspan>
-    <tspan x="10px" y="640px">
+    <tspan x="10px" y="640px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">pumpkin ls --runs runs</tspan>
+</tspan>
+    <tspan x="10px" y="658px"><tspan>          List the runs recorded in `runs`</tspan>
+</tspan>
+    <tspan x="10px" y="676px">
+</tspan>
+    <tspan x="10px" y="694px"><tspan>The phases and states:</tspan>
+</tspan>
+    <tspan x="10px" y="712px"><tspan>https://github.com/FrontierCS/Pumpkin/blob/main/docs/running.md#following-and-listing-runs</tspan>
+</tspan>
+    <tspan x="10px" y="730px">
 </tspan>
   </text>
 

@@ -30,7 +30,6 @@ pub(crate) struct Named {
     pub(crate) profiles: BTreeSet<String>,
 }
 
-/// What `templates` name.
 pub(crate) fn named<'d>(templates: impl IntoIterator<Item = &'d Data>) -> Named {
     let mut named = Named::default();
     for data in templates {

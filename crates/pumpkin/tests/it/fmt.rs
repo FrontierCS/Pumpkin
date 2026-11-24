@@ -1,5 +1,5 @@
-//! `fmt`: `.star` files formatted in place by the formatter beside `pumpkin`, the real one,
-//! which `cargo xtask ci` puts beside the tests' `pumpkin`; with `--check`, only said.
+//! `fmt`: `.star` files formatted in place by the real formatter beside `pumpkin`; with `--check`,
+//! only said.
 
 use std::fs;
 use std::os::unix::fs::symlink;

@@ -6,6 +6,7 @@ use std::io::{self, Read as _, Seek as _, SeekFrom};
 use std::path::Path;
 use std::time::Duration;
 
+use schema::frame::MAX_MESSAGE_BYTES;
 use stdx::Context as _;
 use stdx::process::{Bound, Echo, Environment, Run};
 
@@ -31,6 +32,7 @@ pub(crate) fn boot() -> Result<Exit, String> {
     // images that the job has built, which no IR that the boot reads names yet.
     let reap = cli::Reap {
         runs: None,
+        controller: None,
         modal_config: None,
     };
     crate::reap(reap, crate::Reaper::Boot)
@@ -99,6 +101,8 @@ impl Shown {
 /// when the JSON encoding escapes every byte.
 fn boot_log(path: &Path) -> io::Result<String> {
     const TAIL_BYTES: u64 = 4096;
+    // A JSON string writes a byte as at most six, `\u00XX`.
+    const _: () = assert!(TAIL_BYTES * 6 < MAX_MESSAGE_BYTES as u64);
     let mut file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(String::new()),

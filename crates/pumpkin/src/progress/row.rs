@@ -7,6 +7,7 @@ use runtime::{Ending, Stopped};
 use serde::{Deserialize, Serialize};
 
 use super::{Columns, Listed, State, columns, under};
+use crate::next;
 
 /// A run in a listing, rendered at the time and with the runs directory that it was made with.
 #[derive(Serialize, Deserialize)]
@@ -17,6 +18,8 @@ pub(crate) struct Row {
     pub(super) spent: Spent,
     /// The member whose job the run is, on a controller whose job names one.
     pub(crate) member: Option<Member>,
+    /// What of the run's log this `pumpkin` can't read, as `progress::unread` says it, if any.
+    pub(crate) unread: Option<String>,
 }
 
 /// What a run is doing or how it ended, with what only that stage has.
@@ -46,7 +49,6 @@ pub(super) enum Stage {
         under: String,
     },
     Finished {
-        /// Whether the run returned a result.
         result: bool,
     },
 }
@@ -69,15 +71,15 @@ pub(super) enum Spent {
 }
 
 impl Row {
-    /// The row of run `id`, `listed`, at `now`, with its commands naming `runs` as its runs
-    /// directory.
-    pub(crate) fn of(id: &str, listed: &Listed, now: UnixTime, runs: Option<&str>) -> Self {
-        let stage = Stage::of(id, listed, now, runs);
+    /// The row of run `id`, `listed`, at `now`, with its commands naming where `at` says.
+    pub(crate) fn of(id: &str, listed: &Listed, now: UnixTime, at: &next::At) -> Self {
+        let stage = Stage::of(id, listed, now, at);
         Self {
-            cells: columns(id, listed, stage.state(), now, runs),
+            cells: columns(id, listed, stage.state(), now, at),
             stage,
             spent: Spent::of(listed),
             member: None,
+            unread: None,
         }
     }
 
@@ -131,7 +133,7 @@ impl Row {
 }
 
 impl Stage {
-    fn of(id: &str, listed: &Listed, now: UnixTime, runs: Option<&str>) -> Self {
+    fn of(id: &str, listed: &Listed, now: UnixTime, at: &next::At) -> Self {
         let run = match listed {
             Listed::Waiting { .. } => return Self::Waiting,
             Listed::Building { .. } => return Self::Building,
@@ -147,7 +149,7 @@ impl Stage {
                 let ends = progress.started.saturating_add(progress.hard_end);
                 Self::Running {
                     ends_unix_seconds: ends.since_epoch().as_secs(),
-                    under: under(id, progress, now, runs),
+                    under: under(id, progress, now, at),
                 }
             }
             Some(Ending::Returned { .. }) => Self::Finished { result: true },

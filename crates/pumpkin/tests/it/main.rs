@@ -28,7 +28,7 @@ use engine::{ContextName, Engine};
 use expect_test::Expect;
 use serde_json::{Value, json};
 use stdx::process::Environment;
-use test_support::{BUSYBOX, TestDir, WORKFLOW, files};
+use test_support::{BUSYBOX, TestDir, files};
 
 mod cancel;
 mod check;
@@ -49,6 +49,11 @@ mod wait;
 const PUMPKIN: &str = env!("CARGO_BIN_EXE_pumpkin");
 
 const AWS_GUARD: &str = "no-aws";
+
+// What the machine's environment would change in what `pumpkin` prints or where it writes:
+// clap wraps help at `COLUMNS` when no terminal is attached, the colour follows `CLICOLOR_FORCE`
+// and `NO_COLOR`, and `PUMPKIN_WORKSPACE` names the workspace in place of the executable's.
+const UNSET: [&str; 4] = ["CLICOLOR_FORCE", "COLUMNS", "NO_COLOR", "PUMPKIN_WORKSPACE"];
 
 // The command of the final call of each task that a test writes: it scores the payload by its
 // size.
@@ -95,7 +100,7 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
-/// A test's own directory, with a copy of `pumpkin` in `.pumpkin/bin`.
+/// A test's own directory, with `pumpkin` and the formatter linked in `.pumpkin/bin`.
 ///
 /// Field `0` is its canonical path.
 struct Scratch(
@@ -238,8 +243,9 @@ impl Scratch {
         let home = self.0.join("home");
         fs::create_dir_all(&home).unwrap();
         command.env("HOME", home);
-        // clap wraps help at `COLUMNS` when no terminal is attached, and at 100 columns without it.
-        command.env_remove("COLUMNS");
+        for name in UNSET {
+            command.env_remove(name);
+        }
         // So that no test reaches AWS with the machine's credentials: one that runs `aws` puts its
         // own first on the `PATH` it gives.
         let path = std::env::var_os("PATH").unwrap_or_default();
@@ -358,12 +364,12 @@ fn check(
     expect.assert_eq(&text);
 }
 
-/// Runs `command` again for up to ten minutes while it fails only because other runs hold the
+/// Runs `command` again for up to four minutes while it fails only because other runs hold the
 /// machine's CPUs. Gives its output without the lines that say an image's build started or ended.
-// A run builds an image only if the engine lacks it under its tag. An earlier try, or another
-// test's run of the same recipe, may have left it.
 fn with_room(command: &mut Command) -> Output {
-    let room = Instant::now() + Duration::from_mins(10);
+    // Below the 300 s at which nextest's `live` profile kills a test, so that a machine too
+    // crowded shows as the reservation's refusal, not as a kill that says nothing.
+    let room = Instant::now() + Duration::from_mins(4);
     loop {
         let output = command.output().unwrap();
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -371,6 +377,8 @@ fn with_room(command: &mut Command) -> Output {
             && stderr.contains("pumpkin: reserving on provider")
             && stderr.contains("run it once");
         if !crowded || Instant::now() >= room {
+            // A run builds an image only if the engine lacks it under its tag. An earlier try, or
+            // another test's run of the same recipe, may have left it.
             let building = [
                 "pumpkin: building an image in ",
                 "pumpkin: built an image in ",
@@ -398,10 +406,10 @@ fn ran(mut command: Command, dir: &Path, rootful: bool) -> String {
 
 fn invocation(command: &Command) -> String {
     // The home and the `PATH` that `Scratch::program` gives each command, `<scratch>/home` and
-    // one that starts with its AWS guard, and its unset `COLUMNS`, are the rule: they are not
+    // one that starts with its AWS guard, and the variables it unsets, are the rule: they are not
     // shown.
     let set = command.get_envs().filter_map(|(name, value)| match value {
-        None if name == "COLUMNS" => None,
+        None if UNSET.iter().any(|unset| name == *unset) => None,
         Some(value) if name == "HOME" && Path::new(value).ends_with("home") => None,
         Some(value)
             if name == "PATH"
@@ -661,6 +669,8 @@ fn masked_members(ran: &str, ids: &str, members: usize) -> String {
         let indent = line.len() - line.trim_start().len();
         let row = line.trim_start().starts_with(ids).then_some(indent);
         if let Some(at) = row.or_else(|| (indent > 25).then(|| indent - 25)) {
+            // `ls` writes a row as its id in 24 columns, a space, its state in 11, a space and
+            // its time in 7: the time starts 37 columns in, after the members' column if any.
             let at = at + members + 37;
             line.replace_range(at..at + 7, "    <t>");
         }
@@ -805,6 +815,31 @@ fn started_work(seconds: u64) -> [Value; 2] {
             json!([]),
         ),
     ]
+}
+
+/// The `model_answered` event of the agent's request, forwarded from an upstream that answered
+/// `status`, with each field of the object `more` set over it.
+fn agent_answer(status: u64, more: Value) -> Value {
+    let mut answer = json!({
+        "kind": "model_answered", "caller": "agent-0",
+        "answer": { "kind": "forwarded" }, "upstream_status": status,
+    });
+    let Value::Object(more) = more else {
+        panic!("the fields to set are no object");
+    };
+    answer.as_object_mut().unwrap().extend(more);
+    answer
+}
+
+/// The log of an agent that starts at 5 s, then has each of `answers`, events of
+/// [`agent_answer`], as the answers to its requests 0, 1 and on, 10 s apart from 10 s.
+fn answered_log(answers: impl IntoIterator<Item = Value>) -> Vec<Value> {
+    let mut log = Vec::from(started_work(5));
+    for (request, (seconds, mut answer)) in (0_u64..).zip((10..).step_by(10).zip(answers)) {
+        answer["request"] = json!(request);
+        log.push(logged(seconds, answer, json!([])));
+    }
+    log
 }
 
 fn agent_exited(seconds: u64) -> Value {
@@ -966,13 +1001,10 @@ fn whole_log() -> Vec<Value> {
     // As the Messages API reports a cache's writes.
     let mut written = tokens(2000, 200, 1800);
     written["cache_write_tokens"] = json!(150);
+    let [work, agent] = started_work(5);
     vec![
-        logged(5, json!({"kind":"work_started"}), none()),
-        logged(
-            5,
-            json!({"kind":"agent_started","caller":"agent-0"}),
-            none(),
-        ),
+        work,
+        agent,
         logged(8, started(0), none()),
         logged(10, answered(0, reasoned, Some("9250000000")), none()),
         logged(15, started(1), none()),
@@ -1137,6 +1169,14 @@ fn write_record(scratch: &Scratch, id: &str, pid: bool, outcome: Option<Value>) 
     }
 }
 
+/// Opens the `driver.pid` of the run recorded in `dir` and locks it, as the run's driver does
+/// until the returned file is dropped.
+fn lock_driver(dir: &Path) -> fs::File {
+    let driver = fs::File::open(dir.join("driver.pid")).unwrap();
+    driver.lock().unwrap();
+    driver
+}
+
 /// What a record made by this build names as its `pumpkin`.
 fn this_build() -> Value {
     let build = runtime::BUILD;
@@ -1160,11 +1200,7 @@ fn write_docker_record(scratch: &Scratch, id: &str, context: &str, outcome: Opti
 /// The fixture's workflow with `argv` as the agent's command and no model route, every role
 /// running `image` with a small share of a machine.
 fn workflow(image: &str, argv: &[&str]) -> Value {
-    let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
-    ir["roles"][0]["runtime"]["agent"]
-        .as_object_mut()
-        .unwrap()
-        .remove("egress");
+    let mut ir = test_support::unrouted();
     ir["roles"][0]["runtime"]["agent"]["command"]["argv"] = json!(argv);
     for role in ir["roles"].as_array_mut().unwrap() {
         role["image"] = json!(image);

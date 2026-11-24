@@ -8,33 +8,33 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::fmt::Write as _;
 use std::io::{self, BufReader, Write};
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{fs, iter};
 
 use decision::{Outcome, lasts};
 use expect_test::{Expect, expect};
-use gateway::{Dialer, GatewayAddress, Listener};
+use gateway::Dialer;
 use provider::{
-    Console, Create, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation, Role,
-    RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
+    Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation,
+    Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
 use route::Serving;
 use runtime::{Host, ModelRoutes, Reaped, Record, Recorded, Run, System, TokenPrices, new_id};
 use schema::ir::{self, Image, ModelName};
-use schema::sandbox::{HELLO_TIMEOUT, RESULT_MAX_DEPTH};
+use schema::sandbox::{RESULT_MAX_DEPTH, SocketDial};
 use schema::workflow::{ByRole, Placed, Workflow};
 use serde_json::{Value, json};
 use stdx::Deadline;
 use test_support::http::{read_request, write_chunk};
-use test_support::{TestDir, WORKFLOW, files, sandboxes, standard_outputs};
+use test_support::{TestDir, files, sandboxes, standard_outputs};
 
 use crate::body::Bodies;
-use crate::host::{LateTake, SimHost, SlowSync, Synced};
+use crate::host::{LateTake, SimHost, SimTime, SlowSync, Synced};
 use crate::run::{PROVIDER, compact_outcome, placed, placed_on, providers_of, serving};
 use crate::sim::{
     self, BRIEF, HUNG, Journal, LAST, LOST, MUTE, REFUSED_ONCE, SCRIBBLED, SLOW, Sim, UNDELETABLE,
@@ -59,8 +59,6 @@ const WAITED: u64 = 60;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum At {
-    PublishSandboxd,
-    PublishImage,
     Created(&'static str),
     Delete,
     AgentStarted,
@@ -130,21 +128,15 @@ impl Provider for Interrupting<'_> {
     }
 
     fn publish_image(&self, image: &Image) -> Result<ImageRef, String> {
-        self.at(At::PublishImage);
         self.sim.publish_image(image)
     }
 
     fn publish_sandboxd(&self, path: &Path) -> Result<SandboxdRef, String> {
-        self.at(At::PublishSandboxd);
         self.sim.publish_sandboxd(path)
     }
 
     fn meeting(&self) -> Meeting<'_> {
-        match self.sim.meeting() {
-            Meeting::Local(_) => Meeting::Local(self),
-            Meeting::Private(_) => Meeting::Private(self),
-            Meeting::Listen(_) => Meeting::Listen(self),
-        }
+        Meeting::Local(self)
     }
 
     fn console(&self, run: &RunTag, id: &SandboxId) -> Result<Console, String> {
@@ -152,15 +144,12 @@ impl Provider for Interrupting<'_> {
     }
 }
 
-impl<D, C> Creator<D, C> for Interrupting<'_>
-where
-    Sim: Creator<D, C>,
-{
-    fn create(&self, create: &Create, dial: D) -> Result<C, String> {
+impl Creator<SocketDial> for Interrupting<'_> {
+    fn create(&self, create: &Create, dial: SocketDial) -> Result<Created, String> {
         if create.name.as_str().starts_with("shared-") {
             assert!(!create.ops && !create.model);
         }
-        let created = Creator::<D, C>::create(self.sim, create, dial);
+        let created = self.sim.create(create, dial);
         if let Some(At::Created(name)) = self.at
             && create.name.as_str() == name
         {
@@ -185,23 +174,9 @@ fn interrupting<'a>(
         .collect()
 }
 
-fn interrupted_at(
-    run: Run<'_, impl Host>,
-    providers: &[(&'static str, &Sim)],
-    sandboxd: &str,
-    also: &[Also],
-) -> Vec<String> {
+fn interrupted_at(run: Run<'_, impl Host>, sandboxd: &str, also: &[Also]) -> Vec<String> {
     let record = run.dir().to_owned();
     let at = interruption(also);
-    let listen = !also.contains(&Also::WithoutListener)
-        && providers
-            .iter()
-            .any(|(_, provider)| matches!(provider.meeting(), Meeting::Private(_)));
-    let private = listen.then(|| {
-        let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
-        let address = GatewayAddress::try_from(loopback).unwrap();
-        Listener::bind(&address, HELLO_TIMEOUT).unwrap()
-    });
     let waited = Deadline::after(Duration::from_secs(WAITED));
     let mut ran = false;
     let executed = thread::scope(|scope| {
@@ -210,7 +185,7 @@ fn interrupted_at(
         }
         run.execute(
             Path::new(sandboxd),
-            private.as_ref(),
+            None,
             &Dialer::new(test_support::edge::client()),
             &Bodies { record: &record },
             || {
@@ -227,22 +202,13 @@ fn interrupted_at(
         lines.push(format!("it started: {ran}"));
         let within = waited.remaining().is_some();
         lines.push(format!("it returned within {WAITED} s: {within}"));
-        let published = providers.iter().flat_map(|(_, sim)| sim.published());
-        lines.push(format!("it published: {:?}", published.collect::<Vec<_>>()));
     }
     lines
 }
 
 fn interrupt_once_started(record: &Path) {
-    for _ in 0..6000 {
-        let log = fs::read_to_string(record.join("log.jsonl")).unwrap_or_default();
-        if log.contains(r#""kind":"agent_started""#) {
-            interrupt();
-            return;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    panic!("the agent didn't start in a minute");
+    sim::logged(record, r#""kind":"agent_started""#);
+    interrupt();
 }
 
 fn shown(sim: &Sim) -> Vec<String> {
@@ -274,43 +240,33 @@ fn check(
     expect.assert_eq(&executed(host, name, providers, ir, sandboxd, &[]));
 }
 
-fn check_polls(
-    host: &impl Shown,
-    name: &str,
-    providers: &[(&'static str, &Sim)],
-    ir: &Value,
-    sandboxd: &str,
-    expect: &Expect,
-) {
-    let also = [Also::Polls];
-    expect.assert_eq(&executed(host, name, providers, ir, sandboxd, &also));
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Also {
     Interrupted(At),
-    WithoutListener,
     Listing,
     Usage,
     Exchanges,
     ChangedItem,
     Polls,
     Reaped,
-    /// A kind of event whose record races the run's failure, which the shown log leaves out.
+    /// A part of the records that nothing orders among the others, which the log shows apart
+    /// from them, sorted.
     Racing(&'static str),
+    /// A file of the record, which the output shows whole.
+    File(&'static str),
 }
 
 fn interruption(also: &[Also]) -> Option<At> {
     also.iter().find_map(|also| match also {
         Also::Interrupted(at) => Some(*at),
-        Also::WithoutListener
-        | Also::Listing
+        Also::Listing
         | Also::Usage
         | Also::Exchanges
         | Also::ChangedItem
         | Also::Polls
         | Also::Reaped
-        | Also::Racing(_) => None,
+        | Also::Racing(_)
+        | Also::File(_) => None,
     })
 }
 
@@ -344,7 +300,7 @@ fn executed_ir<H: Shown>(
 ) -> String {
     let at = interruption(also);
     let runs = TestDir::new();
-    let stand_in = model_routed(ir).then(StandIn::start);
+    let stand_in = model_routed(ir).then(|| StandIn::start(host.time()));
     let ready = (providers.iter()).map(|(name, provider)| (*name, provider.ready()));
     let ready: BTreeMap<&str, &Ready> = ready.collect();
     let placed = placed_on(ir, &ready).unwrap();
@@ -353,7 +309,7 @@ fn executed_ir<H: Shown>(
     let id = new_id(SystemTime::now()).unwrap();
     let record = runs.path().join(id.as_str());
     for (_, sim) in providers {
-        sim.records(&record);
+        sim.records(&record, host.time());
     }
     let interrupting = interrupting(providers, at, &record);
     let on = providers_of(&placed, |name| named(&interrupting, name));
@@ -364,7 +320,7 @@ fn executed_ir<H: Shown>(
     let sockets = record.join("sockets");
     let partial = record.with_file_name(format!(".{}.partial", run.id()));
     let before = unix_ns();
-    let mut lines = interrupted_at(run, providers, sandboxd, also);
+    let mut lines = interrupted_at(run, sandboxd, also);
     let started = before..=unix_ns();
     let log = read_log(&record);
     let held = held(name, &record, &log, providers, also, &lines[0]);
@@ -375,14 +331,13 @@ fn executed_ir<H: Shown>(
     lines.push("log.jsonl:".to_owned());
     let (log, start, last) = logged(log, &started, H::SCRIPTED, also);
     lines.extend(log);
-    if let Some(last) = last {
-        let last = when(&placed, last);
-        lines.push(format!("its last record came {last}"));
-    }
-    if written(&record, start).is_some_and(|written| written >= hard_end) {
+    lines.extend(last.map(|last| format!("its last record came {}", when(&placed, last))));
+    // A scripted host's last record shows its time above, which the log's file doesn't follow.
+    if !H::SCRIPTED && written(&record, start).is_some_and(|written| written >= hard_end) {
         lines.push("its log's last record was written once the hard end had passed".to_owned());
     }
     lines.extend(standard_outputs(&record));
+    lines.extend(also.iter().flat_map(|also| shown_file(&record, also)));
     let address = stand_in.as_ref().map(|stand_in| stand_in.address.clone());
     let (received, hung_ups) = stand_in.map(StandIn::stop).unwrap_or_default();
     let exchanges = kept_exchanges(name, &record, received);
@@ -416,6 +371,17 @@ fn executed_ir<H: Shown>(
     (names.into_iter()).fold(lines.join("\n"), |shown, (path, name)| {
         shown.replace(&path, name)
     })
+}
+
+// The lines of the file of `record` that `also` names, if it names one, under its path.
+fn shown_file(record: &Path, also: &Also) -> Vec<String> {
+    let Also::File(path) = also else {
+        return Vec::new();
+    };
+    let text = fs::read_to_string(record.join(path)).unwrap();
+    iter::once(format!("{path}:"))
+        .chain(text.lines().map(str::to_owned))
+        .collect()
 }
 
 fn prices() -> BTreeMap<ModelName, TokenPrices> {
@@ -868,7 +834,8 @@ struct StandIn {
 }
 
 impl StandIn {
-    fn start() -> Self {
+    // On a simulated host, `time` times each hang-up.
+    fn start(time: Option<SimTime>) -> Self {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let address = listener.local_addr().unwrap().to_string();
         let (stops, stopped) = mpsc::channel();
@@ -881,7 +848,8 @@ impl StandIn {
                 let connection = connection.unwrap();
                 // Each connection is answered on a thread of its own, so that a stalled stream
                 // holds no other request.
-                answering.push(thread::spawn(move || answer(connection)));
+                let time = time.clone();
+                answering.push(thread::spawn(move || answer(connection, time.as_ref())));
             }
             let answered = answering
                 .into_iter()
@@ -929,7 +897,7 @@ impl StandIn {
     }
 }
 
-fn answer(mut connection: TcpStream) -> (Vec<u8>, Option<u64>) {
+fn answer(mut connection: TcpStream, time: Option<&SimTime>) -> (Vec<u8>, Option<u64>) {
     let (line, headers, body) = read_request(&mut BufReader::new(&connection));
     let received = body.clone();
     let key = headers.iter().find(|(name, _)| name == "authorization");
@@ -937,9 +905,7 @@ fn answer(mut connection: TcpStream) -> (Vec<u8>, Option<u64>) {
     let conversation = input.get("input").unwrap_or(&input["messages"]);
     let said = (conversation.as_str()).or_else(|| conversation[1]["content"].as_str());
     let refused = match said {
-        Some("silent") => return (received, None),
         Some("expired") => Some(("401 Unauthorized", "")),
-        Some("forbidden") => Some(("403 Forbidden", "")),
         Some("down") => Some(("502 Bad Gateway", "x-request-id: req-502\r\n")),
         _ => None,
     };
@@ -972,16 +938,6 @@ fn answer(mut connection: TcpStream) -> (Vec<u8>, Option<u64>) {
         completed(&mut connection, said == "usage");
         return (received, None);
     }
-    // As a provider answered a rate limit, with a 200.
-    if said == Some("limited") {
-        write_chunk(
-            &mut connection,
-            "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"Rate limit reached\"},\"usage\":null}}\n\n\
-             event: error\ndata: {\"type\":\"error\",\"code\":\"rate_limit_exceeded\",\"message\":\"Rate limit reached\",\"param\":null}\n\n",
-        );
-        write_chunk(&mut connection, "");
-        return (received, None);
-    }
     if said == Some("stream") {
         write_chunk(&mut connection, &echo);
         write_chunk(&mut connection, "");
@@ -990,7 +946,7 @@ fn answer(mut connection: TcpStream) -> (Vec<u8>, Option<u64>) {
     write_chunk(&mut connection, "event: response.created\n\n");
     // What the client sends is read until it hangs up, as its end shows that it has.
     let _ = io::copy(&mut connection, &mut io::sink());
-    (received, Some(unix_ns()))
+    (received, Some(time.map_or_else(unix_ns, sim_unix_ns)))
 }
 
 fn completed(connection: &mut TcpStream, ended: bool) {
@@ -1011,14 +967,25 @@ fn completed(connection: &mut TcpStream, ended: bool) {
 
 trait Shown: Host {
     const SCRIPTED: bool;
+
+    /// The clock that the simulated provider waits on, if the host's is simulated.
+    fn time(&self) -> Option<SimTime>;
 }
 
 impl Shown for System {
     const SCRIPTED: bool = false;
+
+    fn time(&self) -> Option<SimTime> {
+        None
+    }
 }
 
 impl Shown for SimHost {
     const SCRIPTED: bool = true;
+
+    fn time(&self) -> Option<SimTime> {
+        Some(Self::time(self))
+    }
 }
 
 fn logged(
@@ -1033,11 +1000,6 @@ fn logged(
         // A poll answered by its own kind, and a call refused as busy, which the agent makes
         // again, are dropped, as how many an `await` or a call makes depends on timing, and the
         // later op numbers drop with them.
-        let racing =
-            |also: &Also| matches!(also, Also::Racing(kind) if logged["event"]["kind"] == *kind);
-        if also.iter().any(racing) {
-            continue;
-        }
         let kind = &logged["event"]["request"]["kind"];
         if kind == "call" && logged.pointer("/actions/0/reply/busy") == Some(&json!(true)) {
             dropped += 1;
@@ -1100,7 +1062,29 @@ fn logged(
         }
         records.push(logged);
     }
-    (numbered(records), start, last)
+    (numbered_apart(records, also), start, last)
+}
+
+// The records numbered in order, then those of a racing kind, sorted, with no place.
+fn numbered_apart(records: Vec<Value>, also: &[Also]) -> Vec<String> {
+    let races = |logged: &Value| {
+        let line = logged.to_string();
+        (also.iter()).any(|also| matches!(also, Also::Racing(part) if line.contains(part)))
+    };
+    let (racing, records): (Vec<Value>, _) = records.into_iter().partition(races);
+    let mut lines = numbered(records);
+    let mut racing: Vec<String> = (racing.into_iter())
+        .map(|mut logged| {
+            logged.as_object_mut().unwrap().remove("seq");
+            elided(&logged.to_string())
+        })
+        .collect();
+    if !racing.is_empty() {
+        racing.sort_unstable();
+        lines.push("log.jsonl, at no fixed place:".to_owned());
+        lines.extend(racing);
+    }
+    lines
 }
 
 fn polls(log: &[Value]) -> Vec<String> {
@@ -1247,10 +1231,8 @@ fn when(placed: &Placed, last: Duration) -> &'static str {
 }
 
 fn workflow(argv: &[&str]) -> Value {
-    let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
-    let agent = &mut ir["roles"][0]["runtime"]["agent"];
-    agent.as_object_mut().unwrap().remove("egress");
-    agent["command"]["argv"] = json!(argv);
+    let mut ir = test_support::unrouted();
+    ir["roles"][0]["runtime"]["agent"]["command"]["argv"] = json!(argv);
     ir
 }
 
@@ -1310,35 +1292,14 @@ fn deleted_by_the_sweep() {
 }
 
 #[test]
-fn sweep_unrecorded() {
-    check(
-        &SimHost::new().failed_sync_of(".sandbox.json.partial", 2),
-        "sweep-unrecorded",
-        &[(PROVIDER, &Sim::new())],
-        &workflow(&["exit", "0"]),
-        REFUSED_ONCE,
-        &expect![[r#"
-            failed: deleting the sandbox failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; <record>/agents/agent/.sandbox.json.partial: the simulated host's sync failed
-            agent `agent`'s sandbox, agents/agent/sandbox.json: {"delete":{"state":"failed"},"id":"sim-1","provider":"simulated"}
-            log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"18270000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
-            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
-            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"0","seq":3}
-            {"at_ns":"0","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":4}
-            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_collected"},"seq":5}
-            {"actions":[],"at_ns":"0","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":6}
-            {"at_ns":"0","note":"the run failed: deleting the sandbox failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; <record>/agents/agent/.sandbox.json.partial: the simulated host's sync failed","seq":7}
-            its last record came before the agent's teardown was to end"#]],
-    );
-}
-
-#[test]
 fn unstarted_undeletable() {
     let mut ir = workflow(&["exit", "0"]);
     ir["roles"][0]["image"] = json!(sim::image(MUTE).as_str());
+    // Once the start has read the clock past the create's record, the clock moves to its first
+    // look, which finds the sandbox ended.
+    let created = Synced::Holding(AGENT_SANDBOX, "sim-1");
     let shown = executed(
-        &SimHost::new(),
+        &SimHost::new().moving_after_read(created, Duration::from_secs(1)),
         "unstarted-undeletable",
         &[(PROVIDER, &Sim::new())],
         &ir,
@@ -1351,55 +1312,24 @@ fn unstarted_undeletable() {
         agent `agent`'s sandbox, agents/agent/sandbox.json: {"delete":{"state":"failed"},"id":"sim-1","provider":"simulated"}
         log.jsonl:
         {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"18270000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-        {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
-        {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_failed","reason":"the agent's sandbox didn't start: it ended before it met the gateway: expected its `sandboxd` to run until it connects"},"observed_ns":"0","seq":2}
-        {"at_ns":"0","note":"the run failed: sandbox sim-1: it ended before it met the gateway: expected its `sandboxd` to run until it connects; its console ends: sandboxd: a simulated one, which never dials; deleting it failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `simulated` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","seq":3}
+        {"actions":[],"at_ns":"1000000000","event":{"kind":"work_started"},"observed_ns":"1000000000","seq":1}
+        {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"agent_failed","reason":"the agent's sandbox didn't start: it ended before it met the gateway: expected its `sandboxd` to run until it connects"},"observed_ns":"1000000000","seq":2}
+        {"at_ns":"1000000000","note":"the run failed: sandbox sim-1: it ended before it met the gateway: expected its `sandboxd` to run until it connects; its console ends: sandboxd: a simulated one, which never dials; deleting it failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `simulated` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","seq":3}
         its last record came before the agent's teardown was to end
         listed once it ended: ["sim-1"]"#]]
     .assert_eq(&shown);
 }
 
 #[test]
-fn exits() {
-    let mut ir = workflow(&["exit", "3"]);
-    // The exit, not the deadline, ends the work phase.
-    ir["deadline_seconds"] = json!(30);
-    let shown = executed(
-        &SimHost::new(),
-        "exits",
-        &[(PROVIDER, &Sim::new().priced(0.25))],
-        &ir,
-        SANDBOXD,
-        &[Also::Usage],
-    );
-    expect![[r#"
-        finished, showing [score=0]
-        outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_exited","status":{"code":3}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
-        outcome.json's usage: {"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated","usd":"<usd>","usd_per_hour":0.25}],"tokens":{"input":0,"output":0,"responses":0},"usd":"<usd>"}
-        log.jsonl:
-        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-        {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
-        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
-        {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":3}},"observed_ns":"0","seq":3}
-        {"at_ns":"0","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":4}
-        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_collected"},"seq":5}
-        {"actions":[],"at_ns":"0","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":6}
-        {"actions":[{"job":0,"kind":"start_final_call","selections":[{"role":"agent","selection":null}],"timeout_ns":"120000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"0","seq":7}
-        {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_started"},"observed_ns":"0","seq":8}
-        {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_returned","returned":[{"name":"score","value":0}]},"observed_ns":"0","seq":9}
-        {"actions":[],"at_ns":"0","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":10}
-        {"actions":[{"kind":"finish"}],"at_ns":"0","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"0","seq":11}
-        its last record came before the agent's teardown was to end"#]]
-    .assert_eq(&shown);
-}
-
-#[test]
 fn stalls() {
-    let mut ir = workflow(&["stall"]);
+    // Once it has started, the agent's sleep moves the clock to the 1 s deadline. Then its sandbox
+    // stops answering, and holds its teardown's freeze until the clock reaches its end, 3 s.
+    let argv = ["ops", "await_log agent_started", "sleep 1", "stall 3"];
+    let mut ir = workflow(&argv);
     ir["deadline_seconds"] = json!(1);
     ir["roles"][0]["runtime"]["agent"]["finalize_grace_seconds"] = json!(0);
     check(
-        &System,
+        &SimHost::new(),
         "stalls",
         &[(PROVIDER, &Sim::with_startup(SHORT_STARTUP))],
         &ir,
@@ -1408,50 +1338,41 @@ fn stalls() {
             finished, showing [score=0]
             outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"deadline"}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"<ns>","event":{"hard_end_ns":"124000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"work_started"},"observed_ns":"<ns>","seq":1}
-            {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"kind":"tick"},"observed_ns":"<ns>","seq":3}
-            {"at_ns":"<ns>","note":"freezing the agent's sandbox failed: the sandbox didn't answer before the request's deadline: expected its answer while the deadline lasts","seq":4}
-            {"at_ns":"<ns>","note":"the agent's out is incomplete: collecting /pumpkin/out failed: the sandbox didn't answer before the request's deadline: expected its answer while the deadline lasts","seq":5}
-            {"at_ns":"<ns>","note":"the agent's log is incomplete: collecting /pumpkin/log failed: the sandbox didn't answer before the request's deadline: expected its answer while the deadline lasts","seq":6}
-            {"at_ns":"<ns>","note":"collected from agent `agent`'s sandbox: out, nothing; log, nothing","seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_collected"},"seq":8}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":9}
-            {"actions":[{"job":0,"kind":"start_final_call","selections":[{"role":"agent","selection":null}],"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"<ns>","seq":10}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_started"},"observed_ns":"<ns>","seq":11}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_returned","returned":[{"name":"score","value":0}]},"observed_ns":"<ns>","seq":12}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":13}
-            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":14}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"124000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
+            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
+            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"1000000000","event":{"kind":"tick"},"observed_ns":"1000000000","seq":3}
+            {"at_ns":"3000000000","note":"freezing the agent's sandbox failed: the sandbox didn't answer before the request's deadline: expected its answer while the deadline lasts","seq":4}
+            {"at_ns":"3000000000","note":"the agent's out is incomplete: collecting /pumpkin/out failed: the sandbox didn't answer before the request's deadline: expected its answer while the deadline lasts","seq":5}
+            {"at_ns":"3000000000","note":"the agent's log is incomplete: collecting /pumpkin/log failed: the sandbox didn't answer before the request's deadline: expected its answer while the deadline lasts","seq":6}
+            {"at_ns":"3000000000","note":"collected from agent `agent`'s sandbox: out, nothing; log, nothing","seq":7}
+            {"actions":[],"at_ns":"3000000000","event":{"caller":"agent-0","kind":"agent_collected"},"seq":8}
+            {"actions":[],"at_ns":"3000000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":9}
+            {"actions":[{"job":0,"kind":"start_final_call","selections":[{"role":"agent","selection":null}],"timeout_ns":"120000000000"}],"at_ns":"3000000000","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"3000000000","seq":10}
+            {"actions":[],"at_ns":"3000000000","event":{"job":0,"kind":"call_started"},"observed_ns":"3000000000","seq":11}
+            {"actions":[],"at_ns":"3000000000","event":{"job":0,"kind":"call_returned","returned":[{"name":"score","value":0}]},"observed_ns":"3000000000","seq":12}
+            {"actions":[],"at_ns":"3000000000","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":13}
+            {"actions":[{"kind":"finish"}],"at_ns":"3000000000","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"3000000000","seq":14}
             its last record came once the agent's teardown was to end, before the hard end"#]],
     );
 }
 
-// Both runs end before the startup has passed once, which a start that waited it out
-// wouldn't.
+// Each start ends at its first look, which finds its sandbox ended, long before its 30 s startup:
+// the clock moves past the look's interval once the start reads it past its create's record.
 #[test]
 fn unstarted() {
     let ir = workflow(&["exit", "0"]);
-    let parsed: ir::Workflow = serde_json::from_value(ir.clone()).unwrap();
-    let placed = placed(&parsed, Sim::new().ready()).unwrap();
-    let startup = placed.startup(placed.workflow().agents().next().unwrap().id.role());
-    let begun = Instant::now();
     let on = |name, sandboxd| {
-        executed(
-            &System,
-            name,
-            &[(PROVIDER, &Sim::new())],
-            &ir,
-            sandboxd,
-            &[],
-        )
+        let looked = |record, id| Synced::Holding(record, id);
+        let host = SimHost::new()
+            .moving_after_read(looked(AGENT_SANDBOX, "sim-1"), Duration::from_secs(1))
+            .moving_after_read(
+                looked("jobs/0/.sandbox.json.partial", "sim-2"),
+                Duration::from_secs(2),
+            );
+        executed(&host, name, &[(PROVIDER, &Sim::new())], &ir, sandboxd, &[])
     };
     let (listed, left_out) = (on("unstarted", MUTE), on("unstarted-left-out", VANISHING));
-    let took = begun.elapsed();
-    assert!(
-        took < startup,
-        "the runs took {took:?}, the startup {startup:?}"
-    );
     assert_eq!(
         left_out, listed,
         "left out of the list, against listed as ended"
@@ -1460,16 +1381,16 @@ fn unstarted() {
         finished without a result
         outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: it ended before it met the gateway: expected its `sandboxd` to run until it connects"}}],"verdict":{"failure":{"kind":"error","reason":"the job's sandbox didn't start: sandbox sim-2: it ended before it met the gateway: expected its `sandboxd` to run until it connects; its console ends: sandboxd: a simulated one, which never dials"},"kind":"no_result"}}
         log.jsonl:
-        {"actions":[{"kind":"start_agents"}],"at_ns":"<ns>","event":{"hard_end_ns":"18270000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-        {"actions":[],"at_ns":"<ns>","event":{"kind":"work_started"},"observed_ns":"<ns>","seq":1}
-        {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_failed","reason":"the agent's sandbox didn't start: it ended before it met the gateway: expected its `sandboxd` to run until it connects"},"observed_ns":"<ns>","seq":2}
-        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":3}
-        {"at_ns":"<ns>","note":"agent `agent`: the agent's sandbox didn't start: sandbox sim-1: it ended before it met the gateway: expected its `sandboxd` to run until it connects; its console ends: sandboxd: a simulated one, which never dials","seq":4}
-        {"at_ns":"<ns>","note":"the agent's sandbox never started: nothing was collected","seq":5}
-        {"actions":[{"job":0,"kind":"start_final_call","selections":[{"role":"agent","selection":null}],"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"<ns>","seq":6}
-        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":7}
-        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_failed","reason":"the job's sandbox didn't start: sandbox sim-2: it ended before it met the gateway: expected its `sandboxd` to run until it connects; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"<ns>","seq":8}
-        {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":9}
+        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"18270000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+        {"actions":[],"at_ns":"1000000000","event":{"kind":"work_started"},"observed_ns":"1000000000","seq":1}
+        {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"agent_failed","reason":"the agent's sandbox didn't start: it ended before it met the gateway: expected its `sandboxd` to run until it connects"},"observed_ns":"1000000000","seq":2}
+        {"actions":[],"at_ns":"1000000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":3}
+        {"at_ns":"1000000000","note":"agent `agent`: the agent's sandbox didn't start: sandbox sim-1: it ended before it met the gateway: expected its `sandboxd` to run until it connects; its console ends: sandboxd: a simulated one, which never dials","seq":4}
+        {"at_ns":"1000000000","note":"the agent's sandbox never started: nothing was collected","seq":5}
+        {"actions":[{"job":0,"kind":"start_final_call","selections":[{"role":"agent","selection":null}],"timeout_ns":"120000000000"}],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"1000000000","seq":6}
+        {"actions":[],"at_ns":"2000000000","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":7}
+        {"actions":[],"at_ns":"2000000000","event":{"job":0,"kind":"call_failed","reason":"the job's sandbox didn't start: sandbox sim-2: it ended before it met the gateway: expected its `sandboxd` to run until it connects; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"2000000000","seq":8}
+        {"actions":[{"kind":"finish"}],"at_ns":"2000000000","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"2000000000","seq":9}
         its last record came before the agent's teardown was to end"#]].assert_eq(&listed);
 }
 
@@ -1490,44 +1411,6 @@ fn interrupted(name: &str, startup: u64, ir: &Value, sandboxd: &str, at: At, exp
 }
 
 #[test]
-fn interrupted_publishing_sandboxd() {
-    interrupted(
-        "publishing-sandboxd",
-        30,
-        &workflow(&["exit", "0"]),
-        SANDBOXD,
-        At::PublishSandboxd,
-        &expect![[r#"
-            was interrupted by SIGTERM
-            it started: false
-            it returned within 60 s: true
-            it published: ["sandboxd /sim/sandboxd"]
-            log.jsonl:"#]],
-    );
-}
-
-#[test]
-fn interrupted_publishing_image() {
-    let mut one_image = workflow(&["exit", "0"]);
-    for role in [1, 2] {
-        one_image["roles"][role]["image"] = one_image["roles"][0]["image"].clone();
-    }
-    interrupted(
-        "publishing-image",
-        30,
-        &one_image,
-        SANDBOXD,
-        At::PublishImage,
-        &expect![[r#"
-            was interrupted by SIGTERM
-            it started: false
-            it returned within 60 s: true
-            it published: ["sandboxd /sim/sandboxd", "image sha256:1111111111111111111111111111111111111111111111111111111111111111"]
-            log.jsonl:"#]],
-    );
-}
-
-#[test]
 fn interrupted_agent_start() {
     interrupted(
         "agent-start",
@@ -1539,7 +1422,6 @@ fn interrupted_agent_start() {
             was interrupted by SIGTERM
             it started: true
             it returned within 60 s: true
-            it published: ["sandboxd /sim/hung", "image sha256:1111111111111111111111111111111111111111111111111111111111111111", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
             log.jsonl:
             {"actions":[{"kind":"start_agents"}],"at_ns":"<ns>","event":{"hard_end_ns":"18360000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"at_ns":"<ns>","note":"the run was interrupted by SIGTERM","seq":1}
@@ -1552,28 +1434,33 @@ fn interrupted_agent_start() {
 fn interrupted_call_start() {
     let mut judged = ops_workflow(&["ops", "call train 6", "await 0 completed"], WAITED);
     judged["roles"][1]["image"] = json!(sim::image(HUNG).as_str());
-    interrupted(
-        "call-start",
-        WAITED,
+    // The sweep's delete of the agent's sandbox is recorded once the call's start has deleted
+    // its own, which the two threads would otherwise log in either order.
+    let deleted = Synced::Holding(AGENT_SANDBOX, DELETED);
+    let host = SimHost::new().held_sync(deleted, r#""sandbox":"job-0""#);
+    let shown = executed(
+        &host,
+        "interrupted-call-start",
+        &[(PROVIDER, &Sim::with_startup(WAITED))],
         &judged,
         SANDBOXD,
-        At::Created("job-0"),
-        &expect![[r#"
-            was interrupted by SIGTERM
-            it started: true
-            it returned within 60 s: true
-            it published: ["sandboxd /sim/sandboxd", "image sha256:1111111111111111111111111111111111111111111111111111111111111111", "image sha256:2f73696d2f68756e670000000000000000000000000000000000000000000000", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
-            payloads hold: ["xxxxxx"]
-            log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"<ns>","event":{"hard_end_ns":"420000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"work_started"},"observed_ns":"<ns>","seq":1}
-            {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-            {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":3}
-            {"at_ns":"<ns>","note":"the run was interrupted by SIGTERM","seq":4}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":5}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":6}
-            its last record came before the agent's teardown was to end"#]],
+        &[Also::Interrupted(At::Created("job-0"))],
     );
+    expect![[r#"
+        was interrupted by SIGTERM
+        it started: true
+        it returned within 60 s: true
+        payloads hold: ["xxxxxx"]
+        log.jsonl:
+        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"420000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+        {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
+        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
+        {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
+        {"at_ns":"0","note":"the run was interrupted by SIGTERM","seq":4}
+        {"actions":[],"at_ns":"0","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":5}
+        {"actions":[],"at_ns":"0","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":6}
+        its last record came before the agent's teardown was to end"#]]
+    .assert_eq(&shown);
 }
 
 #[test]
@@ -1592,7 +1479,6 @@ fn interrupted_with_one_undeletable() {
             failed: SIGTERM interrupted the run; deleting the sandboxes the run left on provider `simulated` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`
             it started: true
             it returned within 60 s: true
-            it published: ["sandboxd /sim/sandboxd", "image sha256:2f73696d2f756e64656c657461626c6500000000000000000000000000000000", "image sha256:2f73696d2f68756e670000000000000000000000000000000000000000000000", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
             agent `agent`'s sandbox, agents/agent/sandbox.json: {"delete":{"state":"failed"},"id":"sim-1","provider":"simulated"}
             payloads hold: ["xxxxxx"]
             log.jsonl:
@@ -1606,43 +1492,6 @@ fn interrupted_with_one_undeletable() {
             its last record came before the agent's teardown was to end
             listed once it ended: ["sim-1"]"#]],
     );
-}
-
-#[test]
-fn reaped_past_one_undeletable() {
-    // The run's sweep fails both sandboxes, and the reap's deletes the agent's alone.
-    let mut judged = ops_workflow(&["ops", "call train 6", "await 0 completed"], WAITED);
-    judged["roles"][0]["image"] = json!(sim::image(REFUSED_ONCE).as_str());
-    judged["roles"][1]["image"] = json!(sim::image(UNDELETABLE).as_str());
-    let provider = Sim::with_startup(WAITED);
-    let shown = executed(
-        &System,
-        "reaped-past-one-undeletable",
-        &[(PROVIDER, &provider)],
-        &judged,
-        SANDBOXD,
-        &[Also::Interrupted(At::Created("job-0")), Also::Reaped],
-    );
-    expect![[r#"
-        failed: SIGTERM interrupted the run; sandbox sim-2: the accept was stopped before a sandbox connected to <sockets>/job-0/s: expected its sandbox to connect before the stop; deleting it failed: sim-2 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `simulated` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; sim-2 can't be deleted by the simulated provider: create one with another `sandboxd`
-        it started: true
-        it returned within 60 s: true
-        it published: ["sandboxd /sim/sandboxd", "image sha256:2f73696d2f726566757365642d6f6e6365000000000000000000000000000000", "image sha256:2f73696d2f756e64656c657461626c6500000000000000000000000000000000", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
-        agent `agent`'s sandbox, agents/agent/sandbox.json: {"delete":{"state":"failed"},"id":"sim-1","provider":"simulated"}
-        job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"failed"},"id":"sim-2","provider":"simulated"}
-        payloads hold: ["xxxxxx"]
-        log.jsonl:
-        {"actions":[{"kind":"start_agents"}],"at_ns":"<ns>","event":{"hard_end_ns":"420000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-        {"actions":[],"at_ns":"<ns>","event":{"kind":"work_started"},"observed_ns":"<ns>","seq":1}
-        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-        {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":3}
-        {"at_ns":"<ns>","note":"the run was interrupted by SIGTERM","seq":4}
-        {"at_ns":"<ns>","note":"the run failed: SIGTERM interrupted the run; sandbox sim-2: the accept was stopped before a sandbox connected to <sockets>/job-0/s: expected its sandbox to connect before the stop; deleting it failed: sim-2 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `simulated` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; sim-2 can't be deleted by the simulated provider: create one with another `sandboxd`","seq":5}
-        its last record came before the agent's teardown was to end
-        reaped: []
-        the reap failed: deleting the sandboxes the run left on provider `simulated` failed: sim-2 can't be deleted by the simulated provider: create one with another `sandboxd`
-        reaps.jsonl: {"at_ns":"<ns>","id":"sim-1","provider":"simulated","reaped":"removed"}
-        listed once it ended: ["sim-2"]"#]].assert_eq(&shown);
 }
 
 #[test]
@@ -1668,7 +1517,6 @@ fn reaped_past_a_failing_provider() {
         failed: SIGTERM interrupted the run; sandbox sim-1: the accept was stopped before a sandbox connected to <sockets>/job-0/s: expected its sandbox to connect before the stop; deleting it failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `here` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `there` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`
         it started: true
         it returned within 60 s: true
-        it published: ["sandboxd /sim/sandboxd", "image sha256:2f73696d2f756e64656c657461626c6500000000000000000000000000000000", "image sha256:2222222222222222222222222222222222222222222222222222222222222222", "sandboxd /sim/sandboxd", "image sha256:2f73696d2f726566757365642d6f6e6365000000000000000000000000000000"]
         agent `agent`'s sandbox, agents/agent/sandbox.json: {"delete":{"state":"failed"},"id":"sim-1","provider":"here"}
         job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"failed"},"id":"sim-1","provider":"there"}
         payloads hold: ["xxxxxx"]
@@ -1705,7 +1553,6 @@ fn interrupted_working() {
             was interrupted by SIGTERM
             it started: true
             it returned within 60 s: true
-            it published: ["sandboxd /sim/sandboxd", "image sha256:1111111111111111111111111111111111111111111111111111111111111111", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
             log.jsonl:
             {"actions":[{"kind":"start_agents"}],"at_ns":"<ns>","event":{"hard_end_ns":"330000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"work_started"},"observed_ns":"<ns>","seq":1}
@@ -1734,30 +1581,35 @@ fn interrupted_during_teardown() {
     assert!(!shown.contains(r#""kind":"start_final_call""#));
 }
 
-// The simulated host's clock stands still. So the setup's wait takes the start's failure, and no
-// deadline passes before the core hears of it.
+// The final call's start runs out at its startup, past a look whose list fails. An agent's start
+// that ran out then would race the setup's wait, which ends at the startup too.
 #[test]
 fn unlistable() {
+    let mut ir = workflow(&["exit", "0"]);
+    ir["roles"][2]["image"] = json!(sim::image(UNLISTABLE).as_str());
+    let created = Synced::Holding("jobs/0/.sandbox.json.partial", "sim-2");
+    let startup = Duration::from_secs(SHORT_STARTUP);
     check(
-        &SimHost::new(),
+        &SimHost::new().moving_after_read(created, startup),
         "unlistable",
         &[(PROVIDER, &Sim::with_startup(SHORT_STARTUP))],
-        &workflow(&["exit", "0"]),
-        UNLISTABLE,
+        &ir,
+        SANDBOXD,
         &expect![[r#"
             finished without a result
-            outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: no sandbox connected to <sockets>/agent-0/s by the deadline: expected its sandbox to connect while the deadline lasts; the last list of its provider failed: the simulated list failed while sim-1 lasts: delete it, or create one with another `sandboxd`"}}],"verdict":{"failure":{"kind":"error","reason":"the job's sandbox didn't start: sandbox sim-2: no sandbox connected to <sockets>/job-0/s by the deadline: expected its sandbox to connect while the deadline lasts; the last list of its provider failed: the simulated list failed while sim-2 lasts: delete it, or create one with another `sandboxd`; its console ends: sandboxd: a simulated one, which never dials"},"kind":"no_result"}}
+            outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"failure":{"kind":"error","reason":"the job's sandbox didn't start: sandbox sim-2: no sandbox connected to <sockets>/job-0/s by the deadline: expected its sandbox to connect while the deadline lasts; the last list of its provider failed: the simulated list failed while sim-2 lasts: delete it, or create one with another `sandboxd`; its console ends: sandboxd: a simulated one, which never dials"},"kind":"no_result"}}
             log.jsonl:
             {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"18183000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
-            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_failed","reason":"the agent's sandbox didn't start: no sandbox connected to <sockets>/agent-0/s by the deadline: expected its sandbox to connect while the deadline lasts; the last list of its provider failed: the simulated list failed while sim-1 lasts: delete it, or create one with another `sandboxd`"},"observed_ns":"0","seq":2}
-            {"actions":[],"at_ns":"0","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":3}
-            {"at_ns":"0","note":"agent `agent`: the agent's sandbox didn't start: sandbox sim-1: no sandbox connected to <sockets>/agent-0/s by the deadline: expected its sandbox to connect while the deadline lasts; the last list of its provider failed: the simulated list failed while sim-1 lasts: delete it, or create one with another `sandboxd`; its console ends: sandboxd: a simulated one, which never dials","seq":4}
-            {"at_ns":"0","note":"the agent's sandbox never started: nothing was collected","seq":5}
-            {"actions":[{"job":0,"kind":"start_final_call","selections":[{"role":"agent","selection":null}],"timeout_ns":"120000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"0","seq":6}
-            {"actions":[],"at_ns":"0","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":7}
-            {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_failed","reason":"the job's sandbox didn't start: sandbox sim-2: no sandbox connected to <sockets>/job-0/s by the deadline: expected its sandbox to connect while the deadline lasts; the last list of its provider failed: the simulated list failed while sim-2 lasts: delete it, or create one with another `sandboxd`; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"0","seq":8}
-            {"actions":[{"kind":"finish"}],"at_ns":"0","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"0","seq":9}
+            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
+            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"0","seq":3}
+            {"at_ns":"0","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":4}
+            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_collected"},"seq":5}
+            {"actions":[],"at_ns":"0","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":6}
+            {"actions":[{"job":0,"kind":"start_final_call","selections":[{"role":"agent","selection":null}],"timeout_ns":"120000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"0","seq":7}
+            {"actions":[],"at_ns":"1000000000","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":8}
+            {"actions":[],"at_ns":"1000000000","event":{"job":0,"kind":"call_failed","reason":"the job's sandbox didn't start: sandbox sim-2: no sandbox connected to <sockets>/job-0/s by the deadline: expected its sandbox to connect while the deadline lasts; the last list of its provider failed: the simulated list failed while sim-2 lasts: delete it, or create one with another `sandboxd`; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"1000000000","seq":9}
+            {"actions":[{"kind":"finish"}],"at_ns":"1000000000","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"1000000000","seq":10}
             its last record came before the agent's teardown was to end"#]],
     );
 }
@@ -1796,89 +1648,6 @@ fn unpublished_image() {
         record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
         log.jsonl:"#]]
     .assert_eq(&shown);
-}
-
-#[test]
-fn missing_private_listener() {
-    let shown = executed(
-        &SimHost::new(),
-        "missing-private-listener",
-        &[(PROVIDER, &Sim::new().private())],
-        &workflow(&["exit", "0"]),
-        SANDBOXD,
-        &[Also::WithoutListener, Also::Listing],
-    );
-    expect![[r#"
-        failed: private provider `simulated` has no private listener: bind one for its sandboxes to dial
-        record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
-        log.jsonl:"#]].assert_eq(&shown);
-}
-
-#[test]
-fn ops() {
-    let argv = [
-        "ops",
-        "ops",
-        "call train 17",
-        "call train 6",
-        "await 0 completed",
-        "call train slow",
-        "await 1 errored",
-        "call submit 6 finalize=true",
-    ];
-    // A deadline far later than the agent's last op, so that a reply the agent misses ends the
-    // work phase.
-    check_polls(
-        &System,
-        "ops",
-        &[(PROVIDER, &Sim::new())],
-        &ops_workflow(&argv, 30),
-        SANDBOXD,
-        &expect![[r#"
-            finished, showing [score=6]
-            a poll, {"job":"0","kind":"status"}, is answered {"kind":"status"}
-            a poll, {"job":"1","kind":"status"}, is answered {"kind":"status"}
-            payloads hold: ["slow", "xxxxxx"]
-            outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
-            log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"work_started"},"observed_ns":"<ns>","seq":1}
-            {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-            {"actions":[{"kind":"reply","reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"job","name":"train","payload_max_bytes":8},{"arguments":{"finalize":{"default":false,"type":"bool"}},"kind":"now","name":"submit","payload_max_bytes":16}],"kind":"ops","remaining_seconds":"<s>","resources":{"cpu_millis":8000,"memory_bytes":34359738368},"role":"agent"}}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"kind":"ops"}},"observed_ns":"<ns>","seq":3}
-            {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_refused","message":"the payload is 17 bytes, more than the limit of 16: send at most 16","request":{"grant":"train","kind":"call","payload":{"over":16,"size":17}}},"seq":4}
-            {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":1,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":5}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_started"},"observed_ns":"<ns>","seq":6}
-            {"actions":[],"at_ns":"<ns>","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":0,"kind":"target_put","path":"/work/payload"},"observed_ns":"<ns>","seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"argv":["judge","/work/payload","/work/result.json"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"<ns>","seq":8}
-            {"actions":[],"at_ns":"<ns>","event":{"command":0,"end":{"exited":{"code":0}},"job":0,"kind":"command_ended"},"observed_ns":"<ns>","seq":9}
-            {"actions":[],"at_ns":"<ns>","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":0,"kind":"target_get","path":"/work/result.json"},"observed_ns":"<ns>","seq":10}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_returned","returned":[{"name":"raw_score","value":6}]},"observed_ns":"<ns>","seq":11}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":12}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":13}
-            {"actions":[{"kind":"reply","reply":{"job":1,"kind":"call","remaining":{"calls":98,"seconds":null}}},{"caller":"agent-0","grant":"train","job":1,"kind":"start_call","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":2,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"observed_ns":"<ns>","seq":14}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"call_started"},"observed_ns":"<ns>","seq":15}
-            {"actions":[],"at_ns":"<ns>","event":{"bytes":4,"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","job":1,"kind":"target_put","path":"/work/payload"},"observed_ns":"<ns>","seq":16}
-            {"actions":[],"at_ns":"<ns>","event":{"argv":["judge","/work/payload","/work/result.json"],"command":0,"job":1,"kind":"target_run"},"observed_ns":"<ns>","seq":17}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"call_timed_out"},"observed_ns":"<ns>","seq":18}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"call_failed","reason":"the call's timeout passed"},"observed_ns":"<ns>","seq":19}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":20}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":21}
-            {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":"<s>","returned":{"state":"accepted"}}}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":3,"request":{"evaluated":{"effects":["set_submission","end_work"],"returned":[{"name":"state","value":"accepted"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":22}
-            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":23}
-            {"at_ns":"<ns>","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":24}
-            {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_collected"},"seq":25}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":26}
-            {"actions":[{"job":2,"kind":"start_final_call","selections":[{"role":"agent","selection":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}],"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"<ns>","seq":27}
-            {"actions":[],"at_ns":"<ns>","event":{"job":2,"kind":"call_started"},"observed_ns":"<ns>","seq":28}
-            {"actions":[],"at_ns":"<ns>","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":2,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"<ns>","seq":29}
-            {"actions":[],"at_ns":"<ns>","event":{"argv":["judge","/pumpkin/in/payload/raw"],"command":0,"job":2,"kind":"target_run"},"observed_ns":"<ns>","seq":30}
-            {"actions":[],"at_ns":"<ns>","event":{"command":0,"end":{"exited":{"code":0}},"job":2,"kind":"command_ended"},"observed_ns":"<ns>","seq":31}
-            {"actions":[],"at_ns":"<ns>","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":2,"kind":"target_get","path":"/pumpkin/out/result.json"},"observed_ns":"<ns>","seq":32}
-            {"actions":[],"at_ns":"<ns>","event":{"job":2,"kind":"call_returned","returned":[{"name":"score","value":6}]},"observed_ns":"<ns>","seq":33}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-4","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-2"},"seq":34}
-            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":2,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":35}
-            its last record came before the agent's teardown was to end"#]],
-    );
 }
 
 // The read fails, as the size and digest differ, rather than put other bytes on the target.
@@ -1952,13 +1721,14 @@ fn result_over_the_limit() {
 #[test]
 fn crashes_with_an_op_in_flight() {
     let mut ir = ops_workflow(&["ops", "call train 12", "crash"], 30);
-    // Slow to create, so that the agent's end stops the call before its body starts.
-    ir["roles"][1]["image"] = json!(sim::image(SLOW).as_str());
     // Over the final call's payload but within `train`'s, so within the most an op may carry.
     ir["roles"][0]["runtime"]["agent"]["grants"][0]["job"]["payload_max_bytes"] = json!(16);
     ir["final"]["payload_max_bytes"] = json!(8);
+    // The call's sandbox is recorded once the agent's teardown is, so that the agent's end stops
+    // the call before its body starts.
+    let created = Synced::Holding("jobs/0/.sandbox.json.partial", "sim-2");
     check(
-        &SimHost::new(),
+        &SimHost::new().held_sync(created, r#""kind":"agent_torn_down""#),
         "crashes-with-an-op",
         &[(PROVIDER, &Sim::new())],
         &ir,
@@ -1999,10 +1769,17 @@ fn call_starts_past_the_deadline() {
     // leaves the call its whole timeout.
     let mut ir = ops_workflow(&["ops", "call train 6", "exit"], 2);
     ir["roles"][1]["image"] = json!(sim::image(SLOW).as_str());
+    // The clock reaches the deadline, where the create gives up, once the agent's teardown is
+    // logged.
+    let host = SimHost::new();
+    let sim = Sim::new().once_logged(
+        &[r#""kind":"agent_torn_down""#],
+        host.moving_to(Duration::from_secs(2)),
+    );
     check(
-        &System,
+        &host,
         "call-starts-past-the-deadline",
-        &[(PROVIDER, &Sim::new())],
+        &[(PROVIDER, &sim)],
         &ir,
         SANDBOXD,
         &expect![[r#"
@@ -2010,22 +1787,22 @@ fn call_starts_past_the_deadline() {
             payloads hold: ["xxxxxx"]
             outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"<ns>","event":{"hard_end_ns":"272000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"work_started"},"observed_ns":"<ns>","seq":1}
-            {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-            {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":3}
-            {"actions":[{"job":0,"kind":"stop_call"},{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":4}
-            {"at_ns":"<ns>","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":5}
-            {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_collected"},"seq":6}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"<ns>","seq":8}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_failed","reason":"the job's sandbox didn't start: the simulated create gave up at its deadline, and can't name what it made: expected the run's list to find it"},"observed_ns":"<ns>","seq":9}
-            {"actions":[{"job":1,"kind":"start_final_call","selections":[{"role":"agent","selection":null}],"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":10}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":null},"seq":11}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"call_started"},"observed_ns":"<ns>","seq":12}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"call_returned","returned":[{"name":"score","value":0}]},"observed_ns":"<ns>","seq":13}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":14}
-            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":1,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":15}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"272000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
+            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
+            {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
+            {"actions":[{"job":0,"kind":"stop_call"},{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"0","seq":4}
+            {"at_ns":"0","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":5}
+            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_collected"},"seq":6}
+            {"actions":[],"at_ns":"0","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":7}
+            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"0","seq":8}
+            {"actions":[],"at_ns":"2000000000","event":{"job":0,"kind":"call_failed","reason":"the job's sandbox didn't start: the simulated create gave up at its deadline, and can't name what it made: expected the run's list to find it"},"observed_ns":"2000000000","seq":9}
+            {"actions":[{"job":1,"kind":"start_final_call","selections":[{"role":"agent","selection":null}],"timeout_ns":"120000000000"}],"at_ns":"2000000000","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"2000000000","seq":10}
+            {"actions":[],"at_ns":"2000000000","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":null},"seq":11}
+            {"actions":[],"at_ns":"2000000000","event":{"job":1,"kind":"call_started"},"observed_ns":"2000000000","seq":12}
+            {"actions":[],"at_ns":"2000000000","event":{"job":1,"kind":"call_returned","returned":[{"name":"score","value":0}]},"observed_ns":"2000000000","seq":13}
+            {"actions":[],"at_ns":"2000000000","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":14}
+            {"actions":[{"kind":"finish"}],"at_ns":"2000000000","event":{"job":1,"kind":"call_torn_down"},"observed_ns":"2000000000","seq":15}
             its last record came before the agent's teardown was to end"#]],
     );
 }
@@ -2033,12 +1810,18 @@ fn call_starts_past_the_deadline() {
 #[test]
 fn call_placed_apart() {
     // The call's start runs out at its target's class's startup, though the agent's class gives
-    // 30 s, so the agent sees the call errored long before the deadline.
+    // 30 s, so the agent sees the call errored long before the deadline. The create's record
+    // lasts until that startup.
     let mut ir = ops_workflow(&["ops", "call train 6", "await 0 errored"], 30);
     ir["roles"][1]["image"] = json!(sim::image(HUNG).as_str());
     ir["roles"][1]["needs"]["cpu_model"] = json!(BRIEF);
+    let startup = SlowSync {
+        record: Synced::Holding("jobs/0/.sandbox.json.partial", "sim-2"),
+        queued: 0,
+        at: Duration::from_secs(1),
+    };
     check(
-        &System,
+        &SimHost::new().slow_sync(startup),
         "call-placed-apart",
         &[(PROVIDER, &Sim::new())],
         &ir,
@@ -2048,22 +1831,22 @@ fn call_placed_apart() {
             payloads hold: ["xxxxxx"]
             outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"work_started"},"observed_ns":"<ns>","seq":1}
-            {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-            {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":3}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":4}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_failed","reason":"the job's sandbox didn't start: sandbox sim-2: no sandbox connected to <sockets>/job-0/s by the deadline: expected its sandbox to connect while the deadline lasts; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"<ns>","seq":5}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":6}
-            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":7}
-            {"at_ns":"<ns>","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":8}
-            {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_collected"},"seq":9}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":10}
-            {"actions":[{"job":1,"kind":"start_final_call","selections":[{"role":"agent","selection":null}],"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"<ns>","seq":11}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"call_started"},"observed_ns":"<ns>","seq":12}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"call_returned","returned":[{"name":"score","value":0}]},"observed_ns":"<ns>","seq":13}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":14}
-            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":1,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":15}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
+            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
+            {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
+            {"actions":[],"at_ns":"1000000000","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":4}
+            {"actions":[],"at_ns":"1000000000","event":{"job":0,"kind":"call_failed","reason":"the job's sandbox didn't start: sandbox sim-2: no sandbox connected to <sockets>/job-0/s by the deadline: expected its sandbox to connect while the deadline lasts; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"1000000000","seq":5}
+            {"actions":[],"at_ns":"1000000000","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"1000000000","seq":6}
+            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"1000000000","seq":7}
+            {"at_ns":"1000000000","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":8}
+            {"actions":[],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"agent_collected"},"seq":9}
+            {"actions":[],"at_ns":"1000000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":10}
+            {"actions":[{"job":1,"kind":"start_final_call","selections":[{"role":"agent","selection":null}],"timeout_ns":"120000000000"}],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"1000000000","seq":11}
+            {"actions":[],"at_ns":"1000000000","event":{"job":1,"kind":"call_started"},"observed_ns":"1000000000","seq":12}
+            {"actions":[],"at_ns":"1000000000","event":{"job":1,"kind":"call_returned","returned":[{"name":"score","value":0}]},"observed_ns":"1000000000","seq":13}
+            {"actions":[],"at_ns":"1000000000","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":14}
+            {"actions":[{"kind":"finish"}],"at_ns":"1000000000","event":{"job":1,"kind":"call_torn_down"},"observed_ns":"1000000000","seq":15}
             its last record came before the agent's teardown was to end"#]],
     );
 }
@@ -2073,72 +1856,6 @@ fn there(sim: Sim) -> Sim {
     // and more than the trainer and the final call's target need, so that they are placed on
     // `there`.
     sim.named("there").offering_memory(16 << 30)
-}
-
-#[test]
-fn spans_providers() {
-    let argv = [
-        "ops",
-        "call train 6",
-        "await 0 completed",
-        "call submit 6 finalize=true",
-    ];
-    let mut ir = ops_workflow(&argv, 30);
-    ir["roles"][1]["needs"]["cpu_model"] = json!(BRIEF);
-    ir["roles"][0]["image"] = ir["roles"][1]["image"].clone();
-    // `there` is private, so its sandboxes dial the run's private listener, or it listens, so the
-    // run dials them, and `here`'s dial their sockets, alike either way.
-    for reach in [Sim::private, Sim::listening] {
-        let (here, there) = (Sim::new().named("here"), there(reach(Sim::new())));
-        let providers = [("here", &here), ("there", &there)];
-        let shown = executed(
-            &System,
-            "spans-providers",
-            &providers,
-            &ir,
-            SANDBOXD,
-            &[Also::Usage],
-        );
-        expect![[r#"
-            finished, showing [score=6]
-            payloads hold: ["xxxxxx"]
-            provider.json places the roles: {"agent":{"class":"sim","provider":"here"},"final_judge":{"class":"sim","provider":"there"},"trainer":{"class":"brief","provider":"there"}}
-            outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
-            outcome.json's usage: {"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"here"},{"class":"brief","count":1,"lasted_ns":"<ns>","provider":"there"},{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"there"}],"tokens":{"input":0,"output":0,"responses":0}}
-            log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"work_started"},"observed_ns":"<ns>","seq":1}
-            {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-            {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":3}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_started"},"observed_ns":"<ns>","seq":4}
-            {"actions":[],"at_ns":"<ns>","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":0,"kind":"target_put","path":"/work/payload"},"observed_ns":"<ns>","seq":5}
-            {"actions":[],"at_ns":"<ns>","event":{"argv":["judge","/work/payload","/work/result.json"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"<ns>","seq":6}
-            {"actions":[],"at_ns":"<ns>","event":{"command":0,"end":{"exited":{"code":0}},"job":0,"kind":"command_ended"},"observed_ns":"<ns>","seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":0,"kind":"target_get","path":"/work/result.json"},"observed_ns":"<ns>","seq":8}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_returned","returned":[{"name":"raw_score","value":6}]},"observed_ns":"<ns>","seq":9}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"there","sandbox":"job-0"},"seq":10}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":11}
-            {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":"<s>","returned":{"state":"accepted"}}}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":1,"request":{"evaluated":{"effects":["set_submission","end_work"],"returned":[{"name":"state","value":"accepted"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":12}
-            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":13}
-            {"at_ns":"<ns>","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":14}
-            {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_collected"},"seq":15}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"here","sandbox":"agent-0"},"seq":16}
-            {"actions":[{"job":1,"kind":"start_final_call","selections":[{"role":"agent","selection":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}],"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"<ns>","seq":17}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"call_started"},"observed_ns":"<ns>","seq":18}
-            {"actions":[],"at_ns":"<ns>","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":1,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"<ns>","seq":19}
-            {"actions":[],"at_ns":"<ns>","event":{"argv":["judge","/pumpkin/in/payload/raw"],"command":0,"job":1,"kind":"target_run"},"observed_ns":"<ns>","seq":20}
-            {"actions":[],"at_ns":"<ns>","event":{"command":0,"end":{"exited":{"code":0}},"job":1,"kind":"command_ended"},"observed_ns":"<ns>","seq":21}
-            {"actions":[],"at_ns":"<ns>","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":1,"kind":"target_get","path":"/pumpkin/out/result.json"},"observed_ns":"<ns>","seq":22}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"call_returned","returned":[{"name":"score","value":6}]},"observed_ns":"<ns>","seq":23}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"there","sandbox":"job-1"},"seq":24}
-            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":1,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":25}
-            its last record came before the agent's teardown was to end
-            here published: ["sandboxd /sim/sandboxd", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
-            here: the class at each create: ["sim"]
-            there published: ["sandboxd /sim/sandboxd", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
-            there: the class at each create: ["brief", "sim"]"#]]
-        .assert_eq(&shown);
-    }
 }
 
 #[test]
@@ -2180,15 +1897,12 @@ fn sweeps_each_provider() {
     );
 }
 
-// The watcher takes each provider's list for that provider's starts alone.
+// Each start looks at its own provider's list.
 #[test]
 fn watches_each_provider() {
     let argv = [
         "ops",
         "call near 6",
-        // The agent can't tell when a start is handed to the watcher, so a second's sleep orders
-        // the two: `here`'s start waits as `there`'s begins.
-        "sleep 1",
         "call train 6",
         "await 0 errored",
         "await 1 errored",
@@ -2206,15 +1920,22 @@ fn watches_each_provider() {
     grant["name"] = json!("near");
     grant["job"]["target"] = json!("nearer");
     grants.as_array_mut().unwrap().push(grant);
-    // A simulated sandbox that never dials waits on nothing but its start's deadline, so the near
-    // call's start is kept waiting by its class's startup, 4 s: past the end of the train call's
-    // start, a second later, at its class's 2 s. A watcher that listed `here` alone while its
-    // start waits would leave the train call's start to run out at its startup.
+    // At half the train call's startup, once its start reads the clock past its create's record,
+    // its look at `there` finds its sandbox ended, where one at `here` would leave it waiting.
+    let created = Synced::Holding("jobs/1/.sandbox.json.partial", "sim-1");
+    // The run log's next record after the train call's end lasts until the near call's startup.
+    let startup = SlowSync {
+        record: Synced::Holding("log.jsonl", r#""event":{"job":1,"kind":"call_torn_down"}"#),
+        queued: 0,
+        at: Duration::from_secs(4),
+    };
     let here = Sim::with_startup(4).named("here");
     let there = there(Sim::new());
     let providers = [("here", &here), ("there", &there)];
     check(
-        &System,
+        &SimHost::new()
+            .moving_after_read(created, Duration::from_millis(500))
+            .slow_sync(startup),
         "watches-each-provider",
         &providers,
         &ir,
@@ -2225,26 +1946,26 @@ fn watches_each_provider() {
             provider.json places the roles: {"agent":{"class":"sim","provider":"here"},"final_judge":{"class":"sim","provider":"there"},"nearer":{"class":"sim","provider":"here"},"trainer":{"class":"brief","provider":"there"}}
             outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"<ns>","event":{"hard_end_ns":"248000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"work_started"},"observed_ns":"<ns>","seq":1}
-            {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-            {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"near","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"near","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":3}
-            {"actions":[{"kind":"reply","reply":{"job":1,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":1,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":1,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":4}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"there","sandbox":"job-1"},"seq":5}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"call_failed","reason":"the job's sandbox didn't start: sandbox sim-1: it ended before it met the gateway: expected its `sandboxd` to run until it connects; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"<ns>","seq":6}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"here","sandbox":"job-0"},"seq":8}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_failed","reason":"the job's sandbox didn't start: sandbox sim-2: no sandbox connected to <sockets>/job-0/s by the deadline: expected its sandbox to connect while the deadline lasts; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"<ns>","seq":9}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":10}
-            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":11}
-            {"at_ns":"<ns>","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":12}
-            {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_collected"},"seq":13}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"here","sandbox":"agent-0"},"seq":14}
-            {"actions":[{"job":2,"kind":"start_final_call","selections":[{"role":"agent","selection":null}],"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"<ns>","seq":15}
-            {"actions":[],"at_ns":"<ns>","event":{"job":2,"kind":"call_started"},"observed_ns":"<ns>","seq":16}
-            {"actions":[],"at_ns":"<ns>","event":{"job":2,"kind":"call_returned","returned":[{"name":"score","value":0}]},"observed_ns":"<ns>","seq":17}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"there","sandbox":"job-2"},"seq":18}
-            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":2,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":19}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"248000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
+            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
+            {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"near","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"near","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
+            {"actions":[{"kind":"reply","reply":{"job":1,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":1,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":1,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":4}
+            {"actions":[],"at_ns":"500000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"there","sandbox":"job-1"},"seq":5}
+            {"actions":[],"at_ns":"500000000","event":{"job":1,"kind":"call_failed","reason":"the job's sandbox didn't start: sandbox sim-1: it ended before it met the gateway: expected its `sandboxd` to run until it connects; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"500000000","seq":6}
+            {"actions":[],"at_ns":"500000000","event":{"job":1,"kind":"call_torn_down"},"observed_ns":"500000000","seq":7}
+            {"actions":[],"at_ns":"4000000000","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"here","sandbox":"job-0"},"seq":8}
+            {"actions":[],"at_ns":"4000000000","event":{"job":0,"kind":"call_failed","reason":"the job's sandbox didn't start: sandbox sim-2: no sandbox connected to <sockets>/job-0/s by the deadline: expected its sandbox to connect while the deadline lasts; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"4000000000","seq":9}
+            {"actions":[],"at_ns":"4000000000","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"4000000000","seq":10}
+            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"4000000000","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"4000000000","seq":11}
+            {"at_ns":"4000000000","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":12}
+            {"actions":[],"at_ns":"4000000000","event":{"caller":"agent-0","kind":"agent_collected"},"seq":13}
+            {"actions":[],"at_ns":"4000000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"here","sandbox":"agent-0"},"seq":14}
+            {"actions":[{"job":2,"kind":"start_final_call","selections":[{"role":"agent","selection":null}],"timeout_ns":"120000000000"}],"at_ns":"4000000000","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"4000000000","seq":15}
+            {"actions":[],"at_ns":"4000000000","event":{"job":2,"kind":"call_started"},"observed_ns":"4000000000","seq":16}
+            {"actions":[],"at_ns":"4000000000","event":{"job":2,"kind":"call_returned","returned":[{"name":"score","value":0}]},"observed_ns":"4000000000","seq":17}
+            {"actions":[],"at_ns":"4000000000","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"there","sandbox":"job-2"},"seq":18}
+            {"actions":[{"kind":"finish"}],"at_ns":"4000000000","event":{"job":2,"kind":"call_torn_down"},"observed_ns":"4000000000","seq":19}
             its last record came before the agent's teardown was to end
             here published: ["sandboxd /sim/sandboxd", "image sha256:1111111111111111111111111111111111111111111111111111111111111111", "image sha256:2f73696d2f68756e670000000000000000000000000000000000000000000000"]
             here: the class at each create: ["sim", "sim"]
@@ -2265,52 +1986,60 @@ fn abandoned() {
         queued: 0,
         at: PAST_THE_HARD_END,
     };
-    check(
+    // The move at the agent's delete wakes the tick beside the agent's last records, and past the
+    // abandon nothing orders the agent's teardown among the call's reports.
+    let racing = [
+        Also::Racing(r#""kind":"agent_torn_down""#),
+        Also::Racing(r#""sandbox":"agent-0""#),
+    ];
+    let shown = executed(
         &SimHost::new().slow_sync(slow),
         "abandoned",
         &[(PROVIDER, &Sim::with_startup(SHORT_STARTUP))],
         &ir,
         SANDBOXD,
-        &expect![[r#"
-            failed: the run was still going at its hard end, 6 s after it started: expected it to end within its deadline, its finalize grace, its final call's timeout and its sandboxes' startups
-            payloads hold: ["xxxxxx"]
-            log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"6000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
-            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
-            {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
-            {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_started"},"observed_ns":"0","seq":4}
-            {"actions":[],"at_ns":"0","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":0,"kind":"target_put","path":"/work/payload"},"observed_ns":"0","seq":5}
-            {"actions":[],"at_ns":"0","event":{"argv":["judge","/work/payload","/work/result.json"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"0","seq":6}
-            {"actions":[],"at_ns":"0","event":{"command":0,"end":{"exited":{"code":0}},"job":0,"kind":"command_ended"},"observed_ns":"0","seq":7}
-            {"actions":[],"at_ns":"0","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":0,"kind":"target_get","path":"/work/result.json"},"observed_ns":"0","seq":8}
-            {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_returned","returned":[{"name":"raw_score","value":6}]},"observed_ns":"0","seq":9}
-            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"0","seq":10}
-            {"at_ns":"0","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":11}
-            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_collected"},"seq":12}
-            {"actions":[],"at_ns":"6500000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":13}
-            {"actions":[{"kind":"abandon"}],"at_ns":"6500000000","event":{"kind":"tick"},"observed_ns":"6500000000","seq":14}
-            {"actions":[],"at_ns":"6500000000","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"6500000000","seq":15}
-            {"actions":[],"at_ns":"6500000000","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":16}
-            {"actions":[],"at_ns":"6500000000","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"6500000000","seq":17}
-            {"at_ns":"6500000000","note":"the run failed: the run was still going at its hard end, 6 s after it started: expected it to end within its deadline, its finalize grace, its final call's timeout and its sandboxes' startups","seq":18}
-            its last record came once the hard end had passed"#]],
+        &racing,
     );
+    expect![[r#"
+        failed: the run was still going at its hard end, 6 s after it started: expected it to end within its deadline, its finalize grace, its final call's timeout and its sandboxes' startups
+        payloads hold: ["xxxxxx"]
+        log.jsonl:
+        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"6000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+        {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
+        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
+        {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
+        {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_started"},"observed_ns":"0","seq":4}
+        {"actions":[],"at_ns":"0","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":0,"kind":"target_put","path":"/work/payload"},"observed_ns":"0","seq":5}
+        {"actions":[],"at_ns":"0","event":{"argv":["judge","/work/payload","/work/result.json"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"0","seq":6}
+        {"actions":[],"at_ns":"0","event":{"command":0,"end":{"exited":{"code":0}},"job":0,"kind":"command_ended"},"observed_ns":"0","seq":7}
+        {"actions":[],"at_ns":"0","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":0,"kind":"target_get","path":"/work/result.json"},"observed_ns":"0","seq":8}
+        {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_returned","returned":[{"name":"raw_score","value":6}]},"observed_ns":"0","seq":9}
+        {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"0","seq":10}
+        {"at_ns":"0","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":11}
+        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_collected"},"seq":12}
+        {"actions":[{"kind":"abandon"}],"at_ns":"6500000000","event":{"kind":"tick"},"observed_ns":"6500000000","seq":13}
+        {"actions":[],"at_ns":"6500000000","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":14}
+        {"actions":[],"at_ns":"6500000000","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"6500000000","seq":15}
+        {"at_ns":"6500000000","note":"the run failed: the run was still going at its hard end, 6 s after it started: expected it to end within its deadline, its finalize grace, its final call's timeout and its sandboxes' startups","seq":16}
+        log.jsonl, at no fixed place:
+        {"actions":[],"at_ns":"6500000000","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"6500000000"}
+        {"actions":[],"at_ns":"6500000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"}}
+        its last record came once the hard end had passed"#]].assert_eq(&shown);
 }
 
-// The clock passes the hard end as the agent's exit is recorded, before the call is stopped: the
-// call's failure, observed past the hard end, comes after the tick that abandons the run.
+// The clock passes the hard end once the call has taken its stop, at the agent's exit: the call's
+// failure, observed past the hard end, comes after the tick that abandons the run.
 #[test]
 fn stopped_past_the_hard_end() {
-    let argv = ["ops", "call train slow", "await_log target_run", "exit"];
-    let ir = short_workflow(&argv, 2);
-    let slow = SlowSync {
-        record: Synced::Holding("log.jsonl", r#""kind":"stop_call""#),
-        queued: 0,
-        at: PAST_THE_HARD_END,
-    };
+    let argv = ["ops", "call train 6", "await_log target_run", "exit"];
+    let mut ir = short_workflow(&argv, 2);
+    // The command stalls its sandbox, which moves the clock past the hard end as it takes the
+    // freeze that follows the call's stop, once the stop alone has cut the call.
+    let train = &mut ir["roles"][0]["runtime"]["agent"]["grants"][0]["job"];
+    train["body"]["def"] = json!("run");
+    train["keywords"] = json!({ "argv": ["stall", "7"] });
     let dir = TestDir::new();
-    let host = SimHost::new().slow_sync(slow);
+    let host = SimHost::new();
     let (record, outcome) = execute_agents(&host, SHORT_STARTUP, ir, &dir, None);
     let Err(runtime::Stopped::Failed(reason)) = outcome else {
         panic!("expected the run to be abandoned: {outcome:?}")
@@ -2326,7 +2055,7 @@ fn stopped_past_the_hard_end() {
     let failed = log.iter().position(failed).unwrap();
     assert!(abandoned < failed);
     assert_eq!(log[failed]["event"]["reason"], "the call was stopped");
-    assert_eq!(log[failed]["observed_ns"], "6500000000");
+    assert_eq!(log[failed]["observed_ns"], "7000000000");
 }
 
 // The call's delete waits for the agent's, which begins once the agent has heard the result: the
@@ -2336,8 +2065,10 @@ fn returns_before_its_delete() {
     let argv = ["ops", "call train 6", "await_result 0 completed", "exit"];
     let mut ir = short_workflow(&argv, 30);
     ir["roles"][1]["image"] = json!(sim::image(LAST).as_str());
+    // The call's delete is recorded once the agent's teardown is.
+    let deleted = Synced::Holding("jobs/0/.sandbox.json.partial", DELETED);
     check(
-        &SimHost::new(),
+        &SimHost::new().held_sync(deleted, r#""kind":"agent_torn_down""#),
         "returns-before-its-delete",
         &[(PROVIDER, &Sim::new())],
         &ir,
@@ -2373,21 +2104,23 @@ fn returns_before_its_delete() {
 }
 
 // As `returns_before_its_delete`, but the call's delete fails, which fails the run with its final
-// call unstarted; the agent's teardown races that failure, so the log shown leaves it out.
+// call unstarted.
 #[test]
 fn undeleted_after_its_return() {
     let argv = ["ops", "call train 6", "await_result 0 completed", "exit"];
     let mut ir = short_workflow(&argv, 30);
     ir["roles"][1]["image"] = json!(sim::image(UNDELETABLE_LAST).as_str());
     let providers = [(PROVIDER, &Sim::new())];
-    let racing = [Also::Racing("agent_torn_down")];
+    // The call's failed delete is recorded once the agent's teardown is: past the run's failure,
+    // the log would take no teardown.
+    let failed = Synced::Holding("jobs/0/.sandbox.json.partial", r#""state": "failed""#);
     let shown = executed(
-        &SimHost::new(),
+        &SimHost::new().held_sync(failed, r#""kind":"agent_torn_down""#),
         "undeleted-after-its-return",
         &providers,
         &ir,
         SANDBOXD,
-        &racing,
+        &[],
     );
     expect![[r#"
         failed: deleting the sandbox failed: sim-2 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `simulated` failed: sim-2 can't be deleted by the simulated provider: create one with another `sandboxd`
@@ -2408,7 +2141,8 @@ fn undeleted_after_its_return() {
         {"at_ns":"0","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":11}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_collected"},"seq":12}
         {"actions":[],"at_ns":"0","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":13}
-        {"at_ns":"0","note":"the run failed: deleting the sandbox failed: sim-2 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `simulated` failed: sim-2 can't be deleted by the simulated provider: create one with another `sandboxd`","seq":14}
+        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"0","seq":14}
+        {"at_ns":"0","note":"the run failed: deleting the sandbox failed: sim-2 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `simulated` failed: sim-2 can't be deleted by the simulated provider: create one with another `sandboxd`","seq":15}
         its last record came before the agent's teardown was to end
         listed once it ended: ["sim-2"]"#]].assert_eq(&shown);
 }
@@ -2418,12 +2152,14 @@ fn undeleted_after_its_return() {
 #[test]
 fn deleted_while_torn_down() {
     let argv = ["ops", "call train slow", "await_log target_run", "exit"];
-    // A call timeout far longer than the agent takes to exit, so that the stop ends the call.
     let mut ir = short_workflow(&argv, 30);
-    ir["roles"][0]["runtime"]["agent"]["grants"][0]["job"]["call_timeout_seconds"] = json!(20);
     ir["roles"][0]["image"] = json!(sim::image(LAST).as_str());
+    // The agent's delete is recorded once the call's is logged: its `LAST` sandbox orders only
+    // the provider's deletes, not what each thread reports after its delete.
+    let deleted = Synced::Holding(AGENT_SANDBOX, DELETED);
+    let host = SimHost::new().held_sync(deleted, r#""provider":"simulated","sandbox":"job-0""#);
     let dir = TestDir::new();
-    let (record, outcome) = execute_agents(&System, SHORT_STARTUP, ir, &dir, None);
+    let (record, outcome) = execute_agents(&host, SHORT_STARTUP, ir, &dir, None);
     outcome.unwrap();
     let recorded: Value =
         serde_json::from_slice(&fs::read(record.join("outcome.json")).unwrap()).unwrap();
@@ -2492,87 +2228,6 @@ fn reported_before_the_hard_end() {
     assert_eq!(log[op]["actions"][0]["reply"]["kind"], "refused");
 }
 
-// The op reached the host before the deadline, so the core accepts it; the failure, which
-// reached it after, waits for the deadline's tick.
-#[test]
-fn reported_past_the_deadline() {
-    let late = LateTake {
-        behind: 0,
-        at: Duration::from_millis(30_500),
-        then: 1,
-    };
-    check(
-        &SimHost::new().late_take(late),
-        "reported-past-the-deadline",
-        &[(PROVIDER, &Sim::new())],
-        &short_workflow(
-            &["ops", "await_log agent_started", "ops", "call train 6"],
-            30,
-        ),
-        SANDBOXD,
-        &expect![[r#"
-            finished, showing [score=0]
-            payloads hold: ["xxxxxx"]
-            outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"deadline"}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
-            log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"121000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
-            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
-            {"actions":[{"kind":"reply","reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"job","name":"train","payload_max_bytes":8},{"arguments":{"finalize":{"default":false,"type":"bool"}},"kind":"now","name":"submit","payload_max_bytes":16}],"kind":"ops","remaining_seconds":30,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"role":"agent"}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"kind":"ops"}},"observed_ns":"0","seq":3}
-            {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"30500000000","event":{"caller":"agent-0","kind":"op_arrived","op":1,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":4}
-            {"at_ns":"30500000000","note":"op 1's reply wasn't sent: it was due by the core's next act, which has come","seq":5}
-            {"actions":[{"job":0,"kind":"stop_call"},{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"30500000000","event":{"kind":"tick"},"observed_ns":"30500000000","seq":6}
-            {"actions":[],"at_ns":"30500000000","event":{"job":0,"kind":"call_failed","reason":"the job's sandbox wasn't created: its start was due by a time that had passed"},"observed_ns":"30500000000","seq":7}
-            {"actions":[],"at_ns":"30500000000","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"30500000000","seq":8}
-            {"at_ns":"30500000000","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":9}
-            {"actions":[],"at_ns":"30500000000","event":{"caller":"agent-0","kind":"agent_collected"},"seq":10}
-            {"actions":[],"at_ns":"30500000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":11}
-            {"actions":[{"job":1,"kind":"start_final_call","selections":[{"role":"agent","selection":null}],"timeout_ns":"1000000000"}],"at_ns":"30500000000","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"30500000000","seq":12}
-            {"actions":[],"at_ns":"30500000000","event":{"job":1,"kind":"call_started"},"observed_ns":"30500000000","seq":13}
-            {"actions":[],"at_ns":"30500000000","event":{"job":1,"kind":"call_returned","returned":[{"name":"score","value":0}]},"observed_ns":"30500000000","seq":14}
-            {"actions":[],"at_ns":"30500000000","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":15}
-            {"actions":[{"kind":"finish"}],"at_ns":"30500000000","event":{"job":1,"kind":"call_torn_down"},"observed_ns":"30500000000","seq":16}
-            its last record came before the agent's teardown was to end"#]],
-    );
-}
-
-// `reported_past_the_deadline`'s run, with its loop's take an hour in, past the run's hard end:
-// the call's failure waits while the tick abandons the run, and is recorded after it.
-#[test]
-fn reported_past_the_hard_end() {
-    let late = LateTake {
-        behind: 0,
-        at: Duration::from_secs(3600),
-        then: 1,
-    };
-    check(
-        &SimHost::new().late_take(late),
-        "reported-past-the-hard-end",
-        &[(PROVIDER, &Sim::new())],
-        &short_workflow(
-            &["ops", "await_log agent_started", "ops", "call train 6"],
-            30,
-        ),
-        SANDBOXD,
-        &expect![[r#"
-            failed: the run was still going at its hard end, 121 s after it started: expected it to end within its deadline, its finalize grace, its final call's timeout and its sandboxes' startups
-            payloads hold: ["xxxxxx"]
-            log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"121000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
-            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
-            {"actions":[{"kind":"reply","reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"job","name":"train","payload_max_bytes":8},{"arguments":{"finalize":{"default":false,"type":"bool"}},"kind":"now","name":"submit","payload_max_bytes":16}],"kind":"ops","remaining_seconds":30,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"role":"agent"}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"kind":"ops"}},"observed_ns":"0","seq":3}
-            {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"3600000000000","event":{"caller":"agent-0","kind":"op_arrived","op":1,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":4}
-            {"at_ns":"3600000000000","note":"op 1's reply wasn't sent: it was due by the core's next act, which has come","seq":5}
-            {"actions":[{"kind":"abandon"}],"at_ns":"3600000000000","event":{"kind":"tick"},"observed_ns":"3600000000000","seq":6}
-            {"actions":[],"at_ns":"3600000000000","event":{"job":0,"kind":"call_failed","reason":"the job's sandbox wasn't created: its start was due by a time that had passed"},"observed_ns":"3600000000000","seq":7}
-            {"actions":[],"at_ns":"3600000000000","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"3600000000000","seq":8}
-            {"actions":[],"at_ns":"3600000000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":9}
-            {"at_ns":"3600000000000","note":"the run failed: the run was still going at its hard end, 121 s after it started: expected it to end within its deadline, its finalize grace, its final call's timeout and its sandboxes' startups","seq":10}
-            its last record came once the hard end had passed"#]],
-    );
-}
-
 // The final call's start is due by the hard end, which has passed, so its call fails with no
 // sandbox created, and the hard end's tick, which comes first, abandons the run.
 #[test]
@@ -2607,117 +2262,35 @@ fn torn_down_past_the_hard_end() {
     );
 }
 
+// Once it has started, the agent's sleep moves the clock past the hard end. Its model request then
+// comes at the tick's time, so the loop takes it after the tick that abandons the run.
 #[test]
 fn model_request_after_abandon() {
-    let mut ir = short_workflow(
-        &[
-            "ops",
-            "await_log agent_started",
-            "ops",
-            "call submit 6 finalize=true",
-        ],
-        2,
-    );
-    ir["roles"][2]["runtime"]["target"]["egress"] = route();
-    ir["final"]["body"]["def"] = json!("routed");
-    ir["final"]["keywords"] = json!({ "argv": ["ops", "model m-small 7", "result"] });
-    // The loop waits for the agent's remaining arrivals and the start of the final call.
-    let waited = LateTake {
-        behind: 0,
-        at: Duration::ZERO,
-        then: 3,
-    };
-    // Its sandbox was created on time, but the record holds its start past the hard end.
-    let late = SlowSync {
-        record: Synced::Holding("jobs/0/.sandbox.json.partial", "sim-2"),
-        queued: 0,
-        at: PAST_THE_HARD_END,
-    };
-    // The call reports its command and model request while the loop syncs its abandon.
-    let requested = SlowSync {
-        record: Synced::Holding("log.jsonl", r#""kind":"abandon""#),
-        queued: 2,
-        at: PAST_THE_HARD_END,
-    };
-    let host = SimHost::new()
-        .late_take(waited)
-        .slow_sync(late)
-        .slow_sync(requested);
+    let argv = [
+        "ops",
+        "await_log agent_started",
+        "sleep 7",
+        "model m-large 7",
+    ];
     check(
-        &host,
+        &SimHost::new(),
         "model-request-after-abandon",
         &[(PROVIDER, &Sim::with_startup(SHORT_STARTUP))],
-        &ir,
+        &routed(short_workflow(&argv, 2)),
         SANDBOXD,
         &expect![[r#"
             failed: the run was still going at its hard end, 6 s after it started: expected it to end within its deadline, its finalize grace, its final call's timeout and its sandboxes' startups
-            payloads hold: ["xxxxxx"]
-            provider.json routes: {"final_judge":[{"api":"responses","models":{"m-small":{"upstream_name":"vendor/m-small","usd_per_mtok":{"cache_write":3.75,"cached":0.3,"input":3.0,"output":15.0}}},"upstream":"stand-in"}]}
+            provider.json routes: {"agent":[{"api":"responses","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"}]}
             log.jsonl:
             {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"6000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
             {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
-            {"actions":[{"kind":"reply","reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"job","name":"train","payload_max_bytes":8},{"arguments":{"finalize":{"default":false,"type":"bool"}},"kind":"now","name":"submit","payload_max_bytes":16}],"kind":"ops","remaining_seconds":2,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"role":"agent"}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"kind":"ops"}},"observed_ns":"0","seq":3}
-            {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":0,"returned":{"state":"accepted"}}},{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":1,"request":{"evaluated":{"effects":["set_submission","end_work"],"returned":[{"name":"state","value":"accepted"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":4}
-            {"at_ns":"0","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":5}
-            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_collected"},"seq":6}
-            {"actions":[],"at_ns":"0","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":7}
-            {"actions":[{"job":0,"kind":"start_final_call","selections":[{"role":"agent","selection":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}],"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"0","seq":8}
-            {"actions":[{"kind":"abandon"}],"at_ns":"6500000000","event":{"kind":"tick"},"observed_ns":"6500000000","seq":9}
-            {"actions":[],"at_ns":"6500000000","event":{"job":0,"kind":"call_started"},"observed_ns":"6500000000","seq":10}
-            {"actions":[],"at_ns":"6500000000","event":{"argv":["ops","model m-small 7","result"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"6500000000","seq":11}
-            {"at_ns":"6500000000","note":"model request 0 wasn't answered: the run has ended","seq":12}
-            {"at_ns":"6500000000","note":"freezing job 0's target failed: the request's deadline passed before it was sent: expected time left to send it","seq":13}
-            {"at_ns":"6500000000","note":"job 0's log/0 is incomplete: collecting /pumpkin/log/0 failed: the request's deadline passed before it was sent: expected time left to send it","seq":14}
-            {"at_ns":"6500000000","note":"job 0's out is incomplete: collecting /pumpkin/out failed: the request's deadline passed before it was sent: expected time left to send it","seq":15}
-            {"actions":[],"at_ns":"6500000000","event":{"job":0,"kind":"call_failed","reason":"the call was stopped"},"observed_ns":"6500000000","seq":16}
-            {"actions":[],"at_ns":"6500000000","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":17}
-            {"actions":[],"at_ns":"6500000000","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"6500000000","seq":18}
-            {"at_ns":"6500000000","note":"the run failed: the run was still going at its hard end, 6 s after it started: expected it to end within its deadline, its finalize grace, its final call's timeout and its sandboxes' startups","seq":19}
+            {"actions":[{"kind":"abandon"}],"at_ns":"7000000000","event":{"kind":"tick"},"observed_ns":"7000000000","seq":3}
+            {"at_ns":"7000000000","note":"model request 0 wasn't answered: the run has ended","seq":4}
+            {"actions":[],"at_ns":"7000000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":5}
+            {"at_ns":"7000000000","note":"the run failed: the run was still going at its hard end, 6 s after it started: expected it to end within its deadline, its finalize grace, its final call's timeout and its sandboxes' startups","seq":6}
             its last record came once the hard end had passed
-            the model endpoint at each create: [false, true]"#]],
-    );
-}
-
-// The agent checks that the `ops` after its 1 s sleep leaves at least 1 s less than the one
-// before, however long it took to start.
-#[test]
-fn late_ops() {
-    let argv = [
-        "ops",
-        "ops",
-        "sleep 1",
-        "ops at least 1 less",
-        "exit",
-        "call train 6",
-    ];
-    check(
-        &System,
-        "late-ops",
-        &[(PROVIDER, &Sim::new())],
-        &ops_workflow(&argv, 30),
-        SANDBOXD,
-        &expect![[r#"
-            finished, showing [score=0]
-            outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
-            log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"work_started"},"observed_ns":"<ns>","seq":1}
-            {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-            {"actions":[{"kind":"reply","reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"job","name":"train","payload_max_bytes":8},{"arguments":{"finalize":{"default":false,"type":"bool"}},"kind":"now","name":"submit","payload_max_bytes":16}],"kind":"ops","remaining_seconds":"<s>","resources":{"cpu_millis":8000,"memory_bytes":34359738368},"role":"agent"}}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"kind":"ops"}},"observed_ns":"<ns>","seq":3}
-            {"actions":[{"kind":"reply","reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"job","name":"train","payload_max_bytes":8},{"arguments":{"finalize":{"default":false,"type":"bool"}},"kind":"now","name":"submit","payload_max_bytes":16}],"kind":"ops","remaining_seconds":"<s>","resources":{"cpu_millis":8000,"memory_bytes":34359738368},"role":"agent"}}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":1,"request":{"kind":"ops"}},"observed_ns":"<ns>","seq":4}
-            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":5}
-            {"actions":[{"kind":"reply","reply":{"kind":"refused","message":"your work has ended: make no more ops"}}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":2,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":6}
-            {"at_ns":"<ns>","note":"op 2's reply wasn't sent: the agent's sandbox is gone","seq":7}
-            {"at_ns":"<ns>","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":8}
-            {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_collected"},"seq":9}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":10}
-            {"actions":[{"job":0,"kind":"start_final_call","selections":[{"role":"agent","selection":null}],"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"<ns>","seq":11}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_started"},"observed_ns":"<ns>","seq":12}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_returned","returned":[{"name":"score","value":0}]},"observed_ns":"<ns>","seq":13}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":14}
-            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":15}
-            its last record came before the agent's teardown was to end"#]],
+            the model endpoint at each create: [true]"#]],
     );
 }
 
@@ -2726,7 +2299,6 @@ fn taken_past_the_deadline() {
     let late = LateTake {
         behind: 1,
         at: Duration::from_millis(30_500),
-        then: 0,
     };
     let ir = short_workflow(
         &[
@@ -2824,7 +2396,6 @@ fn started_late() {
     let late = LateTake {
         behind: 0,
         at: Duration::from_secs(55),
-        then: 0,
     };
     check(
         &SimHost::new().slow_sync(slow).late_take(late),
@@ -3007,84 +2578,6 @@ fn syncs() {
     );
 }
 
-// The route stays open through the grace after the finalize, until the agent's exit ends the
-// work phase.
-#[test]
-fn model_requests() {
-    let argv = [
-        "ops",
-        // The first request's last item holds what JSON escapes, and what it writes as UTF-8, in a
-        // list in an object, which its rebuild must give back byte for byte.
-        "model m-large stream \"quoted\"\\back\nline\u{1}\ttab/é→😀",
-        "model m-huge stream",
-        "call submit 6 finalize=true",
-        "model m-large usage",
-        "model m-large limited",
-        "model m-large silent",
-        "model m-large expired",
-    ];
-    let shown = executed(
-        &SimHost::new(),
-        "model-requests",
-        &[(PROVIDER, &Sim::new())],
-        &routed(ops_workflow(&argv, 30)),
-        SANDBOXD,
-        &[Also::Usage, Also::Exchanges],
-    );
-    expect![[r#"
-        finished, showing [score=6]
-        payloads hold: ["xxxxxx"]
-        provider.json routes: {"agent":[{"api":"responses","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"}]}
-        outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
-        outcome.json's usage: {"model_requests":6,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"cached":8,"input":12,"output":5,"reasoning":3,"responses":1}}
-        log.jsonl:
-        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-        {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
-        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
-        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"model_request_started","request":0},"observed_ns":"0","seq":3}
-        {"actions":[],"at_ns":"0","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"agent-0","first_byte_ns":"0","kept":{"request":{"body_bytes":294,"body_sha256":"8aee411ba0ca2df7c885f4c4ad7c4dd467b8b23df03ff88a02519a4b0f438d48","bytes":272,"dropped_headers":["user-agent"],"items":{"count":3,"field":"input"}},"response":{"bytes":372}},"kind":"model_answered","model":"m-large","request":0,"upstream":"stand-in","upstream_status":200},"observed_ns":"0","seq":4}
-        {"actions":[],"at_ns":"0","event":{"answer":{"bar":"rules","kind":"barred","message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","status":400},"api":"responses","caller":"agent-0","kept":{"request":{"body_bytes":166,"body_sha256":"dcfd721111dd302f62bb2078dcfe197c15dda58b0c7a7d865cbb8106e6da33d4","bytes":166},"response":{"bytes":153}},"kind":"model_answered","request":1,"upstream":"stand-in","upstream_status":null},"observed_ns":"0","seq":5}
-        {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":30,"returned":{"state":"accepted"}}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"evaluated":{"effects":["set_submission","end_work"],"returned":[{"name":"state","value":"accepted"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":6}
-        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"model_request_started","request":2},"observed_ns":"0","seq":7}
-        {"actions":[],"at_ns":"0","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"agent-0","first_byte_ns":"0","first_token_ns":"0","kept":{"request":{"body_bytes":173,"body_sha256":"d78e896c5dfe6db3d4162da33a4aa93e9d38bd52a592d60f6fa718d6a1c655e9","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":330}},"kind":"model_answered","model":"m-large","request":2,"upstream":"stand-in","upstream_status":200,"usage":{"cached_tokens":8,"input_tokens":12,"output_tokens":5,"reasoning_tokens":3}},"observed_ns":"0","seq":8}
-        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"model_request_started","request":3},"observed_ns":"0","seq":9}
-        {"actions":[],"at_ns":"0","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"agent-0","failed":{"code":"rate_limit_exceeded"},"first_byte_ns":"0","kept":{"request":{"body_bytes":175,"body_sha256":"97f26708325407223a15d9021152be9dd45fb3afd76092eeda62c06a70c2320a","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":281}},"kind":"model_answered","model":"m-large","request":3,"upstream":"stand-in","upstream_status":200},"observed_ns":"0","seq":10}
-        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"model_request_started","request":4},"observed_ns":"0","seq":11}
-        {"actions":[],"at_ns":"0","event":{"answer":{"kind":"refused","message":"the model provider gave no answer: try again","status":502},"api":"responses","caller":"agent-0","kept":{"request":{"body_bytes":174,"body_sha256":"88e3c92bf8546c69eb0ced10c5415fe43c4221081d4953cece017ee6c225e586","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":115}},"kind":"model_answered","request":4,"upstream":"stand-in","upstream_status":null},"observed_ns":"0","seq":12}
-        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"model_request_started","request":5},"observed_ns":"0","seq":13}
-        {"actions":[],"at_ns":"0","event":{"answer":{"kind":"refused","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"api":"responses","caller":"agent-0","first_byte_ns":"0","kept":{"request":{"body_bytes":175,"body_sha256":"845a5928a0d117a92d395f2dddb92d8073f4ace2518b1a881e88bf10a65e2d85","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":7}},"kind":"model_answered","request":5,"upstream":"stand-in","upstream_status":401},"observed_ns":"0","seq":14}
-        {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"0","seq":15}
-        {"at_ns":"0","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 2 files of 1834 bytes","seq":16}
-        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_collected"},"seq":17}
-        {"actions":[],"at_ns":"0","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":18}
-        {"actions":[{"job":0,"kind":"start_final_call","selections":[{"role":"agent","selection":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}],"timeout_ns":"120000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"0","seq":19}
-        {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_started"},"observed_ns":"0","seq":20}
-        {"actions":[],"at_ns":"0","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":0,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"0","seq":21}
-        {"actions":[],"at_ns":"0","event":{"argv":["judge","/pumpkin/in/payload/raw"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"0","seq":22}
-        {"actions":[],"at_ns":"0","event":{"command":0,"end":{"exited":{"code":0}},"job":0,"kind":"command_ended"},"observed_ns":"0","seq":23}
-        {"actions":[],"at_ns":"0","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":0,"kind":"target_get","path":"/pumpkin/out/result.json"},"observed_ns":"0","seq":24}
-        {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_returned","returned":[{"name":"score","value":6}]},"observed_ns":"0","seq":25}
-        {"actions":[],"at_ns":"0","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":26}
-        {"actions":[{"kind":"finish"}],"at_ns":"0","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"0","seq":27}
-        its last record came before the agent's teardown was to end
-        agent `agent`'s standard output:
-        model request 0: 200 [("content-type", "text/event-stream")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"},{"content":[{"text":"\"quoted\"\\back\nline\u0001\ttab/é→😀","type":"input_text"}],"role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
-        model request 1: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","param":null,"type":"invalid_request_error"}}
-        model request 2: 200 [("content-type", "text/event-stream")] data: {"type":"response.created","response":{"usage":null}}\n\ndata: {"type":"response.output_text.delta","delta":"6"}\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":8},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":3}}}}\n\n
-        model request 3: 200 [("content-type", "text/event-stream")] event: response.failed\ndata: {"type":"response.failed","response":{"status":"failed","error":{"code":"rate_limit_exceeded","message":"Rate limit reached"},"usage":null}}\n\nevent: error\ndata: {"type":"error","code":"rate_limit_exceeded","message":"Rate limit reached","param":null}\n\n
-        model request 4: 502 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider gave no answer: try again","param":null,"type":"server_error"}}
-        model request 5: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}
-        model exchange 0 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:af497cd3652d5371734347499d7dd2db68a62c28fe107f368d77cff1b78d474a","sha256:55d2a41f5ef0f1adb28a4e2d4420c19e5c857ee46121cc479a8f7bc2fdac819b"],"model":"vendor/m-large","store":false}; response data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"},{"content":[{"text":"\"quoted\"\\back\nline\u0001\ttab/é→😀","type":"input_text"}],"role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
-        model exchange 1 kept: request {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"m-huge","store":false}; response {"error":{"code":null,"message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","param":null,"type":"invalid_request_error"}}
-        model exchange 2 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:6bc0b5dcffbd963414c779a049374557aba7edf0b7655c06cfd15b83b4901d9d"],"model":"vendor/m-large","store":false}; response data: {"type":"response.created","response":{"usage":null}}\n\ndata: {"type":"response.output_text.delta","delta":"6"}\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":8},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":3}}}}\n\n
-        model exchange 3 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:7b6c4b476ddef378a1d5d3f8d8aede1f77d78e9f85b27ee071a96779b90da7df"],"model":"vendor/m-large","store":false}; response event: response.failed\ndata: {"type":"response.failed","response":{"status":"failed","error":{"code":"rate_limit_exceeded","message":"Rate limit reached"},"usage":null}}\n\nevent: error\ndata: {"type":"error","code":"rate_limit_exceeded","message":"Rate limit reached","param":null}\n\n
-        model exchange 4 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:ab7db161254d2c7471c643168516a57af7f7841c5b6613b468ba76fd09cd4ba6"],"model":"vendor/m-large","store":false}; response {"error":{"code":null,"message":"the model provider gave no answer: try again","param":null,"type":"server_error"}}
-        model exchange 5 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:6752f5d96dfccaffbf0772742e4557281e807f48cc031258473eb59fb6390c57"],"model":"vendor/m-large","store":false}; response refused
-        model items kept: 7
-        the model endpoint at each create: [true, false]"#]]
-    .assert_eq(&shown);
-}
-
 // Each API's tools, and the Responses API's instructions, are kept once whole; the Chat
 // request's `instructions` is no field its API keeps whole.
 #[test]
@@ -3207,73 +2700,13 @@ fn model_request_rebuilt_from_changed_item() {
         request 0 read from a damaged log: the run log's `kept.request` is "model/0.request": expected an object"#]].assert_eq(&rebuilt.join("\n"));
 }
 
-#[test]
-fn model_upstream_refusals() {
-    let argv = [
-        "ops",
-        "model m-large forbidden",
-        "model m-large stream",
-        "model m-large expired",
-        "model m-large stream",
-        "call submit 6 finalize=true",
-    ];
-    let shown = executed(
-        &SimHost::new(),
-        "model-upstream-refusals",
-        &[(PROVIDER, &Sim::new())],
-        &routed(ops_workflow(&argv, 30)),
-        SANDBOXD,
-        &[Also::Exchanges],
-    );
-    expect![[r#"
-        finished, showing [score=6]
-        payloads hold: ["xxxxxx"]
-        provider.json routes: {"agent":[{"api":"responses","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"}]}
-        outcome.json: {"agents":[{"role":"agent","route_failure":"the upstream `stand-in` refused its key, with a 401, which ended the agent's model route: give it a key that it takes, and run again","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
-        log.jsonl:
-        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-        {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
-        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
-        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"model_request_started","request":0},"observed_ns":"0","seq":3}
-        {"actions":[],"at_ns":"0","event":{"answer":{"kind":"refused","message":"the model provider refused the request, with a 403: send only requests that it allows","status":400},"api":"responses","caller":"agent-0","first_byte_ns":"0","kept":{"request":{"body_bytes":177,"body_sha256":"078fbc89df4550b236db1eb91ce291d85f3251b70680c94bd74057dcaa7f2644","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":7}},"kind":"model_answered","request":0,"upstream":"stand-in","upstream_status":403},"observed_ns":"0","seq":4}
-        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"model_request_started","request":1},"observed_ns":"0","seq":5}
-        {"actions":[],"at_ns":"0","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"agent-0","first_byte_ns":"0","kept":{"request":{"body_bytes":174,"body_sha256":"8d6175ce51c5e9942c5037737b41cabe7120f8a38f746b122528340427199599","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":252}},"kind":"model_answered","model":"m-large","request":1,"upstream":"stand-in","upstream_status":200},"observed_ns":"0","seq":6}
-        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"model_request_started","request":2},"observed_ns":"0","seq":7}
-        {"actions":[],"at_ns":"0","event":{"answer":{"kind":"refused","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"api":"responses","caller":"agent-0","first_byte_ns":"0","kept":{"request":{"body_bytes":175,"body_sha256":"845a5928a0d117a92d395f2dddb92d8073f4ace2518b1a881e88bf10a65e2d85","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":7}},"kind":"model_answered","request":2,"upstream":"stand-in","upstream_status":401},"observed_ns":"0","seq":8}
-        {"actions":[],"at_ns":"0","event":{"answer":{"bar":"ended","kind":"barred","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"api":"responses","caller":"agent-0","kept":{"request":{"body_bytes":167,"body_sha256":"6d425404d88037d2c75db5fa6013365efa76ccf6f8ac1b5bb4f9f44fe74d0a8e","bytes":167},"response":{"bytes":191}},"kind":"model_answered","request":3,"upstream":"stand-in","upstream_status":null},"observed_ns":"0","seq":9}
-        {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":30,"returned":{"state":"accepted"}}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"evaluated":{"effects":["set_submission","end_work"],"returned":[{"name":"state","value":"accepted"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":10}
-        {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"0","seq":11}
-        {"at_ns":"0","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 2 files of 1054 bytes","seq":12}
-        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_collected"},"seq":13}
-        {"actions":[],"at_ns":"0","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":14}
-        {"actions":[{"job":0,"kind":"start_final_call","selections":[{"role":"agent","selection":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}],"timeout_ns":"120000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"0","seq":15}
-        {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_started"},"observed_ns":"0","seq":16}
-        {"actions":[],"at_ns":"0","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":0,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"0","seq":17}
-        {"actions":[],"at_ns":"0","event":{"argv":["judge","/pumpkin/in/payload/raw"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"0","seq":18}
-        {"actions":[],"at_ns":"0","event":{"command":0,"end":{"exited":{"code":0}},"job":0,"kind":"command_ended"},"observed_ns":"0","seq":19}
-        {"actions":[],"at_ns":"0","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":0,"kind":"target_get","path":"/pumpkin/out/result.json"},"observed_ns":"0","seq":20}
-        {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_returned","returned":[{"name":"score","value":6}]},"observed_ns":"0","seq":21}
-        {"actions":[],"at_ns":"0","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":22}
-        {"actions":[{"kind":"finish"}],"at_ns":"0","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"0","seq":23}
-        its last record came before the agent's teardown was to end
-        agent `agent`'s standard output:
-        model request 0: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the request, with a 403: send only requests that it allows","param":null,"type":"invalid_request_error"}}
-        model request 1: 200 [("content-type", "text/event-stream")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
-        model request 2: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}
-        model request 3: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}
-        model exchange 0 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:8b4bb900d130b1b6642e6f25e0464280105b882a02c27bd9e008556adbe2d34f"],"model":"vendor/m-large","store":false}; response refused
-        model exchange 1 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:af497cd3652d5371734347499d7dd2db68a62c28fe107f368d77cff1b78d474a"],"model":"vendor/m-large","store":false}; response data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
-        model exchange 2 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:6752f5d96dfccaffbf0772742e4557281e807f48cc031258473eb59fb6390c57"],"model":"vendor/m-large","store":false}; response refused
-        model exchange 3 kept: request {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"m-large","store":false}; response {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}
-        model items kept: 4
-        the model endpoint at each create: [true, false]"#]]
-    .assert_eq(&shown);
-}
-
+// The upstream fails, answers, then fails until the agent exits: its failure counts from the
+// first request past the answer, and a request the route bars, or cuts at its end, leaves it.
 #[test]
 fn model_provider_down() {
     let argv = [
         "ops",
+        "model m-large down",
         "model m-large stream",
         "model m-large down",
         "model m-large down",
@@ -3292,62 +2725,7 @@ fn model_provider_down() {
     expect![[r#"
         finished, showing [score=0]
         provider.json routes: {"agent":[{"api":"responses","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"}]}
-        outcome.json: {"agents":[{"role":"agent","route_failure":"the upstream `stand-in` failed the agent's last model request, 2 (502; failing since request 1), and the agent exited: a deployment fault, not the agent's result; run it again","submission":null,"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
-        log.jsonl:
-        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-        {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
-        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
-        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"model_request_started","request":0},"observed_ns":"0","seq":3}
-        {"actions":[],"at_ns":"0","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"agent-0","first_byte_ns":"0","kept":{"request":{"body_bytes":174,"body_sha256":"8d6175ce51c5e9942c5037737b41cabe7120f8a38f746b122528340427199599","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":252}},"kind":"model_answered","model":"m-large","request":0,"upstream":"stand-in","upstream_status":200},"observed_ns":"0","seq":4}
-        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"model_request_started","request":1},"observed_ns":"0","seq":5}
-        {"actions":[],"at_ns":"0","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"agent-0","first_byte_ns":"0","kept":{"request":{"body_bytes":172,"body_sha256":"dc978248f6a10cf2405c2f1144b54026073188a2ef8072f5b52280326be5f330","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":7}},"kind":"model_answered","model":"m-large","request":1,"request_id":"req-502","upstream":"stand-in","upstream_status":502},"observed_ns":"0","seq":6}
-        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"model_request_started","request":2},"observed_ns":"0","seq":7}
-        {"actions":[],"at_ns":"0","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"agent-0","first_byte_ns":"0","kept":{"request":{"body_bytes":172,"body_sha256":"dc978248f6a10cf2405c2f1144b54026073188a2ef8072f5b52280326be5f330","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":7}},"kind":"model_answered","model":"m-large","request":2,"request_id":"req-502","upstream":"stand-in","upstream_status":502},"observed_ns":"0","seq":8}
-        {"actions":[],"at_ns":"0","event":{"answer":{"bar":"rules","kind":"barred","message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","status":400},"api":"responses","caller":"agent-0","kept":{"request":{"body_bytes":166,"body_sha256":"dcfd721111dd302f62bb2078dcfe197c15dda58b0c7a7d865cbb8106e6da33d4","bytes":166},"response":{"bytes":153}},"kind":"model_answered","request":3,"upstream":"stand-in","upstream_status":null},"observed_ns":"0","seq":9}
-        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"model_request_started","request":4},"observed_ns":"0","seq":10}
-        {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"0","seq":11}
-        {"actions":[],"at_ns":"0","event":{"answer":{"kind":"cut"},"api":"responses","caller":"agent-0","first_byte_ns":"0","kept":{"request":{"body_bytes":173,"body_sha256":"47bf6d5b1bdebfa49b0689b8f69a5f19e3d3ae113fde67c00dd2d2edb81ec513","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":25}},"kind":"model_answered","model":"m-large","request":4,"upstream":"stand-in","upstream_status":200},"observed_ns":"0","seq":12}
-        {"at_ns":"0","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 2 files of 809 bytes","seq":13}
-        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_collected"},"seq":14}
-        {"actions":[],"at_ns":"0","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":15}
-        {"actions":[{"job":0,"kind":"start_final_call","selections":[{"role":"agent","selection":null}],"timeout_ns":"120000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"0","seq":16}
-        {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_started"},"observed_ns":"0","seq":17}
-        {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_returned","returned":[{"name":"score","value":0}]},"observed_ns":"0","seq":18}
-        {"actions":[],"at_ns":"0","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":19}
-        {"actions":[{"kind":"finish"}],"at_ns":"0","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"0","seq":20}
-        its last record came before the agent's teardown was to end
-        agent `agent`'s standard output:
-        model request 0: 200 [("content-type", "text/event-stream")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
-        model request 1: 502 [("content-type", "text/plain"), ("x-request-id", "req-502")] refused
-        model request 2: 502 [("content-type", "text/plain"), ("x-request-id", "req-502")] refused
-        model request 3: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","param":null,"type":"invalid_request_error"}}
-        model request 4: 200 [("content-type", "text/event-stream")] event: response.created\n\n
-        model exchange 0 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:af497cd3652d5371734347499d7dd2db68a62c28fe107f368d77cff1b78d474a"],"model":"vendor/m-large","store":false}; response data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
-        model exchange 1 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:ebd80fcd992f7a45a6c58098f79ce103ace84aef8b2530a94481e55202c29f67"],"model":"vendor/m-large","store":false}; response refused
-        model exchange 2 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:ebd80fcd992f7a45a6c58098f79ce103ace84aef8b2530a94481e55202c29f67"],"model":"vendor/m-large","store":false}; response refused
-        model exchange 3 kept: request {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"m-huge","store":false}; response {"error":{"code":null,"message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","param":null,"type":"invalid_request_error"}}
-        model exchange 4 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:8b740cd5d26befcc0dbb835cfb3849a3cdd15f134987d273e263503033017963"],"model":"vendor/m-large","store":false}; response event: response.created\n\n
-        model items kept: 4
-        the model endpoint at each create: [true, false]
-        a stalled stream's client hung up before the agent's teardown was to end"#]]
-    .assert_eq(&shown);
-}
-
-#[test]
-fn model_provider_recovers() {
-    let argv = ["ops", "model m-large down", "model m-large stream"];
-    let shown = executed(
-        &SimHost::new(),
-        "model-provider-recovers",
-        &[(PROVIDER, &Sim::new())],
-        &routed(ops_workflow(&argv, 30)),
-        SANDBOXD,
-        &[Also::Exchanges],
-    );
-    expect![[r#"
-        finished, showing [score=0]
-        provider.json routes: {"agent":[{"api":"responses","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"}]}
-        outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
+        outcome.json: {"agents":[{"role":"agent","route_failure":"the upstream `stand-in` failed the agent's last model request, 3 (502; failing since request 2), and the agent exited: a deployment fault, not the agent's result; run it again","submission":null,"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
         log.jsonl:
         {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
@@ -3356,23 +2734,39 @@ fn model_provider_recovers() {
         {"actions":[],"at_ns":"0","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"agent-0","first_byte_ns":"0","kept":{"request":{"body_bytes":172,"body_sha256":"dc978248f6a10cf2405c2f1144b54026073188a2ef8072f5b52280326be5f330","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":7}},"kind":"model_answered","model":"m-large","request":0,"request_id":"req-502","upstream":"stand-in","upstream_status":502},"observed_ns":"0","seq":4}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"model_request_started","request":1},"observed_ns":"0","seq":5}
         {"actions":[],"at_ns":"0","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"agent-0","first_byte_ns":"0","kept":{"request":{"body_bytes":174,"body_sha256":"8d6175ce51c5e9942c5037737b41cabe7120f8a38f746b122528340427199599","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":252}},"kind":"model_answered","model":"m-large","request":1,"upstream":"stand-in","upstream_status":200},"observed_ns":"0","seq":6}
-        {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"0","seq":7}
-        {"at_ns":"0","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 2 files of 415 bytes","seq":8}
-        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_collected"},"seq":9}
-        {"actions":[],"at_ns":"0","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":10}
-        {"actions":[{"job":0,"kind":"start_final_call","selections":[{"role":"agent","selection":null}],"timeout_ns":"120000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"0","seq":11}
-        {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_started"},"observed_ns":"0","seq":12}
-        {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_returned","returned":[{"name":"score","value":0}]},"observed_ns":"0","seq":13}
-        {"actions":[],"at_ns":"0","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":14}
-        {"actions":[{"kind":"finish"}],"at_ns":"0","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"0","seq":15}
+        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"model_request_started","request":2},"observed_ns":"0","seq":7}
+        {"actions":[],"at_ns":"0","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"agent-0","first_byte_ns":"0","kept":{"request":{"body_bytes":172,"body_sha256":"dc978248f6a10cf2405c2f1144b54026073188a2ef8072f5b52280326be5f330","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":7}},"kind":"model_answered","model":"m-large","request":2,"request_id":"req-502","upstream":"stand-in","upstream_status":502},"observed_ns":"0","seq":8}
+        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"model_request_started","request":3},"observed_ns":"0","seq":9}
+        {"actions":[],"at_ns":"0","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"agent-0","first_byte_ns":"0","kept":{"request":{"body_bytes":172,"body_sha256":"dc978248f6a10cf2405c2f1144b54026073188a2ef8072f5b52280326be5f330","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":7}},"kind":"model_answered","model":"m-large","request":3,"request_id":"req-502","upstream":"stand-in","upstream_status":502},"observed_ns":"0","seq":10}
+        {"actions":[],"at_ns":"0","event":{"answer":{"bar":"rules","kind":"barred","message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","status":400},"api":"responses","caller":"agent-0","kept":{"request":{"body_bytes":166,"body_sha256":"dcfd721111dd302f62bb2078dcfe197c15dda58b0c7a7d865cbb8106e6da33d4","bytes":166},"response":{"bytes":153}},"kind":"model_answered","request":4,"upstream":"stand-in","upstream_status":null},"observed_ns":"0","seq":11}
+        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"model_request_started","request":5},"observed_ns":"0","seq":12}
+        {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"0","seq":13}
+        {"actions":[],"at_ns":"0","event":{"answer":{"kind":"cut"},"api":"responses","caller":"agent-0","first_byte_ns":"0","kept":{"request":{"body_bytes":173,"body_sha256":"47bf6d5b1bdebfa49b0689b8f69a5f19e3d3ae113fde67c00dd2d2edb81ec513","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":25}},"kind":"model_answered","model":"m-large","request":5,"upstream":"stand-in","upstream_status":200},"observed_ns":"0","seq":14}
+        {"at_ns":"0","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 2 files of 900 bytes","seq":15}
+        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_collected"},"seq":16}
+        {"actions":[],"at_ns":"0","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":17}
+        {"actions":[{"job":0,"kind":"start_final_call","selections":[{"role":"agent","selection":null}],"timeout_ns":"120000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"0","seq":18}
+        {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_started"},"observed_ns":"0","seq":19}
+        {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_returned","returned":[{"name":"score","value":0}]},"observed_ns":"0","seq":20}
+        {"actions":[],"at_ns":"0","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":21}
+        {"actions":[{"kind":"finish"}],"at_ns":"0","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"0","seq":22}
         its last record came before the agent's teardown was to end
         agent `agent`'s standard output:
         model request 0: 502 [("content-type", "text/plain"), ("x-request-id", "req-502")] refused
         model request 1: 200 [("content-type", "text/event-stream")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
+        model request 2: 502 [("content-type", "text/plain"), ("x-request-id", "req-502")] refused
+        model request 3: 502 [("content-type", "text/plain"), ("x-request-id", "req-502")] refused
+        model request 4: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","param":null,"type":"invalid_request_error"}}
+        model request 5: 200 [("content-type", "text/event-stream")] event: response.created\n\n
         model exchange 0 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:ebd80fcd992f7a45a6c58098f79ce103ace84aef8b2530a94481e55202c29f67"],"model":"vendor/m-large","store":false}; response refused
         model exchange 1 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:af497cd3652d5371734347499d7dd2db68a62c28fe107f368d77cff1b78d474a"],"model":"vendor/m-large","store":false}; response data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
-        model items kept: 3
-        the model endpoint at each create: [true, false]"#]]
+        model exchange 2 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:ebd80fcd992f7a45a6c58098f79ce103ace84aef8b2530a94481e55202c29f67"],"model":"vendor/m-large","store":false}; response refused
+        model exchange 3 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:ebd80fcd992f7a45a6c58098f79ce103ace84aef8b2530a94481e55202c29f67"],"model":"vendor/m-large","store":false}; response refused
+        model exchange 4 kept: request {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"m-huge","store":false}; response {"error":{"code":null,"message":"the request names `m-huge`, which the route doesn't allow: name `m-large`","param":null,"type":"invalid_request_error"}}
+        model exchange 5 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:8b740cd5d26befcc0dbb835cfb3849a3cdd15f134987d273e263503033017963"],"model":"vendor/m-large","store":false}; response event: response.created\n\n
+        model items kept: 4
+        the model endpoint at each create: [true, false]
+        a stalled stream's client hung up before the agent's teardown was to end"#]]
     .assert_eq(&shown);
 }
 
@@ -3382,15 +2776,21 @@ fn model_provider_down_at_the_deadline() {
         "ops",
         "call submit 6",
         "model m-large down",
-        "model m-large stall",
+        // Its stream's first event has come, so the request is under way, once the sleep moves
+        // the clock to the 2 s deadline.
+        "ask m-large stall",
+        "await_log model_request_started request=1",
+        "sleep 2",
     ];
+    // The stalled request ends as the deadline ends the agent's route, beside the agent's
+    // teardown, which nothing orders it against.
     let shown = executed(
-        &System,
+        &SimHost::new(),
         "model-provider-down-at-the-deadline",
         &[(PROVIDER, &Sim::new())],
         &routed(short_workflow(&argv, 2)),
         SANDBOXD,
-        &[Also::Exchanges],
+        &[Also::Exchanges, Also::Racing(r#""answer":{"kind":"cut"}"#)],
     );
     expect![[r#"
         finished, showing [score=6]
@@ -3398,27 +2798,28 @@ fn model_provider_down_at_the_deadline() {
         provider.json routes: {"agent":[{"api":"responses","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"}]}
         outcome.json: {"agents":[{"role":"agent","submission":{"finalized":false,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"deadline"}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
         log.jsonl:
-        {"actions":[{"kind":"start_agents"}],"at_ns":"<ns>","event":{"hard_end_ns":"93000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-        {"actions":[],"at_ns":"<ns>","event":{"kind":"work_started"},"observed_ns":"<ns>","seq":1}
-        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-        {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":"<s>","returned":{"state":"stored"}}}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"evaluated":{"effects":["set_submission"],"returned":[{"name":"state","value":"stored"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":3}
-        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"model_request_started","request":0},"observed_ns":"<ns>","seq":4}
-        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"agent-0","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":172,"body_sha256":"dc978248f6a10cf2405c2f1144b54026073188a2ef8072f5b52280326be5f330","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":7}},"kind":"model_answered","model":"m-large","request":0,"request_id":"req-502","upstream":"stand-in","upstream_status":502},"observed_ns":"<ns>","seq":5}
-        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"model_request_started","request":1},"observed_ns":"<ns>","seq":6}
-        {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"kind":"tick"},"observed_ns":"<ns>","seq":7}
-        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"api":"responses","caller":"agent-0","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":173,"body_sha256":"47bf6d5b1bdebfa49b0689b8f69a5f19e3d3ae113fde67c00dd2d2edb81ec513","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":25}},"kind":"model_answered","model":"m-large","request":1,"upstream":"stand-in","upstream_status":200},"observed_ns":"<ns>","seq":8}
-        {"at_ns":"<ns>","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 2 files of 188 bytes","seq":9}
-        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_collected"},"seq":10}
-        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":11}
-        {"actions":[{"job":0,"kind":"start_final_call","selections":[{"role":"agent","selection":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}],"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"<ns>","seq":12}
-        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_started"},"observed_ns":"<ns>","seq":13}
-        {"actions":[],"at_ns":"<ns>","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":0,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"<ns>","seq":14}
-        {"actions":[],"at_ns":"<ns>","event":{"argv":["judge","/pumpkin/in/payload/raw"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"<ns>","seq":15}
-        {"actions":[],"at_ns":"<ns>","event":{"command":0,"end":{"exited":{"code":0}},"job":0,"kind":"command_ended"},"observed_ns":"<ns>","seq":16}
-        {"actions":[],"at_ns":"<ns>","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":0,"kind":"target_get","path":"/pumpkin/out/result.json"},"observed_ns":"<ns>","seq":17}
-        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_returned","returned":[{"name":"score","value":6}]},"observed_ns":"<ns>","seq":18}
-        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":19}
-        {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":20}
+        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"93000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+        {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
+        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
+        {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":2,"returned":{"state":"stored"}}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"evaluated":{"effects":["set_submission"],"returned":[{"name":"state","value":"stored"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
+        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"model_request_started","request":0},"observed_ns":"0","seq":4}
+        {"actions":[],"at_ns":"0","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"agent-0","first_byte_ns":"0","kept":{"request":{"body_bytes":172,"body_sha256":"dc978248f6a10cf2405c2f1144b54026073188a2ef8072f5b52280326be5f330","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":7}},"kind":"model_answered","model":"m-large","request":0,"request_id":"req-502","upstream":"stand-in","upstream_status":502},"observed_ns":"0","seq":5}
+        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"model_request_started","request":1},"observed_ns":"0","seq":6}
+        {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"2000000000","event":{"kind":"tick"},"observed_ns":"2000000000","seq":7}
+        {"at_ns":"2000000000","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 2 files of 188 bytes","seq":8}
+        {"actions":[],"at_ns":"2000000000","event":{"caller":"agent-0","kind":"agent_collected"},"seq":9}
+        {"actions":[],"at_ns":"2000000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":10}
+        {"actions":[{"job":0,"kind":"start_final_call","selections":[{"role":"agent","selection":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}],"timeout_ns":"1000000000"}],"at_ns":"2000000000","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"2000000000","seq":11}
+        {"actions":[],"at_ns":"2000000000","event":{"job":0,"kind":"call_started"},"observed_ns":"2000000000","seq":12}
+        {"actions":[],"at_ns":"2000000000","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":0,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"2000000000","seq":13}
+        {"actions":[],"at_ns":"2000000000","event":{"argv":["judge","/pumpkin/in/payload/raw"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"2000000000","seq":14}
+        {"actions":[],"at_ns":"2000000000","event":{"command":0,"end":{"exited":{"code":0}},"job":0,"kind":"command_ended"},"observed_ns":"2000000000","seq":15}
+        {"actions":[],"at_ns":"2000000000","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":0,"kind":"target_get","path":"/pumpkin/out/result.json"},"observed_ns":"2000000000","seq":16}
+        {"actions":[],"at_ns":"2000000000","event":{"job":0,"kind":"call_returned","returned":[{"name":"score","value":6}]},"observed_ns":"2000000000","seq":17}
+        {"actions":[],"at_ns":"2000000000","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":18}
+        {"actions":[{"kind":"finish"}],"at_ns":"2000000000","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"2000000000","seq":19}
+        log.jsonl, at no fixed place:
+        {"actions":[],"at_ns":"2000000000","event":{"answer":{"kind":"cut"},"api":"responses","caller":"agent-0","first_byte_ns":"0","kept":{"request":{"body_bytes":173,"body_sha256":"47bf6d5b1bdebfa49b0689b8f69a5f19e3d3ae113fde67c00dd2d2edb81ec513","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":25}},"kind":"model_answered","model":"m-large","request":1,"upstream":"stand-in","upstream_status":200},"observed_ns":"2000000000"}
         its last record came before the agent's teardown was to end
         agent `agent`'s standard output:
         model request 0: 502 [("content-type", "text/plain"), ("x-request-id", "req-502")] refused
@@ -3433,14 +2834,33 @@ fn model_provider_down_at_the_deadline() {
 
 #[test]
 fn model_stream_cut() {
-    let argv = ["ops", "call submit slow", "model m-large stall"];
+    // The sleep moves the clock to the 1 s deadline once the stream's first event has come and
+    // the request's start is logged.
+    let argv = [
+        "ops",
+        "call submit slow",
+        "ask m-large stall",
+        "await_log model_request_started",
+        "sleep 1",
+    ];
+    // The clock reaches the slow judge's 1 s timeout once its command has started, and the cut is
+    // logged, so that the cut's times are the deadline's.
+    let host = SimHost::new();
+    let judging = &[
+        r#""job":0,"kind":"target_run""#,
+        r#""answer":{"kind":"cut"}"#,
+    ];
+    let sim = Sim::new().once_logged(judging, host.moving_to(Duration::from_secs(2)));
+    // The stalled request ends as the deadline ends the agent's route, beside the agent's
+    // teardown, which nothing orders it against.
+    let also = [Also::Exchanges, Also::Racing(r#""answer":{"kind":"cut"}"#)];
     let shown = executed(
-        &System,
+        &host,
         "model-stream-cut",
-        &[(PROVIDER, &Sim::new())],
+        &[(PROVIDER, &sim)],
         &routed(short_workflow(&argv, 1)),
         SANDBOXD,
-        &[Also::Exchanges],
+        &also,
     );
     expect![[r#"
         finished without a result
@@ -3448,24 +2868,25 @@ fn model_stream_cut() {
         provider.json routes: {"agent":[{"api":"responses","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"}]}
         outcome.json: {"agents":[{"role":"agent","submission":{"finalized":false,"payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}},"work_end":{"kind":"deadline"}}],"verdict":{"failure":{"kind":"timeout"},"kind":"no_result"}}
         log.jsonl:
-        {"actions":[{"kind":"start_agents"}],"at_ns":"<ns>","event":{"hard_end_ns":"92000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-        {"actions":[],"at_ns":"<ns>","event":{"kind":"work_started"},"observed_ns":"<ns>","seq":1}
-        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-        {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":"<s>","returned":{"state":"stored"}}}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"evaluated":{"effects":["set_submission"],"returned":[{"name":"state","value":"stored"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"observed_ns":"<ns>","seq":3}
-        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"model_request_started","request":0},"observed_ns":"<ns>","seq":4}
-        {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"kind":"tick"},"observed_ns":"<ns>","seq":5}
-        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"api":"responses","caller":"agent-0","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":173,"body_sha256":"47bf6d5b1bdebfa49b0689b8f69a5f19e3d3ae113fde67c00dd2d2edb81ec513","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":25}},"kind":"model_answered","model":"m-large","request":0,"upstream":"stand-in","upstream_status":200},"observed_ns":"<ns>","seq":6}
-        {"at_ns":"<ns>","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 2 files of 97 bytes","seq":7}
-        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_collected"},"seq":8}
-        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":9}
-        {"actions":[{"job":0,"kind":"start_final_call","selections":[{"role":"agent","selection":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}],"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"<ns>","seq":10}
-        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_started"},"observed_ns":"<ns>","seq":11}
-        {"actions":[],"at_ns":"<ns>","event":{"bytes":4,"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","job":0,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"<ns>","seq":12}
-        {"actions":[],"at_ns":"<ns>","event":{"argv":["judge","/pumpkin/in/payload/raw"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"<ns>","seq":13}
-        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_timed_out"},"observed_ns":"<ns>","seq":14}
-        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_failed","reason":"the call's timeout passed"},"observed_ns":"<ns>","seq":15}
-        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":16}
-        {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":17}
+        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"92000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+        {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
+        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
+        {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":1,"returned":{"state":"stored"}}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"evaluated":{"effects":["set_submission"],"returned":[{"name":"state","value":"stored"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"observed_ns":"0","seq":3}
+        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"model_request_started","request":0},"observed_ns":"0","seq":4}
+        {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"1000000000","event":{"kind":"tick"},"observed_ns":"1000000000","seq":5}
+        {"at_ns":"1000000000","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 2 files of 97 bytes","seq":6}
+        {"actions":[],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"agent_collected"},"seq":7}
+        {"actions":[],"at_ns":"1000000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":8}
+        {"actions":[{"job":0,"kind":"start_final_call","selections":[{"role":"agent","selection":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}],"timeout_ns":"1000000000"}],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"1000000000","seq":9}
+        {"actions":[],"at_ns":"1000000000","event":{"job":0,"kind":"call_started"},"observed_ns":"1000000000","seq":10}
+        {"actions":[],"at_ns":"1000000000","event":{"bytes":4,"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","job":0,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"1000000000","seq":11}
+        {"actions":[],"at_ns":"1000000000","event":{"argv":["judge","/pumpkin/in/payload/raw"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"1000000000","seq":12}
+        {"actions":[],"at_ns":"2000000000","event":{"job":0,"kind":"call_timed_out"},"observed_ns":"2000000000","seq":13}
+        {"actions":[],"at_ns":"2000000000","event":{"job":0,"kind":"call_failed","reason":"the call's timeout passed"},"observed_ns":"2000000000","seq":14}
+        {"actions":[],"at_ns":"2000000000","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":15}
+        {"actions":[{"kind":"finish"}],"at_ns":"2000000000","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"2000000000","seq":16}
+        log.jsonl, at no fixed place:
+        {"actions":[],"at_ns":"1000000000","event":{"answer":{"kind":"cut"},"api":"responses","caller":"agent-0","first_byte_ns":"0","kept":{"request":{"body_bytes":173,"body_sha256":"47bf6d5b1bdebfa49b0689b8f69a5f19e3d3ae113fde67c00dd2d2edb81ec513","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":25}},"kind":"model_answered","model":"m-large","request":0,"upstream":"stand-in","upstream_status":200},"observed_ns":"1000000000"}
         its last record came before the agent's teardown was to end
         agent `agent`'s standard output:
         model request 0: 200 [("content-type", "text/event-stream")] event: response.created\n\n
@@ -3478,17 +2899,26 @@ fn model_stream_cut() {
 
 #[test]
 fn model_grace_cut() {
-    let argv = ["ops", "ask m-large stall", "call submit 6 finalize=true"];
+    // The sleep moves the clock to the grace's end.
+    let argv = [
+        "ops",
+        "ask m-large stall",
+        "call submit 6 finalize=true",
+        "sleep 1",
+    ];
     let mut ir = routed(ops_workflow(&argv, 30));
     // So that the grace runs out while the agent still waits on the stalled stream.
     ir["roles"][0]["runtime"]["agent"]["finalize_grace_seconds"] = json!(1);
+    // The stalled request ends as the grace's end ends the agent's route, beside the agent's
+    // teardown, which nothing orders it against.
+    let also = [Also::Exchanges, Also::Racing(r#""answer":{"kind":"cut"}"#)];
     let shown = executed(
-        &System,
+        &SimHost::new(),
         "model-grace-cut",
         &[(PROVIDER, &Sim::new())],
         &ir,
         SANDBOXD,
-        &[Also::Exchanges],
+        &also,
     );
     expect![[r#"
         finished, showing [score=6]
@@ -3496,25 +2926,26 @@ fn model_grace_cut() {
         provider.json routes: {"agent":[{"api":"responses","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"}]}
         outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"finalized"}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
         log.jsonl:
-        {"actions":[{"kind":"start_agents"}],"at_ns":"<ns>","event":{"hard_end_ns":"241000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-        {"actions":[],"at_ns":"<ns>","event":{"kind":"work_started"},"observed_ns":"<ns>","seq":1}
-        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"model_request_started","request":0},"observed_ns":"<ns>","seq":3}
-        {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":"<s>","returned":{"state":"accepted"}}}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"evaluated":{"effects":["set_submission","end_work"],"returned":[{"name":"state","value":"accepted"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":4}
-        {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"kind":"tick"},"observed_ns":"<ns>","seq":5}
-        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"api":"responses","caller":"agent-0","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":173,"body_sha256":"47bf6d5b1bdebfa49b0689b8f69a5f19e3d3ae113fde67c00dd2d2edb81ec513","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":25}},"kind":"model_answered","model":"m-large","request":0,"upstream":"stand-in","upstream_status":200},"observed_ns":"<ns>","seq":6}
-        {"at_ns":"<ns>","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 2 files of 97 bytes","seq":7}
-        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_collected"},"seq":8}
-        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":9}
-        {"actions":[{"job":0,"kind":"start_final_call","selections":[{"role":"agent","selection":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}],"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"<ns>","seq":10}
-        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_started"},"observed_ns":"<ns>","seq":11}
-        {"actions":[],"at_ns":"<ns>","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":0,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"<ns>","seq":12}
-        {"actions":[],"at_ns":"<ns>","event":{"argv":["judge","/pumpkin/in/payload/raw"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"<ns>","seq":13}
-        {"actions":[],"at_ns":"<ns>","event":{"command":0,"end":{"exited":{"code":0}},"job":0,"kind":"command_ended"},"observed_ns":"<ns>","seq":14}
-        {"actions":[],"at_ns":"<ns>","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":0,"kind":"target_get","path":"/pumpkin/out/result.json"},"observed_ns":"<ns>","seq":15}
-        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_returned","returned":[{"name":"score","value":6}]},"observed_ns":"<ns>","seq":16}
-        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":17}
-        {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":18}
+        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"241000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+        {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
+        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
+        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"model_request_started","request":0},"observed_ns":"0","seq":3}
+        {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":1,"returned":{"state":"accepted"}}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"evaluated":{"effects":["set_submission","end_work"],"returned":[{"name":"state","value":"accepted"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":4}
+        {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"1000000000","event":{"kind":"tick"},"observed_ns":"1000000000","seq":5}
+        {"at_ns":"1000000000","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 2 files of 97 bytes","seq":6}
+        {"actions":[],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"agent_collected"},"seq":7}
+        {"actions":[],"at_ns":"1000000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":8}
+        {"actions":[{"job":0,"kind":"start_final_call","selections":[{"role":"agent","selection":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}],"timeout_ns":"120000000000"}],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"1000000000","seq":9}
+        {"actions":[],"at_ns":"1000000000","event":{"job":0,"kind":"call_started"},"observed_ns":"1000000000","seq":10}
+        {"actions":[],"at_ns":"1000000000","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":0,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"1000000000","seq":11}
+        {"actions":[],"at_ns":"1000000000","event":{"argv":["judge","/pumpkin/in/payload/raw"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"1000000000","seq":12}
+        {"actions":[],"at_ns":"1000000000","event":{"command":0,"end":{"exited":{"code":0}},"job":0,"kind":"command_ended"},"observed_ns":"1000000000","seq":13}
+        {"actions":[],"at_ns":"1000000000","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":0,"kind":"target_get","path":"/pumpkin/out/result.json"},"observed_ns":"1000000000","seq":14}
+        {"actions":[],"at_ns":"1000000000","event":{"job":0,"kind":"call_returned","returned":[{"name":"score","value":6}]},"observed_ns":"1000000000","seq":15}
+        {"actions":[],"at_ns":"1000000000","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":16}
+        {"actions":[{"kind":"finish"}],"at_ns":"1000000000","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"1000000000","seq":17}
+        log.jsonl, at no fixed place:
+        {"actions":[],"at_ns":"1000000000","event":{"answer":{"kind":"cut"},"api":"responses","caller":"agent-0","first_byte_ns":"0","kept":{"request":{"body_bytes":173,"body_sha256":"47bf6d5b1bdebfa49b0689b8f69a5f19e3d3ae113fde67c00dd2d2edb81ec513","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":25}},"kind":"model_answered","model":"m-large","request":0,"upstream":"stand-in","upstream_status":200},"observed_ns":"1000000000"}
         its last record came before the agent's teardown was to end
         agent `agent`'s standard output:
         model request 0: 200 [("content-type", "text/event-stream")] event: response.created\n\n
@@ -3857,6 +3288,12 @@ fn budgets_spent() {
         the model endpoint at each create: [true, true, true, false]"#]].assert_eq(&shown);
 }
 
+// A simulated host's time, as the Unix time that its runs read.
+fn sim_unix_ns(time: &SimTime) -> u64 {
+    let unix = time.unix().duration_since(UNIX_EPOCH).unwrap();
+    u64::try_from(unix.as_nanos()).unwrap()
+}
+
 fn unix_ns() -> u64 {
     let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     u64::try_from(since.as_nanos()).unwrap()
@@ -3954,7 +3391,7 @@ const RUNNER: &str = "sha256:333333333333333333333333333333333333333333333333333
 
 /// [`ops_workflow`]'s, with two targets: `checker`, of the agent's job function `check`, and
 /// `slower`, of `slow`, each function's body the tests' `def` of its name ([`Bodies`]), `check`'s
-/// with its caller's `label`; and the now function `broken`, whose body fails.
+/// with its caller's `label`.
 fn calling_workflow(argv: &[&str], deadline: u64) -> Value {
     let mut ir = ops_workflow(argv, deadline);
     for (name, image) in [("checker", RUNNER), ("slower", RUNNER_TOO)] {
@@ -3975,58 +3412,10 @@ fn calling_workflow(argv: &[&str], deadline: u64) -> Value {
             "keywords": { "dir": "/work" }, "payload_max_bytes": 8, "call_timeout_seconds": 1,
         } }));
     }
-    let body = json!({ "file": "//check.star", "def": "broken" });
-    grants.push(json!({ "name": "broken", "now": { "body": body, "payload_max_bytes": 8 } }));
     ir
 }
 
 const RUNNER_TOO: &str = "sha256:4444444444444444444444444444444444444444444444444444444444444444";
-
-// A now call whose argument doesn't read, or whose body fails, is refused; one answered at once
-// applies its body's effects in the call's step.
-#[test]
-fn now_calls() {
-    let argv = [
-        "ops",
-        "call submit 6 finalize=yes",
-        "call broken 6",
-        "call submit 6",
-        "call submit 6 finalize=true",
-    ];
-    check(
-        &SimHost::new(),
-        "now-calls",
-        &[(PROVIDER, &Sim::new())],
-        &calling_workflow(&argv, 30),
-        SANDBOXD,
-        &expect![[r#"
-            finished, showing [score=6]
-            payloads hold: ["xxxxxx"]
-            outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
-            log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
-            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
-            {"actions":[{"kind":"reply","reply":{"kind":"refused","message":"`--arg finalize` is `\"yes\"`, which is no bool: give it `true` or `false`"}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"evaluated":{"unread":"`--arg finalize` is `\"yes\"`, which is no bool: give it `true` or `false`"},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
-            {"actions":[{"kind":"reply","reply":{"kind":"refused","message":"the call's body failed: the run's record says why"}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":1,"request":{"evaluated":{"failed":"the tests have no body `broken`"},"grant":"broken","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":4}
-            {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":30,"returned":{"state":"stored"}}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":2,"request":{"evaluated":{"effects":["set_submission"],"returned":[{"name":"state","value":"stored"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":5}
-            {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":30,"returned":{"state":"accepted"}}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":3,"request":{"evaluated":{"effects":["set_submission","end_work"],"returned":[{"name":"state","value":"accepted"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":6}
-            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"0","seq":7}
-            {"at_ns":"0","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":8}
-            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_collected"},"seq":9}
-            {"actions":[],"at_ns":"0","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":10}
-            {"actions":[{"job":0,"kind":"start_final_call","selections":[{"role":"agent","selection":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}],"timeout_ns":"120000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"0","seq":11}
-            {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_started"},"observed_ns":"0","seq":12}
-            {"actions":[],"at_ns":"0","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":0,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"0","seq":13}
-            {"actions":[],"at_ns":"0","event":{"argv":["judge","/pumpkin/in/payload/raw"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"0","seq":14}
-            {"actions":[],"at_ns":"0","event":{"command":0,"end":{"exited":{"code":0}},"job":0,"kind":"command_ended"},"observed_ns":"0","seq":15}
-            {"actions":[],"at_ns":"0","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":0,"kind":"target_get","path":"/pumpkin/out/result.json"},"observed_ns":"0","seq":16}
-            {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_returned","returned":[{"name":"score","value":6}]},"observed_ns":"0","seq":17}
-            {"actions":[],"at_ns":"0","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":18}
-            {"actions":[{"kind":"finish"}],"at_ns":"0","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"0","seq":19}
-            its last record came before the agent's teardown was to end"#]],
-    );
-}
 
 // A job's body runs its commands and returns, or times out in one or fails after one: the record
 // keeps the target's `out` and each command's log either way.
@@ -4051,8 +3440,14 @@ fn job_calls() {
     // freeze, and its call's end collects all the same.
     ir["roles"][3]["image"] = json!(sim::image(SCRIBBLED).as_str());
     ir["roles"][4]["image"] = json!(sim::image(UNFREEZABLE).as_str());
+    // The clock reaches the slow call's 1 s timeout once its command has started.
+    let timed_out = SlowSync {
+        record: Synced::Holding("log.jsonl", r#""job":1,"kind":"target_run""#),
+        queued: 0,
+        at: Duration::from_secs(1),
+    };
     let shown = executed(
-        &System,
+        &SimHost::new().slow_sync(timed_out),
         "job-calls",
         &[(PROVIDER, &Sim::new())],
         &ir,
@@ -4069,58 +3464,58 @@ fn job_calls() {
         payloads hold: ["large", "xxxxxx"]
         outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
         log.jsonl:
-        {"actions":[{"kind":"start_agents"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-        {"actions":[],"at_ns":"<ns>","event":{"kind":"work_started"},"observed_ns":"<ns>","seq":1}
-        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-        {"actions":[{"kind":"reply","reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"job","name":"train","payload_max_bytes":8},{"arguments":{"label":{"type":"str"}},"call_timeout_seconds":1,"calls":null,"cumulative_seconds":null,"kind":"job","name":"check","payload_max_bytes":8},{"call_timeout_seconds":1,"calls":null,"cumulative_seconds":null,"kind":"job","name":"slow","payload_max_bytes":8},{"arguments":{"finalize":{"default":false,"type":"bool"}},"kind":"now","name":"submit","payload_max_bytes":16},{"kind":"now","name":"broken","payload_max_bytes":8}],"kind":"ops","remaining_seconds":"<s>","resources":{"cpu_millis":8000,"memory_bytes":34359738368},"role":"agent"}}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"kind":"ops"}},"observed_ns":"<ns>","seq":3}
-        {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":null,"seconds":null}}},{"caller":"agent-0","grant":"check","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":1,"request":{"arguments":{"label":"first"},"grant":"check","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":4}
-        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_started"},"observed_ns":"<ns>","seq":5}
-        {"actions":[],"at_ns":"<ns>","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":0,"kind":"target_put","path":"/work/payload"},"observed_ns":"<ns>","seq":6}
-        {"actions":[],"at_ns":"<ns>","event":{"argv":["list","/work"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"<ns>","seq":7}
-        {"actions":[],"at_ns":"<ns>","event":{"command":0,"end":{"exited":{"code":0}},"job":0,"kind":"command_ended"},"observed_ns":"<ns>","seq":8}
-        {"actions":[],"at_ns":"<ns>","event":{"bytes":20,"digest":"sha256:7bac131c0d0099b465090b2c412cc6d29e6ccae243db4f48714f03af841d0cb7","job":0,"kind":"target_get","path":"/pumpkin/log/0/command.stdout"},"observed_ns":"<ns>","seq":9}
-        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_returned","returned":[{"name":"printed","value":"0644 payload: xxxxxx"},{"name":"label","value":"first"}]},"observed_ns":"<ns>","seq":10}
-        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":11}
-        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":12}
-        {"actions":[{"kind":"reply","reply":{"job":1,"kind":"call","remaining":{"calls":null,"seconds":null}}},{"caller":"agent-0","grant":"slow","job":1,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":2,"request":{"grant":"slow","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":13}
-        {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"call_started"},"observed_ns":"<ns>","seq":14}
-        {"actions":[],"at_ns":"<ns>","event":{"argv":["slow"],"command":0,"job":1,"kind":"target_run"},"observed_ns":"<ns>","seq":15}
-        {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"call_timed_out"},"observed_ns":"<ns>","seq":16}
-        {"at_ns":"<ns>","note":"freezing job 1's target failed: the sandbox's processes couldn't be killed: Operation not permitted (os error 1)","seq":17}
-        {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"call_failed","reason":"the call's timeout passed"},"observed_ns":"<ns>","seq":18}
-        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":19}
-        {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":20}
-        {"actions":[{"kind":"reply","reply":{"job":2,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":2,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":3,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":21}
-        {"actions":[],"at_ns":"<ns>","event":{"job":2,"kind":"call_started"},"observed_ns":"<ns>","seq":22}
-        {"actions":[],"at_ns":"<ns>","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":2,"kind":"target_put","path":"/work/payload"},"observed_ns":"<ns>","seq":23}
-        {"actions":[],"at_ns":"<ns>","event":{"argv":["judge","/work/payload","/work/result.json"],"command":0,"job":2,"kind":"target_run"},"observed_ns":"<ns>","seq":24}
-        {"actions":[],"at_ns":"<ns>","event":{"command":0,"end":{"exited":{"code":0}},"job":2,"kind":"command_ended"},"observed_ns":"<ns>","seq":25}
-        {"actions":[],"at_ns":"<ns>","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":2,"kind":"target_get","path":"/work/result.json"},"observed_ns":"<ns>","seq":26}
-        {"actions":[],"at_ns":"<ns>","event":{"job":2,"kind":"call_returned","returned":[{"name":"raw_score","value":6}]},"observed_ns":"<ns>","seq":27}
-        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-4","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-2"},"seq":28}
-        {"actions":[],"at_ns":"<ns>","event":{"job":2,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":29}
-        {"actions":[{"kind":"reply","reply":{"job":3,"kind":"call","remaining":{"calls":98,"seconds":null}}},{"caller":"agent-0","grant":"train","job":3,"kind":"start_call","payload":{"digest":"sha256:d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9","size":5},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":4,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9","size":5}}},"observed_ns":"<ns>","seq":30}
-        {"actions":[],"at_ns":"<ns>","event":{"job":3,"kind":"call_started"},"observed_ns":"<ns>","seq":31}
-        {"actions":[],"at_ns":"<ns>","event":{"bytes":5,"digest":"sha256:d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9","job":3,"kind":"target_put","path":"/work/payload"},"observed_ns":"<ns>","seq":32}
-        {"actions":[],"at_ns":"<ns>","event":{"argv":["judge","/work/payload","/work/result.json"],"command":0,"job":3,"kind":"target_run"},"observed_ns":"<ns>","seq":33}
-        {"actions":[],"at_ns":"<ns>","event":{"command":0,"end":{"exited":{"code":0}},"job":3,"kind":"command_ended"},"observed_ns":"<ns>","seq":34}
-        {"actions":[],"at_ns":"<ns>","event":{"job":3,"kind":"call_failed","reason":"getting /work/result.json failed: the tree's files hold more than 1048576 bytes"},"observed_ns":"<ns>","seq":35}
-        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-5","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-3"},"seq":36}
-        {"actions":[],"at_ns":"<ns>","event":{"job":3,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":37}
-        {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":"<s>","returned":{"state":"accepted"}}}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":5,"request":{"evaluated":{"effects":["set_submission","end_work"],"returned":[{"name":"state","value":"accepted"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":38}
-        {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":39}
-        {"at_ns":"<ns>","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":40}
-        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_collected"},"seq":41}
-        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":42}
-        {"actions":[{"job":4,"kind":"start_final_call","selections":[{"role":"agent","selection":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}],"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"<ns>","seq":43}
-        {"actions":[],"at_ns":"<ns>","event":{"job":4,"kind":"call_started"},"observed_ns":"<ns>","seq":44}
-        {"actions":[],"at_ns":"<ns>","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":4,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"<ns>","seq":45}
-        {"actions":[],"at_ns":"<ns>","event":{"argv":["judge","/pumpkin/in/payload/raw"],"command":0,"job":4,"kind":"target_run"},"observed_ns":"<ns>","seq":46}
-        {"actions":[],"at_ns":"<ns>","event":{"command":0,"end":{"exited":{"code":0}},"job":4,"kind":"command_ended"},"observed_ns":"<ns>","seq":47}
-        {"actions":[],"at_ns":"<ns>","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":4,"kind":"target_get","path":"/pumpkin/out/result.json"},"observed_ns":"<ns>","seq":48}
-        {"actions":[],"at_ns":"<ns>","event":{"job":4,"kind":"call_returned","returned":[{"name":"score","value":6}]},"observed_ns":"<ns>","seq":49}
-        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-6","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-4"},"seq":50}
-        {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":4,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":51}
+        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+        {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
+        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
+        {"actions":[{"kind":"reply","reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"job","name":"train","payload_max_bytes":8},{"arguments":{"label":{"type":"str"}},"call_timeout_seconds":1,"calls":null,"cumulative_seconds":null,"kind":"job","name":"check","payload_max_bytes":8},{"call_timeout_seconds":1,"calls":null,"cumulative_seconds":null,"kind":"job","name":"slow","payload_max_bytes":8},{"arguments":{"finalize":{"default":false,"type":"bool"}},"kind":"now","name":"submit","payload_max_bytes":16}],"kind":"ops","remaining_seconds":30,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"role":"agent"}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"kind":"ops"}},"observed_ns":"0","seq":3}
+        {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":null,"seconds":null}}},{"caller":"agent-0","grant":"check","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":1,"request":{"arguments":{"label":"first"},"grant":"check","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":4}
+        {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_started"},"observed_ns":"0","seq":5}
+        {"actions":[],"at_ns":"0","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":0,"kind":"target_put","path":"/work/payload"},"observed_ns":"0","seq":6}
+        {"actions":[],"at_ns":"0","event":{"argv":["list","/work"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"0","seq":7}
+        {"actions":[],"at_ns":"0","event":{"command":0,"end":{"exited":{"code":0}},"job":0,"kind":"command_ended"},"observed_ns":"0","seq":8}
+        {"actions":[],"at_ns":"0","event":{"bytes":20,"digest":"sha256:7bac131c0d0099b465090b2c412cc6d29e6ccae243db4f48714f03af841d0cb7","job":0,"kind":"target_get","path":"/pumpkin/log/0/command.stdout"},"observed_ns":"0","seq":9}
+        {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_returned","returned":[{"name":"printed","value":"0644 payload: xxxxxx"},{"name":"label","value":"first"}]},"observed_ns":"0","seq":10}
+        {"actions":[],"at_ns":"0","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":11}
+        {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"0","seq":12}
+        {"actions":[{"kind":"reply","reply":{"job":1,"kind":"call","remaining":{"calls":null,"seconds":null}}},{"caller":"agent-0","grant":"slow","job":1,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":2,"request":{"grant":"slow","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":13}
+        {"actions":[],"at_ns":"0","event":{"job":1,"kind":"call_started"},"observed_ns":"0","seq":14}
+        {"actions":[],"at_ns":"0","event":{"argv":["slow"],"command":0,"job":1,"kind":"target_run"},"observed_ns":"0","seq":15}
+        {"actions":[],"at_ns":"1000000000","event":{"job":1,"kind":"call_timed_out"},"observed_ns":"1000000000","seq":16}
+        {"at_ns":"1000000000","note":"freezing job 1's target failed: the sandbox's processes couldn't be killed: Operation not permitted (os error 1)","seq":17}
+        {"actions":[],"at_ns":"1000000000","event":{"job":1,"kind":"call_failed","reason":"the call's timeout passed"},"observed_ns":"1000000000","seq":18}
+        {"actions":[],"at_ns":"1000000000","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":19}
+        {"actions":[],"at_ns":"1000000000","event":{"job":1,"kind":"call_torn_down"},"observed_ns":"1000000000","seq":20}
+        {"actions":[{"kind":"reply","reply":{"job":2,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":2,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"op_arrived","op":3,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"1000000000","seq":21}
+        {"actions":[],"at_ns":"1000000000","event":{"job":2,"kind":"call_started"},"observed_ns":"1000000000","seq":22}
+        {"actions":[],"at_ns":"1000000000","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":2,"kind":"target_put","path":"/work/payload"},"observed_ns":"1000000000","seq":23}
+        {"actions":[],"at_ns":"1000000000","event":{"argv":["judge","/work/payload","/work/result.json"],"command":0,"job":2,"kind":"target_run"},"observed_ns":"1000000000","seq":24}
+        {"actions":[],"at_ns":"1000000000","event":{"command":0,"end":{"exited":{"code":0}},"job":2,"kind":"command_ended"},"observed_ns":"1000000000","seq":25}
+        {"actions":[],"at_ns":"1000000000","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":2,"kind":"target_get","path":"/work/result.json"},"observed_ns":"1000000000","seq":26}
+        {"actions":[],"at_ns":"1000000000","event":{"job":2,"kind":"call_returned","returned":[{"name":"raw_score","value":6}]},"observed_ns":"1000000000","seq":27}
+        {"actions":[],"at_ns":"1000000000","event":{"id":"sim-4","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-2"},"seq":28}
+        {"actions":[],"at_ns":"1000000000","event":{"job":2,"kind":"call_torn_down"},"observed_ns":"1000000000","seq":29}
+        {"actions":[{"kind":"reply","reply":{"job":3,"kind":"call","remaining":{"calls":98,"seconds":null}}},{"caller":"agent-0","grant":"train","job":3,"kind":"start_call","payload":{"digest":"sha256:d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9","size":5},"timeout_ns":"1000000000"}],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"op_arrived","op":4,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9","size":5}}},"observed_ns":"1000000000","seq":30}
+        {"actions":[],"at_ns":"1000000000","event":{"job":3,"kind":"call_started"},"observed_ns":"1000000000","seq":31}
+        {"actions":[],"at_ns":"1000000000","event":{"bytes":5,"digest":"sha256:d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9","job":3,"kind":"target_put","path":"/work/payload"},"observed_ns":"1000000000","seq":32}
+        {"actions":[],"at_ns":"1000000000","event":{"argv":["judge","/work/payload","/work/result.json"],"command":0,"job":3,"kind":"target_run"},"observed_ns":"1000000000","seq":33}
+        {"actions":[],"at_ns":"1000000000","event":{"command":0,"end":{"exited":{"code":0}},"job":3,"kind":"command_ended"},"observed_ns":"1000000000","seq":34}
+        {"actions":[],"at_ns":"1000000000","event":{"job":3,"kind":"call_failed","reason":"getting /work/result.json failed: the tree's files hold more than 1048576 bytes"},"observed_ns":"1000000000","seq":35}
+        {"actions":[],"at_ns":"1000000000","event":{"id":"sim-5","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-3"},"seq":36}
+        {"actions":[],"at_ns":"1000000000","event":{"job":3,"kind":"call_torn_down"},"observed_ns":"1000000000","seq":37}
+        {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":29,"returned":{"state":"accepted"}}}],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"op_arrived","op":5,"request":{"evaluated":{"effects":["set_submission","end_work"],"returned":[{"name":"state","value":"accepted"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"1000000000","seq":38}
+        {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"1000000000","seq":39}
+        {"at_ns":"1000000000","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":40}
+        {"actions":[],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"agent_collected"},"seq":41}
+        {"actions":[],"at_ns":"1000000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":42}
+        {"actions":[{"job":4,"kind":"start_final_call","selections":[{"role":"agent","selection":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}],"timeout_ns":"120000000000"}],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"1000000000","seq":43}
+        {"actions":[],"at_ns":"1000000000","event":{"job":4,"kind":"call_started"},"observed_ns":"1000000000","seq":44}
+        {"actions":[],"at_ns":"1000000000","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":4,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"1000000000","seq":45}
+        {"actions":[],"at_ns":"1000000000","event":{"argv":["judge","/pumpkin/in/payload/raw"],"command":0,"job":4,"kind":"target_run"},"observed_ns":"1000000000","seq":46}
+        {"actions":[],"at_ns":"1000000000","event":{"command":0,"end":{"exited":{"code":0}},"job":4,"kind":"command_ended"},"observed_ns":"1000000000","seq":47}
+        {"actions":[],"at_ns":"1000000000","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":4,"kind":"target_get","path":"/pumpkin/out/result.json"},"observed_ns":"1000000000","seq":48}
+        {"actions":[],"at_ns":"1000000000","event":{"job":4,"kind":"call_returned","returned":[{"name":"score","value":6}]},"observed_ns":"1000000000","seq":49}
+        {"actions":[],"at_ns":"1000000000","event":{"id":"sim-6","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-4"},"seq":50}
+        {"actions":[{"kind":"finish"}],"at_ns":"1000000000","event":{"job":4,"kind":"call_torn_down"},"observed_ns":"1000000000","seq":51}
         its last record came before the agent's teardown was to end
         job 0's command 0's standard output:
         0644 payload: xxxxxx"#]]
@@ -4147,8 +3542,9 @@ fn commands_past_the_startup() {
         "await 0 completed",
         "call submit 6 finalize=true",
     ];
+    // The first command's sleep moves the clock 2 s on, past the 1 s startup.
     check(
-        &System,
+        &SimHost::new(),
         "commands-past-the-startup",
         &[(PROVIDER, &Sim::with_startup(SHORT_STARTUP))],
         &body_workflow(&argv, "again", 4),
@@ -4158,33 +3554,33 @@ fn commands_past_the_startup() {
             payloads hold: ["xxxxxx"]
             outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"<ns>","event":{"hard_end_ns":"213000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"work_started"},"observed_ns":"<ns>","seq":1}
-            {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-            {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"4000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":3}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_started"},"observed_ns":"<ns>","seq":4}
-            {"actions":[],"at_ns":"<ns>","event":{"argv":["ops","sleep 2"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"<ns>","seq":5}
-            {"actions":[],"at_ns":"<ns>","event":{"command":0,"end":{"exited":{"code":0}},"job":0,"kind":"command_ended"},"observed_ns":"<ns>","seq":6}
-            {"actions":[],"at_ns":"<ns>","event":{"argv":["print","two"],"command":1,"job":0,"kind":"target_run"},"observed_ns":"<ns>","seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"command":1,"end":{"exited":{"code":0}},"job":0,"kind":"command_ended"},"observed_ns":"<ns>","seq":8}
-            {"actions":[],"at_ns":"<ns>","event":{"bytes":3,"digest":"sha256:3fc4ccfe745870e2c0d99f71f30ff0656c8dedd41cc1d7d3d376b0dbe685e2f3","job":0,"kind":"target_get","path":"/pumpkin/log/1/command.stdout"},"observed_ns":"<ns>","seq":9}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_returned","returned":[{"name":"printed","value":"two"}]},"observed_ns":"<ns>","seq":10}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":11}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":12}
-            {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":"<s>","returned":{"state":"accepted"}}}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":1,"request":{"evaluated":{"effects":["set_submission","end_work"],"returned":[{"name":"state","value":"accepted"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":13}
-            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":14}
-            {"at_ns":"<ns>","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":15}
-            {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_collected"},"seq":16}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":17}
-            {"actions":[{"job":1,"kind":"start_final_call","selections":[{"role":"agent","selection":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}],"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"<ns>","seq":18}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"call_started"},"observed_ns":"<ns>","seq":19}
-            {"actions":[],"at_ns":"<ns>","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":1,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"<ns>","seq":20}
-            {"actions":[],"at_ns":"<ns>","event":{"argv":["judge","/pumpkin/in/payload/raw"],"command":0,"job":1,"kind":"target_run"},"observed_ns":"<ns>","seq":21}
-            {"actions":[],"at_ns":"<ns>","event":{"command":0,"end":{"exited":{"code":0}},"job":1,"kind":"command_ended"},"observed_ns":"<ns>","seq":22}
-            {"actions":[],"at_ns":"<ns>","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":1,"kind":"target_get","path":"/pumpkin/out/result.json"},"observed_ns":"<ns>","seq":23}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"call_returned","returned":[{"name":"score","value":6}]},"observed_ns":"<ns>","seq":24}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":25}
-            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":1,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":26}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"213000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
+            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
+            {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"4000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
+            {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_started"},"observed_ns":"0","seq":4}
+            {"actions":[],"at_ns":"0","event":{"argv":["ops","await_log target_run","sleep 2"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"0","seq":5}
+            {"actions":[],"at_ns":"2000000000","event":{"command":0,"end":{"exited":{"code":0}},"job":0,"kind":"command_ended"},"observed_ns":"2000000000","seq":6}
+            {"actions":[],"at_ns":"2000000000","event":{"argv":["print","two"],"command":1,"job":0,"kind":"target_run"},"observed_ns":"2000000000","seq":7}
+            {"actions":[],"at_ns":"2000000000","event":{"command":1,"end":{"exited":{"code":0}},"job":0,"kind":"command_ended"},"observed_ns":"2000000000","seq":8}
+            {"actions":[],"at_ns":"2000000000","event":{"bytes":3,"digest":"sha256:3fc4ccfe745870e2c0d99f71f30ff0656c8dedd41cc1d7d3d376b0dbe685e2f3","job":0,"kind":"target_get","path":"/pumpkin/log/1/command.stdout"},"observed_ns":"2000000000","seq":9}
+            {"actions":[],"at_ns":"2000000000","event":{"job":0,"kind":"call_returned","returned":[{"name":"printed","value":"two"}]},"observed_ns":"2000000000","seq":10}
+            {"actions":[],"at_ns":"2000000000","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":11}
+            {"actions":[],"at_ns":"2000000000","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"2000000000","seq":12}
+            {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":28,"returned":{"state":"accepted"}}}],"at_ns":"2000000000","event":{"caller":"agent-0","kind":"op_arrived","op":1,"request":{"evaluated":{"effects":["set_submission","end_work"],"returned":[{"name":"state","value":"accepted"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"2000000000","seq":13}
+            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"2000000000","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"2000000000","seq":14}
+            {"at_ns":"2000000000","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":15}
+            {"actions":[],"at_ns":"2000000000","event":{"caller":"agent-0","kind":"agent_collected"},"seq":16}
+            {"actions":[],"at_ns":"2000000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":17}
+            {"actions":[{"job":1,"kind":"start_final_call","selections":[{"role":"agent","selection":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}],"timeout_ns":"120000000000"}],"at_ns":"2000000000","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"2000000000","seq":18}
+            {"actions":[],"at_ns":"2000000000","event":{"job":1,"kind":"call_started"},"observed_ns":"2000000000","seq":19}
+            {"actions":[],"at_ns":"2000000000","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":1,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"2000000000","seq":20}
+            {"actions":[],"at_ns":"2000000000","event":{"argv":["judge","/pumpkin/in/payload/raw"],"command":0,"job":1,"kind":"target_run"},"observed_ns":"2000000000","seq":21}
+            {"actions":[],"at_ns":"2000000000","event":{"command":0,"end":{"exited":{"code":0}},"job":1,"kind":"command_ended"},"observed_ns":"2000000000","seq":22}
+            {"actions":[],"at_ns":"2000000000","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":1,"kind":"target_get","path":"/pumpkin/out/result.json"},"observed_ns":"2000000000","seq":23}
+            {"actions":[],"at_ns":"2000000000","event":{"job":1,"kind":"call_returned","returned":[{"name":"score","value":6}]},"observed_ns":"2000000000","seq":24}
+            {"actions":[],"at_ns":"2000000000","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":25}
+            {"actions":[{"kind":"finish"}],"at_ns":"2000000000","event":{"job":1,"kind":"call_torn_down"},"observed_ns":"2000000000","seq":26}
             its last record came before the agent's teardown was to end"#]],
     );
 }
@@ -4198,8 +3594,14 @@ fn times_out_between_commands() {
         "await 0 errored",
         "call submit 6 finalize=true",
     ];
+    // The clock reaches the 1 s timeout once the first command has ended.
+    let timed_out = SlowSync {
+        record: Synced::Holding("log.jsonl", r#""job":0,"kind":"command_ended""#),
+        queued: 0,
+        at: Duration::from_secs(1),
+    };
     check(
-        &System,
+        &SimHost::new().slow_sync(timed_out),
         "times-out-between-commands",
         &[(PROVIDER, &Sim::new())],
         &body_workflow(&argv, "holds", 1),
@@ -4209,31 +3611,31 @@ fn times_out_between_commands() {
             payloads hold: ["xxxxxx"]
             outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"work_started"},"observed_ns":"<ns>","seq":1}
-            {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-            {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":3}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_started"},"observed_ns":"<ns>","seq":4}
-            {"actions":[],"at_ns":"<ns>","event":{"argv":["print","one"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"<ns>","seq":5}
-            {"actions":[],"at_ns":"<ns>","event":{"command":0,"end":{"exited":{"code":0}},"job":0,"kind":"command_ended"},"observed_ns":"<ns>","seq":6}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_timed_out"},"observed_ns":"<ns>","seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_failed","reason":"the call's timeout passed"},"observed_ns":"<ns>","seq":8}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":9}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":10}
-            {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":"<s>","returned":{"state":"accepted"}}}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":1,"request":{"evaluated":{"effects":["set_submission","end_work"],"returned":[{"name":"state","value":"accepted"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":11}
-            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":12}
-            {"at_ns":"<ns>","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":13}
-            {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_collected"},"seq":14}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":15}
-            {"actions":[{"job":1,"kind":"start_final_call","selections":[{"role":"agent","selection":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}],"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"<ns>","seq":16}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"call_started"},"observed_ns":"<ns>","seq":17}
-            {"actions":[],"at_ns":"<ns>","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":1,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"<ns>","seq":18}
-            {"actions":[],"at_ns":"<ns>","event":{"argv":["judge","/pumpkin/in/payload/raw"],"command":0,"job":1,"kind":"target_run"},"observed_ns":"<ns>","seq":19}
-            {"actions":[],"at_ns":"<ns>","event":{"command":0,"end":{"exited":{"code":0}},"job":1,"kind":"command_ended"},"observed_ns":"<ns>","seq":20}
-            {"actions":[],"at_ns":"<ns>","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":1,"kind":"target_get","path":"/pumpkin/out/result.json"},"observed_ns":"<ns>","seq":21}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"call_returned","returned":[{"name":"score","value":6}]},"observed_ns":"<ns>","seq":22}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":23}
-            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":1,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":24}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
+            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
+            {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
+            {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_started"},"observed_ns":"0","seq":4}
+            {"actions":[],"at_ns":"0","event":{"argv":["print","one"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"0","seq":5}
+            {"actions":[],"at_ns":"0","event":{"command":0,"end":{"exited":{"code":0}},"job":0,"kind":"command_ended"},"observed_ns":"0","seq":6}
+            {"actions":[],"at_ns":"1000000000","event":{"job":0,"kind":"call_timed_out"},"observed_ns":"1000000000","seq":7}
+            {"actions":[],"at_ns":"1000000000","event":{"job":0,"kind":"call_failed","reason":"the call's timeout passed"},"observed_ns":"1000000000","seq":8}
+            {"actions":[],"at_ns":"1000000000","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":9}
+            {"actions":[],"at_ns":"1000000000","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"1000000000","seq":10}
+            {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":29,"returned":{"state":"accepted"}}}],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"op_arrived","op":1,"request":{"evaluated":{"effects":["set_submission","end_work"],"returned":[{"name":"state","value":"accepted"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"1000000000","seq":11}
+            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"1000000000","seq":12}
+            {"at_ns":"1000000000","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":13}
+            {"actions":[],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"agent_collected"},"seq":14}
+            {"actions":[],"at_ns":"1000000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":15}
+            {"actions":[{"job":1,"kind":"start_final_call","selections":[{"role":"agent","selection":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}],"timeout_ns":"120000000000"}],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"1000000000","seq":16}
+            {"actions":[],"at_ns":"1000000000","event":{"job":1,"kind":"call_started"},"observed_ns":"1000000000","seq":17}
+            {"actions":[],"at_ns":"1000000000","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":1,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"1000000000","seq":18}
+            {"actions":[],"at_ns":"1000000000","event":{"argv":["judge","/pumpkin/in/payload/raw"],"command":0,"job":1,"kind":"target_run"},"observed_ns":"1000000000","seq":19}
+            {"actions":[],"at_ns":"1000000000","event":{"command":0,"end":{"exited":{"code":0}},"job":1,"kind":"command_ended"},"observed_ns":"1000000000","seq":20}
+            {"actions":[],"at_ns":"1000000000","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":1,"kind":"target_get","path":"/pumpkin/out/result.json"},"observed_ns":"1000000000","seq":21}
+            {"actions":[],"at_ns":"1000000000","event":{"job":1,"kind":"call_returned","returned":[{"name":"score","value":6}]},"observed_ns":"1000000000","seq":22}
+            {"actions":[],"at_ns":"1000000000","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":23}
+            {"actions":[{"kind":"finish"}],"at_ns":"1000000000","event":{"job":1,"kind":"call_torn_down"},"observed_ns":"1000000000","seq":24}
             its last record came before the agent's teardown was to end
             job 0's command 0's standard output:
             one"#]],
@@ -4408,76 +3810,14 @@ fn deep_returns() {
 }
 
 #[test]
-fn leases() {
-    let argv = [
-        "ops",
-        "gpu.open",
-        // Once its runner is ready, which a thread of its own reports, so that the ready comes
-        // before these ops in the log, not as the threads happen to run.
-        "await_lease gpu 0 ready",
-        "gpu.run 0 - print one",
-        "await_lease gpu 0 ready",
-        "gpu.run 0 - fill 30000 two",
-        "await_lease gpu 0 ready",
-        "gpu.run 0 1 sleep",
-        "await_lease gpu 0 ready",
-        "gpu.close 0",
-        // The lease's end and the agent's ops reach the run's loop from different threads;
-        // `closed` is said only once the loop has taken the end, so it comes before the next op.
-        "await_lease gpu 0 closed",
-        "call submit 6 finalize=true",
-    ];
-    check_polls(
-        &System,
-        "leases",
-        &[(PROVIDER, &Sim::new())],
-        &lease_workflow(&argv, 30, RUNNER),
-        SANDBOXD,
-        &expect![[r#"
-            finished, showing [score=6]
-            a poll, {"grant":"gpu","kind":"lease_status","lease":0}, is answered {"kind":"lease_status"}
-            payloads hold: ["xxxxxx"]
-            outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
-            log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"work_started"},"observed_ns":"<ns>","seq":1}
-            {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-            {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":4,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"grant":"gpu","holder":"agent-0","instance":0,"kind":"start_lease","lease":0,"start_by_ns":"<ns>"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"gpu","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"<ns>","seq":3}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"lease_ready","lease":0},"observed_ns":"<ns>","seq":4}
-            {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":3,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"command":0,"kind":"run_command","lease":0,"timeout_ns":null}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":1,"request":{"argv":["print","one"],"grant":"gpu","kind":"lease_run","lease":0,"timeout_seconds":null}},"observed_ns":"<ns>","seq":5}
-            {"actions":[],"at_ns":"<ns>","event":{"command":0,"end":{"exited":{"code":0}},"kind":"command_ended","lease":0},"observed_ns":"<ns>","seq":6}
-            {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":2,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"command":1,"kind":"run_command","lease":0,"timeout_ns":null}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":2,"request":{"argv":["fill","30000","two"],"grant":"gpu","kind":"lease_run","lease":0,"timeout_seconds":null}},"observed_ns":"<ns>","seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"command":1,"end":{"exited":{"code":0}},"kind":"command_ended","lease":0},"observed_ns":"<ns>","seq":8}
-            {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":1,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"command":2,"kind":"run_command","lease":0,"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":3,"request":{"argv":["sleep"],"grant":"gpu","kind":"lease_run","lease":0,"timeout_seconds":1}},"observed_ns":"<ns>","seq":9}
-            {"actions":[],"at_ns":"<ns>","event":{"command":2,"end":"timed_out","kind":"command_ended","lease":0},"observed_ns":"<ns>","seq":10}
-            {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":1,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"kind":"close_lease","lease":0}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":4,"request":{"grant":"gpu","kind":"lease_close","lease":0}},"observed_ns":"<ns>","seq":11}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"lease-0"},"seq":12}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"lease_ended","lease":0},"observed_ns":"<ns>","seq":13}
-            {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":"<s>","returned":{"state":"accepted"}}}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":5,"request":{"evaluated":{"effects":["set_submission","end_work"],"returned":[{"name":"state","value":"accepted"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":14}
-            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":15}
-            {"at_ns":"<ns>","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":16}
-            {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_collected"},"seq":17}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":18}
-            {"actions":[{"job":0,"kind":"start_final_call","selections":[{"role":"agent","selection":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}],"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"<ns>","seq":19}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_started"},"observed_ns":"<ns>","seq":20}
-            {"actions":[],"at_ns":"<ns>","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":0,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"<ns>","seq":21}
-            {"actions":[],"at_ns":"<ns>","event":{"argv":["judge","/pumpkin/in/payload/raw"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"<ns>","seq":22}
-            {"actions":[],"at_ns":"<ns>","event":{"command":0,"end":{"exited":{"code":0}},"job":0,"kind":"command_ended"},"observed_ns":"<ns>","seq":23}
-            {"actions":[],"at_ns":"<ns>","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":0,"kind":"target_get","path":"/pumpkin/out/result.json"},"observed_ns":"<ns>","seq":24}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_returned","returned":[{"name":"score","value":6}]},"observed_ns":"<ns>","seq":25}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":26}
-            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":27}
-            its last record came before the agent's teardown was to end"#]],
-    );
-}
-
-#[test]
 fn lease_ends() {
     let argv = [
         "ops",
         "gpu.open 1",
         "await_lease gpu 0 ready",
         "gpu.run 0 - sleep",
+        // Past the lease's 1 s.
+        "sleep 2",
         // A lease is `expired` only once its runner is gone, so its end comes before the next
         // lease's events.
         "await_lease gpu 0 expired",
@@ -4489,7 +3829,7 @@ fn lease_ends() {
     ];
     let ir = lease_workflow(&argv, 30, RUNNER);
     let dir = TestDir::new();
-    let (record, _, _) = judged(&System, ir, &dir);
+    let (record, _, _) = judged(&SimHost::new(), ir, &dir);
     let log = read_log(&record);
     let closes: Vec<_> = log
         .iter()
@@ -4536,6 +3876,8 @@ fn lease_ends() {
 #[test]
 #[expect(clippy::too_many_lines, reason = "most of it is the transcript")]
 fn lease_transfers() {
+    // A umask that narrows every mode the agent's sandbox sent, so that a put restores each.
+    rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o077));
     let argv = [
         "ops",
         "gpu.open",
@@ -4580,7 +3922,7 @@ fn lease_transfers() {
         &[(PROVIDER, &Sim::new())],
         &ir,
         SANDBOXD,
-        &[Also::Listing],
+        &[Also::Listing, Also::File("leases/0/log/1/command.stdout")],
     );
     expect![[r#"
         finished, showing [score=6]
@@ -4626,7 +3968,16 @@ fn lease_transfers() {
         {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_returned","returned":[{"name":"score","value":6}]},"observed_ns":"0","seq":35}
         {"actions":[],"at_ns":"0","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":36}
         {"actions":[{"kind":"finish"}],"at_ns":"0","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"0","seq":37}
-        its last record came before the agent's teardown was to end"#]]
+        its last record came before the agent's teardown was to end
+        leases/0/log/1/command.stdout:
+        0644 collected: collected
+        0600 config.toml: model = "gpt-6-astra"
+
+        0444 ro: r
+        0666 shared: s
+        0551 shut/
+        0600 shut/key: k
+        0750 tool: true"#]]
     .assert_eq(&shown);
 }
 
@@ -4709,76 +4060,6 @@ fn held_lease_workflow(argv: &[&str], holder_argv: &[&str]) -> Value {
     train_runs(ir, holder_argv)
 }
 
-const LEASING: [&str; 8] = [
-    "ops",
-    "box.open",
-    "await_lease box 0 ready",
-    "box.put 0 /pumpkin/in/payload /work/in",
-    "await_transfer box 0 moved",
-    "box.run 0 - print 7",
-    "await_lease box 0 ready",
-    "result",
-];
-
-// A call's lease is closed as its call returns.
-#[test]
-fn call_leases() {
-    let argv = [
-        "ops",
-        "call train 6",
-        "await 0 completed",
-        // The call's lease ends after its result comes.
-        "await_log lease_ended",
-        "call submit 6 finalize=true",
-    ];
-    check(
-        &SimHost::new(),
-        "call-leases",
-        &[(PROVIDER, &Sim::new())],
-        &held_lease_workflow(&argv, &LEASING),
-        SANDBOXD,
-        &expect![[r#"
-            finished, showing [score=6]
-            payloads hold: ["xxxxxx"]
-            outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
-            log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
-            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
-            {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"20000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
-            {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_started"},"observed_ns":"0","seq":4}
-            {"actions":[],"at_ns":"0","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":0,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"0","seq":5}
-            {"actions":[],"at_ns":"0","event":{"argv":["ops","box.open","await_lease box 0 ready","box.put 0 /pumpkin/in/payload /work/in","await_transfer box 0 moved","box.run 0 - print 7","await_lease box 0 ready","result"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"0","seq":6}
-            {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":null,"cumulative_seconds":null,"instance_seconds":60,"instances":0}}},{"grant":"box","holder":"job-0","instance":0,"kind":"start_lease","lease":0,"start_by_ns":"20000000000"}],"at_ns":"0","event":{"caller":"job-0","kind":"op_arrived","op":1,"request":{"grant":"box","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"0","seq":7}
-            {"actions":[],"at_ns":"0","event":{"kind":"lease_ready","lease":0},"observed_ns":"0","seq":8}
-            {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":null,"cumulative_seconds":null,"instance_seconds":60,"instances":0}}},{"direction":"put","kind":"transfer","lease":0,"max_bytes":64,"transfer":0}],"at_ns":"0","event":{"caller":"job-0","kind":"op_arrived","op":2,"request":{"grant":"box","kind":"lease_put","lease":0,"replace":false,"to":"/work/in","tree":"/pumpkin/in/payload"}},"observed_ns":"0","seq":9}
-            {"actions":[],"at_ns":"0","event":{"end":{"moved":{"bytes":15,"entries":2}},"kind":"transfer_ended","lease":0,"transfer":0},"observed_ns":"0","seq":10}
-            {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":null,"cumulative_seconds":null,"instance_seconds":60,"instances":0}}},{"command":1,"kind":"run_command","lease":0,"timeout_ns":null}],"at_ns":"0","event":{"caller":"job-0","kind":"op_arrived","op":3,"request":{"argv":["print","7"],"grant":"box","kind":"lease_run","lease":0,"timeout_seconds":null}},"observed_ns":"0","seq":11}
-            {"actions":[],"at_ns":"0","event":{"command":1,"end":{"exited":{"code":0}},"kind":"command_ended","lease":0},"observed_ns":"0","seq":12}
-            {"actions":[],"at_ns":"0","event":{"command":0,"end":{"exited":{"code":0}},"job":0,"kind":"command_ended"},"observed_ns":"0","seq":13}
-            {"actions":[{"kind":"close_lease","lease":0}],"at_ns":"0","event":{"job":0,"kind":"call_returned","returned":[]},"observed_ns":"0","seq":14}
-            {"actions":[],"at_ns":"0","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":15}
-            {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"0","seq":16}
-            {"actions":[],"at_ns":"0","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"lease-0"},"seq":17}
-            {"actions":[],"at_ns":"0","event":{"kind":"lease_ended","lease":0},"observed_ns":"0","seq":18}
-            {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":30,"returned":{"state":"accepted"}}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":4,"request":{"evaluated":{"effects":["set_submission","end_work"],"returned":[{"name":"state","value":"accepted"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":19}
-            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"0","seq":20}
-            {"at_ns":"0","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":21}
-            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_collected"},"seq":22}
-            {"actions":[],"at_ns":"0","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":23}
-            {"actions":[{"job":1,"kind":"start_final_call","selections":[{"role":"agent","selection":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}],"timeout_ns":"120000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"0","seq":24}
-            {"actions":[],"at_ns":"0","event":{"job":1,"kind":"call_started"},"observed_ns":"0","seq":25}
-            {"actions":[],"at_ns":"0","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":1,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"0","seq":26}
-            {"actions":[],"at_ns":"0","event":{"argv":["judge","/pumpkin/in/payload/raw"],"command":0,"job":1,"kind":"target_run"},"observed_ns":"0","seq":27}
-            {"actions":[],"at_ns":"0","event":{"command":0,"end":{"exited":{"code":0}},"job":1,"kind":"command_ended"},"observed_ns":"0","seq":28}
-            {"actions":[],"at_ns":"0","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":1,"kind":"target_get","path":"/pumpkin/out/result.json"},"observed_ns":"0","seq":29}
-            {"actions":[],"at_ns":"0","event":{"job":1,"kind":"call_returned","returned":[{"name":"score","value":6}]},"observed_ns":"0","seq":30}
-            {"actions":[],"at_ns":"0","event":{"id":"sim-4","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":31}
-            {"actions":[{"kind":"finish"}],"at_ns":"0","event":{"job":1,"kind":"call_torn_down"},"observed_ns":"0","seq":32}
-            its last record came before the agent's teardown was to end"#]],
-    );
-}
-
 // The lease starts by the call's timeout, not by its class's startup, so its create gives up
 // then.
 #[test]
@@ -4795,10 +4076,15 @@ fn lease_starts_by_its_holders_end() {
     let mut ir = held_lease_workflow(&argv, &holder_argv);
     ir["roles"][0]["runtime"]["agent"]["grants"][0]["job"]["call_timeout_seconds"] = json!(1);
     ir["roles"][3]["image"] = json!(sim::image(SLOW).as_str());
+    // The clock reaches the call's 1 s timeout, where the lease's create gives up, once the
+    // call's teardown is logged.
+    let host = SimHost::new();
+    let torn_down = &[r#"{"job":0,"kind":"call_torn_down"}"#];
+    let sim = Sim::new().once_logged(torn_down, host.moving_to(Duration::from_secs(1)));
     check(
-        &System,
+        &host,
         "lease-starts-by-its-holders-end",
-        &[(PROVIDER, &Sim::new())],
+        &[(PROVIDER, &sim)],
         &ir,
         SANDBOXD,
         &expect![[r#"
@@ -4806,34 +4092,34 @@ fn lease_starts_by_its_holders_end() {
             payloads hold: ["xxxxxx"]
             outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
             log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"work_started"},"observed_ns":"<ns>","seq":1}
-            {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-            {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":3}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_started"},"observed_ns":"<ns>","seq":4}
-            {"actions":[],"at_ns":"<ns>","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":0,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"<ns>","seq":5}
-            {"actions":[],"at_ns":"<ns>","event":{"argv":["ops","box.open"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"<ns>","seq":6}
-            {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":null,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":0}}},{"grant":"box","holder":"job-0","instance":0,"kind":"start_lease","lease":0,"start_by_ns":"<ns>"}],"at_ns":"<ns>","event":{"caller":"job-0","kind":"op_arrived","op":1,"request":{"grant":"box","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"<ns>","seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"command":0,"end":{"exited":{"code":0}},"job":0,"kind":"command_ended"},"observed_ns":"<ns>","seq":8}
-            {"actions":[{"kind":"close_lease","lease":0}],"at_ns":"<ns>","event":{"job":0,"kind":"call_returned","returned":[]},"observed_ns":"<ns>","seq":9}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":10}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":11}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"lease_failed","lease":0,"reason":"the runner's sandbox didn't start: the simulated create gave up at its deadline, and can't name what it made: expected the run's list to find it"},"observed_ns":"<ns>","seq":12}
-            {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":"<s>","returned":{"state":"accepted"}}}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":2,"request":{"evaluated":{"effects":["set_submission","end_work"],"returned":[{"name":"state","value":"accepted"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":13}
-            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":14}
-            {"at_ns":"<ns>","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":15}
-            {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_collected"},"seq":16}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":17}
-            {"actions":[{"job":1,"kind":"start_final_call","selections":[{"role":"agent","selection":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}],"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"<ns>","seq":18}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":null},"seq":19}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"call_started"},"observed_ns":"<ns>","seq":20}
-            {"actions":[],"at_ns":"<ns>","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":1,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"<ns>","seq":21}
-            {"actions":[],"at_ns":"<ns>","event":{"argv":["judge","/pumpkin/in/payload/raw"],"command":0,"job":1,"kind":"target_run"},"observed_ns":"<ns>","seq":22}
-            {"actions":[],"at_ns":"<ns>","event":{"command":0,"end":{"exited":{"code":0}},"job":1,"kind":"command_ended"},"observed_ns":"<ns>","seq":23}
-            {"actions":[],"at_ns":"<ns>","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":1,"kind":"target_get","path":"/pumpkin/out/result.json"},"observed_ns":"<ns>","seq":24}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"call_returned","returned":[{"name":"score","value":6}]},"observed_ns":"<ns>","seq":25}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-4","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":26}
-            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":1,"kind":"call_torn_down"},"observed_ns":"<ns>","seq":27}
+            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
+            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
+            {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":3}
+            {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_started"},"observed_ns":"0","seq":4}
+            {"actions":[],"at_ns":"0","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":0,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"0","seq":5}
+            {"actions":[],"at_ns":"0","event":{"argv":["ops","box.open"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"0","seq":6}
+            {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":null,"cumulative_seconds":null,"instance_seconds":60,"instances":0}}},{"grant":"box","holder":"job-0","instance":0,"kind":"start_lease","lease":0,"start_by_ns":"1000000000"}],"at_ns":"0","event":{"caller":"job-0","kind":"op_arrived","op":1,"request":{"grant":"box","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"0","seq":7}
+            {"actions":[],"at_ns":"0","event":{"command":0,"end":{"exited":{"code":0}},"job":0,"kind":"command_ended"},"observed_ns":"0","seq":8}
+            {"actions":[{"kind":"close_lease","lease":0}],"at_ns":"0","event":{"job":0,"kind":"call_returned","returned":[]},"observed_ns":"0","seq":9}
+            {"actions":[],"at_ns":"0","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":10}
+            {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"0","seq":11}
+            {"actions":[],"at_ns":"1000000000","event":{"kind":"lease_failed","lease":0,"reason":"the runner's sandbox didn't start: the simulated create gave up at its deadline, and can't name what it made: expected the run's list to find it"},"observed_ns":"1000000000","seq":12}
+            {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":29,"returned":{"state":"accepted"}}}],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"op_arrived","op":2,"request":{"evaluated":{"effects":["set_submission","end_work"],"returned":[{"name":"state","value":"accepted"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"1000000000","seq":13}
+            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"1000000000","seq":14}
+            {"at_ns":"1000000000","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":15}
+            {"actions":[],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"agent_collected"},"seq":16}
+            {"actions":[],"at_ns":"1000000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":17}
+            {"actions":[{"job":1,"kind":"start_final_call","selections":[{"role":"agent","selection":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}],"timeout_ns":"120000000000"}],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"1000000000","seq":18}
+            {"actions":[],"at_ns":"1000000000","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":null},"seq":19}
+            {"actions":[],"at_ns":"1000000000","event":{"job":1,"kind":"call_started"},"observed_ns":"1000000000","seq":20}
+            {"actions":[],"at_ns":"1000000000","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":1,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"1000000000","seq":21}
+            {"actions":[],"at_ns":"1000000000","event":{"argv":["judge","/pumpkin/in/payload/raw"],"command":0,"job":1,"kind":"target_run"},"observed_ns":"1000000000","seq":22}
+            {"actions":[],"at_ns":"1000000000","event":{"command":0,"end":{"exited":{"code":0}},"job":1,"kind":"command_ended"},"observed_ns":"1000000000","seq":23}
+            {"actions":[],"at_ns":"1000000000","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":1,"kind":"target_get","path":"/pumpkin/out/result.json"},"observed_ns":"1000000000","seq":24}
+            {"actions":[],"at_ns":"1000000000","event":{"job":1,"kind":"call_returned","returned":[{"name":"score","value":6}]},"observed_ns":"1000000000","seq":25}
+            {"actions":[],"at_ns":"1000000000","event":{"id":"sim-4","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":26}
+            {"actions":[{"kind":"finish"}],"at_ns":"1000000000","event":{"job":1,"kind":"call_torn_down"},"observed_ns":"1000000000","seq":27}
             its last record came before the agent's teardown was to end"#]],
     );
 }
@@ -4847,7 +4133,7 @@ fn submissions_workflow(argv: &[&str]) -> Value {
 }
 
 fn execute_agents(
-    host: &impl Host,
+    host: &impl Shown,
     startup: u64,
     ir: Value,
     dir: &TestDir,
@@ -4861,7 +4147,7 @@ fn execute_agents(
         .agents()
         .map(|agent| agent.id)
         .collect::<Vec<_>>();
-    let upstream = model_routed(&ir).then(StandIn::start);
+    let upstream = model_routed(&ir).then(|| StandIn::start(host.time()));
     let servings = StandIn::servings(upstream.as_ref(), placed.workflow(), dir.path());
     let prices = prices();
     let (models, recorded) = kept(&placed, &servings, &prices);
@@ -4874,7 +4160,7 @@ fn execute_agents(
     };
     let on = providers_of(&placed, |_| &provider);
     let run = Run::prepare(host, placed, on, dir.path(), tag.clone(), models, recorded).unwrap();
-    sim.records(&record);
+    sim.records(&record, host.time());
     let outcome = thread::scope(|scope| {
         if let Some(At::Logged(event)) = at {
             scope.spawn(|| {
@@ -4901,7 +4187,7 @@ fn execute_agents(
 }
 
 fn judged(
-    host: &impl Host,
+    host: &impl Shown,
     ir: Value,
     dir: &TestDir,
 ) -> (PathBuf, Vec<decision::AgentOutcome>, decision::CallResult) {
@@ -5150,7 +4436,6 @@ fn releases_agents_and_a_shared_target_ready_before_the_driver_takes_their_notic
     let wait = LateTake {
         behind: 2,
         at: Duration::from_secs(3),
-        then: 0,
     };
     let host = SimHost::new().during_setup(wait, || {});
     let dir = TestDir::new();
@@ -5164,15 +4449,14 @@ fn releases_agents_and_a_shared_target_ready_before_the_driver_takes_their_notic
     );
 }
 
-// The clock passes the startup while both sandboxes set up, so each start ends after its bound,
-// and the setup takes both notices at once.
+// The clock passes the startup once both sandboxes have sent their set-up's put, so each put fails
+// at its bound, waiting for its answer, and the setup takes both notices at once.
 #[test]
 fn set_up_past_the_startup() {
     let past = Duration::from_secs(31);
     let both = LateTake {
         behind: 1,
         at: past,
-        then: 0,
     };
     let host = SimHost::new().during_setup(both, || {});
     let sim = Sim::new().holding_set_ups(2, host.moving_to(past));
@@ -5204,9 +4488,9 @@ fn set_up_past_the_startup() {
     let outcome = shown.lines().find(|line| line.starts_with("outcome.json:"));
     failed.extend(outcome.map(str::to_owned));
     expect![[r#"
-        {"actions":[],"at_ns":"31000000000","event":{"kind":"shared_failed","reason":"the shared role's setup missed the startup deadline","shared":1},"observed_ns":"31000000000"}
-        {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"31000000000","event":{"caller":"agent-0","kind":"agent_failed","reason":"the agent's setup missed the startup deadline"},"observed_ns":"31000000000"}
-        outcome.json: {"agents":[{"role":"alpha","submission":null,"work_end":{"kind":"agent_failed","reason":"the agent's setup missed the startup deadline"}}],"verdict":{"kind":"returned","result":{"values":[{"name":"files","value":{"alpha":null}}]}}}"#]].assert_eq(&failed.join("\n"));
+        {"actions":[],"at_ns":"31000000000","event":{"kind":"shared_failed","reason":"the directories under `/pumpkin` can't be put in the sandbox: the sandbox didn't answer before the request's deadline: expected its answer while the deadline lasts","shared":1},"observed_ns":"31000000000"}
+        {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"31000000000","event":{"caller":"agent-0","kind":"agent_failed","reason":"the agent's sandbox didn't start: the directories under `/pumpkin` can't be put in the sandbox: the sandbox didn't answer before the request's deadline: expected its answer while the deadline lasts"},"observed_ns":"31000000000"}
+        outcome.json: {"agents":[{"role":"alpha","submission":null,"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: the directories under `/pumpkin` can't be put in the sandbox: the sandbox didn't answer before the request's deadline: expected its answer while the deadline lasts"}}],"verdict":{"kind":"returned","result":{"values":[{"name":"files","value":{"alpha":null}}]}}}"#]].assert_eq(&failed.join("\n"));
 }
 
 #[test]
@@ -5219,7 +4503,6 @@ fn interrupt_during_peer_setup_keeps_ready_commands_unlaunched() {
     let wait = LateTake {
         behind: 0,
         at: Duration::ZERO,
-        then: 0,
     };
     let host = SimHost::new().during_setup(wait, interrupt);
     let dir = TestDir::new();
@@ -5235,6 +4518,13 @@ fn final_body_reads_submitted_bytes_after_one_agent_fails_to_start() {
     let mut broken = roles[0].clone();
     broken["name"] = json!("broken");
     broken["image"] = json!(sim::image(sim::HUNG_LAST).as_str());
+    // A startup shorter than the other agents', at which its create's record ends.
+    broken["needs"]["cpu_model"] = json!(BRIEF);
+    let startup = SlowSync {
+        record: Synced::Holding("agents/broken/.sandbox.json.partial", "sim-"),
+        queued: 0,
+        at: Duration::from_secs(1),
+    };
     let mut beta = roles[0].clone();
     beta["name"] = json!("beta");
     beta["runtime"]["agent"]["command"]["argv"] = json!([
@@ -5246,7 +4536,7 @@ fn final_body_reads_submitted_bytes_after_one_agent_fails_to_start() {
     ]);
     roles.extend([broken, beta]);
     let dir = TestDir::new();
-    let (record, agents, result) = judged(&System, ir, &dir);
+    let (record, agents, result) = judged(&SimHost::new().slow_sync(startup), ir, &dir);
     assert!(agents[0].submission.as_ref().unwrap().finalized);
     assert!(matches!(
         agents[1].work_end,
@@ -5349,9 +4639,16 @@ fn judge_waits_for_failed_agent_deletion() {
     let mut broken = roles[0].clone();
     broken["name"] = json!("broken");
     broken["image"] = json!(sim::image(sim::HUNG_REFUSED).as_str());
+    // A startup shorter than the other agent's, at which its create's record ends.
+    broken["needs"]["cpu_model"] = json!(BRIEF);
     roles.push(broken);
+    let startup = SlowSync {
+        record: Synced::Holding("agents/broken/.sandbox.json.partial", "sim-"),
+        queued: 0,
+        at: Duration::from_secs(1),
+    };
     let dir = TestDir::new();
-    let (record, outcome) = execute_agents(&System, 2, ir, &dir, None);
+    let (record, outcome) = execute_agents(&SimHost::new().slow_sync(startup), 2, ir, &dir, None);
     assert!(
         outcome
             .unwrap_err()
@@ -5505,7 +4802,7 @@ fn work_target_calls_share_files_and_collect_each_call_once() {
             .unwrap();
     assert_eq!(sandbox["delete"]["state"], "deleted");
 
-    // A record written with a service declaration still identifies the same physical sandbox.
+    // A record that declares the role `shared` identifies the same physical sandbox.
     let path = record.join("ir.json");
     let mut old: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     old["roles"][1]["runtime"] =
@@ -5630,8 +4927,14 @@ fn shared_timeout_stops_its_client_before_the_next_call() {
     fast["name"] = json!("fast");
     fast["job"]["body"]["def"] = json!("board");
     grants.push(fast);
+    // The clock reaches the slow call's timeout once its command has started.
+    let timed_out = SlowSync {
+        record: Synced::Holding("log.jsonl", r#""job":0,"kind":"target_run""#),
+        queued: 0,
+        at: Duration::from_secs(1),
+    };
     let dir = TestDir::new();
-    let (record, _, _) = judged(&System, ir, &dir);
+    let (record, _, _) = judged(&SimHost::new().slow_sync(timed_out), ir, &dir);
     let log = read_log(&record);
     assert!(
         log.iter()
@@ -5699,8 +5002,12 @@ fn shared_start_failure_is_disposed_before_final() {
         "board",
     );
     ir["roles"][1]["image"] = json!(sim::image(MUTE).as_str());
+    // Once the start has read the clock past the create's record, the clock moves to its first
+    // look, which finds the sandbox ended.
+    let created = Synced::Holding("shared/trainer/.sandbox.json.partial", "sim-");
+    let host = SimHost::new().moving_after_read(created, Duration::from_secs(1));
     let dir = TestDir::new();
-    let (record, agents, _) = judged(&SimHost::new(), ir, &dir);
+    let (record, agents, _) = judged(&host, ir, &dir);
     assert!(agents[0].submission.as_ref().unwrap().finalized);
     let log = read_log(&record);
     let failure = log
@@ -5760,15 +5067,21 @@ fn an_unconfirmed_command_stop_closes_the_work_target_to_later_calls() {
         &[
             "ops",
             "call train 1",
+            // Past the call's 1 s timeout, once its command has started.
+            "await_log target_run",
+            "sleep 1",
             "await_log shared_failed",
             "call train 2",
             "call submit ok finalize=true",
         ],
         "run",
     );
-    ir["roles"][0]["runtime"]["agent"]["grants"][0]["job"]["keywords"] = json!({"argv":["stall"]});
+    // The command stalls its sandbox, which holds the stop that follows the call's 1 s timeout
+    // until that stop's own deadline, 1 s later.
+    let argv = json!({ "argv": ["stall", "2"] });
+    ir["roles"][0]["runtime"]["agent"]["grants"][0]["job"]["keywords"] = argv;
     let dir = TestDir::new();
-    let (record, agents, _) = judged(&System, ir, &dir);
+    let (record, agents, _) = judged(&SimHost::new(), ir, &dir);
     assert!(agents[0].submission.as_ref().unwrap().finalized);
     let log = read_log(&record);
     assert!(

@@ -19,14 +19,16 @@ use std::{fs, thread};
 
 use expect_test::{Expect, expect};
 use gateway::{Arrival, IncomingModelRequest, Registration, Sockets};
-use route::{Admission, Apart, Headers, Keep, Key, Route, Upstream, UpstreamUrl};
+use route::{
+    Admission, Apart, Headers, Keep, Key, MAX_DROPPED_HEADERS, Route, Upstream, UpstreamUrl,
+};
 use schema::frame;
 use schema::ir::{Api, HeaderName, ModelName, Name};
 use schema::sandbox::{FromSandbox, Hello, HelloReply, SOCKET_NAME, SocketDial, ToSandbox};
 use serde_json::{Value, json};
-use stdx::Deadline;
+use stdx::time::Machine;
 use test_support::http::read_request;
-use test_support::{HUNG, TestDir};
+use test_support::{HUNG, TestDir, hung};
 
 mod kept;
 mod read;
@@ -98,11 +100,8 @@ fn listed(api: Api) -> Headers {
     }
 }
 
-/// Sends each case's request over a session, as a sandbox whose route allows `m-large` and
-/// `m-small` through the Responses API and through Chat Completions, there each in an entry of
-/// its own, and serves it as the session's owner: it shows what the stand-in model provider
-/// received of each that the route admitted, or the refusal that the sandbox heard, and checks
-/// them against `expect`.
+/// [`check_apis`] with one entry of the Responses API for `m-large` and `m-small`, and one of Chat
+/// Completions for each of them.
 fn check(cases: &[(&str, Request)], expect: &Expect) {
     let entries = [
         (Api::Responses, &["m-large", "m-small"][..]),
@@ -112,12 +111,10 @@ fn check(cases: &[(&str, Request)], expect: &Expect) {
     check_apis(&entries, cases, expect);
 }
 
-/// [`check`]s each case through a route with an entry for each of `entries`, an API and the
-/// models it allows.
-#[expect(
-    clippy::too_many_lines,
-    reason = "it runs a session, a stand-in and each case's exchange in one place"
-)]
+/// Sends each case's request over a session, as a sandbox, through a route with an entry for each
+/// of `entries`, an API and the models it allows. As the session's owner, it checks against
+/// `expect` what the stand-in model provider received of each that the route admitted, or the
+/// refusal that the sandbox heard.
 fn check_apis(entries: &[(Api, &[&str])], cases: &[(&str, Request)], expect: &Expect) {
     let scratch = TestDir::new();
     let dir = scratch.path();
@@ -152,8 +149,7 @@ fn check_apis(entries: &[(Api, &[&str])], cases: &[(&str, Request)], expect: &Ex
     let requests: Vec<Request> = cases.iter().map(|(_, request)| request.clone()).collect();
     let sandbox = thread::spawn(move || fake_sandbox(&socket, requests, None, None));
     let (sender, arrivals) = mpsc::channel();
-    let by = Deadline::after(HUNG);
-    let accepted = registration.accept(by, None, true, sender, |arrival| arrival, || false);
+    let accepted = registration.accept((&Machine, hung()), None, true, sender, |a| a, || false);
     let session = accepted.unwrap();
     let mut first = None;
     let sent: Vec<Option<String>> = cases
@@ -161,7 +157,7 @@ fn check_apis(entries: &[(Api, &[&str])], cases: &[(&str, Request)], expect: &Ex
         .map(|(_, (_, _, _, sent))| {
             let incoming = next_model_request(&arrivals);
             let mut forwarded = false;
-            let by = Deadline::after(HUNG);
+            let by = (&Machine, hung());
             let answered = |_, _| {};
             let dropped = Dropped::default();
             route::serve(
@@ -175,20 +171,9 @@ fn check_apis(entries: &[(Api, &[&str])], cases: &[(&str, Request)], expect: &Ex
             );
             forwarded.then(|| {
                 let (line, headers, body) = received.recv_timeout(HUNG).unwrap();
-                let body = if &body == sent {
-                    "the body as sent".to_owned()
-                } else {
-                    format!("the body {}", String::from_utf8_lossy(&body))
-                };
                 let dropped = dropped.0.take();
-                let head = format!("{line} with {headers:?}");
-                let head = if first.is_none() {
-                    first.insert(head).clone()
-                } else if first.as_ref() == Some(&head) {
-                    "the same head".to_owned()
-                } else {
-                    head
-                };
+                let head = received_head(&line, headers);
+                let (head, body) = shown_received(head, &body, sent, &mut first);
                 format!("went upstream, as {head} and {body}, leaving {dropped:?}")
             })
         })
@@ -201,6 +186,41 @@ fn check_apis(entries: &[(Api, &[&str])], cases: &[(&str, Request)], expect: &Ex
         .collect();
     expect.assert_eq(&lines.join("\n").replace(&address, "<stand-in>"));
     drop(session);
+}
+
+/// The request line and the headers that the stand-in received, as a snapshot shows them, with
+/// `ureq`'s version masked, which a dependency's update moves.
+fn received_head(line: &str, mut headers: Vec<(String, String)>) -> String {
+    for (_, value) in &mut headers {
+        if value.starts_with("ureq/") {
+            "ureq/<version>".clone_into(value);
+        }
+    }
+    format!("{line} with {headers:?}")
+}
+
+/// The head and the body of a request that the stand-in received, as a snapshot shows them: the
+/// head in full the first time, `first` keeping it, and after that "the same head" if it is, and
+/// the body as "the body as sent" if it is `sent`.
+fn shown_received(
+    head: String,
+    body: &[u8],
+    sent: &[u8],
+    first: &mut Option<String>,
+) -> (String, String) {
+    let head = if first.is_none() {
+        first.insert(head).clone()
+    } else if first.as_ref() == Some(&head) {
+        "the same head".to_owned()
+    } else {
+        head
+    };
+    let body = if body == sent {
+        "the body as sent".to_owned()
+    } else {
+        format!("the body {}", String::from_utf8_lossy(body))
+    };
+    (head, body)
 }
 
 /// Keeps of an exchange only the names of the headers that the route left behind.
@@ -501,10 +521,10 @@ fn at(method: &'static str, path: &str) -> Request {
 )]
 fn closure() {
     let twice = br#"{"model":"m-small","store":true,"store":false,"input":[]}"#;
-    // More unlisted names than the log keeps, one of them twice.
+    // More unlisted names than `MAX_DROPPED_HEADERS`, one of them twice.
     let (method, path, mut many, body) = post(|_| {});
     many.push(("x-client-request-id".to_owned(), "c-2".to_owned()));
-    many.extend((0..40).map(|index| (format!("x-n{index:02}"), "v".to_owned())));
+    many.extend((0..MAX_DROPPED_HEADERS).map(|index| (format!("x-n{index:02}"), "v".to_owned())));
     check(
         &[
             ("the harness's", post(|_| {})),
@@ -658,7 +678,7 @@ fn closure() {
         ],
         &expect![[r#"
             the harness's: went upstream, as POST /v1/responses HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "552"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "text/event-stream"), ("originator", "codex_exec"), ("user-agent", "codex_exec/0.167.0"), ("session-id", "s-1"), ("thread-id", "t-1"), ("x-codex-beta-features", "remote_compaction_v2"), ("x-codex-window-id", "w-1"), ("x-codex-turn-metadata", "{\"turn_id\":\"u-1\"}"), ("x-openai-internal-codex-responses-lite", "true"), ("authorization", "Bearer sk-test-0123")] and the body as sent, leaving ["x-client-request-id", "x-codex-routing-hint"]
-            stored, then not: went upstream, as POST /v1/responses HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "44"), ("user-agent", "ureq/3.5.1"), ("accept", "*/*"), ("host", "<stand-in>"), ("authorization", "Bearer sk-test-0123")] and the body {"input":[],"model":"m-small","store":false}, leaving []
+            stored, then not: went upstream, as POST /v1/responses HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "44"), ("user-agent", "ureq/<version>"), ("accept", "*/*"), ("host", "<stand-in>"), ("authorization", "Bearer sk-test-0123")] and the body {"input":[],"model":"m-small","store":false}, leaving []
             not JSON: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the body is not a JSON object (EOF while parsing an object at line 1 column 1): send one","param":null,"type":"invalid_request_error"}}
             no store: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"`store` is not false: set it to false, since the route keeps nothing on the provider's side","param":null,"type":"invalid_request_error"}}
             stored: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"`store` is not false: set it to false, since the route keeps nothing on the provider's side","param":null,"type":"invalid_request_error"}}

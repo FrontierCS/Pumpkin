@@ -60,7 +60,7 @@ impl Ops {
                 let why = event["reason"].as_str().unwrap_or_default();
                 (
                     number("job").map(Work::Call),
-                    format!("failed: {why}"),
+                    progress::call_failed(why),
                     true,
                 )
             }

@@ -1,6 +1,6 @@
 //! `check`: a task's source, read below the root of its repository, evaluated and checked with
-//! no engine and no configuration, then linted by the formatter beside `pumpkin`, the real one;
-//! nothing said on success, and else every problem at its place.
+//! no engine, then linted by the formatter beside `pumpkin`, the real one; nothing said on
+//! success, and else every problem at its place.
 
 use std::ffi::OsStr;
 use std::fs;
@@ -13,10 +13,7 @@ use test_support::BUSYBOX;
 
 use super::{Scratch, Step, check, copy_tree, ran};
 
-/// A neutral library, which writes a task's workflow from the task's own values: Codex works
-/// as the agent, on the image that the package's agent recipe builds, and a trainer and the final
-/// call's target, on the image of its judge recipe, judge the agent's train calls and its final
-/// submission.
+/// `lib/bench.star`, which the entry that [`task`] writes loads.
 const LIBRARY: &str = r##""""A neutral library: `bench_task` writes the workflow of the task in the entry's package,
 `tasks/<id>`, from its own values."""
 
@@ -293,6 +290,7 @@ fn tasks() {
     let mut not_utf8 = scratch.pumpkin(&["check"]);
     not_utf8.arg(OsStr::from_bytes(b"tasks/\xff/task.star"));
     not_utf8.arg("--arg").arg(OsStr::from_bytes(b"model=\xff"));
+    // One problem more than a check shows.
     let unused: Vec<String> = ('a'..='u').map(|name| format!("--arg={name}=1")).collect();
     let mut many = vec!["--arg", "model=model-a"];
     many.extend(unused.iter().map(String::as_str));
@@ -854,33 +852,14 @@ fn library_lints() {
 const EXAMPLE_ARGS: &[(&str, &[&str])] = &[
     ("codex/task.star", &["--arg", "model=model-a"]),
     ("hypergraph/task.star", &["--arg", "model=model-a"]),
+    (
+        "hypergraph-benchmark/task.star",
+        &["--arg", "model=model-a", "--arg", "budget_microusd=5000000"],
+    ),
     ("team/codex.star", &["--arg", "model=model-a"]),
     // So that the GPU runner, which the smoke adds only for a GPU's model, is checked too.
     ("smoke/task.star", &["--arg", "gpu_model=gpu-a"]),
 ];
-
-fn write_benchmark_inputs(scratch: &Scratch) {
-    // Preparation supplies the upstream recipes, source trees and replay selections.
-    for context in [
-        "agent-base",
-        "verifier-base",
-        "native-agent",
-        "native-verifier",
-    ] {
-        scratch.write(
-            &format!("examples/benchmark-input/{context}/Dockerfile"),
-            "FROM scratch\n",
-        );
-    }
-    for mount in [
-        "benchmark-input/generation",
-        "benchmark-input/agent",
-        "benchmark-input/judge",
-        "benchmark-replay",
-    ] {
-        fs::create_dir_all(scratch.0.join("examples").join(mount)).unwrap();
-    }
-}
 
 #[test]
 fn examples() {
@@ -902,12 +881,19 @@ fn examples() {
             fs::copy(entry.path(), dest).unwrap();
         }
     }
-    write_benchmark_inputs(&scratch);
+    // What `replay/prepare.py` makes of a run's record.
+    fs::create_dir_all(root.join("benchmark-replay")).unwrap();
     names.extend([
         "team/codex.star".into(),
         "hypergraph-benchmark/replay/task.star".into(),
     ]);
     names.sort();
+    for (example, _) in EXAMPLE_ARGS {
+        assert!(
+            names.iter().any(|name| name == example),
+            "{example} is no example"
+        );
+    }
     let steps = names.iter().map(|name| {
         let args = EXAMPLE_ARGS.iter().find(|(example, _)| example == name);
         let mut command = scratch.pumpkin(&["check", name]);
@@ -927,7 +913,7 @@ fn examples() {
             exit status: Some(0)
             $ pumpkin check hypergraph-benchmark/replay/task.star
             exit status: Some(0)
-            $ pumpkin check hypergraph-benchmark/task.star
+            $ pumpkin check hypergraph-benchmark/task.star --arg model=model-a --arg budget_microusd=5000000
             exit status: Some(0)
             $ pumpkin check hypergraph/task.star --arg model=model-a
             exit status: Some(0)

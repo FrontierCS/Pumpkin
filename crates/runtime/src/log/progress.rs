@@ -73,7 +73,7 @@ pub struct Progress {
 #[derive(Debug)]
 pub struct Readout {
     /// `None` if the log holds no `run_started` that gives a hard end, as none does of a log not
-    /// yet begun, or of a build that predates it.
+    /// yet begun, or whose `run_started` has no `hard_end_ns`.
     pub progress: Option<Progress>,
     /// The parts of the log that were left out, in the order they were met.
     pub unread: Vec<Unread>,

@@ -39,6 +39,10 @@ The `verdict` records the final call. If its `kind` is `returned`, the result ho
 in the order the final body returned them. If it is `no_result`, `failure` records a timeout
 or an error and its reason. A failed run instead records `state: "failed"` and a reason.
 An interrupted run records `state: "interrupted"` and the signal.
+The lines of `pumpkin ls` and `pumpkin wait`, and the page's words for a run, cut a long result
+short. They cut a call's long reason for failing short too, as the page does each long string of
+a record. `outcome.json` keeps the run's result whole, which `pumpkin wait --outcome` prints. The
+log keeps whole what each call's body returned, or why it failed.
 
 For example, to see who submitted and what the judge returned for `examples/hello`:
 
@@ -69,7 +73,14 @@ bodies read under `jobs/<n>/`. Usage counts the shared sandbox once across all i
 allocation whose role is unknown, `usage.unplaced_sandbox` marks the cost as partial. The
 allocation contributes no estimate to a class’s count, time or price.
 The `start_final_call` action lists the selection for each agent by role.
-[Workflows](workflows.md) describes what the log keeps of each call.
+
+For each call, the log keeps:
+
+- the op and its reply, and the call's start
+- each `put`, with its path and the payload's digest
+- each `run`, with its argv and how it ended
+- each `get`, with its path and the digest of what it got
+- what the body returned, or why it failed
 
 
 ## Model exchanges

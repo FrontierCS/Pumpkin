@@ -73,7 +73,7 @@ fn roles() {
             dir 0700 /workspace/.qwen-home
             dir 0700 /workspace/.qwen-home/tmp
             dir 0700 /workspace/.qwen-home/qwen
-            file 0600 /workspace/.qwen-home/qwen/settings.json, sha256 6657c75c768d967084049d7f3d118bf05fab4b7e9bec8a79a29003eea2ad8cd8:
+            file 0600 /workspace/.qwen-home/qwen/settings.json:
             {"$version":4,"general":{"enableAutoUpdate":false},"mcpServers":{},"memory":{"enableAutoSkill":false,"enableManagedAutoDream":false,"enableManagedAutoMemory":false},"model":{"name":"qwen3.8-max"},"modelProviders":{"openai":[{"baseUrl":"http://127.0.0.1:11235/v1","envKey":"PUMPKIN_MODEL_KEY","generationConfig":{"contextWindowSize":1000000,"extra_body":{"enable_thinking":true,"max_tokens":65536,"reasoning_effort":"high","temperature":1},"maxRetries":16,"streamIdleTimeoutMs":3600000,"timeout":3600000},"id":"qwen3.8-max","wireApi":"chat-completions"}]},"privacy":{"usageStatisticsEnabled":false},"security":{"auth":{"selectedType":"openai"}},"skills":{"disabledLevels":["project","extension","bundled"]},"telemetry":{"enabled":false},"tools":{"disabled":["web_fetch","web_search"],"shell":{"defaultTimeoutMs":0}}}
             route: chat qwen3.8-max
             request headers: user-agent
@@ -89,7 +89,7 @@ fn roles() {
             dir 0700 /srv/my "work" dir/.qwen-home
             dir 0700 /srv/my "work" dir/.qwen-home/tmp
             dir 0700 /srv/my "work" dir/.qwen-home/qwen
-            file 0600 /srv/my "work" dir/.qwen-home/qwen/settings.json, sha256 21ef41778343c9df2d2b71d1d136e43c50b3d965692939fc9900f90636ee7520:
+            file 0600 /srv/my "work" dir/.qwen-home/qwen/settings.json:
             {"$version":4,"general":{"enableAutoUpdate":false},"mcpServers":{},"memory":{"enableAutoSkill":false,"enableManagedAutoDream":false,"enableManagedAutoMemory":false},"model":{"name":"vendor/\"quoted\"\\model"},"modelProviders":{"openai":[{"baseUrl":"http://127.0.0.1:11235/v1","envKey":"PUMPKIN_MODEL_KEY","generationConfig":{"contextWindowSize":1,"extra_body":{"max_tokens":1,"reasoning_effort":"xhigh"},"maxRetries":16,"streamIdleTimeoutMs":3600000,"timeout":3600000},"id":"vendor/\"quoted\"\\model","wireApi":"chat-completions"}]},"privacy":{"usageStatisticsEnabled":false},"security":{"auth":{"selectedType":"openai"}},"skills":{"disabledLevels":["project","extension","bundled"]},"telemetry":{"enabled":false},"tools":{"disabled":["web_fetch","web_search"],"shell":{"defaultTimeoutMs":0}}}
             route: chat vendor/"quoted"\model
             model-small low / 200000 32000 {}:
@@ -99,7 +99,7 @@ fn roles() {
             dir 0700 /.qwen-home
             dir 0700 /.qwen-home/tmp
             dir 0700 /.qwen-home/qwen
-            file 0600 /.qwen-home/qwen/settings.json, sha256 9537e01ef9bc6a1125256ac1dab1f4a8b590ef2ed292782601344c0c829246ab:
+            file 0600 /.qwen-home/qwen/settings.json:
             route: chat model-small
         "#]],
     );

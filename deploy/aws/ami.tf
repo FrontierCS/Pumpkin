@@ -51,12 +51,9 @@ resource "aws_imagebuilder_image_recipe" "pumpkin" {
 # The build instance: Image Builder drives it through SSM, and it reaches the release's
 # repositories over HTTPS, as a sandbox reaches ECR.
 resource "aws_iam_role" "image_builder" {
-  name        = "${local.prefix}-image-builder"
-  description = "Pumpkin's AMI build instance"
-  assume_role_policy = jsonencode({
-    Version   = "2012-10-17"
-    Statement = [{ Effect = "Allow", Principal = { Service = "ec2.amazonaws.com" }, Action = "sts:AssumeRole" }]
-  })
+  name               = "${local.prefix}-image-builder"
+  description        = "Pumpkin's AMI build instance"
+  assume_role_policy = local.ec2_assume_role_policy
 }
 
 resource "aws_iam_role_policy_attachment" "image_builder" {

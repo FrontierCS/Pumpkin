@@ -69,10 +69,9 @@ fn show(folder: Folder, path: &str, files: &BTreeMap<String, String>, args: &Arg
         // Every eighth character, as a cut at each took 5 s of the tests' time.
         case.prefixes(path, args, 8)
     });
-    // No prefix of a library evaluates, as `text.star` calls no `workflow()`: the count shows only
-    // a change in the file's length.
+    // No prefix of a library evaluates, as `text.star` calls no `workflow()`.
     let swept = (swept.filter(|_| folder != Folder::Lib))
-        .map(|(evaluated, cuts)| format!(": {evaluated} of {cuts} prefixes evaluate"));
+        .map(|evaluated| format!(": {evaluated} prefixes evaluate"));
     let evaluated = is_entry.then(|| case.evaluate(args));
     match (folder, &evaluated) {
         (Folder::Tasks, Some(Err(problems))) => {
@@ -101,7 +100,7 @@ fn tasks() {
     check(
         Folder::Tasks,
         &expect![[r#"
-            == tasks/judged/task.star: 2 of 66 prefixes evaluate
+            == tasks/judged/task.star: 2 prefixes evaluate
             {
               "deadline_seconds": 18000,
               "final": {
@@ -237,7 +236,7 @@ fn tasks() {
               ]
             }
 
-            == tasks/literal/task.star: 2 of 652 prefixes evaluate
+            == tasks/literal/task.star: 2 prefixes evaluate
             {
               "deadline_seconds": 18000,
               "final": {
@@ -425,7 +424,7 @@ fn tasks() {
               ]
             }
 
-            == tasks/loaded/task.star: 2 of 92 prefixes evaluate
+            == tasks/loaded/task.star: 2 prefixes evaluate
             {
               "deadline_seconds": 3600,
               "final": {
@@ -509,9 +508,9 @@ fn bad() {
     check(
         Folder::Bad,
         &expect![[r#"
-            == bad/calls/lib.star: 0 of 350 prefixes evaluate
+            == bad/calls/lib.star: 0 prefixes evaluate
 
-            == bad/calls/task.star: 0 of 7 prefixes evaluate
+            == bad/calls/task.star: 0 prefixes evaluate
             bad/calls/lib.star:146:12: this call would run 49 functions at once: nest calls at most 48 deep
                 146 |     return f48(x)
                     |            ^^^^^^
@@ -566,7 +565,7 @@ fn bad() {
 
             == bad/stack/lib.star
 
-            == bad/stack/task.star: 0 of 7 prefixes evaluate
+            == bad/stack/task.star: 0 prefixes evaluate
             bad/stack/lib.star:85:18: `+` can't take an int and a bool: give it two numbers, two strings, two lists or two tuples
                 85 |         t(INNER) + (DEEP == DEEP)
                    |                  ^

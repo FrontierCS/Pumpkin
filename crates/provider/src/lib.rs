@@ -61,6 +61,13 @@ pub trait Provider: Sweep + Send + Sync {
     /// If a role is in more than one phase.
     fn reserve(&self, run: &RunTag, phases: &[Vec<Role>]) -> Result<Reservation, String>;
 
+    /// Fails, saying why, if `phases`, as [`reserve`](Self::reserve) takes them, need more than
+    /// this provider ever holds for one run, whatever other runs hold. Holds nothing. By default,
+    /// as of a provider that gives each sandbox a host of its own, it fails none.
+    fn fits(&self, _phases: &[Vec<Role>]) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Publishes `image`, a role's, so that this provider's sandboxes can run it.
     fn publish_image(&self, image: &Image) -> Result<ImageRef, String>;
 
@@ -114,7 +121,7 @@ pub trait Creator<D, C = Created>: Sync {
 
 /// What a provider holds for a run ([`Provider::reserve`]), until it is dropped.
 pub struct Reservation(
-    // Whatever the provider holds it by, such as a locked file; its drop releases it.
+    // Whatever the provider holds it by, such as a locked file.
     #[expect(
         dead_code,
         reason = "the reservation is held by owning it, and released by dropping it"

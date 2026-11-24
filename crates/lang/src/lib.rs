@@ -11,8 +11,6 @@
 //! An annotation only refuses too, where a value doesn't fit it, so a file the subset
 //! accepts, with its annotations dropped, is valid Starlark and means what the specification
 //! says it does. The workflow is what the entry file's `workflow()` call gives.
-//! `eval` runs `pumpkin`'s functions, which record what an evaluation gives in `plan`'s types,
-//! and `plan` reads it through `ir`: none uses one before it.
 //!
 //! An evaluation is hermetic: it reads source only through its [`Loader`], by [`Label`]s, which
 //! stay below their root, and its `--arg`s ([`Args`]); and the crate is `no_std`, so that its own
@@ -75,9 +73,8 @@ pub struct Bounds {
 
 impl Bounds {
     // So that a file that would run for minutes or never end, as nested comprehensions can, or
-    // would ask for gigabytes, as doubling a string or a list can, ends at once: about 1,000
-    // times the steps the heaviest workflow of the task repository takes, 837, and 2,400 times
-    // the bytes it makes, 113,229.
+    // would ask for gigabytes, as doubling a string or a list can, ends at once: over 1,000 times
+    // the steps, and 2,000 times the bytes, of the heaviest workflow of the task repository.
     pub const WORKFLOW: Self = Self {
         steps: 1_000_000,
         bytes: 256 << 20,
@@ -140,7 +137,7 @@ pub fn check(
 
 /// Calls the body that `body` names, on an evaluation of its file as [`check`] has it.
 ///
-/// The second argument is the payload for a job or the per-role submissions for a final call.
+/// The body's second argument is the payload, or the per-role submissions for a final call.
 /// The returned dictionary gives each name with its JSON value.
 ///
 /// # Errors

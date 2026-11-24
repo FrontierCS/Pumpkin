@@ -2,7 +2,7 @@
 //! store, and a command starts the job from them.
 //!
 //! The controller says which blobs of the task's manifest its store lacks, and only those are
-//! sent, each from its held offset. Large task uploads can use up to four links.
+//! sent, each from its held offset. Large task uploads can use several links.
 //! After a cut, the next store query finds which complete frames arrived.
 //!
 //! The start request sends this machine's settings and keys on the link's standard input. The
@@ -48,7 +48,8 @@ pub(super) struct Tree {
     pub(super) workflow: Workflow,
 }
 
-/// Hashes the tracked and unignored files that the task reaches below its repository.
+/// Hashes every file below the paths that the task reaches in its repository, whether git tracks
+/// it, ignores it or neither.
 pub(super) fn tree(entry: &crate::star::Entry, args: &lang::Args) -> Result<Tree, String> {
     let path = fs::canonicalize(entry.path()).context(entry.path())?;
     let dir = path.parent().unwrap_or(Path::new("/"));
@@ -84,22 +85,18 @@ pub(super) fn tree(entry: &crate::star::Entry, args: &lang::Args) -> Result<Tree
              to the controller"
         )
     })?;
-    let files = git(
-        &top,
-        &[
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-        ],
-    )
-    .map_err(|failure| failure.to_string())?;
     let reach = match crate::star::reached(entry, args)? {
         Ok(reach) => reach,
         Err(problems) => return Err(crate::task_problems(entry, &problems)),
     };
-    let files = needed(entry, &reach.root, &reach.paths, &top, &files)?;
+    let pathspecs = pathspecs(entry, &reach.root, &reach.paths, &top)?;
+    // Without `--exclude-standard`, `--others` lists the files that git ignores too: a file that a
+    // script made where the task reaches, and that git ignores, is the task's all the same, as
+    // cargo packages what `include` names whatever git ignores:
+    // https://github.com/rust-lang/cargo/blob/111443f3dc4d82a65e2306a93028f122406401c1/doc/book/src/reference/manifest.md#L400-L409
+    let mut listing = vec!["ls-files", "-z", "--cached", "--others", "--"];
+    listing.extend(pathspecs.iter().map(String::as_str));
+    let files = git(&top, &listing).map_err(|failure| failure.to_string())?;
     let hashed = manifest::hash(&top, &files)?;
     let name = top
         .file_name()
@@ -123,16 +120,15 @@ fn plain(name: &str) -> String {
         .collect()
 }
 
-/// Of `listed`, the files that git lists in `top`, each ended by a NUL, those that checking the
-/// task whose entry is `entry` reaches, `reached` below its `root`, as files or as directories
-/// that hold them.
-fn needed(
+/// A pathspec of git's for each path that checking the task whose entry is `entry` reached,
+/// `reached` below its `root`, each a file or a directory, that names it below `top`, the
+/// repository's top, and nothing else.
+fn pathspecs(
     entry: &crate::star::Entry,
     root: &Path,
     reached: &BTreeSet<String>,
     top: &Path,
-    listed: &[u8],
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<String>, String> {
     // At or below the top, unless the marker is above the repository that holds the entry.
     let prefix = root.strip_prefix(top).map_err(|_| {
         format!(
@@ -144,33 +140,15 @@ fn needed(
         )
     })?;
     let prefix = prefix.to_string_lossy();
-    let prefix = prefix.as_ref();
-    let under = |path: &str| match prefix {
-        "" => path.to_owned(),
-        prefix if path.is_empty() => prefix.to_owned(),
-        prefix => format!("{prefix}/{path}"),
+    // `literal`, so that no character of a path is a wildcard; `.` names the whole top.
+    let spec = |path: &str| match (prefix.as_ref(), path) {
+        ("", "") => ".".to_owned(),
+        ("", path) | (path, "") => format!(":(literal){path}"),
+        (prefix, path) => format!(":(literal){prefix}/{path}"),
     };
-    let kept: Vec<String> = reached.iter().map(|path| under(path)).collect();
-    let wanted = |file: &str| {
-        kept.iter().any(|path| {
-            path.is_empty()
-                || file == path
-                || file
-                    .strip_prefix(path.as_str())
-                    .is_some_and(|rest| rest.starts_with('/'))
-        })
-    };
-    let mut files = Vec::new();
-    for file in listed
-        .split(|byte| *byte == 0)
-        .filter(|file| !file.is_empty())
-    {
-        if wanted(&String::from_utf8_lossy(file)) {
-            files.extend_from_slice(file);
-            files.push(0);
-        }
-    }
-    Ok(files)
+    // The entry is reached, so there is a path at least, and git lists every file without one.
+    assert!(!reached.is_empty(), "checking a task reaches its entry");
+    Ok(reached.iter().map(|path| spec(path)).collect())
 }
 
 /// Sends the task's `tree` and the client's configuration, keys and Modal configuration to the
@@ -226,7 +204,13 @@ pub(super) fn send(
             linked.ask_with_body(reached, request, &body)
         },
     )?? {
-        StartAnswer::Started | StartAnswer::AlreadyStarted => Ok(build),
+        StartAnswer::Started { unrecorded } => {
+            if let Some(unrecorded) = unrecorded {
+                say(unrecorded);
+            }
+            Ok(build)
+        }
+        StartAnswer::AlreadyStarted => Ok(build),
         StartAnswer::Unconfirmed { message } => Err(message),
     }
 }

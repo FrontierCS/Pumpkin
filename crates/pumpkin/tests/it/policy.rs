@@ -1,5 +1,5 @@
 //! `pumpkin-admin policy` prints each principal's IAM policy, as the calls of this build's code on
-//! AWS state it. A deployment's review reads it. `deploy/aws` renders each policy from
+//! AWS state it. `deploy/aws` renders each policy from
 //! `deploy/aws/policies/<principal>.json.tftpl`, which these tests keep equal to it.
 
 use expect_test::{ExpectFile, expect, expect_file};
@@ -15,7 +15,6 @@ fn output(arg: &str) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
-/// Compares `principal`'s policy with `expect`, the module's file of it.
 fn check(principal: &str, expect: &ExpectFile) {
     expect.assert_eq(&output(principal));
 }
@@ -38,10 +37,14 @@ fn timer() {
 
 #[test]
 fn sandbox() {
-    check(
-        "sandbox",
-        &expect_file!["../../../../deploy/aws/policies/sandbox.json.tftpl"],
+    let policy = output("sandbox");
+    // An image's tag is its digest, and ECR serves `tags/list` as `ecr:ListImages`: with no list,
+    // an instance can't name another role's image, such as a judge's.
+    assert!(
+        !policy.contains("ecr:List") && !policy.contains("ecr:Describe"),
+        "{policy}"
     );
+    expect_file!["../../../../deploy/aws/policies/sandbox.json.tftpl"].assert_eq(&policy);
 }
 
 #[test]
@@ -75,6 +78,27 @@ fn check_principal() {
           "Statement": [
             {
               "Action": [
+                "iam:GetInstanceProfile"
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                "${controller_profile_arn}"
+              ]
+            },
+            {
+              "Action": [
+                "iam:SimulatePrincipalPolicy"
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                "${controller_role_arn}",
+                "${modal_pull_role_arn}",
+                "${sandbox_role_arn}",
+                "${timer_role_arn}"
+              ]
+            },
+            {
+              "Action": [
                 "ssm:GetParameter"
               ],
               "Effect": "Allow",
@@ -103,9 +127,7 @@ fn check_principal() {
             {
               "Action": [
                 "ec2:DescribeInstances",
-                "ec2:DescribeLaunchTemplateVersions",
-                "iam:GetInstanceProfile",
-                "iam:SimulatePrincipalPolicy"
+                "ec2:DescribeLaunchTemplateVersions"
               ],
               "Effect": "Allow",
               "Resource": [

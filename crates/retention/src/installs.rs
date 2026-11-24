@@ -20,7 +20,6 @@ pub struct Installs {
     pub own: Option<String>,
     /// The target of each running job's link to its `pumpkin`, `<install>/bin/pumpkin`.
     pub links: Vec<PathBuf>,
-    /// The entries of the workspace that a SHA-256 names, as it names an install.
     pub installs: Vec<Install>,
 }
 

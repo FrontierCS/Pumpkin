@@ -3,23 +3,23 @@
 //! it.
 //!
 //! - `record.json`, written first: `record_version`, which a reader refuses if it isn't its own;
-//!   `args`, the words that started the run; `pumpkin`, the build that made it, `{"version",
-//!   "commit"}`, with the commit `{"hash", "date"}` or null, which an older record lacks.
+//!   `args`, the words that started the run; and, if it names the build that made it, `pumpkin`,
+//!   `{"version", "commit"}`, with the commit `{"hash", "date"}` or null.
 //! - `driver.pid`, locked while the driver lives and holding its process ID; `driver.log`, the
 //!   driver's standard output and error since the run started.
-//! - `ir.json`, the workflow's IR; `provider.json`, written before the log: `providers`, each with
-//!   its `report` and `classes` (`startup_seconds`, and `usd_per_hour` if priced); `roles`, each
-//!   with its `provider` and `class`; and `routes`, each role's entries (`api`, `upstream` and
-//!   `models`, each with its `upstream_name` and `usd_per_mtok` if priced), which an older record
-//!   lacks.
+//! - `ir.json`, the workflow's IR; `sources/`, the text of each file that its evaluation read;
+//!   `provider.json`, written before the log: `providers`, each with its `report` and `classes`
+//!   (`startup_seconds`, and `usd_per_hour` if priced); `roles`, each with its `provider` and
+//!   `class`; and `routes`, if it keeps them, each role's entries (`api`, `upstream` and `models`,
+//!   each with its `upstream_name` and `usd_per_mtok` if priced).
 //! - `log.jsonl`, the run log (`log`); `payloads/<digest>`, the payload of each op the core
 //!   accepted, by the SHA-256 of its bytes; `model/`, each model exchange (`model`).
-//! - `agents/<role>/`, `jobs/<n>/` and `leases/<n>/`, each with its `sandbox.json`:
-//!   `id`, `gpus` once known, and `delete.state`, `deleted` or `failed`, once tried; its `out/`,
-//!   `log/` and a body's `got/` as far as collected.
+//! - `agents/<role>/`, `shared/<role>/`, `jobs/<n>/` and `leases/<n>/`, each with its
+//!   `sandbox.json`: `provider`, `id`, `gpus` once known, and `delete.state`, `deleted` or
+//!   `failed`, once tried; its `out/`, `log/` and a body's `got/` as far as collected.
 //! - `outcome.json`, the run's end: `state` is `finished`, with what `log::outcome_json` gives,
 //!   `failed`, with a `reason`, or `interrupted`, with a `signal`; and `usage`, if the run began
-//!   its log, which an older record lacks.
+//!   its log.
 //! - `reaps.jsonl`, a line for each sandbox a reap deleted; `sockets/`, where private sandboxes
 //!   meet the gateway, which a reap removes.
 
@@ -391,8 +391,8 @@ impl Record {
     }
 
     /// The names of the directories in `runs` that may hold a record, in order of id, oldest
-    /// first. Leaves out the names that start with `.`, each a record in the making or being
-    /// removed.
+    /// first. Leaves out each name that starts with `.`, a record in the making or being removed,
+    /// or with no digit, as an id of [`new_id`]'s does.
     pub fn names(runs: &Path) -> Result<Vec<String>, String> {
         names(runs)
     }
@@ -506,7 +506,7 @@ impl Record {
     }
 
     /// The build of Pumpkin that made the record, shown as a [`Build`] is, if it isn't [`BUILD`];
-    /// `None` for a record of this build, or one made before records named theirs.
+    /// `None` for a record of this build, or one that names no build.
     pub fn other_build(&self) -> Option<&str> {
         self.other_build.as_deref()
     }
@@ -833,7 +833,7 @@ fn names(runs: &Path) -> Result<Vec<String>, String> {
         let Ok(name) = entry.file_name().into_string() else {
             continue;
         };
-        if is_dir && !name.starts_with('.') {
+        if is_dir && name.starts_with(|c: char| c.is_ascii_digit()) {
             names.push(name);
         }
     }

@@ -47,6 +47,7 @@ fn each_key_forced_to_its_member() {
                 "alice ssh-ed25519 {a} alice@laptop\n\n  \nbob ssh-ed25519 {b}\nalice ssh-ed25519 {c} command=\"sh\" no-pty\ncarol-2 ssh-ed25519 {d}\n"
             ),
             format!("alice ssh-ed25519 {a}\r\n{longest} ssh-ed25519 {b} written on Windows\r\n"),
+            "\n".to_owned(),
         ],
         &expect![[r#"
             "alice ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa alice@laptop"
@@ -64,6 +65,8 @@ fn each_key_forced_to_its_member() {
             "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI+++++++++++++++++++++++++++++++++++++++++++ written on Windows"
             restrict,command="exec /bin/sh -c \"$SSH_ORIGINAL_COMMAND\" pumpkin --member alice" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa alice
             restrict,command="exec /bin/sh -c \"$SSH_ORIGINAL_COMMAND\" pumpkin --member zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI+++++++++++++++++++++++++++++++++++++++++++ zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz written on Windows
+
+            ""
         "#]],
     );
 }

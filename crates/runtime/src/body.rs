@@ -27,10 +27,10 @@ use schema::sandbox::{
 };
 use schema::workflow::{self, Final, JobFunction, TargetId};
 use serde_json::{Map, Value};
-use stdx::{Context, Deadline};
+use stdx::Context;
+use stdx::time::Clock as _;
 
 use crate::child::{Child, Report};
-use crate::host::deadline;
 use crate::lease::command_dir;
 use crate::record::{Stored, reference};
 use crate::relay::{Relay, Waited};
@@ -211,7 +211,7 @@ pub(crate) fn evaluate<H: Host>(
     bodies: &dyn Bodies,
     call: &Call<'_>,
     child: &mut Child<'_, H, crate::relay::Order>,
-    session: &mut Session,
+    session: &mut Session<H::Clock>,
     stdin: &mut Stdin,
 ) -> Ended {
     let resident = call.target.lifetime == TargetLifetime::Work;
@@ -308,9 +308,9 @@ impl Stdin {
 
     fn put(
         &mut self,
-        session: &Session,
+        session: &Session<impl Clock>,
         bytes: &[u8],
-        by: Deadline,
+        by: (&impl Clock, Duration),
     ) -> Result<AbsolutePath, String> {
         let trees = session.trees();
         let dir = Self::DIR;
@@ -335,7 +335,11 @@ impl Stdin {
         Ok(path)
     }
 
-    fn clear(&mut self, session: &Session, by: Deadline) -> Result<(), String> {
+    fn clear(
+        &mut self,
+        session: &Session<impl Clock>,
+        by: (&impl Clock, Duration),
+    ) -> Result<(), String> {
         if matches!(self, Self::Staged) {
             session
                 .trees()
@@ -351,7 +355,7 @@ impl Stdin {
 struct OnTarget<'a, 'c, 'r, H: Host> {
     call: &'a Call<'c>,
     child: &'a mut Child<'r, H, crate::relay::Order>,
-    session: &'a mut Session,
+    session: &'a mut Session<H::Clock>,
     /// When the call's timeout passes, as a time since the run started.
     timeout: Duration,
     relay: Relay,
@@ -369,11 +373,11 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
     /// The deadline of the body's next ask of the target, if the call goes on: relays what the
     /// target's session handed over since the last, and fails once the core has stopped the call,
     /// or its timeout has passed.
-    fn going(&mut self) -> Result<Deadline, String> {
+    fn going(&mut self) -> Result<Duration, String> {
         if let Some(cut) = self.cut {
             return Err(cut.reason());
         }
-        let by = deadline(&self.child.clock, self.timeout);
+        let by = self.timeout;
         let idle = (self.relay).idle(self.child, self.call.job, (self.session, by));
         match idle {
             Ok(true) => return Err(self.cut_short(Cut::Stopped)),
@@ -434,7 +438,7 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
     }
 
     /// The recorded output directory, only once the whole command log has arrived.
-    fn collect_output(&mut self, command: u64, by: Deadline) -> Result<PathBuf, String> {
+    fn collect_output(&mut self, command: u64, by: Duration) -> Result<PathBuf, String> {
         let dir = self.output_dir(command);
         let logs = self.child.dir.join(log_dir().as_str());
         let into = self.child.dir.join(command_dir(command).as_str());
@@ -458,10 +462,9 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
             .now()
             .saturating_add(self.call.timeout)
             .min(self.child.deadlines.collect);
-        let by = deadline(&self.child.clock, until);
         if let Some((command, process)) = self.running {
-            let stopped = self.stop_client(process, until, by);
-            let _ = self.collect_output(command, by);
+            let stopped = self.stop_client(process, until);
+            let _ = self.collect_output(command, until);
             let status = stopped?;
             let end = if matches!(self.cut, Some(Cut::TimedOut)) {
                 CommandEnd::TimedOut
@@ -470,21 +473,16 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
             };
             self.log(Targeted::Ended { command, end });
         }
-        self.stdin.clear(self.session, by)?;
+        self.stdin.clear(self.session, (&self.child.clock, until))?;
         match self.session.ended() {
             Some(reason) => Err(format!("the shared role's session ended: {reason}")),
             None => Ok(()),
         }
     }
 
-    fn stop_client(
-        &mut self,
-        process: Process,
-        until: Duration,
-        by: Deadline,
-    ) -> Result<ExitStatus, String> {
+    fn stop_client(&mut self, process: Process, until: Duration) -> Result<ExitStatus, String> {
         self.session
-            .kill(process, by)
+            .kill(process, until)
             .context("stopping the shared call's command failed")?;
         loop {
             match self
@@ -502,7 +500,7 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
 
     fn collect_fresh(&mut self) {
         let job = self.call.job.0;
-        let by = deadline(&self.child.clock, self.child.deadlines.collect);
+        let by = self.child.deadlines.collect;
         match self.session.freeze(by) {
             Ok(()) => {}
             // Every ask of an ended session fails at once, with the reason it ended: collecting
@@ -532,12 +530,14 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
     fn stage_stdin(
         &mut self,
         slot: usize,
-        by: Deadline,
+        by: Duration,
     ) -> Result<(AbsolutePath, PayloadRef), String> {
         let input = self.input(slot)?;
         let bytes = input.read()?;
         let supplied = input.reference.clone();
-        let put = self.stdin.put(self.session, &bytes, by);
+        let put = self
+            .stdin
+            .put(self.session, &bytes, (&self.child.clock, by));
         Ok((self.timely(put)?, supplied))
     }
 
@@ -721,13 +721,13 @@ impl<H: Host> Target for OnTarget<'_, '_, '_, H> {
 
     fn run(&mut self, argv: &Argv) -> Result<(), String> {
         let (command, _) = self.command(argv, None)?;
-        let _ = self.collect_output(command, deadline(&self.child.clock, self.timeout));
+        let _ = self.collect_output(command, self.timeout);
         Ok(())
     }
 
     fn capture(&mut self, argv: &Argv, stdin: Option<usize>) -> Result<String, String> {
         let (command, status) = self.command(argv, stdin)?;
-        let log = self.collect_output(command, deadline(&self.child.clock, self.timeout));
+        let log = self.collect_output(command, self.timeout);
         match status {
             ExitStatus::Code(0) => {}
             ExitStatus::Code(code) => {

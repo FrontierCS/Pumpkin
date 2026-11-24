@@ -19,8 +19,6 @@ mod aws_certificates;
 #[path = "../../src/diff.rs"]
 mod diff;
 mod entry;
-#[path = "../../src/figure.rs"]
-mod figure;
 mod live;
 mod op_stats;
 #[path = "../../src/repo.rs"]
@@ -461,70 +459,75 @@ fn figures() {
 }
 
 #[test]
-fn figure_of_crates() {
-    let package = |name: &str, bin: bool, dependencies: &[(&str, Option<&str>)]| {
-        let kind = if bin { "bin" } else { "lib" };
-        let dependencies: Vec<_> = (dependencies.iter())
-            .map(|(name, kind)| serde_json::json!({ "name": name, "kind": kind }))
-            .collect();
-        serde_json::json!({
-            "name": name,
-            "targets": [{ "name": name, "kind": [kind] }],
-            "dependencies": dependencies,
-        })
-    };
-    let metadata = serde_json::json!({ "packages": [
-        package("app", true, &[("mid", None), ("side", None), ("helper", Some("dev")), ("serde", None)]),
-        package("mid", false, &[("low", None), ("side", Some("build"))]),
-        package("low", false, &[("base", None)]),
-        package("base", false, &[]),
-        package("side", false, &[]),
-        package("tool", true, &[("side", None), ("base", None)]),
-        package("helper", false, &[]),
-    ]})
-    .to_string();
+fn links() {
+    use Standing::Tracked;
+    // Each link is made here, so that tidy doesn't find it in this file.
+    let at = |rest: &str| format!("https://github.com/o/r/{rest}");
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    let code = [
+        format!("// {}\n", at(&format!("blob/{sha}/src/a.rs#L1-L2"))),
+        format!("// {}\n", at("blob/main/src/a.rs")),
+        format!("// <{}>, a directory at a tag\n", at("tree/v1.0/src")),
+        format!("// ({}), at a short SHA\n", at("blob/0123456/a.zig")),
+        format!("// {}, a document\n", at("blob/main/docs/a.md#part")),
+        format!("// {}, {}, {}\n", at(""), at("tree/main"), at("tree/main/")),
+        format!("// {}\n", at("releases/download/v1/a.tgz")),
+        format!("const S: &str = \"{}\";\n", at("blob/main/a.rs")),
+    ];
+    let text = |line: String| line + "\n";
     check(
-        &[],
-        |repo| {
-            let stale = figure::check(repo.root, &metadata).unwrap_err();
-            figure::write(repo.root, &metadata).unwrap();
-            let fresh = figure::check(repo.root, &metadata);
-            let drawn = repo.read(figure::PATH).unwrap();
-            let drawn = drawn.replace(figure::STYLE, "<style>…</style>");
-            format!("{stale}\n{fresh:?}\n{drawn}")
-        },
+        &[
+            ("a.rs", code.concat(), Tracked),
+            (
+                "b.md",
+                text(format!("[B]({})", at("blob/master/b.py"))),
+                Tracked,
+            ),
+            (
+                "c.toml",
+                text(format!("# {}", at("blob/HEAD/c.rs"))),
+                Tracked,
+            ),
+            ("d.txt", text(at("blob/main/d.rs")), Tracked),
+            (
+                "crates/lang/tests/conformance/suite/e.star",
+                text(format!("# {}", at("blob/main/e.star"))),
+                Tracked,
+            ),
+        ],
+        tidy,
         &expect![[r#"
-            docs/figures/crates.svg is not what the workspace's manifests draw, as a crate or a dependency changed: run `cargo xtask figures`
-            Ok(())
-            <!-- cargo xtask figures writes this file from `cargo metadata`: edit xtask/src/figure.rs, not this -->
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 276 316" width="276" height="316" role="img" aria-labelledby="title desc">
-            <title id="title">How the workspace's crates depend on one another</title>
-            <desc id="desc">A box for each crate of the workspace, shaded if it builds a binary, in rows: an arrow leads from a crate down to each it depends on, but for a build or a development dependency, and for one that another of its arrows already leads to.</desc>
-            <style>…</style>
-            <defs><marker id="head" viewBox="0 0 8 8" refX="8" refY="4" markerWidth="8" markerHeight="8" orient="auto"><path class="head" d="M0 0L8 4L0 8z"/></marker></defs>
-            <rect class="bg" width="276" height="316"/>
-            <path class="arrow" d="M117 48C117 73 94 73 94 99" marker-end="url(#head)"/>
-            <path class="arrow" d="M141 48C141 74 164 74 164 100V132C164 158 202 158 202 184V216C202 241 236 241 236 267" marker-end="url(#head)"/>
-            <path class="arrow" d="M62 216C62 241 40 241 40 267" marker-end="url(#head)"/>
-            <path class="arrow" d="M94 132C94 157 62 157 62 183" marker-end="url(#head)"/>
-            <path class="arrow" d="M136 216C136 241 64 241 64 267" marker-end="url(#head)"/>
-            <path class="arrow" d="M160 216C160 241 212 241 212 267" marker-end="url(#head)"/>
-            <rect class="hot" x="93" y="16" width="72" height="32" rx="6"/>
-            <text class="code mid" x="129" y="36">app</text>
-            <rect class="box" x="58" y="100" width="72" height="32" rx="6"/>
-            <text class="code mid" x="94" y="120">mid</text>
-            <rect class="box" x="26" y="184" width="72" height="32" rx="6"/>
-            <text class="code mid" x="62" y="204">low</text>
-            <rect class="hot" x="112" y="184" width="72" height="32" rx="6"/>
-            <text class="code mid" x="148" y="204">tool</text>
-            <rect class="box" x="16" y="268" width="72" height="32" rx="6"/>
-            <text class="code mid" x="52" y="288">base</text>
-            <rect class="box" x="102" y="268" width="72" height="32" rx="6"/>
-            <text class="code mid" x="138" y="288">helper</text>
-            <rect class="box" x="188" y="268" width="72" height="32" rx="6"/>
-            <text class="code mid" x="224" y="288">side</text>
-            </svg>
-        "#]],
+            a.rs:2:4: a link to code at `main`, which can move: link it at the full SHA of the commit that was read
+            a.rs:3:5: a link to code at `v1.0`, which can move: link it at the full SHA of the commit that was read
+            a.rs:4:5: a link to code at `0123456`, which can move: link it at the full SHA of the commit that was read
+            a.rs:8:18: a link to code at `main`, which can move: link it at the full SHA of the commit that was read
+            b.md:1:5: a link to code at `master`, which can move: link it at the full SHA of the commit that was read
+            c.toml:1:3: a link to code at `HEAD`, which can move: link it at the full SHA of the commit that was read"#]],
+    );
+}
+
+#[test]
+fn test_binaries() {
+    use Standing::Tracked;
+    let file = |path, text: &str| (path, text.to_owned(), Tracked);
+    let package = |name: &str| format!("[package]\nname = \"{name}\"\n");
+    check(
+        &[
+            file("Cargo.toml", "[workspace]\n"),
+            file("held/Cargo.toml", &package("held")),
+            file("held/tests/it/main.rs", ""),
+            file("held/tests/it/part.rs", ""),
+            file("held/tests/it/part/main.rs", ""),
+            file("held/inner/Cargo.toml", &package("inner")),
+            file("held/inner/tests/it.rs", ""),
+            file("loose/Cargo.toml", &package("loose")),
+            file("loose/tests/a.rs", ""),
+            file("loose/tests/b/main.rs", ""),
+        ],
+        tidy,
+        &expect![
+            "loose/Cargo.toml: the package has 2 integration test binaries, `tests/a.rs`, `tests/b/main.rs`: make each a module of one, as each links the package and its dependencies again"
+        ],
     );
 }
 
@@ -566,15 +569,22 @@ fn test_data() {
 }
 
 #[test]
-fn long_files() {
-    use Standing::Tracked;
+fn ceilings() {
+    use Standing::{Deleted, Tracked, Untracked};
     let rust = |count| lines("fn f() {}", count);
+    let words = |count: usize| lines("A\tword.", count / 2) + &"More.\n".repeat(count % 2);
     let ceilings = "[long_files]\n\
                     \"src/grown.rs\" = 1001\n\
                     \"src/held.rs\" = 1001\n\
                     \"src/shrunk.rs\" = 1002\n\
                     \"src/split.rs\" = 1001\n\
-                    \"src/gone.rs\" = 1001\n";
+                    \"src/gone.rs\" = 1001\n\
+                    [words]\n\
+                    \"docs/grown.md\" = 1501\n\
+                    \"docs/held.md\" = 1501\n\
+                    \"docs/shrunk.md\" = 1502\n\
+                    \"docs/split.md\" = 1501\n\
+                    \"docs/deleted.md\" = 1501\n";
     check(
         &[
             (".config/tidy.toml", ceilings.to_owned(), Tracked),
@@ -582,20 +592,108 @@ fn long_files() {
             ("src/long.rs", rust(1001), Tracked),
             ("src/page/long.js", lines("f();", 1001), Tracked),
             ("crates/a/tests/it/long.rs", rust(1001), Tracked),
-            ("docs/long.md", lines("A line.", 1001), Tracked),
+            ("docs/lines.md", lines("Line.", 1001), Tracked),
             ("src/grown.rs", rust(1002), Tracked),
             ("src/held.rs", rust(1001), Tracked),
             ("src/shrunk.rs", rust(1001), Tracked),
             ("src/split.rs", rust(1000), Tracked),
+            ("docs/at_cap.md", words(1500), Tracked),
+            ("docs/long.md", words(1501), Tracked),
+            ("docs/grown.md", words(1502), Tracked),
+            ("docs/held.md", words(1501), Tracked),
+            ("docs/shrunk.md", words(1501), Tracked),
+            ("docs/split.md", words(1500), Tracked),
+            ("docs/deleted.md", words(1501), Deleted),
+            ("notes.md", words(1501), Untracked),
+            (
+                "crates/lang/tests/conformance/suite/README.md",
+                words(1501),
+                Tracked,
+            ),
         ],
         tidy,
         &expect![[r#"
-            src/grown.rs: the file is 1002 lines, over the cap of 1000 and its ceiling of 1001 in .config/tidy.toml, which only goes down: put what is new in a module of its own, or split the file into modules that each hold one thing, in a pull request that only moves code
-            src/long.rs: the file is 1001 lines, over the cap of 1000: put what is new in a module of its own, or split the file into modules that each hold one thing, in a pull request that only moves code
-            src/page/long.js: the file is 1001 lines, over the cap of 1000: put what is new in a module of its own, or split the file into modules that each hold one thing, in a pull request that only moves code
-            src/shrunk.rs: the file is 1001 lines, under its ceiling of 1002 in .config/tidy.toml: lower the ceiling to 1001
-            src/split.rs: the file is 1000 lines, within the cap of 1000: take it off .config/tidy.toml
-            .config/tidy.toml: `src/gone.rs` isn't a source file of the repository: take it off the list"#]],
+            src/grown.rs: the file has 1002 lines, over the cap of 1000 and its ceiling of 1001 in .config/tidy.toml, which only goes down: put what is new in a module of its own, or split the file into modules that each hold one thing, in a pull request that only moves code
+            src/long.rs: the file has 1001 lines, over the cap of 1000: put what is new in a module of its own, or split the file into modules that each hold one thing, in a pull request that only moves code
+            src/page/long.js: the file has 1001 lines, over the cap of 1000: put what is new in a module of its own, or split the file into modules that each hold one thing, in a pull request that only moves code
+            src/shrunk.rs: the file has 1001 lines, under its ceiling of 1002 in .config/tidy.toml: lower the ceiling to 1001
+            src/split.rs: the file has 1000 lines, within the cap of 1000: take it off .config/tidy.toml
+            .config/tidy.toml: `src/gone.rs` isn't a source file of the repository: take it off the list
+            docs/grown.md: the file has 1502 words, over the cap of 1500 and its ceiling of 1501 in .config/tidy.toml, which only goes down: shorten it, moving each fact to the help or the code it describes
+            docs/long.md: the file has 1501 words, over the cap of 1500: shorten it, moving each fact to the help or the code it describes
+            docs/shrunk.md: the file has 1501 words, under its ceiling of 1502 in .config/tidy.toml: lower the ceiling to 1501
+            docs/split.md: the file has 1500 words, within the cap of 1500: take it off .config/tidy.toml
+            .config/tidy.toml: `docs/deleted.md` isn't a Markdown document of the repository: take it off the list"#]],
+    );
+}
+
+#[test]
+fn sentences() {
+    use Standing::Tracked;
+    // A sentence of `count` words.
+    let long = |count: usize| format!("A{}.", " word".repeat(count - 1));
+    let guide = [
+        format!("# {}", long(30)),
+        String::new(),
+        format!("{} {}", long(25), long(26)),
+        "Wrapped across".to_owned(),
+        format!("lines, {}", long(23)),
+        format!(
+            "Stops in 1.6.3, docs/dev/a.md, e.g. a word, end nothing: {}",
+            long(17)
+        ),
+        format!("(An aside.) **Bold.** #2, `a code span` and {}", long(23)),
+        format!(
+            "[Two words](https://example.com/a) and ![alt text](figures/a.svg) {}",
+            long(23)
+        ),
+        "A `;` in code is none, and so is [a link](https://example.com/a;b).".to_owned(),
+        "One; in prose.".to_owned(),
+        "Before a list, a paragraph ends in one;".to_owned(),
+        "- an item that ends in a semicolon;".to_owned(),
+        format!("- An item ends the sentence{}", " word".repeat(21)),
+        "1. a numbered item; with one inside".to_owned(),
+        String::new(),
+        format!("> {}", long(25)),
+        format!("> {}", long(26)),
+        String::new(),
+        format!("| {} |", long(30)),
+        "```text".to_owned(),
+        long(30),
+        "```".to_owned(),
+        String::new(),
+        format!("    {}", long(30)),
+        String::new(),
+        format!("<p>\n{}\n</p>", long(30)),
+    ];
+    let ceilings = "[sentences]\n\"docs/over.md\" = 1\n\"docs/under.md\" = 2\n";
+    let svg = "<svg><title>A</title><desc>A.</desc></svg>\n".to_owned();
+    let file = |path, text| (path, text, Tracked);
+    check(
+        &[
+            file(".config/tidy.toml", ceilings.to_owned()),
+            file("docs/guide.md", guide.join("\n")),
+            file("docs/figures/a.svg", svg),
+            file("docs/over.md", format!("{}\n{}\n", long(26), long(27))),
+            file("docs/under.md", format!("{}\n", long(26))),
+        ],
+        tidy,
+        &expect![[r#"
+            docs/guide.md: the file has 10 sentences to split, over the cap of 0: split each that a line below names
+            docs/guide.md:3: a sentence of 26 words, over the cap of 25: split it
+            docs/guide.md:4: a sentence of 26 words, over the cap of 25: split it
+            docs/guide.md:6: a sentence of 26 words, over the cap of 25: split it
+            docs/guide.md:7: a sentence of 26 words, over the cap of 25: split it
+            docs/guide.md:8: a sentence of 26 words, over the cap of 25: split it
+            docs/guide.md:10: a sentence chains clauses with a semicolon: make each a sentence, or each part an item of a list
+            docs/guide.md:11: a sentence chains clauses with a semicolon: make each a sentence, or each part an item of a list
+            docs/guide.md:13: a sentence of 26 words, over the cap of 25: split it
+            docs/guide.md:14: a sentence chains clauses with a semicolon: make each a sentence, or each part an item of a list
+            docs/guide.md:17: a sentence of 26 words, over the cap of 25: split it
+            docs/over.md: the file has 2 sentences to split, over the cap of 0 and its ceiling of 1 in .config/tidy.toml, which only goes down: split each that a line below names
+            docs/over.md:1: a sentence of 26 words, over the cap of 25: split it
+            docs/over.md:2: a sentence of 27 words, over the cap of 25: split it
+            docs/under.md: the file has 1 sentence to split, under its ceiling of 2 in .config/tidy.toml: lower the ceiling to 1"#]],
     );
 }
 
@@ -618,12 +716,25 @@ fn diff() {
                 .unwrap();
             let diff = diff::since(repo, "HEAD", &[], again).unwrap();
             let below = diff::since(repo, "HEAD", &["changed.rs".into()], again).unwrap();
+            // Git's blob IDs, which name the contents the test wrote, stand masked, as cargo's
+            // tests mask hashes.
+            let masked = |diff: String| {
+                let lines = diff.lines().map(|line| {
+                    let Some(ids) = line.strip_prefix("index ") else {
+                        return format!("{line}\n");
+                    };
+                    let mode = ids.split_once(' ').map(|(_, mode)| format!(" {mode}"));
+                    format!("index [HASH]..[HASH]{}\n", mode.unwrap_or_default())
+                });
+                lines.collect::<String>()
+            };
+            let (diff, below) = (masked(diff), masked(below));
             format!("{refused}\n{diff}below changed.rs:\n{below}")
         },
         &expect![[r#"
             the diff would leave out untracked Rust files: add them to it with `git add --intent-to-add -- <repo>/new.rs`, then run `cargo xtask mutants --in-diff HEAD` again
             diff --git a/changed.rs b/changed.rs
-            index 59760b5..e20511e 100644
+            index [HASH]..[HASH] 100644
             --- a/changed.rs
             +++ b/changed.rs
             @@ -1 +1,3 @@
@@ -633,21 +744,21 @@ fn diff() {
             +}
             diff --git a/deleted.rs b/deleted.rs
             deleted file mode 100644
-            index d68b814..0000000
+            index [HASH]..[HASH]
             --- a/deleted.rs
             +++ /dev/null
             @@ -1 +0,0 @@
             -fn d() {}
             diff --git a/new.rs b/new.rs
             new file mode 100644
-            index 0000000..ed2b5d2
+            index [HASH]..[HASH]
             --- /dev/null
             +++ b/new.rs
             @@ -0,0 +1 @@
             +fn g() {}
             below changed.rs:
             diff --git a/changed.rs b/changed.rs
-            index 59760b5..e20511e 100644
+            index [HASH]..[HASH] 100644
             --- a/changed.rs
             +++ b/changed.rs
             @@ -1 +1,3 @@

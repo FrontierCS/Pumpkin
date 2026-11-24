@@ -1,4 +1,4 @@
-//! A workflow parsed from its IR: references resolved to typed ids, every time given as a
+//! A workflow parsed from its IR: references resolved to typed ids, every time readable as a
 //! [`Duration`], and the rules that span its parts checked.
 //!
 //! A [`Placed`] workflow has each of its roles on a provider, in the smallest class of sandbox
@@ -245,7 +245,6 @@ impl TryFrom<f64> for UsdPerHour {
 
 impl From<UsdPerHour> for f64 {
     fn from(price: UsdPerHour) -> Self {
-        // A million dollars in millionths is exact as a double.
         #[expect(clippy::cast_precision_loss, reason = "at most 10^12, below 2^53")]
         let micros = price.micros as Self;
         micros / 1e6
@@ -288,6 +287,20 @@ impl<T> ByProvider<T> {
     pub fn map<U>(self, mut f: impl FnMut(T) -> U) -> ByProvider<U> {
         let mapped = self.0.into_iter().map(|(name, value)| (name, f(value)));
         ByProvider(mapped.collect())
+    }
+
+    pub fn as_ref(&self) -> ByProvider<&T> {
+        let borrowed = self.0.iter().map(|(name, value)| (name.clone(), value));
+        ByProvider(borrowed.collect())
+    }
+}
+
+impl<T> IntoIterator for ByProvider<T> {
+    type Item = (Name, T);
+    type IntoIter = std::collections::btree_map::IntoIter<Name, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
     }
 }
 

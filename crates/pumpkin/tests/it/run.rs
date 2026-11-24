@@ -5,7 +5,7 @@
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs::Permissions;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::PermissionsExt as _;
@@ -18,11 +18,12 @@ use expect_test::expect;
 use provider::{RunTag, Sweep as _};
 use schema::sandbox::{MODEL_PORT, SANDBOXCTL_PATH};
 use serde_json::{Value, json};
-use test_support::{BUSYBOX, WORKFLOW, docker, docker_context, files, sandboxd, standard_outputs};
+use test_support::http::{read_request, write_chunk};
+use test_support::{BUSYBOX, docker, docker_context, files, sandboxd, standard_outputs};
 
 use super::{
     EC2, LOCAL, PUMPKIN, RUNNER, Scratch, Step, check, containers, copy_tree, docker_table, engine,
-    final_running, invocation, machine, record, report, through_shell, with_room, workflow,
+    final_running, invocation, machine, ran, record, report, through_shell, with_room, workflow,
 };
 
 #[test]
@@ -90,14 +91,14 @@ fn usage() {
         pumpkin(&["help", "bogus"]),
         same(&["help", "controller"], &["controller", "--help"]),
         pumpkin(&["controller", "install", "--settings", "arn"]),
-        admin(&["install", "--settings", "/pumpkin-alice/settings"]),
+        admin(&["install", "ec2", "--settings", "/pumpkin-alice/settings"]),
+        admin(&["install", "docker", "--settings", "settings.toml"]),
         admin(&["check", "--help"]),
         admin(&["run", "a.star"]),
     ];
     // What `--version` prints: this build, which names its commit if it was made in a git
     // checkout of Pumpkin's repository.
     let this = format!("pumpkin {}\n", runtime::BUILD);
-    // Filled in by `UPDATE_EXPECT=1` once the crate builds.
     check(
         &scratch,
         steps,
@@ -265,9 +266,13 @@ fn usage() {
 
             Usage: pumpkin controller <action>
             pumpkin: to read how to use it: pumpkin help controller
-            $ pumpkin-admin install --settings /pumpkin-alice/settings
+            $ pumpkin-admin install ec2 --settings /pumpkin-alice/settings
             exit status: Some(2)
-            error: invalid value '/pumpkin-alice/settings' for '--settings <arn>': `/pumpkin-alice/settings` is not an SSM parameter's ARN: use one such as `arn:aws:ssm:us-west-1:123456789012:parameter/pumpkin-alice/settings`
+            error: invalid value for '--settings <settings>': `/pumpkin-alice/settings` is not an SSM parameter's ARN: use one such as `arn:aws:ssm:us-west-1:123456789012:parameter/pumpkin-alice/settings`
+            pumpkin: to read how to use it: pumpkin-admin install --help
+            $ pumpkin-admin install docker --settings settings.toml
+            exit status: Some(2)
+            error: invalid value for '--settings <settings>': `settings.toml` is no absolute path: name the file of the controller's settings by one
             pumpkin: to read how to use it: pumpkin-admin install --help
             $ pumpkin-admin check --help
             exit status: Some(0)
@@ -313,10 +318,7 @@ fn usage() {
 )]
 fn unrunnable() {
     let scratch = Scratch::new();
-    scratch.write_task(
-        "workflow",
-        &serde_json::from_str::<Value>(WORKFLOW).unwrap(),
-    );
+    scratch.write_task("workflow", &test_support::workflow());
     scratch.write("empty/task.star", "");
     scratch.write_sandboxd("sandboxd");
     scratch.write_sandboxd("private");
@@ -424,8 +426,8 @@ fn unrunnable() {
     assert!(!scratch.0.join("runs").exists(), "a refusal made a record");
 }
 
-/// `wait` finds the `outcome.json` of each run recorded in `scratch`'s `runs`, which have
-/// ended, and with `sandboxd`, shown as `<sandboxd>`: the engine is not reached.
+/// Runs `wait` on each ended run recorded in `scratch`'s `runs`, which doesn't reach the engine,
+/// and shows `sandboxd` as `<sandboxd>`.
 fn wait_for_each_run(scratch: &Scratch, sandboxd: &str) {
     let mut ids: Vec<String> = (fs::read_dir(scratch.0.join("runs")).unwrap())
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
@@ -511,7 +513,7 @@ fn modes_below(dir: &Path) -> String {
 )]
 fn refusals() {
     let scratch = Scratch::new();
-    let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
+    let mut ir = test_support::workflow();
     scratch.write_task("workflow", &ir);
     let mut budgeted = ir.clone();
     budgeted["roles"][0]["runtime"]["agent"]["egress"]["model"][0]["budget"] =
@@ -523,6 +525,9 @@ fn refusals() {
     scratch.write_task_in("it's broken", "tasks", &ir);
     scratch.write_task_in("a~b", "tasks", &ir);
     write_configurations(&scratch);
+    let uncosted = fs::read_to_string(scratch.0.join("conf/uncosted.toml")).unwrap();
+    scratch.write("home/.config/pumpkin/pumpkin.toml", &uncosted);
+    scratch.write("home/.config/pumpkin/key", "sk-test\n");
     let run = |entry, config: &str| {
         let mut command = scratch.pumpkin(&["run", entry, "--sandboxd", "sandboxd"]);
         command.args(["--runs", "runs", "--config", config]);
@@ -540,6 +545,16 @@ fn refusals() {
         Step::from(run("budgeted/task.star", "conf/uncached.toml")),
         Step::from(run("budgeted/task.star", "conf/unwritten.toml")),
         Step::from(run("budgeted/task.star", "conf/uncosted.toml")),
+        // `check` refuses what `run` does, by the configuration that `--config` names, or else
+        // by the default one.
+        Step::from(scratch.pumpkin(&["check", "budgeted/task.star", "--config", "unserved.toml"])),
+        Step::from(scratch.pumpkin(&[
+            "check",
+            "budgeted/task.star",
+            "--config",
+            "conf/served.toml",
+        ])),
+        Step::from(scratch.pumpkin(&["check", "budgeted/task.star"])),
     ];
     check(
         &scratch,
@@ -596,7 +611,40 @@ fn refusals() {
             $ pumpkin run budgeted/task.star --sandboxd sandboxd --runs runs --config conf/uncosted.toml
             exit status: Some(1)
             pumpkin: conf/uncosted.toml: `agent` has a model budget, but `gpt-6-astra` has no price for `cached` or `cache_write` tokens: price them in its `usd_per_mtok` in the configuration, or remove the budget
-            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/conf/uncosted.toml --sandboxd <scratch>/sandboxd <scratch>/budgeted/task.star"#]],
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/conf/uncosted.toml --sandboxd <scratch>/sandboxd <scratch>/budgeted/task.star
+            $ pumpkin check budgeted/task.star --config unserved.toml
+            exit status: Some(1)
+            budgeted/task.star:1:1: the file has no docstring: begin it with a string that says what it holds
+                1 | load("//lib/train.star", "train")
+                  | ^
+            budgeted/submit.star:1:1: the file has no docstring: begin it with a string that says what it holds
+                1 | def submit(run, payload, finalize: bool = False):
+                  | ^
+            pumpkin: budgeted/task.star: the task has 2 problems
+            pumpkin: budgeted/task.star: unserved.toml: no upstream serves every model that the workflow's route allows, `gpt-6-astra`: list them all under one
+            pumpkin: to check it again: pumpkin check --config <scratch>/unserved.toml <scratch>/budgeted/task.star
+            $ pumpkin check budgeted/task.star --config conf/served.toml
+            exit status: Some(1)
+            budgeted/task.star:1:1: the file has no docstring: begin it with a string that says what it holds
+                1 | load("//lib/train.star", "train")
+                  | ^
+            budgeted/submit.star:1:1: the file has no docstring: begin it with a string that says what it holds
+                1 | def submit(run, payload, finalize: bool = False):
+                  | ^
+            pumpkin: budgeted/task.star: the task has 2 problems
+            pumpkin: budgeted/task.star: conf/served.toml: `agent` has a model budget, but `gpt-6-astra` has no price for `input`, `cached`, `cache_write` or `output` tokens: price them in its `usd_per_mtok` in the configuration, or remove the budget
+            pumpkin: to check it again: pumpkin check --config <scratch>/conf/served.toml <scratch>/budgeted/task.star
+            $ pumpkin check budgeted/task.star
+            exit status: Some(1)
+            budgeted/task.star:1:1: the file has no docstring: begin it with a string that says what it holds
+                1 | load("//lib/train.star", "train")
+                  | ^
+            budgeted/submit.star:1:1: the file has no docstring: begin it with a string that says what it holds
+                1 | def submit(run, payload, finalize: bool = False):
+                  | ^
+            pumpkin: budgeted/task.star: the task has 2 problems
+            pumpkin: budgeted/task.star: <scratch>/home/.config/pumpkin/pumpkin.toml: `agent` has a model budget, but `gpt-6-astra` has no price for `cached` or `cache_write` tokens: price them in its `usd_per_mtok` in the configuration, or remove the budget
+            pumpkin: to check it again: pumpkin check <scratch>/budgeted/task.star"#]],
     );
     assert!(!scratch.0.join("runs").exists(), "a refusal made a record");
 }
@@ -608,13 +656,8 @@ fn refusals() {
 )]
 fn configurations() {
     let scratch = Scratch::new();
-    let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
-    scratch.write_task("workflow", &ir);
-    ir["roles"][0]["runtime"]["agent"]
-        .as_object_mut()
-        .unwrap()
-        .remove("egress");
-    scratch.write_task("unrouted", &ir);
+    scratch.write_task("workflow", &test_support::workflow());
+    scratch.write_task("unrouted", &test_support::unrouted());
     write_configurations(&scratch);
     let run = |entry, config: &[&str]| {
         let mut command = scratch.pumpkin(&["run", entry, "--sandboxd", "sandboxd"]);
@@ -684,7 +727,7 @@ fn configurations() {
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/missing.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config undocked.toml
             exit status: Some(1)
-            pumpkin: undocked.toml: `[docker]` is missing: name it, or `[controller]`, as `pumpkin help config` says
+            pumpkin: undocked.toml: `[docker]` is missing: name it, or `[controllers.<name>]`, as `pumpkin help config` says
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/undocked.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config nameless.toml
             exit status: Some(1)
@@ -909,14 +952,11 @@ fn configurations() {
     );
 }
 
-/// Writes into `scratch` the stand-in `sandboxd` that [`configurations`] and [`refusals`] give
-/// `run`, and the machine's configurations, each named for what it holds: `conf/served`, of the
-/// context `nowhere` and two upstreams, one of whose models has a price, its key in `conf/key`;
-/// `docked`, without upstreams; and, to be refused, one for each rule a configuration breaks, as
-/// its name says (a missing context, TOML errors, keys, upstreams, URLs, prices, unserved models,
-/// `[placement]`, provider kinds and their
-/// settings, [`EC2`]'s and Modal's tables, the gateway's address); and `conf/unkeyed`, whose key
-/// file is missing. Each but `undocked` ends with [`LOCAL`]'s tables, changed as its name says.
+/// Writes into `scratch` the `sandboxd` that [`configurations`] and [`refusals`] give `run`, the
+/// key `conf/key`, and a machine configuration `<name>.toml` for each name they run: `conf/served`
+/// and `docked`, which are accepted, and each other, which breaks the rule that its name says.
+/// Each but `undocked`, which names no Docker context, ends with [`LOCAL`]'s tables, changed as
+/// its name says.
 #[expect(
     clippy::too_many_lines,
     reason = "most of it is the configurations, a line or a few each"
@@ -1074,9 +1114,8 @@ models = [{{ name = "gpt-6-astra", upstream_name = "vendor/gpt-6-astra", usd_per
          {SANDBOXCTL_PATH} call submit six --arg finalize=true"
     );
     let mut asks = workflow("", &["sh", "-c", &ask]);
-    let fixture: Value = serde_json::from_str(WORKFLOW).unwrap();
     asks["roles"][0]["runtime"]["agent"]["egress"] =
-        fixture["roles"][0]["runtime"]["agent"]["egress"].clone();
+        test_support::workflow()["roles"][0]["runtime"]["agent"]["egress"].clone();
     let body = r#"{"model": "gpt-6-astra", "messages": [{"role": "user", "content": "grade"}]}"#;
     let grade = format!(
         "wget --quiet --output-document=/pumpkin/out/answer \
@@ -1104,33 +1143,22 @@ impl Upstream {
         let thread = thread::spawn(move || {
             for connection in listener.incoming() {
                 let mut connection = connection.unwrap();
-                let mut reader = BufReader::new(&connection);
-                let mut head = Vec::new();
-                while head.last().is_none_or(|line: &String| !line.is_empty()) {
-                    let mut line = String::new();
-                    reader.read_line(&mut line).unwrap();
-                    head.push(line.trim_end().to_owned());
-                }
+                let (line, headers, body) = read_request(&mut BufReader::new(&connection));
                 // The connection that `stop` makes holds no request.
-                if head[0].is_empty() {
+                if line.is_empty() {
                     return;
                 }
-                let header = |name| head.iter().find_map(|line| line.strip_prefix(name));
-                let length = header("content-length: ").unwrap();
-                let mut body = vec![0; length.parse().unwrap()];
-                reader.read_exact(&mut body).unwrap();
+                let authorization = headers.iter().find(|(name, _)| name == "authorization");
+                let authorization = authorization.map(|(_, value)| value);
                 let body = String::from_utf8(body).unwrap();
-                let echo = format!(
-                    "data: {} {:?} {body}\n\n",
-                    head[0],
-                    header("authorization: ")
+                let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                            transfer-encoding: chunked\r\nconnection: close\r\n\r\n";
+                connection.write_all(head.as_bytes()).unwrap();
+                write_chunk(
+                    &mut connection,
+                    &format!("data: {line} {authorization:?} {body}\n\n"),
                 );
-                let stream = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
-                     transfer-encoding: chunked\r\nconnection: close\r\n\r\n{:x}\r\n{echo}\r\n0\r\n\r\n",
-                    echo.len()
-                );
-                connection.write_all(stream.as_bytes()).unwrap();
+                write_chunk(&mut connection, "");
             }
         });
         Self { address, thread }
@@ -1332,7 +1360,11 @@ fn writes_only_in_its_workspace() {
             held(&scratch.0.join(".pumpkin/docker"))
         ),
     ];
-    lines.extend(standard_outputs(&scratch.0.join(dir)));
+    lines.extend(
+        standard_outputs(&scratch.0.join(dir))
+            .into_iter()
+            .map(remaining),
+    );
     // So that the scratch directory can be removed.
     fs::set_permissions(home.join(".docker"), Permissions::from_mode(0o755)).unwrap();
     let shown = lines
@@ -1371,7 +1403,7 @@ fn writes_only_in_its_workspace() {
         agent `agent`'s standard output:
         {"kind":"call","job":0,"remaining":{"calls":null,"seconds":null}}
         {"kind":"status","job":0,"state":"completed","returned":{"bytes":6,"lines":1},"remaining":{"calls":null,"seconds":null}}
-        {"kind":"call","returned":{"state":"accepted"},"remaining_seconds":30}
+        {"kind":"call","returned":{"state":"accepted"},"remaining_seconds":"<s>"}
         job 0's command 0's standard output:
         job 1's command 0's standard output:"#]].assert_eq(&shown);
 }
@@ -1459,6 +1491,48 @@ fn unbuilt_on_docker() {
     );
 }
 
+#[test]
+#[ignore = "needs Docker: run cargo xtask live docker"]
+fn unplaced_provider_unreached_on_docker() {
+    let scratch = Scratch::new();
+    let sandboxd = sandboxd().into_os_string().into_string().unwrap();
+    let label = format!("pumpkin.test=unplaced-{}", std::process::id());
+    let _images = Labelled(label.clone());
+    scratch.write_task("unbuilt", &workflow("", &["true"]));
+    let failing = format!("FROM {BUSYBOX}\nLABEL {label}\nRUN false\n");
+    scratch.write("unbuilt/Dockerfile", &failing);
+    let context = docker_context();
+    // `a100`'s one class has GPUs, which no role needs, and it sorts before `aws`, which the AWS
+    // guard keeps unreachable, so a run that reached every provider would reach `a100` first.
+    let a100 = r#"[providers.a100.modal]
+profile = "pumpkin"
+images = { region = "us-west-1", repository = "pumpkin/roles", role_arn = "arn:aws:iam::123456789012:role/pumpkin-modal-pull" }
+dials_from = "203.0.113.7"
+classes.a100 = { gpu = "A100-80GB", gpu_model = "NVIDIA A100-SXM4-80GB", cpu_millis = 8000, memory_bytes = 85899345920, startup_seconds = 1800 }
+"#;
+    let config = format!("{}\n{EC2}\n{a100}", docker_table(&context));
+    scratch.write("pumpkin.toml", &config);
+    let rootful = !engine(&scratch, &context).report().security.rootless;
+    let mut run = scratch.pumpkin(&["run", "unbuilt/task.star", "--sandboxd", &sandboxd]);
+    run.args(["--runs", "runs", "--config", "pumpkin.toml"]);
+    let lines = [
+        ran(run, &scratch.0, rootful),
+        format!("a record was made: {}", scratch.0.join("runs").exists()),
+    ];
+    check(
+        &scratch,
+        lines.map(Step::Ran),
+        rootful,
+        &[(&sandboxd[..], "<sandboxd>")],
+        &expect![[r#"
+            $ pumpkin run unbuilt/task.star --sandboxd <sandboxd> --runs runs --config pumpkin.toml
+            exit status: Some(1)
+            pumpkin: reaching provider `aws` failed: `aws --version` failed with exit status: 1 and wrote nothing to standard error: expected it to exit with 0
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <sandboxd> <scratch>/unbuilt/task.star
+            a record was made: false"#]],
+    );
+}
+
 /// Writes `examples/hello` into `scratch`, with the marker of its root, and with `label` on its
 /// image.
 fn write_hello(scratch: &Scratch, label: &str) {
@@ -1525,7 +1599,6 @@ fn held(dir: &Path) -> String {
     names.join(", ")
 }
 
-/// Copies the tree at `from`, whose files are regular ones, to `to`, which doesn't exist yet.
 const OPS_FINAL: &str = r#"
     payload=/pumpkin/in/payload/raw
     bytes=$(wc -c < $payload)
@@ -1533,7 +1606,6 @@ const OPS_FINAL: &str = r#"
     echo kept > /pumpkin/out/evidence.txt
     echo "judged $bytes bytes as $(id -u), with HOME=$HOME, in $(pwd)""#;
 
-/// `sandboxctl` exits with 1 for a refusal and 2 for a job that gave no result.
 const AGENT: &str = r#"#!/bin/sh
     cd /workspace && stat -c '%a %n' .codex .codex/skills .codex/config.toml .tmp agent
     echo "standard input: $(cat)"
@@ -1553,28 +1625,27 @@ const AGENT: &str = r#"#!/bin/sh
     ctl status 0
     ctl call submit six --arg finalize=true --wait 15"#;
 
-/// The workflow of the run whose agent makes ops: [`workflow`]'s, whose agent runs
-/// [`AGENT`], which the run puts in its sandbox with the fixture's directories, files and
-/// standard input, and a directory listed before the one that holds it; whose job function
-/// `train` takes payloads of up to 8 bytes, and whose final call runs [`OPS_FINAL`] on a payload
-/// of up to 16 bytes, the most an op of the agent's may carry; and whose calls of `train` have a
-/// timeout of 5 s, room for the body's put and command on a loaded engine, without a cumulative
-/// limit, so that it is each call's timeout, and what a reply has left depends on no command's
-/// time.
+/// The workflow of the run whose agent makes ops: [`workflow`]'s, whose agent runs [`AGENT`] and
+/// whose final call runs [`OPS_FINAL`].
 fn ops_workflow() -> Value {
     // Spliced in, since `format!` would need each of the shell's braces doubled.
     let script = AGENT.replace("SANDBOXCTL", SANDBOXCTL_PATH);
     let mut ir = workflow("", &["/workspace/agent"]);
     let agent = &mut ir["roles"][0]["runtime"]["agent"];
     agent["prepend_grant_help"] = json!(true);
+    // Listed before the directory that holds it.
     let skills = json!({ "path": "/workspace/.codex/skills", "mode": "0750" });
     agent["dirs"].as_array_mut().unwrap().insert(0, skills);
     let launcher = json!({ "path": "/workspace/agent", "mode": "0755", "content": script });
     agent["files"].as_array_mut().unwrap().push(launcher);
     let train = &mut ir["roles"][0]["runtime"]["agent"]["grants"][0]["job"];
     train["payload_max_bytes"] = json!(8);
+    // Room for the body's put and command on a loaded engine.
     train["call_timeout_seconds"] = json!(5);
+    // With no cumulative limit, the timeout is each call's alone, and what a reply has left
+    // depends on no command's time.
     train.as_object_mut().unwrap().remove("cumulative_seconds");
+    // The most that an op of the agent's may carry.
     ir["final"]["payload_max_bytes"] = json!(16);
     ir["roles"][0]["runtime"]["agent"]["grants"][1]["now"]["payload_max_bytes"] = json!(16);
     ir
@@ -1764,7 +1835,7 @@ fn final_call_leases_on_docker() {
         let text = fs::read_to_string(path).unwrap_or_default();
         lines.push(format!("the program's {stream}: {text:?}"));
     }
-    lines.extend(standard_outputs(&record));
+    lines.extend(standard_outputs(&record).into_iter().map(remaining));
     let shown = [(&sandboxd[..], "<sandboxd>")];
     check(
         &scratch,
@@ -1778,7 +1849,7 @@ fn final_call_leases_on_docker() {
             the program's stdout: "7\n"
             the program's stderr: "cat: can't open '/answers': No such file or directory\n"
             agent `agent`'s standard output:
-            {"kind":"call","returned":{},"remaining_seconds":60}
+            {"kind":"call","returned":{},"remaining_seconds":"<s>"}
             job 0's command 0's standard output:
             the judge reads /answers: 42
             {"kind":"lease_status","lease":0,"state":"ready","elapsed_seconds":"<s>","busy_seconds":"<s>","idle_seconds":"<s>","failure":null,"last":{"kind":"command","command":1,"end":{"exited":{"code":0}},"stdout":"7\n","stderr":"cat: can't open '/answers': No such file or directory\n"},"remaining":{"instances":0,"instance_seconds":"<s>","cumulative_seconds":null,"commands":null}}"#]],
@@ -1916,5 +1987,17 @@ impl Drop for Labelled {
                 eprintln!("the test's image tag {tag} can't be removed");
             }
         }
+    }
+}
+
+/// `line` with the seconds left of the run's deadline that a call's answer gives masked, as the
+/// run's start moves them.
+fn remaining(line: String) -> String {
+    match line.split_once(r#""remaining_seconds":"#) {
+        Some((before, after)) => {
+            let after = after.trim_start_matches(|c: char| c.is_ascii_digit());
+            format!(r#"{before}"remaining_seconds":"<s>"{after}"#)
+        }
+        None => line,
     }
 }

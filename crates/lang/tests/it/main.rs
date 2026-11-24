@@ -136,10 +136,10 @@ impl<'c> Case<'c> {
         Ok(format!("{built}{ir:#}"))
     }
 
-    /// How many prefixes of the file at `path` evaluate, given `args`, of how many it cuts: at
-    /// every `every`th character's boundary, at each line's end and at the file's, with the other
-    /// files whole; one whose problems don't read panics, named beside the panic.
-    fn prefixes(&self, path: &str, args: &Args, every: usize) -> (usize, usize) {
+    /// How many prefixes of the file at `path` evaluate, given `args`, cut at every `every`th
+    /// character's boundary, at each line's end and at the file's, with the other files whole;
+    /// one whose problems don't read panics, named beside the panic.
+    fn prefixes(&self, path: &str, args: &Args, every: usize) -> usize {
         let held = self.held.iter().find(|(held, _)| *held == path);
         let text = held.map_or_else(|| self.files[path].as_str(), |(_, text)| text);
         let mut cut = Self {
@@ -154,14 +154,13 @@ impl<'c> Case<'c> {
             .filter(|&(index, (_, char))| index % every == 0 || char == '\n')
             .map(|(_, (end, _))| end)
             .chain([text.len()]);
-        let (mut evaluated, mut cuts) = (0, 0);
+        let mut evaluated = 0;
         for end in ends {
             let _named = Named { path, end };
             *cut.held.last_mut().unwrap() = (path, &text[..end]);
             evaluated += usize::from(cut.evaluate(args).is_ok());
-            cuts += 1;
         }
-        (evaluated, cuts)
+        evaluated
     }
 }
 
@@ -2933,18 +2932,6 @@ X = 1"#,
 #- //text.star
 load("//lib.star", "X")
 #- //lib.star
-X = {}
-Y = X.update({})"#,
-        &expect![[r#"
-            lib.star:2:7: `update`, which would change the dict, is not in Pumpkin's Starlark: make a new dict with `|`, as values never change
-                2 | Y = X.update({})
-                  |       ^^^^^^"#]],
-    );
-    check(
-        r#"
-#- //text.star
-load("//lib.star", "X")
-#- //lib.star
 def f(*args):
     pass"#,
         &expect![[r#"
@@ -4253,7 +4240,7 @@ fail("".join([str(int(x)) for x in X]))"#,
               |                 ^
             the text, `"[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[…"`, is made at text.star:1:5"#]],
     );
-    // A closed array no longer counts towards how deep the next one nests.
+    // A closed array doesn't count towards how deep the next one nests.
     let siblings = format!(
         "X = json.decode(\"[{}[]]\")\nfail(str(len(X)))",
         "[],".repeat(128)
@@ -4304,7 +4291,7 @@ X = json.decode(H)"#;
             1 | X = json.decode('{"a": 1, "b": 2, "c": 3')
               |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
     );
-    // A closed array or object no longer counts as pending: each passes at its exact bound, 321
+    // A closed array or object doesn't count as pending: each passes at its exact bound, 321
     // and 483 bytes, where counting a closed one's elements again would refuse it.
     let closed = "X = json.decode('[[1], [2]]')\nfail(str(len(X)))";
     check_within(

@@ -234,7 +234,12 @@ pub struct RunnerRuntime {
 pub enum TargetLifetime {
     /// Each call owns its sandbox until its body ends.
     Call,
-    /// All work-phase calls use one sandbox, one complete body at a time.
+    /// All work-phase calls use one sandbox, one complete body at a time, which keeps the files
+    /// each body leaves, a failed one's too. A call while another's body runs, or while that
+    /// body's runner is being deleted, is refused as busy, and isn't charged. Once the sandbox's
+    /// session has ended, each later call is refused, and the agents work on. Once the work phase's
+    /// calls have ended, the run collects the sandbox's output and deletes it, before the final
+    /// call.
     Work,
 }
 

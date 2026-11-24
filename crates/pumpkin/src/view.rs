@@ -48,7 +48,7 @@ use self::json::{listed_json, live_row, record_json, run_json, tokens_json};
 use self::talk::Talk;
 use crate::cli::Exit;
 use crate::controller::{Unviewed, Viewing};
-use crate::link::Viewed;
+use crate::link::{ViewRequest, Viewed};
 use crate::progress::{self, Listed};
 use crate::{cli, config, next, say};
 
@@ -70,12 +70,16 @@ const RECENT_LINES: usize = 100;
 /// page is read again and again while it is open, and a person opens a few at a time.
 const HELD_ENDED_RUNS: usize = 8;
 
-/// Serves the runs in the directory `flags` name, or else, with `[controller]` in the
-/// configuration, the controller's runs, until the process is stopped.
+/// Serves the runs in the directory `flags` name, or else, with `[controllers.<name>]` in the
+/// configuration, a controller's runs, until the process is stopped.
 pub(crate) fn view(flags: cli::View) -> Result<Exit, String> {
-    let cli::View { runs, port } = flags;
+    let cli::View {
+        runs,
+        controller,
+        port,
+    } = flags;
     let (source, serving) = if runs.is_none()
-        && let Some(client) = config::client(None)?
+        && let Some(client) = config::client(None, controller.as_ref())?
     {
         let viewing = Viewing::reach(&client)?;
         let serving = format!("controller `{}`'s runs", viewing.name());
@@ -83,7 +87,10 @@ pub(crate) fn view(flags: cli::View) -> Result<Exit, String> {
     } else {
         let (runs, named) = crate::runs_dir(runs)?;
         let serving = format!("the runs in {runs}");
-        let view = Box::new(View::new(PathBuf::from(&runs), named));
+        let view = Box::new(View::new(
+            PathBuf::from(&runs),
+            next::At::runs(named.as_deref()),
+        ));
         let runs_given = runs;
         (Source::Here { view, runs_given }, serving)
     };
@@ -118,13 +125,21 @@ impl Answering {
         Self(View {
             again: false,
             jobs: Some(home.join(crate::job::JOBS)),
-            ..View::new(home.join(crate::job::runs()), None)
+            ..View::new(home.join(crate::job::runs()), next::At::Default)
         })
     }
 
-    /// The answer to a `GET` of `target`, as the page's requests are answered, with its body
-    /// deflated if `deflate` and that is shorter.
-    pub(crate) fn answer(&mut self, target: &str, deflate: bool) -> Viewed {
+    /// The answer to `request`, a `GET` of its `target`, as the page's requests are answered, with
+    /// its body deflated if it asks to `deflate` and that is shorter, and its commands to run next
+    /// naming the controller as its `controller`.
+    pub(crate) fn answer(&mut self, request: ViewRequest) -> Viewed {
+        let ViewRequest {
+            target,
+            deflate,
+            controller,
+        } = request;
+        let target = &target[..];
+        self.0.at = next::At::Controller(controller);
         let response = match Request::get(target, deflate) {
             Ok(request) => api(&request, &mut self.0),
             Err(refused) => refused,
@@ -166,8 +181,8 @@ enum Source {
 /// The runs of one directory, as the view reads them.
 struct View {
     runs: PathBuf,
-    /// The runs directory as commands name it, `None` for the default.
-    named: Option<String>,
+    /// Where the commands to run next find the runs.
+    at: next::At,
     /// Whether a run's reply carries the command that runs it again.
     again: bool,
     /// The directory of the runs' jobs, which name each run's member, on a controller.
@@ -220,6 +235,8 @@ struct Held {
     ending: Option<Ending>,
     /// How many times the log has started over: a byte of an earlier epoch means nothing now.
     log_epoch: u64,
+    /// What the view found of the log when it last started over, which the run's row says.
+    started_over: Option<String>,
     /// The value of `View::reads` when it was last read.
     read: u64,
     exchanges: trace::Exchanges,
@@ -242,6 +259,7 @@ impl Held {
             recent: VecDeque::new(),
             ending: None,
             log_epoch,
+            started_over: None,
             read: 0,
             exchanges: trace::Exchanges::default(),
             ops: trace::Ops::default(),
@@ -301,12 +319,13 @@ impl Held {
             }
         })?;
         if let Some(started_over) = started_over {
-            say(format_args!("run {}: {started_over}", self.record.id()));
+            let said = format!("run {}: {started_over}", self.record.id());
             // What was derived of the log before is not of this one.
             let record = Record::open(self.record.dir())?;
             let ending = self.ending.take();
             *self = Self::new(record, self.log_epoch + 1, self.made)?;
             self.ending = ending;
+            self.started_over = Some(said);
             return self.take();
         }
         Ok(())
@@ -463,11 +482,11 @@ fn route(request: &Request, local: &mut Local) -> Response {
         Ok(asked) => asked,
         Err(refused) => return refused,
     };
-    let named = match &local.source {
-        Source::Here { view, .. } => view.named.as_deref(),
-        Source::Controller(_) => None,
+    let at = match &local.source {
+        Source::Here { view, .. } => view.at.clone(),
+        Source::Controller(viewing) => next::At::Controller(viewing.name().clone()),
     };
-    if let Err(refused) = allowed(&asked, request, local.port, named) {
+    if let Err(refused) = allowed(&asked, request, local.port, &at) {
         return refused;
     }
     match (asked, &mut local.source) {
@@ -507,8 +526,9 @@ fn asked_there(viewing: &mut Viewing, request: &Request) -> Response {
         Err(Unviewed::Stopped) => {
             let stopped = format!(
                 "controller `{}` is stopped: start it by `POST {START}`, as the page's \
-                 \"Start it\" does, or run a command that reaches it, which starts it: pumpkin ls",
-                viewing.name()
+                 \"Start it\" does, or run a command that reaches it, which starts it: {}",
+                viewing.name(),
+                next::of_runs("ls", &next::At::Controller(viewing.name().clone()))
             );
             let stopped = json!({ "error": stopped, "start": START });
             Response::json(&stopped).with_status("503 Service Unavailable")
@@ -551,7 +571,7 @@ fn answered(asked: Asked, view: &mut View) -> Response {
                     "the view on a controller answers no cancel: cancel run {} from the page \
                      that `pumpkin view` serves, or run: {}",
                     id.as_str(),
-                    next::of_run("cancel", None, id.as_str())
+                    next::of_run("cancel", &view.at, id.as_str())
                 ),
             );
         }
@@ -569,10 +589,10 @@ fn answered(asked: Asked, view: &mut View) -> Response {
 }
 
 impl View {
-    fn new(runs: PathBuf, named: Option<String>) -> Self {
+    fn new(runs: PathBuf, at: next::At) -> Self {
         Self {
             runs,
-            named,
+            at,
             again: true,
             jobs: None,
             ended: BTreeMap::new(),
@@ -586,7 +606,7 @@ impl View {
 
     fn runs_json(&mut self, before: Option<&str>) -> Result<Response, Failed> {
         let names =
-            if self.named.is_none() && !self.runs.try_exists().context(self.runs.display())? {
+            if self.at.dir().is_none() && !self.runs.try_exists().context(self.runs.display())? {
                 Vec::new()
             } else {
                 Record::names(&self.runs)?
@@ -627,7 +647,7 @@ impl View {
         let listed = Listed::unread(&self.runs.join(id), error)?;
         let mut row = listed_json(
             id,
-            &progress::Row::of(id, &listed, crate::unix_now(), self.named.as_deref()),
+            &progress::Row::of(id, &listed, crate::unix_now(), &self.at),
         );
         row["requests"] = Value::Null;
         row["tokens"] = Value::Null;
@@ -666,11 +686,11 @@ impl View {
             }
             Some(record)
         };
-        let named = self.named.clone();
+        let at = self.at.clone();
         let held = self.looked(id, record)?;
         match &held.ending {
             None => {
-                let row = live_row(held, named.as_deref());
+                let row = live_row(held, &at);
                 let row = self.membered(id, row).map_err(ReadError::Failed)?;
                 Ok(Some(row.into()))
             }
@@ -683,14 +703,14 @@ impl View {
     }
 
     fn ended_row(&mut self, record: Record, ending: Ending) -> Result<JsonRow, ReadError> {
-        let named = self.named.as_deref();
+        let at = self.at.clone();
         let now = crate::unix_now();
         let lost = ending == Ending::Lost;
         let json = if let Some(used) = record.used()? {
             let listed = Listed::of(&record, record.task()?, Some(ending), None);
             let mut row = listed_json(
                 record.id(),
-                &progress::Row::of(record.id(), &listed, now, named),
+                &progress::Row::of(record.id(), &listed, now, &at),
             );
             row["time"] = json!(progress::column_span(used.ran));
             row["usd"] = json!(
@@ -707,7 +727,7 @@ impl View {
             let listed = Listed::of(&record, record.task()?, Some(ending), progress);
             let mut row = listed_json(
                 record.id(),
-                &progress::Row::of(record.id(), &listed, now, named),
+                &progress::Row::of(record.id(), &listed, now, &at),
             );
             row["requests"] = json!(model.as_ref().map(|model| model.requests));
             row["tokens"] = json!(
@@ -782,9 +802,9 @@ impl View {
     }
 
     fn run_json(&mut self, id: &RunTag) -> Result<Value, Failed> {
-        let (named, again) = (self.named.clone(), self.again);
+        let (at, again) = (self.at.clone(), self.again);
         let held = self.held(id)?;
-        Ok(run_json(held, named.as_deref(), again))
+        Ok(run_json(held, &at, again))
     }
 
     /// What run `id`'s log gained past byte `log`, a byte that a reply of `log_epoch` gave: `end`
@@ -796,7 +816,7 @@ impl View {
         log: u64,
         log_epoch: Option<u64>,
     ) -> Result<Value, Failed> {
-        let (named, again) = (self.named.clone(), self.again);
+        let (at, again) = (self.at.clone(), self.again);
         let held = self.held(id)?;
         let end = held.fold.taken();
         let live = held.ending.is_none();
@@ -811,7 +831,7 @@ impl View {
             window_json(held, from)?
         };
         reply["live"] = json!(live);
-        reply["run"] = run_json(held, named.as_deref(), again);
+        reply["run"] = run_json(held, &at, again);
         Ok(reply)
     }
 
@@ -842,9 +862,12 @@ impl Local {
                 if let Err(failed) = view.record(id.as_str()) {
                     return failed.response();
                 }
-                self.cancels.start(id, Some(runs_given))
+                self.cancels.start(id, &next::At::Runs(runs_given.clone()))
             }
-            Source::Controller(_) => self.cancels.start(id, None),
+            Source::Controller(viewing) => {
+                let at = next::At::Controller(viewing.name().clone());
+                self.cancels.start(id, &at)
+            }
         }
     }
 }

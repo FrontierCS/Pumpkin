@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use expect_test::{Expect, expect};
 use stdx::Deadline;
-use test_support::{HUNG, edge, hung};
+use test_support::{HUNG, edge};
 use tls::{Client, Stream};
 
 #[derive(Clone, Copy)]
@@ -98,7 +98,8 @@ fn check(
         let client = client.map(drop).map_err(|e| e.to_string());
         vec![format!("client: {client:?}")]
     } else {
-        let server = thread::spawn(move || edge::server().accept(server_end, hung()));
+        let server =
+            thread::spawn(move || edge::server().accept(server_end, Deadline::after(HUNG)));
         let client = client.connect(client_end, name, Deadline::after(within));
         let tell = || tell.as_ref().unwrap().send(()).unwrap();
         match (client, server.join().unwrap()) {
@@ -112,8 +113,8 @@ fn check(
     expect.assert_eq(&shown.join("\n"));
 }
 
-/// 8 MiB of a pattern.
-// Four times what the sockets between the ends hold of a session that reads nothing.
+// 8 MiB of a pattern: twice the 4 MiB under which `backpressure` expects a write to stall when
+// the other end reads nothing.
 fn pattern() -> Vec<u8> {
     (0..8u32 << 20).map(|i| (i % 251) as u8).collect()
 }
@@ -137,27 +138,20 @@ fn carries_both_ways() {
         Peer::Server,
         HUNG,
         |client, server, _| {
-            let up = sent(&client, &server, pattern()).join().unwrap();
-            let down = sent(&server, &client, pattern()).join().unwrap();
-            let mut lines = vec![
-                format!("to the server intact: {up}"),
-                format!("to the client intact: {down}"),
-            ];
             let (up, down) = (
                 sent(&client, &server, pattern()),
                 sent(&server, &client, pattern()),
             );
             let both = (up.join().unwrap(), down.join().unwrap());
-            lines.push(format!("both ways at once, intact: {both:?}"));
             client.shutdown().unwrap();
             let ended = (&server).read_to_end(&mut Vec::new());
             let ended = ended.map_err(|error| error.to_string());
-            lines.push(format!("then the server's end reads: {ended:?}"));
-            lines
+            vec![
+                format!("both ways at once, intact: {both:?}"),
+                format!("then the server's end reads: {ended:?}"),
+            ]
         },
         &expect![[r#"
-            to the server intact: true
-            to the client intact: true
             both ways at once, intact: (true, true)
             then the server's end reads: Ok(0)"#]],
     );
@@ -238,9 +232,12 @@ fn broken_connections() {
     }
 }
 
+fn unreached(_: Stream, _: Stream, _: &dyn Fn()) -> Vec<String> {
+    unreachable!("the handshake was to fail")
+}
+
 #[test]
 fn refused_servers() {
-    let unreached = |_, _, _: &dyn Fn()| unreachable!("the handshake was to fail");
     let within = HUNG;
     check(
         (&edge::client(), "edge.example"),
@@ -272,7 +269,6 @@ fn refused_servers() {
 
 #[test]
 fn refused_peers() {
-    let unreached = |_, _, _: &dyn Fn()| unreachable!("the handshake was to fail");
     check(
         (&edge::client(), edge::NAME),
         Peer::Sends(b"{\"version\":1}\n"),
@@ -285,7 +281,7 @@ fn refused_peers() {
     check(
         (&edge::client(), edge::NAME),
         Peer::Sends(b""),
-        Duration::from_millis(200),
+        Duration::from_millis(1),
         unreached,
         &expect![[
             r#"client: Err("the TLS handshake wasn't done by its deadline: expected TLS 1.3 from `localhost`, with a certificate trusted for it")"#

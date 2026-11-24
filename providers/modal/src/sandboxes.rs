@@ -9,8 +9,6 @@
 //! no connection out, though Modal's resolver still answers its DNS queries; it runs under gVisor
 //! with its class's GPU, if any, and its role's CPU and memory as both its request and its limit;
 //! and Modal ends it at its run's hard end, if nothing ends it first.
-//!
-//! The provider never stops the App, as an App with no sandbox costs nothing.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -138,7 +136,7 @@ impl Modal<'_> {
             role,
             // Each sandbox has resources of its own, whichever instance of its role it is.
             instance: _,
-            // Read by its caller, which gives its GPU and its image's id.
+            // Taken as the parameters `gpu` and `image`.
             class: _,
             image: _,
             sandboxd,

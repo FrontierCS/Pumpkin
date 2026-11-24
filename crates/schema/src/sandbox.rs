@@ -18,10 +18,6 @@
 //! follow in [`FromSandbox::OpData`], and the gateway answers once ([`ToSandbox::OpReply`]), at
 //! most one op in flight a sandbox. A session takes ops only if accepted with [`OpPayloadLimit`],
 //! and model requests ([`FromSandbox::ModelRequest`]) only if accepted for them.
-//!
-//! Every provider presents [`pumpkin_dir()`] as [`pumpkin_subdirs()`] says, within
-//! [`PUMPKIN_BYTES`]. A role that makes ops has `sandboxctl` at [`SANDBOXCTL_PATH`], served at
-//! [`CONTROL_SOCKET`]; a role with a model route has the model endpoint at [`MODEL_PORT`].
 
 use std::fmt;
 use std::io::{self, Read};

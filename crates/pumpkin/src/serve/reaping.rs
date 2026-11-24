@@ -1,27 +1,51 @@
-//! Stops jobs by their systemd unit and reaps runs of this build using the client's credentials.
+//! Stops jobs by their systemd unit and reaps runs of this build using the client's credentials,
+//! streaming what each reap did as it ends.
 
 use std::fs::{self, File};
-use std::io::{self, Write as _};
+use std::io::{self, Write};
 use std::path::Path;
 use std::time::Duration;
 
 use members::Member;
 use provider::RunTag;
 use runtime::Writer;
+use schema::frame;
 use stdx::Context as _;
 use stdx::process::{Bound, Echo, Environment, Run};
 use tempfile::NamedTempFile;
 
-use crate::link::{CancelAnswer, CancelRequest};
+use crate::link::{self, CancelAnswer, CancelHead, CancelRequest, ReapHead, ReapRequest};
+use crate::reaping::Reaper;
 use crate::{cli, job, next};
 
-/// Stops job `request.id`, refusing, with nothing done, one of another member's than `member`
-/// unless `request.any_member`.
+/// Answers `request`, as [`cancelled`] does, or refuses it.
 pub(super) fn cancel(
+    output: &mut impl Write,
     home: &Path,
     request: CancelRequest,
     body: &[u8],
     member: &Member,
+) -> io::Result<()> {
+    let stopping = |output: &mut _| {
+        frame::write(output, &CancelHead::Stopping, &[])
+            .context("writing that the run stops failed")
+    };
+    match cancelled(output, home, request, body, member, stopping) {
+        Ok(answer) => answer.write(output),
+        Err(message) => link::refuse(output, message),
+    }
+}
+
+/// Stops job `request.id`, refusing, with nothing done, one of another member's than `member`
+/// unless `request.any_member`. Calls `stopping` on `output` once it has signalled the run's
+/// driver.
+fn cancelled<W: Write>(
+    output: &mut W,
+    home: &Path,
+    request: CancelRequest,
+    body: &[u8],
+    member: &Member,
+    stopping: impl FnOnce(&mut W) -> Result<(), String>,
 ) -> Result<CancelAnswer, String> {
     let tag = RunTag::try_from(request.id)?;
     let id = tag.as_str();
@@ -71,15 +95,13 @@ pub(super) fn cancel(
         }
     }
     let modal = modal(request.modal_bytes.map(|_| body))?;
-    let cancel = cli::Cancel {
-        run: cli::RunName::Prefix(id.to_owned()),
-        runs: None,
-        modal_config: modal.as_ref().map(|file| file.path().to_owned()),
-    };
-    let cancelled = crate::cancelled(cancel, crate::Reader::Follower)?;
-    Ok(match cancelled.reached {
-        Ok(true) => CancelAnswer::Ended,
-        Ok(false) => CancelAnswer::EndedUnreached,
+    let (record, _) = crate::found(cli::RunName::Prefix(id.to_owned()), None)?;
+    if crate::reaping::signalled(&record)? {
+        stopping(output)?;
+    }
+    let modal_config = modal.as_ref().map(|file| file.path().to_owned());
+    Ok(match crate::reaping::ended(&record, modal_config)? {
+        Ok(reaped) => CancelAnswer::Ended { reaped },
         Err(message) => CancelAnswer::EndedUnreaped { message },
     })
 }
@@ -127,17 +149,23 @@ fn modal(body: Option<&[u8]>) -> Result<Option<NamedTempFile>, String> {
     Ok(Some(file))
 }
 
+/// Reaps the ended or lost runs below `home` that this build wrote, with the Modal configuration
+/// in `body` if `request` has one, and streams what came of each run, or refuses.
 pub(super) fn reap(
+    output: &mut impl Write,
     home: &Path,
-    request: crate::link::ReapRequest,
+    request: ReapRequest,
     body: &[u8],
-) -> Result<crate::reaping::ReapedRuns, String> {
-    let modal = modal(request.modal_bytes.map(|_| body))?;
-    let config = modal.as_ref().map(|file| file.path().to_owned());
-    crate::reaping::sweep(
-        &home.join(job::runs()),
-        config,
-        None,
-        crate::Reaper::Controller,
-    )
+) -> io::Result<()> {
+    let swept = modal(request.modal_bytes.map(|_| body)).and_then(|modal| {
+        let config = modal.as_ref().map(|file| file.path().to_owned());
+        let runs = home.join(job::runs());
+        crate::reaping::sweep(&runs, config, Reaper::Controller, |reaping| {
+            ReapRequest::write_run(output, &reaping).context("writing a run's reap failed")
+        })
+    });
+    match swept {
+        Ok(()) => frame::write(output, &ReapHead::Reaped, &[]),
+        Err(message) => link::refuse(output, message),
+    }
 }

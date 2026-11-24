@@ -1,5 +1,8 @@
-//! The checks of `cargo xtask live`, which reach a real environment: Docker, or a real provider
-//! through the controller that the configuration names.
+//! The checks of `cargo xtask live`, which reach a real environment: Docker, a controller on
+//! Docker that the check makes (`controller`), or a real provider through the controller that the
+//! configuration names.
+
+mod controller;
 
 use std::io::{BufRead as _, BufReader};
 use std::path::{Path, PathBuf};
@@ -10,6 +13,7 @@ use std::{env, fs, thread};
 use stdx::Context as _;
 use stdx::process::{self, Bound, Echo, Environment, Failure, Run, Stream};
 
+pub(crate) use self::controller::controller;
 use crate::repo::{Repo, STEP_TIMEOUT};
 use crate::settings::{Provider, Settings};
 use crate::{
@@ -25,9 +29,9 @@ const PUMPKIN_TIMEOUT: Duration = Duration::from_hours(1);
 /// How many lines the smoke's probe prints for each sandbox, each of which must say `ok`.
 const CHECKS_PER_SANDBOX: usize = 6;
 
-/// The Modal SDK that the check of a run's sandboxes there uses: the one the provider's helper
-/// pins (`providers/modal/helper/pumpkin-modal.py`).
-const MODAL_SDK: &str = "modal==1.6.3";
+/// The Modal provider's helper, from the repository's root. Its header, inline script metadata,
+/// pins the Modal SDK that the check of a run's sandboxes there uses too.
+const MODAL_HELPER: &str = "providers/modal/helper/pumpkin-modal.py";
 
 /// Prints the id of each sandbox on Modal that carries the tag of run `sys.argv[1]` in Pumpkin's
 /// app, as the provider's helper finds a run's sandboxes, and nothing if there is no app.
@@ -112,13 +116,12 @@ pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> 
     let settings = Settings::parse(&text, &config, provider, gpu_model)?;
     reached(&settings)?;
     let commit = head_commit()?;
-    let repo = task_repository()?;
+    let repo = task_repository("live/repo")?;
     checked_deployment(&settings, &repo, again)?;
     if lost {
         return self::lost(&settings, &repo, again);
     }
-    let mut run = pumpkin(&repo);
-    run.args(["run", "--wait"]);
+    let mut run = controlled(&repo, &settings.name, &["run", "--wait"]);
     if let Some(modal) = &settings.modal {
         run.args(["--arg", &format!("gpu_model={}", modal.gpu_model)]);
     }
@@ -131,13 +134,12 @@ pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> 
             "`./pumpkin run` of run {id} ended with {status}, as it said above"
         ));
     }
-    let record = repo.join(".pumpkin/runs").join(&id);
+    let record = repo.join(".pumpkin/runs").join(&settings.name).join(&id);
     failed.extend(checked(&record, settings.modal.is_some()));
     let left = left(&settings, &id)?;
     if !left.is_empty() {
         failed.push(format!("left after the run: {}", left.join(", ")));
-        let mut cancel = pumpkin(&repo);
-        cancel.args(["cancel", &id]);
+        let mut cancel = controlled(&repo, &settings.name, &["cancel", &id]);
         let cancelled = process::run(&mut cancel, step(PUMPKIN_TIMEOUT).named("./pumpkin cancel"));
         match cancelled {
             Ok(_) => eprintln!("xtask: `./pumpkin cancel {id}` passed"),
@@ -166,38 +168,28 @@ pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> 
 // is set for the minute after, and an instance takes up to 10 to be terminated.
 const LOST_BY: Duration = Duration::from_mins(94 + 2 + 10);
 
-/// How often a lost run's sandboxes are looked for.
 const LOST_EVERY: Duration = Duration::from_mins(1);
 
 fn lost(settings: &Settings, repo: &Path, again: &str) -> Result<()> {
-    let pumpkin = |args: &[&str]| {
-        let mut command = pumpkin(repo);
-        command.args(args);
-        command
-    };
-    // The agent holds a lease of each grant, so that the run is lost with its sandboxes in use.
-    let mut args = vec!["run", "--arg", "hold=true", "--arg", "deadline_seconds=120"];
+    let pumpkin = |args: &[&str]| controlled(repo, &settings.name, args);
     let gpu = settings
         .modal
         .as_ref()
-        .map(|modal| format!("gpu_model={}", modal.gpu_model));
-    if let Some(gpu) = &gpu {
-        args.extend(["--arg", gpu]);
-    }
-    args.push("smoke/task.star");
-    let how = Run::new(Bound::Within(PUMPKIN_TIMEOUT), Echo::Silent)
-        .stderr(Stream::Inherited)
-        .named("./pumpkin run");
-    let ran = process::run(&mut pumpkin(&args), how).map_err(|failure| failure.to_string())?;
-    let id = String::from_utf8_lossy(&ran.stdout).trim().to_owned();
-    if id.is_empty() {
-        return Err(
-            "`./pumpkin run` printed no run id: expected the id of the run it started".into(),
-        );
-    }
-    let leases = if gpu.is_some() { 2 } else { 1 };
-    held(pumpkin(&["wait", &id]), &id, leases)?;
-    kill_job(settings, repo, &id)?;
+        .map(|modal| modal.gpu_model.as_str());
+    let id = holding(&pumpkin, gpu)?;
+    let shared = repo
+        .join(".pumpkin/controller")
+        .join(format!("{}.{}", settings.name, settings.region));
+    let found = fs::read_to_string(shared.join("found"))
+        .map_err(|error| format!("reading where the controller was found failed: {error}"))?;
+    let found: serde_json::Value = serde_json::from_str(&found)?;
+    let Some(address) = found["address"].as_str() else {
+        return Err(format!("the controller's `found` names no address: {found}").into());
+    };
+    let home =
+        env::var_os("HOME").ok_or("HOME is unset: expected the client's SSH key under it")?;
+    let alias = format!("{}.{}", settings.name, settings.region);
+    kill_job(Path::new(&home), address, None, &alias, &id)?;
     let killed = Instant::now();
     println!("xtask: run {id} is lost: its job was killed");
     let before = ended_by_themselves(settings, repo, &id, killed)?;
@@ -238,6 +230,32 @@ fn lost(settings: &Settings, repo: &Path, again: &str) -> Result<()> {
         return Ok(());
     }
     Err(format!("the reap of lost run {id} failed, or left something, as said above: fix it, and run `{again} --lost` again").into())
+}
+
+/// Starts a smoke run with `pumpkin`, which makes a `./pumpkin` command of its arguments, whose
+/// agent holds a lease of each grant, with a GPU runner of `gpu_model` if given, and returns its id
+/// once they are ready.
+fn holding(pumpkin: &dyn Fn(&[&str]) -> Command, gpu_model: Option<&str>) -> Result<String> {
+    // The agent holds a lease of each grant, so that the run is lost with its sandboxes in use.
+    let mut args = vec!["run", "--arg", "hold=true", "--arg", "deadline_seconds=120"];
+    let gpu = gpu_model.map(|model| format!("gpu_model={model}"));
+    if let Some(gpu) = &gpu {
+        args.extend(["--arg", gpu]);
+    }
+    args.push("smoke/task.star");
+    let how = Run::new(Bound::Within(PUMPKIN_TIMEOUT), Echo::Silent)
+        .stderr(Stream::Inherited)
+        .named("./pumpkin run");
+    let ran = process::run(&mut pumpkin(&args), how).map_err(|failure| failure.to_string())?;
+    let id = String::from_utf8_lossy(&ran.stdout).trim().to_owned();
+    if id.is_empty() {
+        return Err(
+            "`./pumpkin run` printed no run id: expected the id of the run it started".into(),
+        );
+    }
+    let leases = if gpu.is_some() { 2 } else { 1 };
+    held(pumpkin(&["wait", &id]), &id, leases)?;
+    Ok(id)
 }
 
 /// Waits until no sandbox of run `id` is left, looking every `LOST_EVERY`, and returns what else of
@@ -300,25 +318,12 @@ fn held(mut wait: Command, id: &str, leases: usize) -> Result<()> {
     Ok(())
 }
 
-/// Kills the unit of job `id` on the controller to leave a lost run, with the client's key and
-/// pinned host key for that controller.
-fn kill_job(settings: &Settings, repo: &Path, id: &str) -> Result<()> {
-    let shared = repo
-        .join(".pumpkin/controller")
-        .join(format!("{}.{}", settings.name, settings.region));
-    let found = fs::read_to_string(shared.join("found"))
-        .map_err(|error| format!("reading where the controller was found failed: {error}"))?;
-    let found: serde_json::Value = serde_json::from_str(&found)?;
-    let Some(address) = found["address"].as_str() else {
-        return Err(format!("the controller's `found` names no address: {found}").into());
-    };
-    let host = format!("pumpkin@{address}");
+/// Kills the unit of job `id` on the controller at `host` and `port`, 22 if `None`, to leave a lost
+/// run, with the key and the host key pinned as `alias` of the client whose home is `home`.
+fn kill_job(home: &Path, host: &str, port: Option<u16>, alias: &str, id: &str) -> Result<()> {
     let kill = format!("systemctl --user kill --signal=KILL pumpkin-job-{id}");
-    let home =
-        std::env::var_os("HOME").ok_or("HOME is unset: expected the client's SSH key under it")?;
-    let kept = PathBuf::from(home).join(".config/pumpkin/ssh");
+    let kept = home.join(".config/pumpkin/ssh");
     let known_hosts = format!("UserKnownHostsFile={}", kept.join("known_hosts").display());
-    let alias = format!("HostKeyAlias={}.{}", settings.name, settings.region);
     let mut ssh = process::command("ssh", Environment::Inherited);
     ssh.args(["-F", "/dev/null", "-i"])
         .arg(kept.join("key"))
@@ -332,12 +337,16 @@ fn kill_job(settings: &Settings, repo: &Path, id: &str) -> Result<()> {
             "-o",
             &known_hosts,
             "-o",
-            &alias,
-            &host,
-            &kill,
+            &format!("HostKeyAlias={alias}"),
         ]);
-    process::run(&mut ssh, step(STEP_TIMEOUT).named("ssh"))
-        .map_err(|failure| failure.to_string())?;
+    if let Some(port) = port {
+        ssh.args(["-o", &format!("Port={port}")]);
+    }
+    ssh.arg(format!("pumpkin@{host}")).arg(&kill);
+    // Its output captured, as `ssh` makes its standard streams non-blocking, and leaves them so
+    // when killed at the bound or ended by a fatal error.
+    let how = Run::new(Bound::Within(STEP_TIMEOUT), Echo::Line).named("ssh");
+    process::run(&mut ssh, how).map_err(|failure| failure.to_string())?;
     Ok(())
 }
 
@@ -356,9 +365,11 @@ fn reached(settings: &Settings) -> Result<()> {
     schedules(settings, "no-such-run", Some(policy))?;
     if let Some(modal) = &settings.modal {
         let token = format!(
-            "give Modal's profile `{}` a token, as `uvx --from {MODAL_SDK} modal token new \
-             --profile {}` does, and run this again",
-            modal.profile, modal.profile
+            "give Modal's profile `{}` a token, as `uv run --no-project --with-requirements {} \
+             modal token new --profile {}` does, and run this again",
+            modal.profile,
+            root().join(MODAL_HELPER).display(),
+            modal.profile
         );
         modal_python(modal, MODAL_LIST, &["no-such-run"], Some(&token))?;
     }
@@ -428,11 +439,11 @@ fn head_commit() -> Result<String> {
     Ok(commit)
 }
 
-/// The task repository that the smoke runs in, `live/repo` in cargo's target directory, which
-/// keeps its `.git` and `.pumpkin` from one live run to the next. The executable is installed
-/// from this checkout so an unpublished change can be exercised.
-fn task_repository() -> Result<PathBuf> {
-    let repo = target_dir()?.join("live/repo");
+/// The task repository that the smoke runs in, `dir` in cargo's target directory, which keeps its
+/// `.git` and `.pumpkin` from one live run to the next. The executable is installed from this
+/// checkout so an unpublished change can be exercised.
+fn task_repository(dir: &str) -> Result<PathBuf> {
+    let repo = target_dir()?.join(dir);
     let made =
         |path: &Path, error: std::io::Error| format!("writing {} failed: {error}", path.display());
     fs::create_dir_all(&repo).map_err(|error| made(&repo, error))?;
@@ -468,6 +479,16 @@ fn task_repository() -> Result<PathBuf> {
 fn pumpkin(repo: &Path) -> Command {
     let mut command = process::command(repo.join("pumpkin"), Environment::Cargo);
     command.current_dir(repo).env_remove("PUMPKIN_WORKSPACE");
+    command
+}
+
+/// `./pumpkin` in `repo` with `args`, a command and its arguments, of controller `name`, which
+/// `--controller` names after the command.
+fn controlled(repo: &Path, name: &str, args: &[&str]) -> Command {
+    let mut command = pumpkin(repo);
+    if let Some((first, rest)) = args.split_first() {
+        command.arg(first).args(["--controller", name]).args(rest);
+    }
     command
 }
 
@@ -677,8 +698,12 @@ fn modal_python(
     expected: Option<&str>,
 ) -> Result<String> {
     let mut python = process::command("uv", Environment::Inherited);
+    // `uv` takes the packages from the helper's inline script metadata, as it does for a
+    // requirements file:
+    // https://github.com/astral-sh/uv/blob/f8bec5eac866c5dd3794b4420e21e5dbd44045c6/crates/uv-cli/src/lib.rs#L3343-L3347
     python
-        .args(["run", "--quiet", "--no-project", "--with", MODAL_SDK])
+        .args(["run", "--quiet", "--no-project", "--with-requirements"])
+        .arg(root().join(MODAL_HELPER))
         .args(["python", "-I", "-c", script])
         .args(args)
         .env("MODAL_PROFILE", &modal.profile);

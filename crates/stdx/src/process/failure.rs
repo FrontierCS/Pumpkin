@@ -46,7 +46,6 @@ pub enum Failure {
 }
 
 impl Failure {
-    /// The failure of `command`, named `name`, which didn't start for `error`.
     pub(super) fn unstarted(command: &Command, name: String, error: io::Error) -> Self {
         let expected = expected(command, &error);
         Self::Unstarted {
@@ -137,7 +136,6 @@ impl Failure {
     }
 }
 
-/// What was expected of `command`, which didn't start for `error`.
 // A spawn fails with these when its working directory can't be entered, as well as when its
 // program is missing or can't be executed, which xshell tells apart in the same way:
 // https://github.com/matklad/xshell/blob/9a405946ecbbfe50fe4a7229bd764194154e4ce6/src/lib.rs#L1020-L1029

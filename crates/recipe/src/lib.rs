@@ -11,8 +11,8 @@
 //! - a frontend, which a parser directive (`# <name>=…` before the first instruction) or a
 //!   `BUILDKIT_` build argument can name;
 //! - a URL, any `ADD` source with a `:`, but the one `https://` source that `--checksum` pins;
-//! - a Git repository: any `ADD` source that `check_source` refuses, but the one source
-//!   `https://<host>/<path>.git#<commit>`, whose full commit pins it;
+//! - a Git repository: any `ADD` source that Docker may take for a Git repository's URL, but the
+//!   one source `https://<host>/<path>.git#<commit>`, whose full commit pins it;
 //! - the host's network, a device or a privilege, which a `RUN` flag but `--mount` may give.
 //!
 //! It refuses a target that names no stage, a build argument or named context misnamed, and a
@@ -123,8 +123,8 @@ pub struct Given<B> {
     /// The stage to build, as `docker build --target` names it; the recipe's last without one.
     pub target: Option<Stage>,
     /// Each build argument's value, as `docker build --build-arg` gives it, by its name: ASCII
-    /// letters, digits and `_`, not starting with a digit, and not `SOURCE_DATE_EPOCH`, the time
-    /// that every build gives its image.
+    /// letters, digits and `_`, not starting with a digit or with `BUILDKIT_`, and not
+    /// `SOURCE_DATE_EPOCH`, the time that every build gives its image.
     pub args: BTreeMap<String, String>,
     /// Each named context's image, as `docker build --build-context` gives it, by the name the
     /// recipe gives it in a `FROM`, a `COPY --from` or a `RUN --mount`'s `from`: words of lowercase

@@ -15,11 +15,12 @@
 //!
 //! # Deadlines
 //!
-//! Every request waits on the sandbox until the [`Deadline`] its caller gives, so a slow link
-//! makes it wait, never fail. A request whose deadline passes fails with
-//! [`io::ErrorKind::TimedOut`] and ends the session; so does a sandbox that closes its
-//! connection, at once. A frame may also wait behind another writer's, until that writer's
-//! deadline.
+//! Every request waits on the sandbox until its caller's deadline, a time on the session's
+//! [`Clock`], so a slow link makes it wait, never fail. A wait blocks no longer than the clock's
+//! [`Clock::look`] before it reads the clock again. A request whose deadline passes fails with
+//! [`io::ErrorKind::TimedOut`] and ends the session; so does a sandbox that closes its connection,
+//! at once. A request takes an answer already waiting, however late it looks. A frame may also
+//! wait behind another writer's, until that writer's deadline.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufReader, Read, Write};
@@ -27,12 +28,13 @@ use std::net::{Shutdown, TcpStream};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use std::{fmt, fs};
 
+use bound::{Bound, Until, passed};
 pub use meeting::{Dialer, GatewayAddress, Listener, Registration, Sockets, Unattested, Unreached};
 pub use op::Op;
 pub use process::Process;
@@ -44,8 +46,9 @@ use schema::sandbox::{
     MAX_OP_PAYLOAD_BYTES, OpPayloadLimit, RelativePath, Root, ToSandbox, dir_mode, pumpkin_dir,
     pumpkin_subdirs,
 };
-use stdx::Deadline;
+use stdx::time::Clock;
 
+mod bound;
 mod meeting;
 mod op;
 mod process;
@@ -55,7 +58,8 @@ mod trees;
 // thread that makes a session shares the count.
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(0);
 
-/// One sandbox's session, driven by its owner.
+/// One sandbox's session, driven by its owner, whose requests each take their deadline as a time
+/// on its clock, `C`.
 ///
 /// Once the session has ended, every call fails with `ConnectionAborted` and the reason. It ends
 /// when the sandbox ends it, when the sandbox breaks the protocol, when a call's deadline passes
@@ -63,13 +67,14 @@ static NEXT_SESSION: AtomicU64 = AtomicU64::new(0);
 /// returns once the reader has sent its last arrival, the end. That waits for a collect through
 /// [`Trees`] to take the part the reader holds.
 #[derive(Debug)]
-pub struct Session {
+pub struct Session<C> {
     id: u64,
     // Shared with the reader thread, and with the responses to model requests, which stream from
     // the threads that serve them while the owner sends requests.
     shared: Arc<Shared>,
     reader: Option<JoinHandle<()>>,
     gpus: Option<Vec<GpuModel>>,
+    clock: C,
 }
 
 #[derive(Debug)]
@@ -235,17 +240,18 @@ pub struct ModelRequest {
     pub body: Vec<u8>,
 }
 
-/// The response to a model request, streaming to its client by the deadline that
-/// [`respond`](IncomingModelRequest::respond) gave.
+/// The response to a model request, streaming to its client by the deadline, a time on its clock,
+/// `C`, that [`respond`](IncomingModelRequest::respond) gave.
 ///
 /// A response that hasn't ended by then ends the session at its next frame, or as it drops.
 /// [`end`](Self::end) ends it whole; [`cut`](Self::cut), or dropping it unended, cuts it short, so
 /// that its client doesn't take it as whole. It can go to another thread, and its sends fail once
 /// the session has ended.
 #[derive(Debug)]
-pub struct ModelResponse {
+pub struct ModelResponse<C: Clock> {
     responder: Responder,
-    by: Deadline,
+    clock: C,
+    by: Duration,
     finished: bool,
 }
 
@@ -255,8 +261,9 @@ struct Responder {
     shared: Arc<Shared>,
 }
 
-impl Session {
+impl<C: Clock> Session<C> {
     fn new(
+        clock: C,
         stream: Connection,
         gpus: Option<Vec<GpuModel>>,
         limit: Option<OpPayloadLimit>,
@@ -292,6 +299,7 @@ impl Session {
             shared,
             reader: Some(reader),
             gpus,
+            clock,
         })
     }
 
@@ -309,7 +317,7 @@ impl Session {
 
     /// Puts [`pumpkin_subdirs()`] under [`pumpkin_dir()`], with [`dir_mode()`], which every sandbox
     /// needs before its first command.
-    pub fn set_up(&mut self, by: Deadline) -> Result<(), String> {
+    pub fn set_up(&mut self, by: Duration) -> Result<(), String> {
         let (root, subdirs) = (pumpkin_dir(), pumpkin_subdirs());
         let puts = subdirs.into_iter().map(|dir| Put::Dir(dir, dir_mode()));
         self.put(&root, puts, by).map_err(|error| {
@@ -334,16 +342,16 @@ impl Session {
         &mut self,
         dir: &AbsolutePath,
         entries: impl IntoIterator<Item = Put<'a>>,
-        by: Deadline,
+        by: Duration,
     ) -> io::Result<()> {
-        self.shared.put(dir, Root::Kept, entries, by)
+        self.shared.put(dir, Root::Kept, entries, self.by(by))
     }
 
     /// Kills the sandbox's processes that [`ToSandbox::Freeze`] names, so that nothing collected
     /// afterwards changes, and returns once they are gone.
-    pub fn freeze(&mut self, by: Deadline) -> io::Result<()> {
+    pub fn freeze(&mut self, by: Duration) -> io::Result<()> {
         self.shared
-            .request(|stream| ToSandbox::Freeze { stream }, by)
+            .request(|stream| ToSandbox::Freeze { stream }, self.by(by))
     }
 
     /// Copies the tree at the sandbox's `path`, a directory's or a file's, into `into`, a new
@@ -354,8 +362,9 @@ impl Session {
         path: &AbsolutePath,
         into: &Path,
         limits: Limits,
-        by: Deadline,
+        by: Duration,
     ) -> io::Result<()> {
+        let by = self.by(by);
         let collected = self.shared.collect(path, into, limits, by, &mut || false);
         collected.map(drop)
     }
@@ -372,7 +381,7 @@ impl Session {
     /// # Panics
     ///
     /// Panics if `op` arrived on another session.
-    pub fn reply(&mut self, op: IncomingOp, reply: OpReply, by: Deadline) -> io::Result<()> {
+    pub fn reply(&mut self, op: IncomingOp, reply: OpReply, by: Duration) -> io::Result<()> {
         let IncomingOp {
             session,
             number,
@@ -401,7 +410,7 @@ impl Session {
     /// # Panics
     ///
     /// Panics if `refused` arrived on another session.
-    pub fn refuse(&mut self, refused: RefusedOp, by: Deadline) -> io::Result<()> {
+    pub fn refuse(&mut self, refused: RefusedOp, by: Duration) -> io::Result<()> {
         let message = refused.message();
         let RefusedOp {
             session,
@@ -435,7 +444,8 @@ impl Session {
         lock(&self.shared.routes).op = None;
     }
 
-    fn answer(&mut self, number: u32, reply: OpReply, by: Deadline) -> io::Result<()> {
+    fn answer(&mut self, number: u32, reply: OpReply, by: Duration) -> io::Result<()> {
+        let by = self.by(by);
         self.shared.can_send(by, Due::Request)?;
         let message = ToSandbox::OpReply { op: number, reply };
         let writer = lock(&self.shared.writer);
@@ -444,7 +454,11 @@ impl Session {
 }
 
 impl Shared {
-    fn request(&self, message: impl FnOnce(u32) -> ToSandbox, by: Deadline) -> io::Result<()> {
+    fn request(
+        &self,
+        message: impl FnOnce(u32) -> ToSandbox,
+        by: Bound<'_, impl Clock>,
+    ) -> io::Result<()> {
         let (stream, replies) = self.open(Route::Reply, by)?;
         let done = self
             .send(&message(stream), &[], by)
@@ -456,7 +470,7 @@ impl Shared {
     fn open<R>(
         &self,
         route: fn(SyncSender<R>) -> Route,
-        by: Deadline,
+        by: Bound<'_, impl Clock>,
     ) -> io::Result<(u32, Receiver<R>)> {
         self.can_send(by, Due::Request)?;
         // One item in every queue. A put's, a freeze's or a start's queue holds its outcome, the
@@ -483,7 +497,7 @@ impl Shared {
         lock(&self.routes).open.remove(&stream);
     }
 
-    fn send(&self, message: &ToSandbox, body: &[u8], by: Deadline) -> io::Result<()> {
+    fn send(&self, message: &ToSandbox, body: &[u8], by: Bound<'_, impl Clock>) -> io::Result<()> {
         let writer = lock(&self.writer);
         // A frame too long ends the session here, though `write` leaves it open: one frame of a
         // request that spans several, such as a put's, may be too long after the first was sent.
@@ -495,33 +509,37 @@ impl Shared {
         }
     }
 
-    fn receive<R>(&self, replies: &Receiver<R>, by: Deadline) -> io::Result<R> {
+    fn receive<R>(&self, replies: &Receiver<R>, by: Bound<'_, impl Clock>) -> io::Result<R> {
         // The gateway bounds no wait of its own. A slow link is latency, which only the operation
         // the request serves knows how long to wait out, as its deadline says; a sandbox that is
-        // gone closes its connection, which ends the session at once. A deadline that has passed
-        // fails at once, even with a frame waiting, so that a tree sent faster than it is written
-        // ends by it too.
-        let received = match by.remaining() {
-            Some(left) => replies.recv_timeout(left),
-            None => Err(RecvTimeoutError::Timeout),
-        };
-        match received {
-            Ok(reply) => Ok(reply),
-            Err(RecvTimeoutError::Timeout) => Err(self.timed_out(
-                "the sandbox didn't answer before the request's deadline: expected its answer \
-                 while the deadline lasts"
-                    .to_owned(),
-            )),
-            Err(RecvTimeoutError::Disconnected) => Err(self.ended()),
+        // gone closes its connection, which ends the session at once. A reply already waiting wins
+        // over a passed deadline, as in `std`'s channel, for a thread that looks late:
+        // https://github.com/rust-lang/rust/blob/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/sync/mpmc/array.rs#L375-L388
+        loop {
+            let Some(wait) = by.wait() else {
+                return replies.try_recv().map_err(|error| match error {
+                    TryRecvError::Empty => self.unanswered(),
+                    TryRecvError::Disconnected => self.ended(),
+                });
+            };
+            match replies.recv_timeout(wait) {
+                Ok(reply) => return Ok(reply),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => return Err(self.ended()),
+            }
         }
     }
 
-    fn done(&self, replies: &Receiver<Result<(), String>>, by: Deadline) -> io::Result<()> {
+    fn done(
+        &self,
+        replies: &Receiver<Result<(), String>>,
+        by: Bound<'_, impl Clock>,
+    ) -> io::Result<()> {
         self.receive(replies, by)?.map_err(io::Error::other)
     }
 }
 
-impl Drop for Session {
+impl<C> Drop for Session<C> {
     fn drop(&mut self) {
         let reason = "the owner dropped the session".to_owned();
         // Ending the session shuts the connection both ways, which wakes the reader thread's read
@@ -543,14 +561,15 @@ impl Drop for Session {
 }
 
 impl IncomingModelRequest {
-    /// Starts the response with `status` and `headers`, and returns it, to stream its body by `by`.
-    /// Fails if the head is too long for a frame, which cuts the request short without a response.
-    pub fn respond(
+    /// Starts the response with `status` and `headers`, and returns it, to stream its body by
+    /// `by`, a time on `clock`. Fails if the head is too long for a frame, which cuts the request
+    /// short without a response.
+    pub fn respond<C: Clock>(
         self,
         status: u16,
         headers: Vec<(String, String)>,
-        by: Deadline,
-    ) -> io::Result<ModelResponse> {
+        (clock, by): (&C, Duration),
+    ) -> io::Result<ModelResponse<C>> {
         let Self {
             request: _,
             responder,
@@ -558,6 +577,7 @@ impl IncomingModelRequest {
         let request = responder.request;
         let response = ModelResponse {
             responder,
+            clock: clock.clone(),
             by,
             finished: false,
         };
@@ -567,17 +587,17 @@ impl IncomingModelRequest {
             headers,
         };
         // A response that fails to start drops here, cut short.
-        response.responder.send(&head, &[], by)?;
+        response.responder.send(&head, &[], response.by())?;
         Ok(response)
     }
 }
 
-impl ModelResponse {
+impl<C: Clock> ModelResponse<C> {
     pub fn send(&mut self, bytes: &[u8]) -> io::Result<()> {
         let request = self.responder.request;
         for chunk in bytes.chunks(schema::frame::MAX_BODY_BYTES) {
             self.responder
-                .send(&ToSandbox::ModelData { request }, chunk, self.by)?;
+                .send(&ToSandbox::ModelData { request }, chunk, self.by())?;
         }
         Ok(())
     }
@@ -599,11 +619,11 @@ impl ModelResponse {
         // end.
         lock(&self.responder.shared.routes).models.remove(&request);
         self.responder
-            .send(&ToSandbox::ModelEnd { request, cut }, &[], self.by)
+            .send(&ToSandbox::ModelEnd { request, cut }, &[], self.by())
     }
 }
 
-impl Drop for ModelResponse {
+impl<C: Clock> Drop for ModelResponse<C> {
     fn drop(&mut self) {
         if !self.finished {
             // A session that has ended has no client left to tell.
@@ -613,7 +633,7 @@ impl Drop for ModelResponse {
 }
 
 impl Responder {
-    fn send(&self, message: &ToSandbox, body: &[u8], by: Deadline) -> io::Result<()> {
+    fn send(&self, message: &ToSandbox, body: &[u8], by: Bound<'_, impl Clock>) -> io::Result<()> {
         let writer = lock(&self.shared.writer);
         // Checked with the lock held, as waiting for the lock may use up the deadline.
         self.shared.can_send(by, Due::Response)?;
@@ -639,11 +659,11 @@ impl Due {
 }
 
 impl Shared {
-    fn can_send(&self, by: Deadline, due: Due) -> io::Result<()> {
+    fn can_send(&self, by: Bound<'_, impl Clock>, due: Due) -> io::Result<()> {
         if self.ended.get().is_some() {
             return Err(self.ended());
         }
-        if by.remaining().is_none() {
+        if by.left().is_none() {
             let reason = format!(
                 "the {}'s deadline passed before it was sent: expected time left to send it",
                 due.noun()
@@ -663,7 +683,7 @@ impl Shared {
         _writer: &MutexGuard<'_, ()>,
         message: &ToSandbox,
         body: &[u8],
-        by: Deadline,
+        by: Bound<'_, impl Clock>,
         due: Due,
     ) -> io::Result<()> {
         let connection = &self.connection;
@@ -719,36 +739,6 @@ impl Shared {
             )
         };
         io::Error::new(io::ErrorKind::ConnectionAborted, reason.clone())
-    }
-}
-
-fn passed(error: &io::Error) -> bool {
-    // A socket's timeout fails a call as it would fail a non-blocking one.
-    matches!(
-        error.kind(),
-        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-    )
-}
-
-// Writes to a connection until `by`, after which every write fails as timed out.
-struct Until<'a> {
-    connection: &'a Connection,
-    by: Deadline,
-}
-
-impl Write for Until<'_> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        // Set before each write, since the socket's timeout bounds each call on its own. A deadline
-        // that has passed fails here, not in the socket, whose `None` would mean no timeout at all.
-        let Some(left) = self.by.remaining() else {
-            return Err(io::ErrorKind::TimedOut.into());
-        };
-        self.connection.set_write_timeout(Some(left))?;
-        (&mut &*self.connection).write(buf)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        (&mut &*self.connection).flush()
     }
 }
 
@@ -1094,7 +1084,7 @@ impl Assembler {
             )));
         }
         // The session's model requests in its owner's inbox are all in flight, so this bounds how
-        // many it leaves there, as `Registration::accept` counts on.
+        // many it leaves there.
         if flight.models.len() >= MAX_MODEL_REQUESTS_IN_FLIGHT {
             return Err(broke(&format!(
                 "it opened model request {number} while {MAX_MODEL_REQUESTS_IN_FLIGHT} are in \

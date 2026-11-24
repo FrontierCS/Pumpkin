@@ -27,8 +27,8 @@ stdx = { path = "../stdx" }
 
 [dev-dependencies]
 test-support = { path = "../test-support" }
-tls = { path = "../tls" }
 expect-test.workspace = true
+rustix = { workspace = true, features = ["fs"] }
 
 [lints]
 workspace = true

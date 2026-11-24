@@ -157,6 +157,8 @@ impl Name {
     }
 }
 
+const MAX_NAME_BYTES: usize = 64;
+
 const fn is_name(name: &str) -> bool {
     let [first, rest @ ..] = name.as_bytes() else {
         return false;
@@ -169,7 +171,7 @@ const fn is_name(name: &str) -> bool {
         }
         index += 1;
     }
-    first.is_ascii_lowercase() && name.len() <= 64
+    first.is_ascii_lowercase() && name.len() <= MAX_NAME_BYTES
 }
 
 fn check_name(name: &str) -> Result<(), String> {
@@ -441,7 +443,7 @@ fn check_model_name(name: &str) -> Result<(), String> {
 }
 
 /// The most bytes a [`HeaderName`] holds, as many as a [`Name`].
-const MAX_HEADER_NAME_BYTES: usize = 64;
+const MAX_HEADER_NAME_BYTES: usize = MAX_NAME_BYTES;
 
 fn check_header_name(name: &str) -> Result<(), String> {
     // RFC 9110's `tchar`, letters in lowercase, as the gateway names a request's headers and the

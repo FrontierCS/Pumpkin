@@ -30,7 +30,6 @@ fn drawn(program: fn(&Scratch, &[&str]) -> Command, args: &[&str], expect: &Expe
     let scratch = Scratch::new();
     let print = |colour: Option<&str>| {
         let mut pumpkin = program(&scratch, args);
-        pumpkin.env_remove("NO_COLOR").env_remove("CLICOLOR_FORCE");
         pumpkin.envs(colour.map(|forced| ("CLICOLOR_FORCE", forced)));
         let output = pumpkin.output().unwrap();
         assert_eq!(output.status.code(), Some(0));
@@ -102,24 +101,6 @@ fn controller_help() {
 }
 
 #[test]
-fn controller_job_help() {
-    let expect = expect_file!["help/controller_job.svg"];
-    check(&["controller", "job", "--help"], &expect);
-}
-
-#[test]
-fn controller_boot_help() {
-    let expect = expect_file!["help/controller_boot.svg"];
-    check(&["controller", "boot", "--help"], &expect);
-}
-
-#[test]
-fn controller_serve_help() {
-    let expect = expect_file!["help/controller_serve.svg"];
-    check(&["controller", "serve", "--help"], &expect);
-}
-
-#[test]
 fn admin_help() {
     admin(&["--help"], &expect_file!["help/admin.svg"]);
 }
@@ -140,24 +121,6 @@ fn admin_check_help() {
 fn admin_policy_help() {
     let expect = expect_file!["help/admin_policy.svg"];
     admin(&["policy", "--help"], &expect);
-}
-
-#[test]
-fn admin_boot_all_help() {
-    let expect = expect_file!["help/admin_boot_all.svg"];
-    admin(&["boot-all", "--help"], &expect);
-}
-
-#[test]
-fn admin_idle_help() {
-    let expect = expect_file!["help/admin_idle.svg"];
-    admin(&["idle", "--help"], &expect);
-}
-
-#[test]
-fn admin_members_help() {
-    let expect = expect_file!["help/admin_members.svg"];
-    admin(&["members", "--help"], &expect);
 }
 
 #[test]

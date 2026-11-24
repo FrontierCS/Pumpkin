@@ -1,13 +1,8 @@
 //! Leases, each a child of the run ([`child`](super::child)): once its runner is ready, a lease
 //! runs the commands and transfers the core orders ([`Order`]), one at a time, and the core is told
-//! how each ended. A command runs in the runner's `cwd` with its `env`, its output in a directory
-//! of its own below [`log_dir()`], `log/<c>` for its `c`th, which is collected into the same path
-//! in the lease's directory of the record once the command ends. A command that runs past its
-//! timeout, if it has one, is killed alone ([`Session::kill`]). A transfer collects the tree from
-//! one sandbox into the lease's directory, [`STAGING`], puts it into the other, and removes it;
-//! whatever reaches the lease's inbox meanwhile, the core's stop or the runner's end, cuts it
-//! short. The core's stop closes the lease: its runner is frozen, and its `out`, and the log of a
-//! command that still ran, are collected.
+//! how each ended. A command that runs past its timeout, if it has one, is killed alone
+//! ([`Session::kill`]). The core's stop closes the lease: its runner is frozen, and its `out`, and
+//! the log of a command that still ran, are collected.
 
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom};
@@ -25,10 +20,10 @@ use schema::sandbox::{
     Entry, Launch, RelativePath, Root, command_env, dir_mode, log_dir, out_dir, pumpkin_dir,
 };
 use schema::workflow::Runner;
-use stdx::{Context, Deadline};
+use stdx::Context;
+use stdx::time::Clock as _;
 
 use super::child::{Child, End, Message};
-use super::host::deadline;
 use super::sandbox::{ENTRIES, collect};
 use super::{Clock, Host, Inbox};
 
@@ -90,7 +85,7 @@ pub(super) fn run<H: Host>(leased: &Leased<'_>, child: &mut Child<'_, H, Order>)
 fn drive<H: Host>(
     leased: &Leased<'_>,
     child: &mut Child<'_, H, Order>,
-    session: &mut Session,
+    session: &mut Session<H::Clock>,
 ) -> Event {
     let lease = leased.lease;
     let failed = |reason: String| Event::LeaseFailed { lease, reason };
@@ -105,7 +100,7 @@ fn drive<H: Host>(
     child.event(Event::LeaseReady { lease });
     let mut running = None;
     let served = serve(leased, child, session, &mut running);
-    let by = deadline(&child.clock, child.deadlines.collect);
+    let by = child.deadlines.collect;
     if let Err(error) = session.freeze(by) {
         let reason = served
             .err()
@@ -125,12 +120,12 @@ fn drive<H: Host>(
 }
 
 /// Runs the commands and transfers the core orders in `child`'s sandbox, whose session is
-/// `session`, one at a time, until the core's stop, and returns the command that still runs then,
-/// if one does; or why the runner failed first.
+/// `session`, one at a time, until the core's stop, which leaves in `running` the command that
+/// still runs then, if one does; or fails with why the runner failed first.
 fn serve<H: Host>(
     leased: &Leased<'_>,
     child: &mut Child<'_, H, Order>,
-    session: &mut Session,
+    session: &mut Session<H::Clock>,
     running: &mut Option<Running>,
 ) -> Result<(), String> {
     let Leased {
@@ -162,7 +157,7 @@ fn serve<H: Host>(
                 });
             }
             Some(Message::Order(Order::Run(run))) => {
-                match start(runner, child, (&run, by_start), session) {
+                match start(runner, (&run, by_start), session) {
                     Ok(process) => {
                         let kill_at = run.timeout.map(|timeout| child.clock.now() + timeout);
                         *running = Some(Running {
@@ -214,11 +209,10 @@ fn kill<H: Host>(
     child: &Child<'_, H, Order>,
     by_start: Duration,
     running: &mut Running,
-    session: &mut Session,
+    session: &mut Session<H::Clock>,
 ) -> Result<(), String> {
-    let by = deadline(&child.clock, by_start);
     running.kill_at = None;
-    match session.kill(running.process, by) {
+    match session.kill(running.process, by_start) {
         Ok(()) => running.timed_out = true,
         Err(error) => {
             let reason = format!("command {} wasn't killed: {error}", running.command);
@@ -232,14 +226,12 @@ fn kill<H: Host>(
 }
 
 /// Starts `run` in the runner's `cwd` with its `env`, its output in [`command_dir`].
-fn start<H: Host>(
+fn start(
     runner: &Runner,
-    child: &Child<'_, H, Order>,
-    (run, by_start): (&Run, Duration),
-    session: &mut Session,
+    (run, by): (&Run, Duration),
+    session: &mut Session<impl Clock>,
 ) -> Result<Process, String> {
     let dir = command_dir(run.command);
-    let by = deadline(&child.clock, by_start);
     let put = session.put(&pumpkin_dir(), [Put::Dir(dir.clone(), dir_mode())], by);
     put.context(format_args!("making {dir} failed"))?;
     let output = |name: RelativePath| pumpkin_dir().join(&dir.join(&name));
@@ -259,13 +251,10 @@ fn start<H: Host>(
 fn outputs<H: Host>(
     child: &Child<'_, H, Order>,
     command: u64,
-    session: &mut Session,
+    session: &mut Session<H::Clock>,
     required: bool,
 ) -> Result<(String, String), String> {
-    let (dir, by) = (
-        command_dir(command),
-        deadline(&child.clock, child.deadlines.collect),
-    );
+    let (dir, by) = (command_dir(command), child.deadlines.collect);
     if let Err(error) = collect(session, &dir, &child.dir, by) {
         let reason = format!("command {command}'s output is incomplete: {error}");
         if required {
@@ -308,7 +297,7 @@ fn transfer<H: Host>(
         }
         held.is_some()
     };
-    let by = deadline(&child.clock, child.deadlines.collect);
+    let by = (&child.clock, child.deadlines.collect);
     let moved = staged_move(runner, order, &staging, by, &mut stopped);
     // The core's stop; the runner's session's end says itself why the transfer failed.
     let cut = matches!(held, Some(Message::Stop));
@@ -332,7 +321,7 @@ fn staged_move(
     runner: &Trees,
     order: &Transfer,
     staging: &Path,
-    by: Deadline,
+    by: (&impl Clock, Duration),
     stopped: &mut dyn FnMut() -> bool,
 ) -> Result<(u64, u64), String> {
     // Where the tree goes, and the rule that a failed put restates.

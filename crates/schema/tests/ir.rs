@@ -1,8 +1,8 @@
 //! The workflow IR and its parsing, tested through the crate's public API against a complete
-//! workflow, [`WORKFLOW`], beside the crate's other schemas.
+//! workflow, [`workflow`], beside the crate's other schemas.
 //!
 //! The workflow stays whole, as the IR's golden fixture: every IR case is a change to it
-//! (`fixture`, `fixture_with`).
+//! (`workflow`, `fixture_with`).
 
 #![expect(
     clippy::unwrap_used,
@@ -25,17 +25,13 @@ use schema::sandbox::{
 use schema::workflow::{Class, Offers, Placement, UsdPerHour, Workflow};
 use schema::{ec2_boot, frame, ir};
 use serde_json::{Value, json};
-use test_support::WORKFLOW;
+use test_support::workflow;
 
 const HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-fn fixture() -> Value {
-    serde_json::from_str(WORKFLOW).unwrap()
-}
-
-/// [`WORKFLOW`] with `value` set at `pointer`, whose parent is an object.
+/// [`workflow`] with `value` set at `pointer`, whose parent is an object.
 fn fixture_with(pointer: &str, value: Value) -> Value {
-    let mut ir = fixture();
+    let mut ir = workflow();
     let (parent, key) = pointer.rsplit_once('/').unwrap();
     let parent = ir.pointer_mut(parent).unwrap().as_object_mut().unwrap();
     parent.insert(key.to_owned(), value);
@@ -48,7 +44,6 @@ fn check<C: Case>(cases: impl IntoIterator<Item = C>, expect: &Expect) {
     expect.assert_eq(&actual.join("\n"));
 }
 
-/// A case whose outcome [`check`] shows.
 trait Case {
     fn outcome(self) -> String;
 }
@@ -92,7 +87,7 @@ impl Case for Placing {
         let ir = serde_json::from_value::<ir::Workflow>(self.0).unwrap();
         let offered = offered();
         let placed = Workflow::parse(&ir)
-            .and_then(|workflow| workflow.place(&offered, |classes| classes))
+            .and_then(|workflow| workflow.place(offered, |classes| classes))
             .map_err(|errors| errors.to_string());
         let (placed, providers) = match placed {
             Ok(placed) => placed,
@@ -125,13 +120,13 @@ struct Needing(Value);
 
 impl Case for Needing {
     fn outcome(self) -> String {
-        let mut ir = fixture();
+        let mut ir = workflow();
         ir["roles"][1]["needs"] = self.0.clone();
         let ir = serde_json::from_value::<ir::Workflow>(ir).unwrap();
         let offered = offered();
         let placed = Workflow::parse(&ir)
             .unwrap()
-            .place(&offered, |classes| classes);
+            .place(offered, |classes| classes);
         let at = match placed {
             Ok((placed, _)) => {
                 let (trainer, _) = placed.workflow().roles().nth(1).unwrap();
@@ -148,7 +143,7 @@ impl Case for Needing {
 /// `aws`, `judge`, `agent` and `judge_memory`, the last two alike, `judge_60`, and `ice_lake`,
 /// which states its CPU's model; and on `gpus`, `h100` and `h100_4`, with GPUs.
 fn offered() -> BTreeMap<ir::Name, BTreeMap<ir::Name, Class>> {
-    let name = |name: &str| ir::Name::try_from(name.to_owned()).unwrap();
+    let name = valid::<ir::Name>;
     let flags = |flags: &[&str]| flags.iter().map(|flag| valid(flag)).collect();
     let h100 = |count| {
         let model = valid("NVIDIA H100 80GB HBM3");
@@ -384,22 +379,24 @@ fn placement() {
             small(json!({ "gpu": h100(2) })),
         ],
         &expect![[r#"
-            {"cpu_millis":128000,"memory_bytes":2147483648}: /roles/1/needs: `trainer` fits no class of sandbox, as `aws`'s `agent` offers 8000 thousandths of a CPU, fewer than its 128000; `aws`'s `ice_lake` offers 4000 thousandths of a CPU, fewer than its 128000; `aws`'s `judge` offers 8000 thousandths of a CPU, fewer than its 128000; `aws`'s `judge_60` offers 64000 thousandths of a CPU, fewer than its 128000; `aws`'s `judge_memory` offers 8000 thousandths of a CPU, fewer than its 128000; `gpus`'s `h100` offers 8000 thousandths of a CPU, fewer than its 128000; `gpus`'s `h100_4` offers 32000 thousandths of a CPU, fewer than its 128000: offer a class that meets its needs, or change its needs
-            {"cpu_millis":2000,"memory_bytes":549755813888}: /roles/1/needs: `trainer` fits no class of sandbox, as `aws`'s `agent` offers 68719476736 bytes of memory, fewer than its 549755813888; `aws`'s `ice_lake` offers 17179869184 bytes of memory, fewer than its 549755813888; `aws`'s `judge` offers 17179869184 bytes of memory, fewer than its 549755813888; `aws`'s `judge_60` offers 137438953472 bytes of memory, fewer than its 549755813888; `aws`'s `judge_memory` offers 68719476736 bytes of memory, fewer than its 549755813888; `gpus`'s `h100` offers 68719476736 bytes of memory, fewer than its 549755813888; `gpus`'s `h100_4` offers 274877906944 bytes of memory, fewer than its 549755813888: offer a class that meets its needs, or change its needs
-            {"cpu_features":["amx_tile","avx512f"],"cpu_millis":2000,"memory_bytes":2147483648}: /roles/1/needs: `trainer` fits no class of sandbox, as `aws`'s `agent` lacks the CPU flags `amx_tile`, `avx512f`, which it needs; `aws`'s `ice_lake` lacks the CPU flags `amx_tile`, which it needs; `aws`'s `judge` lacks the CPU flags `amx_tile`, `avx512f`, which it needs; `aws`'s `judge_60` lacks the CPU flags `amx_tile`, which it needs; `aws`'s `judge_memory` lacks the CPU flags `amx_tile`, `avx512f`, which it needs; `gpus`'s `h100` has GPUs, 1 × `NVIDIA H100 80GB HBM3`, and it needs none; `gpus`'s `h100_4` has GPUs, 4 × `NVIDIA H100 80GB HBM3`, and it needs none: offer a class that meets its needs, or change its needs
-            {"cpu_millis":8000,"cpu_model":"Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz","memory_bytes":2147483648}: /roles/1/needs: `trainer` fits no class of sandbox, as `aws`'s `agent` states no CPU model, and it needs `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`; `aws`'s `ice_lake` offers 4000 thousandths of a CPU, fewer than its 8000; `aws`'s `judge` states no CPU model, and it needs `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`; `aws`'s `judge_60` states no CPU model, and it needs `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`; `aws`'s `judge_memory` states no CPU model, and it needs `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`; `gpus`'s `h100` has GPUs, 1 × `NVIDIA H100 80GB HBM3`, and it needs none; `gpus`'s `h100_4` has GPUs, 4 × `NVIDIA H100 80GB HBM3`, and it needs none: offer a class that meets its needs, or change its needs
-            {"cpu_millis":2000,"cpu_model":"AMD EPYC 7R13 Processor","memory_bytes":2147483648}: /roles/1/needs: `trainer` fits no class of sandbox, as `aws`'s `agent` states no CPU model, and it needs `AMD EPYC 7R13 Processor`; `aws`'s `ice_lake` states the CPU model `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`, and it needs `AMD EPYC 7R13 Processor`; `aws`'s `judge` states no CPU model, and it needs `AMD EPYC 7R13 Processor`; `aws`'s `judge_60` states no CPU model, and it needs `AMD EPYC 7R13 Processor`; `aws`'s `judge_memory` states no CPU model, and it needs `AMD EPYC 7R13 Processor`; `gpus`'s `h100` has GPUs, 1 × `NVIDIA H100 80GB HBM3`, and it needs none; `gpus`'s `h100_4` has GPUs, 4 × `NVIDIA H100 80GB HBM3`, and it needs none: offer a class that meets its needs, or change its needs
-            {"cpu_millis":2000,"gpu":{"count":2,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":2147483648}: /roles/1/needs: `trainer` fits no class of sandbox, as `aws`'s `agent` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `aws`'s `ice_lake` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `aws`'s `judge` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `aws`'s `judge_60` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `aws`'s `judge_memory` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `gpus`'s `h100` has GPUs, 1 × `NVIDIA H100 80GB HBM3`, and it needs 2 × `NVIDIA H100 80GB HBM3`; `gpus`'s `h100_4` has GPUs, 4 × `NVIDIA H100 80GB HBM3`, and it needs 2 × `NVIDIA H100 80GB HBM3`: offer a class that meets its needs, or change its needs"#]],
+            {"cpu_millis":128000,"memory_bytes":2147483648}: /roles/1/needs: `trainer` fits no class of sandbox, as `aws`'s `agent` offers 8000 thousandths of a CPU, fewer than its 128000; `aws`'s `ice_lake` offers 4000 thousandths of a CPU, fewer than its 128000; `aws`'s `judge` offers 8000 thousandths of a CPU, fewer than its 128000; `aws`'s `judge_60` offers 64000 thousandths of a CPU, fewer than its 128000; `aws`'s `judge_memory` offers 8000 thousandths of a CPU, fewer than its 128000; `gpus`'s `h100` offers 8000 thousandths of a CPU, fewer than its 128000; `gpus`'s `h100_4` offers 32000 thousandths of a CPU, fewer than its 128000: change its needs, or run it where sandboxes are larger
+            {"cpu_millis":2000,"memory_bytes":549755813888}: /roles/1/needs: `trainer` fits no class of sandbox, as `aws`'s `agent` offers 68719476736 bytes of memory, fewer than its 549755813888; `aws`'s `ice_lake` offers 17179869184 bytes of memory, fewer than its 549755813888; `aws`'s `judge` offers 17179869184 bytes of memory, fewer than its 549755813888; `aws`'s `judge_60` offers 137438953472 bytes of memory, fewer than its 549755813888; `aws`'s `judge_memory` offers 68719476736 bytes of memory, fewer than its 549755813888; `gpus`'s `h100` offers 68719476736 bytes of memory, fewer than its 549755813888; `gpus`'s `h100_4` offers 274877906944 bytes of memory, fewer than its 549755813888: change its needs, or run it where sandboxes are larger
+            {"cpu_features":["amx_tile","avx512f"],"cpu_millis":2000,"memory_bytes":2147483648}: /roles/1/needs: `trainer` fits no class of sandbox, as `aws`'s `agent` lacks the CPU flags `amx_tile`, `avx512f`, which it needs; `aws`'s `ice_lake` lacks the CPU flags `amx_tile`, which it needs; `aws`'s `judge` lacks the CPU flags `amx_tile`, `avx512f`, which it needs; `aws`'s `judge_60` lacks the CPU flags `amx_tile`, which it needs; `aws`'s `judge_memory` lacks the CPU flags `amx_tile`, `avx512f`, which it needs; `gpus`'s `h100` has GPUs, 1 × `NVIDIA H100 80GB HBM3`, and it needs none; `gpus`'s `h100_4` has GPUs, 4 × `NVIDIA H100 80GB HBM3`, and it needs none: change its needs, or run it where sandboxes are larger
+            {"cpu_millis":8000,"cpu_model":"Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz","memory_bytes":2147483648}: /roles/1/needs: `trainer` fits no class of sandbox, as `aws`'s `agent` states no CPU model, and it needs `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`; `aws`'s `ice_lake` offers 4000 thousandths of a CPU, fewer than its 8000; `aws`'s `judge` states no CPU model, and it needs `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`; `aws`'s `judge_60` states no CPU model, and it needs `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`; `aws`'s `judge_memory` states no CPU model, and it needs `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`; `gpus`'s `h100` has GPUs, 1 × `NVIDIA H100 80GB HBM3`, and it needs none; `gpus`'s `h100_4` has GPUs, 4 × `NVIDIA H100 80GB HBM3`, and it needs none: change its needs, or run it where sandboxes are larger
+            {"cpu_millis":2000,"cpu_model":"AMD EPYC 7R13 Processor","memory_bytes":2147483648}: /roles/1/needs: `trainer` fits no class of sandbox, as `aws`'s `agent` states no CPU model, and it needs `AMD EPYC 7R13 Processor`; `aws`'s `ice_lake` states the CPU model `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`, and it needs `AMD EPYC 7R13 Processor`; `aws`'s `judge` states no CPU model, and it needs `AMD EPYC 7R13 Processor`; `aws`'s `judge_60` states no CPU model, and it needs `AMD EPYC 7R13 Processor`; `aws`'s `judge_memory` states no CPU model, and it needs `AMD EPYC 7R13 Processor`; `gpus`'s `h100` has GPUs, 1 × `NVIDIA H100 80GB HBM3`, and it needs none; `gpus`'s `h100_4` has GPUs, 4 × `NVIDIA H100 80GB HBM3`, and it needs none: change its needs, or run it where sandboxes are larger
+            {"cpu_millis":2000,"gpu":{"count":2,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":2147483648}: /roles/1/needs: `trainer` fits no class of sandbox, as `aws`'s `agent` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `aws`'s `ice_lake` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `aws`'s `judge` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `aws`'s `judge_60` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `aws`'s `judge_memory` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `gpus`'s `h100` has GPUs, 1 × `NVIDIA H100 80GB HBM3`, and it needs 2 × `NVIDIA H100 80GB HBM3`; `gpus`'s `h100_4` has GPUs, 4 × `NVIDIA H100 80GB HBM3`, and it needs 2 × `NVIDIA H100 80GB HBM3`: change its needs, or run it where sandboxes are larger"#]],
     );
-    let mut unplaced = fixture();
+    // Past what any class offers: 8 GPUs, where the most is 4, and one thousandth of a CPU over
+    // the most, 64.
+    let mut unplaced = workflow();
     unplaced["roles"][0]["needs"]["gpu"] = h100(8);
     unplaced["roles"][2]["needs"]["cpu_millis"] = json!(64_001);
     check(
-        [Placing(fixture()), Placing(unplaced)],
+        [Placing(workflow()), Placing(unplaced)],
         &expect![[r#"
             agent, on `aws` in `agent`, whose starts take at most 30s; trainer, on `aws` in `judge`, whose starts take at most 60s; final_judge, on `aws` in `judge`, whose starts take at most 60s; providers `aws`
-            /roles/0/needs: `agent` fits no class of sandbox, as `aws`'s `agent` has no GPU, and it needs 8 × `NVIDIA H100 80GB HBM3`; `aws`'s `ice_lake` offers 4000 thousandths of a CPU, fewer than its 8000; `aws`'s `judge` offers 17179869184 bytes of memory, fewer than its 34359738368; `aws`'s `judge_60` has no GPU, and it needs 8 × `NVIDIA H100 80GB HBM3`; `aws`'s `judge_memory` has no GPU, and it needs 8 × `NVIDIA H100 80GB HBM3`; `gpus`'s `h100` has GPUs, 1 × `NVIDIA H100 80GB HBM3`, and it needs 8 × `NVIDIA H100 80GB HBM3`; `gpus`'s `h100_4` has GPUs, 4 × `NVIDIA H100 80GB HBM3`, and it needs 8 × `NVIDIA H100 80GB HBM3`: offer a class that meets its needs, or change its needs
-            /roles/2/needs: `final_judge` fits no class of sandbox, as `aws`'s `agent` offers 8000 thousandths of a CPU, fewer than its 64001; `aws`'s `ice_lake` offers 4000 thousandths of a CPU, fewer than its 64001; `aws`'s `judge` offers 8000 thousandths of a CPU, fewer than its 64001; `aws`'s `judge_60` offers 64000 thousandths of a CPU, fewer than its 64001; `aws`'s `judge_memory` offers 8000 thousandths of a CPU, fewer than its 64001; `gpus`'s `h100` offers 8000 thousandths of a CPU, fewer than its 64001; `gpus`'s `h100_4` offers 32000 thousandths of a CPU, fewer than its 64001: offer a class that meets its needs, or change its needs"#]],
+            /roles/0/needs: `agent` fits no class of sandbox, as `aws`'s `agent` has no GPU, and it needs 8 × `NVIDIA H100 80GB HBM3`; `aws`'s `ice_lake` offers 4000 thousandths of a CPU, fewer than its 8000; `aws`'s `judge` offers 17179869184 bytes of memory, fewer than its 34359738368; `aws`'s `judge_60` has no GPU, and it needs 8 × `NVIDIA H100 80GB HBM3`; `aws`'s `judge_memory` has no GPU, and it needs 8 × `NVIDIA H100 80GB HBM3`; `gpus`'s `h100` has GPUs, 1 × `NVIDIA H100 80GB HBM3`, and it needs 8 × `NVIDIA H100 80GB HBM3`; `gpus`'s `h100_4` has GPUs, 4 × `NVIDIA H100 80GB HBM3`, and it needs 8 × `NVIDIA H100 80GB HBM3`: change its needs, or run it where sandboxes are larger
+            /roles/2/needs: `final_judge` fits no class of sandbox, as `aws`'s `agent` offers 8000 thousandths of a CPU, fewer than its 64001; `aws`'s `ice_lake` offers 4000 thousandths of a CPU, fewer than its 64001; `aws`'s `judge` offers 8000 thousandths of a CPU, fewer than its 64001; `aws`'s `judge_60` offers 64000 thousandths of a CPU, fewer than its 64001; `aws`'s `judge_memory` offers 8000 thousandths of a CPU, fewer than its 64001; `gpus`'s `h100` offers 8000 thousandths of a CPU, fewer than its 64001; `gpus`'s `h100_4` offers 32000 thousandths of a CPU, fewer than its 64001: change its needs, or run it where sandboxes are larger"#]],
     );
 }
 
@@ -882,6 +879,7 @@ fn grant_help() {
 
 #[test]
 fn ops_frame_bound() {
+    // JSON writes each NUL as `\u0000`, 6 bytes, so this many fill a frame's message by themselves.
     let ir = fixture_with(
         "/roles/0/runtime/agent/grants/0/help",
         json!("\0".repeat(frame::MAX_MESSAGE_BYTES / 6)),
@@ -898,7 +896,7 @@ fn ops_frame_bound() {
 fn parsed() {
     check(
         [
-            Parsed(fixture()),
+            Parsed(workflow()),
             Parsed(fixture_with("/final/keywords", json!({ "mode": "final" }))),
             Parsed(leasing()),
             Parsed(agents()),
@@ -925,7 +923,7 @@ fn checked_values() {
     let agent = "/roles/0";
     let command = "/roles/0/runtime/agent/command";
     let route = "/roles/0/runtime/agent/egress/model";
-    let entry = &fixture()["roles"][0]["runtime"]["agent"]["egress"]["model"][0];
+    let entry = &workflow()["roles"][0]["runtime"]["agent"]["egress"]["model"][0];
     check(
         [
             fixture_with("/name", json!("example task")),
@@ -1114,7 +1112,7 @@ fn agent_files() {
     let agent = "/roles/0/runtime/agent";
     let dir = |path: &str| json!({ "path": path, "mode": "0755" });
     let file = |path: &str| json!({ "path": path, "mode": "0644", "content": "" });
-    let mut broken = fixture();
+    let mut broken = workflow();
     let runtime = &mut broken["roles"][0]["runtime"]["agent"];
     runtime["dirs"] = json!([
         dir("/workspace/a"),
@@ -1156,7 +1154,7 @@ fn agent_files() {
 
 #[test]
 fn broken_references() {
-    let mut ir = fixture();
+    let mut ir = workflow();
     let trainer = ir["roles"][1].clone();
     ir["roles"].as_array_mut().unwrap().push(trainer);
     let grants = &mut ir["roles"][0]["runtime"]["agent"]["grants"];
@@ -1179,7 +1177,7 @@ fn broken_references() {
 #[test]
 fn grant_forms() {
     let with = |change: fn(&mut Value)| {
-        let mut ir = fixture();
+        let mut ir = workflow();
         change(&mut ir["roles"][0]["runtime"]["agent"]["grants"][0]);
         ir
     };
@@ -1200,10 +1198,10 @@ fn grant_forms() {
     );
 }
 
-/// [`WORKFLOW`] with a runner, `gpu`, of an image of its own, that the agent leases under grant
+/// [`workflow`] with a runner, `gpu`, of an image of its own, that the agent leases under grant
 /// `gpu`, before its now function.
 fn leasing() -> Value {
-    let mut ir = fixture();
+    let mut ir = workflow();
     let mut runner = ir["roles"][1].clone();
     runner["name"] = json!("gpu");
     runner["image"] = json!(format!("sha256:{}", "3".repeat(64)));
@@ -1436,7 +1434,7 @@ fn target_leases() {
 
 #[test]
 fn broken_roles() {
-    let mut ir = fixture();
+    let mut ir = workflow();
     let mut helper = ir["roles"][0].clone();
     helper["name"] = json!("helper");
     ir["roles"].as_array_mut().unwrap().push(helper);
@@ -1444,12 +1442,12 @@ fn broken_roles() {
         ir["roles"][0]["runtime"]["agent"]["egress"].clone();
     let grants = &mut ir["roles"][0]["runtime"]["agent"]["grants"];
     let mut submit = now("resubmit");
-    submit["now"]["payload_max_bytes"] = json!(67_108_865);
+    submit["now"]["payload_max_bytes"] = json!(MAX_OP_PAYLOAD_BYTES + 1);
     let mut retrain = grants[0].clone();
     retrain["name"] = json!("retrain");
     grants.as_array_mut().unwrap().extend([submit, retrain]);
     ir["final"]["target"] = json!("trainer");
-    let mut none = fixture();
+    let mut none = workflow();
     none["roles"].as_array_mut().unwrap().remove(0);
     check(
         [ir, none],
@@ -1476,10 +1474,7 @@ impl Case for Given {
         }))
         .unwrap();
         let given = (self.0.iter())
-            .map(|(name, text)| {
-                let name = ir::Name::try_from((*name).to_owned()).unwrap();
-                (name, (*text).to_owned())
-            })
+            .map(|(name, text)| (valid::<ir::Name>(name), (*text).to_owned()))
             .collect();
         match ir::argument::read(&function, &parameters, &given) {
             Ok(values) => format!("{values:?}"),

@@ -1,4 +1,4 @@
-//! The driver's decision core, fed event scripts on [`WORKFLOW`], or on variants of it. Each
+//! The driver's decision core, fed event scripts on [`workflow`], or on variants of it. Each
 //! test shows what the core did after each event, and when it next wants a tick whenever that
 //! changes. Each role is placed in a class whose sandboxes may take [`STARTUP`] to start, or
 //! [`SLOW_STARTUP`] for a role that needs the CPU model `slow`, which sets the run's hard end.
@@ -12,7 +12,7 @@
 //!   [replace]`, `.get <lease> <from> <to>`, `.status <lease>` and `.close <lease>`, each an op
 //!   from the agent, `-` for a command without a timeout;
 //! - an event after `@<role>`, from that agent, or an op after `@<job>`, from that call;
-//! - `agent_torn_down`, the end of the agent's teardown;
+//! - `agent_torn_down`, `shared_failed <target> <reason>` and `shared_torn_down <target>`;
 //! - `call_started <job>`, `call_timed_out <job>`, `call_returned <job> [+<n>] [<name>=<value>]…`,
 //!   the body's return in its order, `call_failed <job> [+<n>] <reason>`, with `+<n>` if the route
 //!   barred `n` of the call's model requests over budget, and `call_torn_down <job>`;
@@ -45,7 +45,7 @@ use schema::sandbox::op::{CommandEnd, OpReply, REASON_BYTES, SessionOp, Transfer
 use schema::sandbox::{ExitStatus, RESULT_MAX_BYTES};
 use schema::workflow::{Class, Offers, Workflow};
 use serde_json::{Value, json};
-use test_support::WORKFLOW;
+use test_support::workflow;
 
 /// How long a sandbox may take to start in class `fast`.
 const STARTUP: Duration = Duration::from_secs(10);
@@ -53,16 +53,16 @@ const STARTUP: Duration = Duration::from_secs(10);
 /// How long a sandbox may take to start in class `slow`.
 const SLOW_STARTUP: Duration = Duration::from_secs(30);
 
-/// Runs `script` on [`WORKFLOW`] with `edit` applied, and compares what the core did
+/// Runs `script` on [`workflow`] with `edit` applied, and compares what the core did
 /// with `expect`.
 fn check(edit: impl FnOnce(&mut Value), script: &str, expect: &Expect) {
-    let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
+    let mut ir = workflow();
     edit(&mut ir);
     let ir: ir::Workflow = serde_json::from_value(ir).unwrap();
     let offered = offered();
     let (placed, _) = Workflow::parse(&ir)
         .unwrap()
-        .place(&offered, |classes| classes)
+        .place(offered, |classes| classes)
         .unwrap();
     let mut run = Run {
         workflow: placed.workflow(),
@@ -110,12 +110,31 @@ fn check(edit: impl FnOnce(&mut Value), script: &str, expect: &Expect) {
             }
             event => {
                 let event = run.event(event);
+                let asked = match &event {
+                    Event::OpArrived { op, .. } => Some(*op),
+                    _ => None,
+                };
                 let actions = core.handle(at, event);
+                assert_replies(line, asked, &actions);
                 run.note(line, &actions, core.tick_due());
             }
         }
     }
     expect.assert_eq(&run.transcript);
+}
+
+fn assert_replies(line: &str, asked: Option<OpId>, actions: &[Action]) {
+    let replied: Vec<OpId> = (actions.iter())
+        .filter_map(|action| match action {
+            Action::Reply { op, .. } => Some(*op),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        replied,
+        Vec::from_iter(asked),
+        "`{line}`: an op gets exactly one reply, and no other event gets one"
+    );
 }
 
 /// The classes of one provider, each of which offers what every role of the fixture needs:
@@ -271,7 +290,6 @@ impl Run<'_> {
                     arguments,
                 })
             }
-            // `now <function> <bytes> <effect>…`, or `now <function> <bytes> failed|unread`.
             "now" => self.now(&words[1..]),
             "status" => self.op(Request::Status {
                 job: words[1].parse().unwrap(),
@@ -1852,7 +1870,7 @@ fn unknown_jobs() {
     );
 }
 
-/// [`WORKFLOW`] with a runner, `gpu_runner`, of an image of its own, that the agent leases under
+/// [`workflow`] with a runner, `gpu_runner`, of an image of its own, that the agent leases under
 /// grant `gpu`: 2 leases at once, each for 900 s, 1200 s in all, 3 commands in all, and transfers
 /// of 4096 bytes each.
 fn leasing(ir: &mut Value) {

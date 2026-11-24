@@ -2,6 +2,7 @@
 greeting and submits it, and the final call scores the greeting's size."""
 
 load("@pumpkin//harness/codex/codex.star", "codex")
+load("//budget.star", "budgeted")
 load("//codex/final.star", "final_call")
 load("//submit.star", "submission")
 
@@ -29,7 +30,10 @@ workflow(
             "image": agent["image"],
             "user": {"uid": 1000, "gid": 1000},
             "needs": {"cpu_millis": 1000, "memory_bytes": 1 * GiB},
-            "runtime": {"agent": agent["runtime"]["agent"] | {"grants": [submission("final", 1 * KiB)]}},
+            "runtime": {"agent": agent["runtime"]["agent"] | {
+                "egress": {"model": budgeted(agent["runtime"]["agent"]["egress"]["model"])},
+                "grants": [submission("final", 1 * KiB)],
+            }},
         },
         {
             "name": "judge",

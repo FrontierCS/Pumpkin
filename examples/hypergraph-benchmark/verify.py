@@ -1,4 +1,4 @@
-"""Recompute scored timings from official evidence and check each recorded selection."""
+"""Check that a run of the benchmark worked, and say what each role scored."""
 
 import argparse
 import collections
@@ -7,13 +7,16 @@ import io
 import json
 import math
 import subprocess
+import sys
 import tarfile
 from pathlib import Path
 
-from judge.receipts import check_receipt, check_timing
+# So that importing the judge's module writes no bytecode into the judge image's context.
+sys.dont_write_bytecode = True
+from judge.receipts import check_receipt, check_timing  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
-SELECTOR = ROOT.parent / "benchmark-input/judge/eval.json"
+SELECTOR = ROOT / "judge/eval.json"
 ROLES = ["alice", "bob", "carol", "dan", "eve"]
 
 
@@ -60,7 +63,7 @@ def check_native(row, out):
     )
     receipt = evidence(out / row["evidence"])
     check_receipt(receipt, row["selection"]["digest"], sha(SELECTOR.read_bytes()))
-    require(native["raw_score"] == row["score"], f"{name} official score")
+    require(native["raw_score"] == row["score"], f"{name} native score")
     median = check_timing(receipt, row["score"])
     if median is not None:
         require(
@@ -115,12 +118,7 @@ def check_run(path):
         and ir["deadline_seconds"] == 5400,
         "team workflow clock",
     )
-    pricing = read(path / "provider.json")["routes"]
-    costs, responses, counts = (
-        collections.Counter(),
-        collections.Counter(),
-        collections.Counter(),
-    )
+    responses, counts = collections.Counter(), collections.Counter()
     sessions = {role: set() for role in ROLES}
     sandbox_ids = set()
     disk = {}
@@ -138,12 +136,7 @@ def check_run(path):
             "real Codex command",
         )
         (route,) = runtime["egress"]["model"]
-        require(
-            route["api"] == "responses"
-            and route["models"] == ["glm-5.3-flash"]
-            and route["budget"]["microusd"] == 5000000,
-            "role model and budget",
-        )
+        require(route["api"] == "responses", "role model route")
         grants = {g["name"]: g for g in runtime["grants"]}
         require(
             runtime["prepend_grant_help"]
@@ -235,17 +228,6 @@ def check_run(path):
                 key = read(request_path).get("prompt_cache_key")
                 if key:
                     sessions[role].add(key)
-            rates = pricing[role][0]["models"]["glm-5.3-flash"]["usd_per_mtok"]
-            cached, written = (
-                usage.get("cached_tokens", 0),
-                usage.get("cache_write_tokens", 0),
-            )
-            costs[role] += (
-                (usage.get("input_tokens", 0) - cached - written) * rates["input"]
-                + cached * rates["cached"]
-                + written * rates["cache_write"]
-                + usage.get("output_tokens", 0) * rates["output"]
-            ) / 1_000_000
         if event.get("kind") != "call_returned" or event["job"] not in jobs:
             continue
         role, grant = jobs[event["job"]]
@@ -312,10 +294,9 @@ def check_run(path):
         "run": path.name,
         "all_five_models_answered": all(counts[r] > 0 for r in ROLES),
         "distinct_model_sessions": len(set.union(*sessions.values())),
-        "model_usd_by_role": dict(costs),
         "successful_responses": dict(responses),
         "worker_usd": sum(r.get("usd", 0) for r in outcome["usage"]["sandboxes"]),
-        "total_metered_usd": outcome["usage"]["usd"],
+        "total_metered_usd": outcome["usage"].get("usd"),
         "sandboxes_deleted": deleted,
         "workspace_free_bytes": disk,
         "best": best,

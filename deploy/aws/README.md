@@ -5,30 +5,11 @@ administrator credentials, and lists the members by key. Every name it makes beg
 `pumpkin-<name>`, where `<name>` is the team's name, so teams share an account without colliding.
 Its state is in an S3 bucket of the account, so no laptop can lose it.
 
-| What | Why |
-| --- | --- |
-| the sandboxes' security group: out to HTTPS and to the controller's ephemeral ports; nothing in | sandboxes pull from ECR and dial the gateway at port 0's pick, and reach nothing else |
-| the controller's security group: in from the sandboxes on the ephemeral ports, and from the VPC's IPv4 blocks on port 22; out to HTTPS | the gateway, and `sshd`, which admits for `pumpkin` the members' keys alone |
-| ECR `pumpkin-<name>/roles` and `/sandboxd`, immutable tags, untagged images expire after 14 days | private images, pushed tagged by digest |
-| a launch template per class: the AMI, the type, a root volume deleted with the instance | the EC2 classes, and what the `ec2` provider relies on; the provider's launch sets the metadata options |
-| the sandboxes' role: ECR pulls only | each sandbox's pulls |
-| the timer: a schedule group and a role that terminates the run instances of this envelope's sandbox profile | a kill bound outside each guest |
-| the Modal pull role: ECR pulls from `roles`, assumed only by `modal_workspace`'s tokens | Modal imports the images of calls' targets, which hold hidden data |
-| an AMI baked by EC2 Image Builder from a named AL2023 release, with Docker, ECR's credential helper and nftables | each sandbox's boot runs them, at the release's versions |
-| the controller's role and instance profile: access to its jobs' settings parameter, the members' parameter and the EC2 provider's resources: launches from its templates with nothing they name overridden and at their instance types, and terminations and console reads of its own sandboxes alone | the runs' launches, timers, sweeps and pushes, from the controller |
-| the controller: an on-demand instance on Ubuntu 24.04 LTS, with a public IPv4 address, IMDSv2 within one hop, an encrypted gp3 root, stopping on shutdown, tagged `pumpkin:controller=<name>`; an apply replaces it only for a new `pumpkin_release` | builds the tasks' images and runs the drivers, which a person's machine sends it, and runs no role |
-| what cloud-init installs there: Docker, which runs as root, so its `docker` group, which holds `pumpkin` alone, is root-equivalent; Buildx, AWS CLI v2 and uv at exact versions, and the rest of `controller.yaml`'s packages from a snapshot of Ubuntu's archive | builds with the containerd image store |
-| what the Pumpkin release `pumpkin_release` installs there, with `pumpkin-admin install` (`pumpkin-admin install --help` says what): the user `pumpkin`, lingering; an `sshd` that admits concurrent openings and ends a session whose client has gone; a unit that stops the controller after 30 minutes with no job and no SSH session; and one that runs each installed build's reap at boot | jobs that outlive every connection; a stop and a reap that need no client |
-| the SSM parameter `/pumpkin-<name>/settings` (advanced tier), of envelope 1.1: the `[deployment]` that the host reads, with the deployment's `name` and members' parameter; the Docker engine, the EC2 provider `aws`, and the Modal provider `modal`'s `images` | each job's settings, which an apply changes for the next job; the rest of the Modal provider is the client's |
-| the SSM parameter `/pumpkin-<name>/members` (advanced tier): a line `<member> <key>` for each key in `members`; the controller copies it every minute into `/etc/ssh/pumpkin/members`, with a forced command that names each key's member; `sshd` admits for `pumpkin` only the keys in that file | who may reach the controller, and which member each job belongs to; an apply changes the list within a minute |
-
-`ami.tf`, `controller.tf` and the other files say more of each. What the `ec2` provider requires
-of its envelope is that crate's module doc, "The envelope".
-
 ## Once per account
 
-The state bucket, versioned so a bad write can be undone, and, if `aws iam
-list-open-id-connect-providers` lists no `oidc.modal.com`, Modal's OIDC provider:
+The state bucket, versioned so a bad write can be undone. A team that lists `modal_workspaces`
+also needs Modal's OIDC provider, if `aws iam list-open-id-connect-providers` lists no
+`oidc.modal.com`:
 
 ```sh
 aws s3api create-bucket --bucket pumpkin-tfstate-<account>-<region> --region <region> \
@@ -40,59 +21,21 @@ aws iam create-open-id-connect-provider --url https://oidc.modal.com --client-id
 
 ## Per team
 
-Terraform 1.11 or later, and the AWS CLI with administrator credentials for the account. The
+Terraform 1.15.9 or later, and the AWS CLI with administrator credentials for the account. The
 module is this directory. A root of the admin's own calls it, pinned by a Pumpkin release's tag, so
 a release's `pumpkin-admin install` and its module agree. The root holds what is the deployment's:
 the provider's configuration with its region and tags, the backend, and the lock file that
 `terraform init` writes. The provider's region is the module's. In a directory of its own, such as
-a repository, write `main.tf` (`variables.tf` says each of the module's values and its default):
-
-```hcl
-terraform {
-  required_version = ">= 1.11"
-  required_providers {
-    aws = { source = "hashicorp/aws", version = "6.72.0" }
-  }
-  backend "s3" { use_lockfile = true }
-}
-
-locals {
-  name = "research"
-}
-
-provider "aws" {
-  region = "us-west-1"
-  # Every resource names its team, so that teams' envelopes in one account stay apart.
-  default_tags {
-    tags = { "pumpkin:envelope" = local.name }
-  }
-}
-
-module "pumpkin" {
-  source = "git::https://github.com/FrontierCS/Pumpkin.git//deploy/aws?ref=<tag>"
-
-  name            = local.name
-  vpc_id          = "vpc-…"
-  subnet_id       = "subnet-…"
-  modal_workspace = "ac-…"
-  members = {
-    alice = ["ssh-ed25519 AAAA… alice-laptop", "ssh-ed25519 AAAA… alice-desk"]
-    bob   = ["ssh-ed25519 AAAA… bob"]
-  }
-  pumpkin_release = "<tag> <commit> <sha256>" # the same release's `pumpkinversion` line
-}
-
-output "client_config" {
-  value = module.pumpkin.client_config
-}
-```
-
-Give an `output` likewise for each other output that "What the outputs feed" or "Versions" names
-and the admin reads. `pumpkin` reaches the controller at its private address. Machines in the
+a repository, copy [`examples/team/main.tf`](examples/team/main.tf) and set its `source` as its
+comment says (`variables.tf` says each of the module's values and its default). Give its
+`pumpkin_release`, the release's `pumpkinversion` line, in a `terraform.tfvars` beside it, or write
+the line in place of the variable: `terraform plan` refuses to run without it. Give an `output`, as
+the example does, for each other output that "What the outputs feed" or "Versions" names and the
+admin reads. `pumpkin` reaches the controller at its private address. Machines in the
 controller's VPC reach its port 22, and `sshd` admits for `pumpkin` only the keys that `members`
 lists. A machine elsewhere needs a route into the VPC that gives its traffic one of the VPC's
 addresses, such as a VPN that translates its addresses into the VPC's. A team of one lists its own
-key.
+key. A team that enrols no one yet gives `members = {}`, and the controller admits no key.
 
 Then, in that directory:
 
@@ -122,9 +65,9 @@ moved {
 ```
 
 `grep '^resource' *.tf` here lists them. Besides the moves, the plan creates
-`terraform_data.pumpkin_release`, updates the controller's `run` policy, the sandbox's and the
-client's to this release's, and destroys the controller's `settings` and `members` policies, which
-`run` now holds. The update and the destroys are unordered, so apply it as a cutover, with the
+`terraform_data.pumpkin_release`. It updates the controller's `run` policy, the sandbox's and
+client's to this release's. It destroys the controller's `settings` and `members` policies, which
+`run` holds. The update and the destroys are unordered, so apply it as a cutover, with the
 drain runbook under "Versions". Once it is applied, the blocks can go.
 
 ## Members
@@ -144,8 +87,12 @@ there.
   journal says why: `journalctl -u pumpkin-members.service`.
 - **Revoke.** Remove the line and apply. The controller refuses the key within a minute. A
   connection already open lasts until it ends. A member was root on the controller through
-  `docker`, so replace the controller to be sure they left nothing behind. `serve` ends a link that asks nothing for a minute,
-  but an open `view` page asks every few seconds until it is closed.
+  `docker`, so to be sure they left nothing behind, replace the instance and its data volume in a
+  cutover, under "Versions": `-replace=module.pumpkin.aws_instance.controller
+  -replace=module.pumpkin.aws_ebs_volume.controller`. The records that no member copied go with
+  the volume, as does the host key, which each member unpins as the refusal says. `serve` ends a
+  link that asks nothing for a minute, but an open `view` page asks every few seconds until it is
+  closed.
 - **See the logins.** On the controller,
   `sudo journalctl -u ssh --grep 'Accepted publickey for pumpkin'` lists each login with its
   key's fingerprint. `ssh-keygen -l -f /etc/ssh/pumpkin/members` lists the fingerprint of each key
@@ -164,9 +111,9 @@ reads `none` as the command's path. It refuses the key, as it should.
 Each is the module's output of that name. `terraform output` reads it where the root gives it as
 an `output` of its own.
 
-- `terraform output -raw client_config` is the `[controller]` table of each member's
+- `terraform output -raw client_config` is the `[controllers.<name>]` table of each member's
   `~/.config/pumpkin/pumpkin.toml`, beside its `[upstreams]` and, for runs on Modal,
-  `[controller.modal]`, the Modal provider's profile and classes, and nothing else; `pumpkin help
+  `[controllers.<name>.modal]`, the Modal provider's profile and classes, and nothing else; `pumpkin help
   config` says what each does, with an example, and which programs a member's machine, Linux on
   x86-64, needs.
 - `terraform output -raw client_policy_arn` is the managed IAM policy that a member's machine
@@ -182,38 +129,23 @@ an `output` of its own.
   on the controller: the groups admit only the ephemeral ports that `gateway_ports.json` holds,
   where the kernel's pick for port 0 falls.
 
-## Policies
-
-The permission policies of the controller's, the timer's, the sandboxes' and the Modal pull roles,
-the client's and the contributor's, are `policies/<principal>.json.tftpl`. This release's `pumpkin-admin policy
-<principal>` prints each from what its code's calls on AWS need. The module fills them with
-`templatefile`, as the GitHub runner module fills its policies
-([policies-runner.tf](https://github.com/github-aws-runners/terraform-aws-github-runner/blob/f975153d6749b2ea2ddebc8d8cf5911196a1973a/modules/runners/policies-runner.tf#L31-L36)).
-The files are generated and committed, as Kubebuilder's projects commit the RBAC that
-`controller-gen` writes from the code
-([makefile.go](https://github.com/kubernetes-sigs/kubebuilder/blob/4d01fcdf146e4d832fc973ef95684a00bcf0f0c0/pkg/plugins/golang/v4/scaffolds/internal/templates/makefile.go#L121-L123)).
-`pumpkin`'s tests fail while a file differs from the code's, and `cargo xtask refill --package
-pumpkin policy` writes them again. So a change to a call is a change to the code that makes it,
-never to these files. The roles' trust policies say who may assume each role. No call states them,
-so they are the module's own. So are the AWS-managed policies of the AMI's build, under which no
-Pumpkin call is made.
-
 ## Changes
 
 An apply that changes a class or the AMI makes a new version of its templates, which the
 controller's settings name from its next job on. The controller's policy allows only the
 templates' current instance types. So an apply that changes a class's type is a cutover that a
 running job would meet: follow the drain runbook under "Versions". A Modal class or profile needs
-no apply: it is the client's `[controller.modal]`, which each job takes.
+no apply: it is the client's `[controllers.<name>.modal]`, which each job takes.
 
 With `variables.tf`'s defaults, the controller costs about $0.94 an hour while it runs in
-us-west-1, less in us-east-1 and us-west-2; stopped, about $110 a month for its volume at
+us-west-1, less in us-east-1 and us-west-2; stopped, about $110 a month for its volumes at
 us-east-1's rates, more in other regions; beside ECR's storage.
 
 The controller's first boot runs the install of the release that `pumpkin_release` names. The
 install sets up Pumpkin's user, its units and `sshd`'s settings, and nothing changes them later.
 So an apply that changes `pumpkin_release` replaces the controller. The new controller also takes
-the current Ubuntu release and this module's `controller.yaml`, and its volume is new.
+the current Ubuntu release, this module's `controller.yaml` and `deploy/controller`'s `install.sh`.
+It mounts the data volume, which keeps the build cache, the records and the host key.
 `terraform apply -replace=module.pumpkin.aws_instance.controller` replaces it at the same
 release. Either replacement is a cutover, under "Versions".
 
@@ -240,10 +172,10 @@ members' keys. Both refuse settings without it.
   a new key beside a provider's kind in `[providers.<name>]`. So either is a major. A job keeps only
   `images` of the Modal provider's table in the settings, as the client sends the rest. It drops any
   other key there without a word in the log.
-- A release keeps nothing but the envelope across releases. It need not work with another tag's
-  module, controller install or members' clients. So at each tag, the admin applies the tag's
-  module with the tag's `pumpkin_release`, in a cutover as below. Each member then raises
-  `.pumpkinversion` to that release.
+- A release keeps nothing but the envelope and the controller's data volume across releases. It
+  need not work with another tag's module, controller install or members' clients. So at each
+  tag, the admin applies the tag's module with the tag's `pumpkin_release`, in a cutover as below.
+  Each member then raises `.pumpkinversion` to that release.
 - Each job's directory on the controller is `~pumpkin/jobs/<id>/`. Its `release` names the release
   that runs it, as `pumpkin --version` does. Its `envelope` names the envelopes it takes, such as
   `^1.1`, Cargo's caret requirement: 1.1 or a later 1.x. Step 2 of a cutover, below, lists the ids
@@ -262,16 +194,16 @@ apply of its own, outside them.
    `sudo ls /run/user/$(id --user pumpkin)/pumpkin` lists the id of each job whose unit runs.
    Each job's unit removes the job's directory there as it ends. A run's job ends by the run's
    hard end at the latest. `sudo cat ~pumpkin/jobs/<id>/release` names the release of job `<id>`.
-   Before a replacement, each member runs `pumpkin wait <id>` for each run whose record they
-   keep. A replacement discards each run's record that no member copied.
 3. Apply the change. For a release, raise the module's `ref` and `pumpkin_release` to the
    release's. Its plan replaces `module.pumpkin.aws_instance.controller`, and the new
    controller's first boot installs the release. The apply that creates
    `terraform_data.pumpkin_release` replaces nothing, as only a change of it does. So where the
-   plan creates it, apply with `-replace=module.pumpkin.aws_instance.controller`. The new
-   controller has a new host key, so each member's first command after the replacement is
-   refused. Once the admin confirms the replacement, the member runs the `ssh-keygen -R` command
-   that the refusal names, and the next command pins the new key.
+   plan creates it, apply with `-replace=module.pumpkin.aws_instance.controller`. Where the plan
+   creates `module.pumpkin.aws_ebs_volume.controller`, it shrinks the root to 30 GiB, which EBS
+   can't do in place: apply it with a new `pumpkin_release` or that `-replace`. The old root goes,
+   so first each member runs `pumpkin wait <id>` for each run whose record they keep. The new
+   volume has a new host key: once the admin confirms it, each member runs the `ssh-keygen -R`
+   command that the refusal names.
 4. Once `pumpkin ls` reaches the controller, set `draining = false` and apply.
 5. At a tag, each member raises `.pumpkinversion` to its release.
 
@@ -281,7 +213,8 @@ apply of its own, outside them.
 terraform destroy
 ```
 
-This deletes the repositories with their images, so a record's images can no longer be pulled.
+This deletes the controller's data volume, with the records that no member copied, and the
+repositories with their images, so a record's images can no longer be pulled.
 The AMIs that Image Builder baked stay registered, as do their snapshots: deregister each
 `aws ec2 describe-images --owners self --filters 'Name=name,Values=pumpkin-<name>*'` lists. The
 state bucket and the OIDC provider are the account's, and stay.

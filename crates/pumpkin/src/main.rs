@@ -48,7 +48,7 @@ mod whole;
 mod workspace;
 
 use ending::{end, follow};
-use reaping::{Reaper, cancel, cancelled, reap};
+use reaping::{Reaper, cancel, reap};
 use run::{driver_run, run, start};
 
 // musl's allocator is much slower than glibc's at reading a run's records, as ripgrep found of its
@@ -93,7 +93,7 @@ fn main() -> Exit {
         Ok(cli::Command::Job(flags)) => job::job(flags),
         Ok(cli::Command::Boot) => job::boot(),
         Ok(cli::Command::Driver(driver)) => driver_run(driver),
-        Ok(cli::Command::Install(settings)) => host::install(&settings),
+        Ok(cli::Command::Install(target)) => host::install(&target),
         Ok(cli::Command::CheckDeployment(settings)) => deployment::check(&settings),
         Ok(cli::Command::Members) => host::members(),
         Ok(cli::Command::CheckMembers(dir)) => keydir::check(&dir),
@@ -188,42 +188,98 @@ fn not_utf8(what: &str, path: &str, absolute: &Path) -> String {
     )
 }
 
+/// The client of the controller that a command of `run` goes to, with the prefix of the run's id
+/// there, given `runs` and `controller`, its flags; `None` for a run of this machine's, which
+/// `--runs` or a record's path names, or with no controller in the configuration. Fails if
+/// `controller` names a controller and `run` names a record's path.
+fn client_of<'r>(
+    run: &'r cli::RunName,
+    runs: Option<&String>,
+    controller: Option<controller::Name>,
+) -> Result<Option<(config::Client, &'r str)>, String> {
+    if runs.is_some() {
+        return Ok(None);
+    }
+    match (run, controller) {
+        (cli::RunName::Record(path), Some(name)) => Err(format!(
+            "`{path}` is a record's path, and `--controller` names controller `{name}`, where a \
+             run is named by its id: give the run's id, or leave out `--controller`"
+        )),
+        (cli::RunName::Record(_), None) => Ok(None),
+        (cli::RunName::Prefix(prefix), name) => {
+            let client = config::client(None, name.as_ref())?;
+            Ok(client.map(|client| (client, prefix.as_str())))
+        }
+    }
+}
+
 fn wait(flags: cli::Wait) -> Result<Exit, String> {
-    let cli::Wait { run, runs, printed } = flags;
-    if let (cli::RunName::Prefix(prefix), None) = (&run, &runs)
-        && let Some(client) = config::client(None)?
-    {
+    let cli::Wait {
+        run,
+        runs,
+        controller,
+        printed,
+    } = flags;
+    if let Some((client, prefix)) = client_of(&run, runs.as_ref(), controller)? {
+        let name = &client.controller.name;
         // A run that has ended is copied here, and is read here; any other is waited for there.
-        if let Ok(record) = Record::find(Path::new(&default_runs()?), prefix)
+        if let Ok(record) = Record::find(&controller::copies(name)?, prefix)
             && let Some(ending) = record.ending()?
         {
-            let args = controller::here(&record, None)?;
-            return end(&record, &ending, printed, None, &args);
+            let args = controller::here(&record, None, Some(name))?;
+            let at = next::At::Controller(name.clone());
+            return end(&record, &ending, printed, &at, &args);
         }
         return controller::wait(&client, prefix, printed);
     }
     let (record, named) = found(run, runs)?;
-    follow(&record, "wait", named.as_deref(), printed)
+    follow(&record, "wait", &next::At::runs(named.as_deref()), printed)
 }
 
 fn ls(flags: cli::Ls) -> Result<Exit, String> {
-    let cli::Ls { runs, prefixes } = flags;
+    let cli::Ls {
+        runs,
+        controller,
+        prefixes,
+    } = flags;
     if runs.is_none()
-        && let Some(client) = config::client(None)?
+        && let Some(client) = config::client(None, controller.as_ref())?
     {
         return controller::ls(&client, &prefixes);
     }
     let (runs, named) = runs_dir(runs)?;
+    let at = next::At::runs(named.as_deref());
     let now = unix_now();
     let since = progress::listed_since(&prefixes, now);
-    let (listing, unlisted) = listed_in(Path::new(&runs), &prefixes, since, now, named.as_deref())?;
-    let lines = progress::lines(&listing, named.as_deref());
+    let (listing, unlisted) = listed_in(Path::new(&runs), &prefixes, since, now, &at)?;
+    said_beside(&listing, &unlisted);
+    let lines = progress::lines(&listing, &at);
     print(lines.as_bytes()).context("printing the runs failed")?;
-    if unlisted > 0 {
-        let runs = counted(unlisted, "run");
+    if !unlisted.is_empty() {
+        let runs = counted(unlisted.len(), "run");
         return Err(format!("{runs} can't be listed, as said above"));
     }
     Ok(Exit::Success)
+}
+
+/// Says what `ls` says before the table of `listing`, by id: each run that `unlisted` holds, and
+/// what of each run's log this `pumpkin` can't read.
+fn said_beside(listing: &progress::Listing, unlisted: &[progress::Unlisted]) {
+    let unread = listing.runs.iter().filter_map(|(id, entry)| {
+        let unread = entry.row()?.unread.as_ref()?;
+        Some((id, format!("run {id}: {unread}")))
+    });
+    let unlisted = unlisted.iter().flat_map(|run| {
+        let unread =
+            (run.unread.as_ref()).map(|unread| (&run.id, format!("run {}: {unread}", run.id)));
+        unread.into_iter().chain([(&run.id, run.message.clone())])
+    });
+    // Stable, so that a run's note comes before why it can't be listed.
+    let mut said: Vec<(&String, String)> = unread.chain(unlisted).collect();
+    said.sort_by_key(|(id, _)| *id);
+    for (_, message) in said {
+        say(message);
+    }
 }
 
 /// The time `since_epoch` after the Unix epoch, or the latest time jiff holds if that is past it.
@@ -239,26 +295,28 @@ fn unix_now() -> UnixTime {
 }
 
 /// The runs of `runs` whose ids start with one of `prefixes`, or every run if there are none, and
-/// how many can't be listed, each said as it is found. A run that ended before `since` is listed
-/// as older, and one that another build made and this can't read is an `unread` row. Each row is
-/// made at `now`, with its commands naming `named` as the runs directory. A `runs` that is missing
-/// is an empty listing unless `named` names it.
+/// those that can't be listed. A run that ended before `since` is listed as older, and one that
+/// another build made and this can't read is an `unread` row. Each row is made at `now`, with its
+/// commands naming the runs where `at` says. A `runs` that is missing is an empty listing unless
+/// `at` names it by `--runs`.
 fn listed_in(
     runs: &Path,
     prefixes: &[String],
     since: Option<UnixTime>,
     now: UnixTime,
-    named: Option<&str>,
-) -> Result<(progress::Listing, usize), String> {
+    at: &next::At,
+) -> Result<(progress::Listing, Vec<progress::Unlisted>), String> {
     let mut listing = progress::Listing::default();
-    if named.is_none() && !runs.try_exists().context(runs.display())? {
-        return Ok((listing, 0));
+    let mut unlisted = Vec::new();
+    if at.dir().is_none() && !runs.try_exists().context(runs.display())? {
+        return Ok((listing, unlisted));
     }
-    let mut unlisted = 0;
     for (id, record) in Record::all(runs)? {
         if !picked(prefixes, &id) {
             continue;
         }
+        // What of its log this `pumpkin` can't read, said even of a run that then can't be listed.
+        let mut unread = None;
         let listed = record
             .and_then(|record| {
                 if let Some(since) = since
@@ -266,7 +324,14 @@ fn listed_in(
                 {
                     return Ok(None);
                 }
-                progress::Listed::run(&record, record.ending()?).map(Some)
+                let ending = record.ending()?;
+                let runtime::Readout {
+                    progress,
+                    unread: parts,
+                } = record.progress()?;
+                unread = progress::unread(&parts);
+                let listed = progress::Listed::of(&record, record.task()?, ending, progress);
+                Ok(Some(listed))
             })
             .or_else(|error| {
                 let dir = runs.join(&id);
@@ -279,16 +344,18 @@ fn listed_in(
             });
         match listed {
             Ok(Some(listed)) => {
-                let row = progress::Row::of(&id, &listed, now, named);
-                listing.runs.insert(id, progress::Entry::Row(row));
+                let mut row = progress::Row::of(&id, &listed, now, at);
+                row.unread = unread;
+                listing.runs.insert(id, progress::Entry::Row(Box::new(row)));
             }
             Ok(None) => {
                 listing.runs.insert(id, progress::Entry::Older);
             }
-            Err(error) => {
-                say(error);
-                unlisted += 1;
-            }
+            Err(message) => unlisted.push(progress::Unlisted {
+                id,
+                unread,
+                message,
+            }),
         }
     }
     Ok((listing, unlisted))
@@ -338,36 +405,68 @@ fn check(flags: cli::Check) -> Result<Exit, String> {
     let cli::Check {
         entries,
         args: cli::TaskArgs(args),
+        config,
     } = flags;
     let formatter = style::Formatter::beside()?;
+    let upstreams = check_upstreams(config.as_deref())?;
     let mut failed = Vec::new();
     for entry in &entries {
-        let checked = match star::check(entry, &args, &formatter) {
-            Ok(Ok(())) => continue,
-            Ok(Err(problems)) => task_problems(entry, &problems),
-            Err(error) => format!("{entry}: {error}"),
+        let models = |workflow: &schema::workflow::Workflow| match &upstreams {
+            Some((path, upstreams)) => {
+                (upstreams.models(workflow).map(drop)).context(path.display())
+            }
+            None => Ok(()),
         };
-        say(checked);
+        match star::check(entry, &args, &formatter, models) {
+            Ok(Ok(star::Checked {
+                lint: Ok(()),
+                models: Ok(()),
+            })) => continue,
+            Ok(Ok(star::Checked { lint, models })) => {
+                if let Err(problems) = lint {
+                    say(task_problems(entry, &problems));
+                }
+                if let Err(error) = models {
+                    say(format_args!("{entry}: {error}"));
+                }
+            }
+            Ok(Err(problems)) => say(task_problems(entry, &problems)),
+            Err(error) => say(format_args!("{entry}: {error}")),
+        }
         failed.push(entry);
     }
     if failed.is_empty() {
         return Ok(Exit::Success);
     }
-    let again = source_again("check", &failed, &args)?;
+    let mut flags = arg_flags(&args).collect::<Vec<String>>();
+    if let Some(config) = &config {
+        flags.extend([
+            "--config".to_owned(),
+            absolute_utf8(config, "the configuration")?,
+        ]);
+    }
+    let entries: Result<Vec<String>, String> = (failed.iter())
+        .map(|entry| absolute_utf8(entry.path(), "the entry"))
+        .collect();
+    let again = next::again("check", &flags, &entries?);
     let them = if failed.len() == 1 { "it" } else { "them" };
     Err(format!("to check {them} again: {again}"))
 }
 
-fn source_again(
-    command: &str,
-    entries: &[&star::Entry],
-    args: &lang::Args,
-) -> Result<String, String> {
-    let flags = arg_flags(args).collect::<Vec<String>>();
-    let entries: Result<Vec<String>, String> = (entries.iter())
-        .map(|entry| absolute_utf8(entry.path(), "the entry"))
-        .collect();
-    Ok(next::again(command, &flags, &entries?))
+/// The configuration whose upstreams `check` checks each workflow's model routes against, and its
+/// path: the file that `config` names, or else the default one, unless there is none.
+fn check_upstreams(config: Option<&str>) -> Result<Option<(PathBuf, config::Upstreams)>, String> {
+    let path = match config {
+        Some(config) => PathBuf::from(config),
+        None => match default_config() {
+            // A file that can't be looked up is read, which says why.
+            Ok(path) if path.try_exists().unwrap_or(true) => path,
+            // A machine with no configuration, or no `HOME`, has no upstreams to check against.
+            Ok(_) | Err(_) => return Ok(None),
+        },
+    };
+    let upstreams = config::upstreams(&path)?;
+    Ok(Some((path, upstreams)))
 }
 
 fn arg_flags(args: &lang::Args) -> impl Iterator<Item = String> {
@@ -384,19 +483,27 @@ fn task_problems(entry: &star::Entry, problems: &lang::Problems) -> String {
     closing_problems(format_args!("{entry}: the task has"), problems.count())
 }
 
-/// `text`, which a sandbox may have shaped, on one line for a terminal: each control character
-/// but a tab escaped, a newline as `\n`.
+/// `text`, which a sandbox may have shaped, on one line for a terminal, as [`Escaped`] shows it.
 fn escaped(text: &str) -> String {
-    let mut shown = String::new();
-    for c in text.chars() {
-        // Control characters would steer the operator's terminal.
-        if c.is_control() && c != '\t' {
-            shown.extend(c.escape_debug());
-        } else {
-            shown.push(c);
+    Escaped(text).to_string()
+}
+
+/// Shows its text on one line for a terminal: each control character but a tab escaped, a
+/// newline as `\n`. It writes a character at a time, so a write that fails stops it there.
+struct Escaped<'a>(&'a str);
+
+impl fmt::Display for Escaped<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for c in self.0.chars() {
+            // Control characters would steer the operator's terminal.
+            if c.is_control() && c != '\t' {
+                write!(f, "{}", c.escape_debug())?;
+            } else {
+                fmt::Write::write_char(f, c)?;
+            }
         }
+        Ok(())
     }
-    shown
 }
 
 fn default_runs() -> Result<String, String> {

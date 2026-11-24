@@ -8,22 +8,22 @@ hyperedge each have core number one. An isolated vertex has core number zero.
 
 ## Run Codex
 
-Copy `examples/` into a task repository and pin `./pumpkin` to the commit you want to verify.
-When testing a release archive, use the examples and launcher from that release.
-Set `MODEL` to a Responses model with prices in your machine's
+From the root of a Pumpkin checkout, with `pumpkin` built as the [examples guide](../README.md)
+says, set `MODEL` to a Responses model in your machine's
 [upstream configuration](../../docs/models.md#upstreams-and-prices), then run
 
 ```sh
 task=examples/hypergraph/task.star
-./pumpkin check "$task" --arg "model=${MODEL:?set MODEL to the configured model name}" &&
-codex=$(./pumpkin run "$task" --arg "model=$MODEL") &&
-./pumpkin wait "$codex" &&
+.pumpkin/bin/pumpkin check "$task" --arg "model=${MODEL:?set MODEL to the configured model name}" &&
+codex=$(.pumpkin/bin/pumpkin run "$task" --arg "model=$MODEL") &&
+.pumpkin/bin/pumpkin wait "$codex" &&
 python3 examples/hypergraph/verify.py ".pumpkin/runs/$codex"
 ```
 
 Codex receives the graph and submission instructions. Its work phase lasts up to five minutes,
 and it can ask for two evaluations of up to 30 seconds each before submitting its final answer.
-The model route stops admitting requests once reported usage reaches $0.50. An admitted request
+Add `--arg budget_microusd=500000` to `check` and `run` to stop the model route admitting
+requests once reported usage reaches $0.50, which needs the model's prices. An admitted request
 can take the total past that amount. [Model budgets](../../docs/models.md#a-budget)
 
 Each judge runs in a fresh sandbox and enumerates vertex subsets. It awards one point for the

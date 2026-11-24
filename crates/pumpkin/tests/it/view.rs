@@ -1,17 +1,20 @@
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{BufRead as _, BufReader, Read as _, Write as IoWrite};
 use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt as _;
+use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use expect_test::expect;
+use schema::sandbox::RESULT_MAX_BYTES;
 use serde_json::{Value, json};
 
 use super::{
-    Prices, Scratch, Step, asked, check, cut, lease_places, logged, payload, poll, returned,
-    whole_log, write_record, write_run,
+    Prices, Scratch, Step, asked, check, cut, lease_places, lock_driver, logged, payload, poll,
+    returned, whole_log, write_record, write_run,
 };
 
 /// A `pumpkin view` process that listens on loopback, and is killed when dropped.
@@ -206,8 +209,7 @@ fn write_served(scratch: &Scratch) -> File {
         None,
         &priced,
     );
-    let driver = File::open(dir.join("driver.pid")).unwrap();
-    driver.lock().unwrap();
+    let driver = lock_driver(&dir);
     // A record with no log.
     write_record(scratch, "20261110-120000-0000000d", true, None);
     // A run whose agent made no model request used no tokens; one whose requests none of the
@@ -552,7 +554,7 @@ fn serves_runs() {
 
 /// A `pumpkin controller serve` process, which answers a request for the view in each frame of
 /// its standard input.
-pub(super) struct Piped {
+struct Piped {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
@@ -560,7 +562,7 @@ pub(super) struct Piped {
 
 impl Piped {
     /// Starts it as the user whose home is the scratch directory, and reads its hello.
-    pub(super) fn start(scratch: &Scratch) -> Self {
+    fn start(scratch: &Scratch) -> Self {
         let mut command = scratch.pumpkin(&["controller", "serve", "--member", "alice"]);
         command.env("HOME", &scratch.0);
         command.stdin(Stdio::piped()).stdout(Stdio::piped());
@@ -575,9 +577,9 @@ impl Piped {
         }
     }
 
-    /// Returns the answer to a request for `target`, and its body.
-    pub(super) fn ask(&mut self, target: &str, deflate: bool) -> (Value, Vec<u8>) {
-        let asking = json!({ "type": "view", "target": target, "deflate": deflate });
+    fn ask(&mut self, target: &str, deflate: bool) -> (Value, Vec<u8>) {
+        let asking =
+            json!({ "type": "view", "target": target, "deflate": deflate, "controller": "alice" });
         schema::frame::write(&mut self.stdin, &asking, &[]).unwrap();
         let (answer, _) = schema::frame::read::<Value>(&mut self.stdout)
             .unwrap()
@@ -689,7 +691,7 @@ fn answers_over_a_pipe() {
             /api/nothing: 404 Not Found
             /api/runs/<ended>: 200 OK, as `pumpkin view` answers but for its `again`, {"command":"pumpkin run --runs <scratch>/runs <scratch>/task.star"}
             /api/runs/<ended>/since?log=0: 200 OK, as `pumpkin view` answers but for its `again`, {"command":"pumpkin run --runs <scratch>/runs <scratch>/task.star"}
-            cancel: {"error":"the view on a controller answers no cancel: cancel run <live> from the page that `pumpkin view` serves, or run: pumpkin cancel <live>"}
+            cancel: {"error":"the view on a controller answers no cancel: cancel run <live> from the page that `pumpkin view` serves, or run: pumpkin cancel --controller alice <live>"}
             the live run, after a line more: live true, 1 record, from where the last poll ended
             once its standard input ends: exit status: 0"#]],
     );
@@ -712,8 +714,7 @@ fn follows_a_live_run() {
         None,
         &lease_places(Prices::Both),
     );
-    let driver = File::open(dir.join("driver.pid")).unwrap();
-    driver.lock().unwrap();
+    let driver = lock_driver(&dir);
     let mut grown = Vec::new();
     for request in 0..1500 {
         let caller = json!({ "caller": "agent-0", "request": request });
@@ -1141,8 +1142,7 @@ fn starts_over_a_shortened_log() {
         None,
         &places,
     );
-    let driver = File::open(dir.join("driver.pid")).unwrap();
-    driver.lock().unwrap();
+    let driver = lock_driver(&dir);
     let served = Served::start(&scratch);
     let mut steps = Vec::new();
     let run = served.get(&format!("/api/runs/{id}"));
@@ -1154,8 +1154,7 @@ fn starts_over_a_shortened_log() {
         "GET /api/runs/<id>: end {}, log_epoch {}, a build that kept no routes: {routes:?}",
         run["end"], run["log_epoch"]
     ));
-    let records = served.get(&format!("/api/runs/{id}/since?log=0"))["records"].clone();
-    let byte = &records[20]["byte"];
+    let byte = &served.get(&format!("/api/runs/{id}/since?log=0"))["records"][20]["byte"];
     let log_path = dir.join("log.jsonl");
     let log = fs::read_to_string(&log_path).unwrap();
     // The log cut back to its first 30 lines, so that the byte still starts one.
@@ -1169,8 +1168,9 @@ fn starts_over_a_shortened_log() {
         steps.push(format!("GET {path}\n{status}\n{body}"));
     }
     let run = served.get(&format!("/api/runs/{id}"));
+    let row = served.get("/api/runs")["runs"][0]["started_over"].clone();
     steps.push(format!(
-        "then GET /api/runs/<id>: end {}, log_epoch {}",
+        "then GET /api/runs/<id>: end {}, log_epoch {}; its row's started_over: {row}",
         run["end"], run["log_epoch"]
     ));
     let path = format!("/api/runs/{id}/since?log={byte}&log_epoch=1");
@@ -1195,7 +1195,7 @@ fn starts_over_a_shortened_log() {
             GET /api/runs/<id>/log?at=3294&log_epoch=0
             HTTP/1.1 409 Conflict
             {"error":"run <id>'s log started over since the reply that gave byte 3294: read the run again, and its log from byte 0","log_epoch":1}
-            then GET /api/runs/<id>: end 4645, log_epoch 1
+            then GET /api/runs/<id>: end 4645, log_epoch 1; its row's started_over: "run <id>: its log is 4645 bytes, shorter than the 10332 bytes read of it before: reading it again from its start"
             GET /api/runs/<id>/since?log=3294&log_epoch=1
             end 4645, log_epoch 1, 10 records"#]],
     );
@@ -1263,10 +1263,6 @@ fn loaded(path: &str, body: &str) -> Vec<String> {
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "its snapshot has a line for each file of the page"
-)]
 fn serves_the_page() {
     let scratch = Scratch::new();
     fs::create_dir_all(scratch.0.join("runs")).unwrap();
@@ -1275,6 +1271,10 @@ fn serves_the_page() {
     let no_token = [("X-Pumpkin-Token", "")];
     let mut steps = Vec::new();
     let mut paths = vec!["/".to_owned()];
+    // How the page's files are served, by kind, so that a file added to the page changes nothing.
+    let mut kinds = BTreeSet::new();
+    let mut preloaded = BTreeSet::new();
+    let mut classic = String::new();
     let mut at = 0;
     while let Some(path) = paths.get(at).cloned() {
         at += 1;
@@ -1286,21 +1286,33 @@ fn serves_the_page() {
             line.map_or("none", |line| &line[name.len() + 2..])
                 .to_owned()
         };
-        steps.push(format!(
-            "{path}: {} {}; {}",
+        let answered = format!(
+            "{} {}; {}",
             head.lines().next().unwrap(),
             header("Content-Type"),
             header("Cache-Control"),
-        ));
+        );
         assert_eq!(header("Content-Length"), body.len().to_string(), "{path}");
         let policy = format!("policy: {}", header("Content-Security-Policy"));
         if path == "/" {
+            steps.push(format!("{path}: {answered}"));
             steps.push(policy.clone());
             let page = String::from_utf8_lossy(&body);
-            let head = page
-                .lines()
-                .filter(|line| line.starts_with("<script") || line.starts_with("<link"));
-            steps.extend(head.map(|line| format!("head: {line}")));
+            for line in page.lines() {
+                let preload = r#"<link rel="modulepreload" href=""#;
+                if let Some(href) = line.strip_prefix(preload) {
+                    preloaded.insert(href.trim_end_matches("\">").to_owned());
+                } else if line.starts_with("<script") || line.starts_with("<link") {
+                    steps.push(format!("head: {line}"));
+                }
+                if let Some(src) = line.strip_prefix(r#"<script src=""#) {
+                    classic = src.split('"').next().unwrap().to_owned();
+                }
+            }
+        } else {
+            let (dir, name) = path.rsplit_once('/').unwrap();
+            let (_, extension) = name.rsplit_once('.').unwrap();
+            kinds.insert(format!("{dir}/*.{extension}: {answered}"));
         }
         assert_eq!(steps[1], policy, "{path}");
         let font = header("Content-Type") == "font/woff2";
@@ -1311,6 +1323,12 @@ fn serves_the_page() {
             }
         }
     }
+    // Each module that the page loads is preloaded, so that none waits for its importer.
+    let modules: BTreeSet<&String> = (paths.iter())
+        .filter(|path| Path::new(path).extension() == Some("js".as_ref()) && **path != classic)
+        .collect();
+    assert_eq!(modules, preloaded.iter().collect());
+    steps.extend(kinds);
     let dir = paths[1].rsplit_once('/').unwrap().0.to_owned();
     // A page of another build, still open, asks for a file at its own path, which the files of
     // this one are never served at.
@@ -1338,48 +1356,9 @@ fn serves_the_page() {
             head: <script src="/<digest>/scheme.js"></script>
             head: <link rel="stylesheet" href="/<digest>/style.css">
             head: <script type="module" src="/<digest>/app.js"></script>
-            head: <link rel="modulepreload" href="/<digest>/app.js">
-            head: <link rel="modulepreload" href="/<digest>/diff.js">
-            head: <link rel="modulepreload" href="/<digest>/failure.js">
-            head: <link rel="modulepreload" href="/<digest>/h.js">
-            head: <link rel="modulepreload" href="/<digest>/inspector.js">
-            head: <link rel="modulepreload" href="/<digest>/key.js">
-            head: <link rel="modulepreload" href="/<digest>/ledger.js">
-            head: <link rel="modulepreload" href="/<digest>/list.js">
-            head: <link rel="modulepreload" href="/<digest>/log.js">
-            head: <link rel="modulepreload" href="/<digest>/payload.js">
-            head: <link rel="modulepreload" href="/<digest>/records.js">
-            head: <link rel="modulepreload" href="/<digest>/returned.js">
-            head: <link rel="modulepreload" href="/<digest>/rows.js">
-            head: <link rel="modulepreload" href="/<digest>/run.js">
-            head: <link rel="modulepreload" href="/<digest>/stats.js">
-            head: <link rel="modulepreload" href="/<digest>/steps.js">
-            head: <link rel="modulepreload" href="/<digest>/talk.js">
-            head: <link rel="modulepreload" href="/<digest>/timeline.js">
-            head: <link rel="modulepreload" href="/<digest>/trace.js">
-            /<digest>/style.css: HTTP/1.1 200 OK text/css; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/app.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/diff.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/failure.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/h.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/inspector.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/key.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/ledger.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/list.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/log.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/payload.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/records.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/returned.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/rows.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/run.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/stats.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/steps.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/talk.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/timeline.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/trace.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/scheme.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
-            /<digest>/hanken-grotesk.woff2: HTTP/1.1 200 OK font/woff2; public, max-age=31536000, immutable
-            /<digest>/jetbrains-mono.woff2: HTTP/1.1 200 OK font/woff2; public, max-age=31536000, immutable
+            /<digest>/*.css: HTTP/1.1 200 OK text/css; charset=utf-8; public, max-age=31536000, immutable
+            /<digest>/*.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
+            /<digest>/*.woff2: HTTP/1.1 200 OK font/woff2; public, max-age=31536000, immutable
             /nothing.js []: HTTP/1.1 404 Not Found {"error":"nothing is at `/nothing.js`: expected the page at `/`, or the runs at `/api/runs` and below it"}
             /app.js []: HTTP/1.1 404 Not Found {"error":"nothing is at `/app.js`: expected the page at `/`, or the runs at `/api/runs` and below it"}
             /0000000000000000000000000000000000000000000000000000000000000000/app.js []: HTTP/1.1 404 Not Found {"error":"nothing is at `/0000000000000000000000000000000000000000000000000000000000000000/app.js`: expected the page at `/`, or the runs at `/api/runs` and below it"}
@@ -1537,14 +1516,13 @@ fn pages_the_list() {
 
 /// The model exchanges that a run's record keeps under `model/`, with each item stored once and
 /// named by its number, as a test needs no SHA-256.
-pub(super) struct Model {
+struct Model {
     dir: std::path::PathBuf,
     items: Vec<String>,
 }
 
 impl Model {
-    /// Starts the store in the run's directory `dir`.
-    pub(super) fn new(dir: &std::path::Path) -> Self {
+    fn new(dir: &std::path::Path) -> Self {
         fs::create_dir_all(dir.join("model/items")).unwrap();
         Self {
             dir: dir.join("model"),
@@ -1569,7 +1547,7 @@ impl Model {
     ///
     /// The request holds `items` in its `field`, each of `whole` as one item of its own, and
     /// `rest`. A response of `None` is named by `kept` but not written.
-    pub(super) fn keep(
+    fn keep(
         &mut self,
         n: u64,
         field: &str,
@@ -1601,7 +1579,7 @@ impl Model {
 }
 
 /// The record of `caller` starting model request `n` at `seconds`.
-pub(super) fn started(seconds: u64, caller: &str, n: u64) -> Value {
+fn started(seconds: u64, caller: &str, n: u64) -> Value {
     let event = json!({ "kind": "model_request_started", "caller": caller, "request": n });
     let mut record = logged(seconds, event, json!([]));
     record["observed_ns"] = json!((seconds * 1_000_000_000 - 1).to_string());
@@ -1612,7 +1590,7 @@ pub(super) fn started(seconds: u64, caller: &str, n: u64) -> Value {
 ///
 /// With an `api`, the record also names the upstream and model and times the first byte and
 /// token, as a forwarded answer does.
-pub(super) fn answered(
+fn answered(
     seconds: u64,
     caller: &str,
     n: u64,
@@ -1689,12 +1667,12 @@ fn entries_counted(served: &Served, trace: &str, steps: &Value) {
 }
 
 /// A user message of the Responses API.
-pub(super) fn user(text: &str) -> Value {
+fn user(text: &str) -> Value {
     json!({ "type": "message", "role": "user", "content": [{ "type": "input_text", "text": text }] })
 }
 
 /// An assistant message of the Responses API.
-pub(super) fn said(text: &str) -> Value {
+fn said(text: &str) -> Value {
     json!({ "type": "message", "role": "assistant", "content": [{ "type": "output_text", "text": text }] })
 }
 
@@ -2415,8 +2393,7 @@ fn follows_a_trace() {
         None,
         &lease_places(Prices::Both),
     );
-    let driver = File::open(dir.join("driver.pid")).unwrap();
-    driver.lock().unwrap();
+    let driver = lock_driver(&dir);
     // Request 1 is in flight, its answer begun, its last line torn.
     let response = dir.join("model/1.response");
     let begun = done(said("part one"));
@@ -2795,8 +2772,7 @@ fn places_steps_whatever_their_answers_order() {
     let whole: Vec<&str> = whole.split_inclusive('\n').collect();
     let first = whole.len() - order.len();
     fs::write(&log_path, whole[..first].concat()).unwrap();
-    let driver = File::open(dir.join("driver.pid")).unwrap();
-    driver.lock().unwrap();
+    let driver = lock_driver(&dir);
     let served = Served::start(&scratch);
     let trace = |run: &str| format!("/api/runs/{run}/trace/job-0");
     let first_reply = served.get(&format!("{}/steps", trace(live)));
@@ -2892,10 +2868,6 @@ fn places_steps_whatever_their_answers_order() {
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "most of it is the reads and their snapshot"
-)]
 fn holds_each_live_trace_and_the_last_three_ended() {
     let scratch = Scratch::new();
     let (ended, live) = ("20261110-210000-00000017", "20261110-210000-00000018");
@@ -2916,8 +2888,7 @@ fn holds_each_live_trace_and_the_last_three_ended() {
         let places = lease_places(Prices::Both);
         write_run(&scratch, id, since, &log, outcome, &places);
     }
-    let driver = File::open(scratch.0.join("runs").join(live).join("driver.pid")).unwrap();
-    driver.lock().unwrap();
+    let _driver = lock_driver(&scratch.0.join("runs").join(live));
     let served = Served::start(&scratch);
     let path = |id: &str, caller: &str| format!("/api/runs/{id}/trace/{caller}/steps");
     // Each caller's held read costs the bytes of its request alone.
@@ -3135,4 +3106,88 @@ fn times_a_callers_ops() {
             caller: "job-1"
         "#]],
     );
+}
+
+// A call that returns the most its body may, and one that fails with as much: each reply that
+// says how they ended cuts it short.
+#[test]
+fn cuts_a_long_call_end_short() {
+    let scratch = Scratch::new();
+    let id = "20261110-230000-00000019";
+    let most = usize::try_from(RESULT_MAX_BYTES).unwrap();
+    let output = "a".repeat(most - 64);
+    let values = json!([{ "name": "output", "value": output }, { "name": "score", "value": 1 }]);
+    let reason = "a line of stdout\n".repeat(most / 17);
+    let ends = [
+        json!({ "kind": "call_returned", "job": 0, "returned": values }),
+        json!({ "kind": "call_failed", "job": 1, "reason": reason }),
+    ];
+    let mut log = Vec::new();
+    for (job, end) in (0_u64..).zip(ends) {
+        let arrived = json!({
+            "kind": "op_arrived", "caller": "agent-0", "op": job,
+            "request": { "kind": "call", "grant": "train" },
+        });
+        let start = json!([{ "kind": "reply", "op": job, "reply": { "kind": "call", "job": job } }, {
+            "kind": "start_call", "caller": "agent-0", "job": job, "grant": "train",
+            "payload": payload(), "timeout_ns": "60000000000",
+        }]);
+        log.extend([
+            logged(1, arrived, start),
+            logged(1, json!({ "kind": "call_started", "job": job }), json!([])),
+            logged(2, end, json!([])),
+        ]);
+    }
+    let outcome = Some(returned(6.0));
+    let places = lease_places(Prices::Nothing);
+    write_run(&scratch, id, asked(id, 0), &log, outcome, &places);
+    let served = Served::start(&scratch);
+    let (_, body) = served.get_with(&format!("/api/runs/{id}"), &[]);
+    // Four cut reasons of 8 KiB, and some kilobytes of the rest.
+    assert!(body.len() < 64 * 1024, "{} bytes", body.len());
+    let run: Value = serde_json::from_str(&body).unwrap();
+    let ops = served.get(&format!("/api/runs/{id}/trace/agent-0/ops"));
+    let summary = run["summary"].as_str().unwrap();
+    let mut said = String::new();
+    for job in 0..2 {
+        let called = summary
+            .lines()
+            .find(|line| line.contains(&format!("train job {job}")));
+        let lane = &run["lanes"][1 + job];
+        said.push_str(&ending("summary", called.unwrap().trim_start()));
+        said.push_str(&ending(
+            lane["lane"].as_str().unwrap(),
+            lane["said"].as_str().unwrap(),
+        ));
+        said.push_str(&ending("op", ops["ops"]["result"][job].as_str().unwrap()));
+    }
+    said.push_str(&ending(
+        "failure",
+        run["failures"][0]["reason"].as_str().unwrap(),
+    ));
+    check(
+        &scratch,
+        [Step::Ran(said)],
+        false,
+        &[],
+        &expect![[r#"
+            summary: `0:01 train job 0 of agent 0 on modal/a100_80 wit`, 233 bytes, ending `aaaaaaaaaaaaaaaaaaaaaaa…`
+            job 0: `train job 0 of agent 0 on modal/a100_80 with unk`, 228 bytes, ending `aaaaaaaaaaaaaaaaaaaaaaa…`
+            op: `returned output="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`, 152 bytes, ending `aaaaaaaaaaaaaaaaaaaaaaa…`
+            summary: `0:01 train job 1 of agent 0 on modal/a100_80 wit`, 8293 bytes, ending `t\na line of stdout\na …`
+            job 1: `train job 1 of agent 0 on modal/a100_80 with unk`, 8288 bytes, ending `t\na line of stdout\na …`
+            op: `failed: a line of stdout\na line of stdout\na li`, 8203 bytes, ending `t\na line of stdout\na …`
+            failure: `a line of stdout
+            a line of stdout
+            a line of stdo`, 8218 bytes, ending `… [1048560 bytes in all]`
+        "#]],
+    );
+}
+
+/// `text` by its start, its length in bytes and its end, after `name`, on a line.
+fn ending(name: &str, text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let start: String = chars[..chars.len().min(48)].iter().collect();
+    let end: String = chars[chars.len().saturating_sub(24)..].iter().collect();
+    format!("{name}: `{start}`, {} bytes, ending `{end}`\n", text.len())
 }

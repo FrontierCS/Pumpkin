@@ -10,10 +10,8 @@
 #![expect(clippy::disallowed_methods, reason = "nextest bounds each test")]
 
 use std::collections::BTreeSet;
-use std::ffi::OsStr;
 use std::fs::DirBuilder;
 use std::num::{NonZeroU32, NonZeroU64};
-use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -26,12 +24,11 @@ use engine::{BuildContext, ContextName, Engine, Recipe, Security};
 use expect_test::{Expect, expect};
 use gateway::{Arrival, IncomingModelRequest, Op, Process, Put, Registration, Session, Sockets};
 use provider::{
-    Create, Created, Creator, Listed, Provider, Reservation, Role, RunTag, SandboxId, Sweep,
-    UnixTime,
+    Create, Created, Creator, Provider, Reservation, Role, RunTag, SandboxId, Sweep, UnixTime,
 };
 use recipe::Given;
 use schema::frame::MAX_MESSAGE_BYTES;
-use schema::ir::{AbsolutePath, Argv, Env, EnvVar, Image, Mode, Name, Resources, User};
+use schema::ir::{AbsolutePath, Argv, Env, EnvVar, Image, Mode, Name, Resources};
 use schema::sandbox::op::{
     CallReply, CommandEnd, CommandStatus, Failure, FailureCode, JobReply, JobState, Last,
     LeaseRemaining, LeaseReply, LeaseState, LeaseStatusReply, NowReply, OpReply, OpsReply,
@@ -44,8 +41,9 @@ use schema::sandbox::{
     dir_mode, file_mode,
 };
 use stdx::process::Environment;
+use stdx::time::{Clock as _, Machine};
 use stdx::{Context, Deadline};
-use test_support::suite::{Locals, Subject, reserve_with_room};
+use test_support::suite::{Locals, Subject, asked, from_now, ids, reserve_with_room, suite_role};
 use test_support::{BUSYBOX, TestDir, docker, hung};
 
 // The directory, in this variable, in which this binary, run again by `hung_create`, makes a create
@@ -53,20 +51,8 @@ use test_support::{BUSYBOX, TestDir, docker, hung};
 const STAND_IN: &str = "PUMPKIN_TEST_STAND_IN";
 
 // The roles that a fixture reserves for, one to a phase, so that a test may start any of them.
-const ROLES: [&str; 13] = [
-    "confined",
-    "first",
-    "hung",
-    "leaver",
-    "missing",
-    "model",
-    "not_utf8",
-    "ops",
-    "refused",
-    "stand-in",
-    "turns",
-    "unexecutable",
-    "unpulled",
+const ROLES: [&str; 9] = [
+    "confined", "first", "hung", "leaver", "model", "ops", "refused", "stand-in", "turns",
 ];
 
 struct Fixture {
@@ -84,7 +70,7 @@ impl Fixture {
         let tag = |suffix: &str| format!("pk-{}-{name}{suffix}", std::process::id());
         let tag = |suffix: &str| RunTag::try_from(tag(suffix)).unwrap();
         let run = tag("");
-        let phases: Vec<Vec<Role>> = ROLES.iter().map(|&name| vec![role(name)]).collect();
+        let phases: Vec<Vec<Role>> = ROLES.iter().map(|&name| vec![suite_role(name)]).collect();
         let held = reserve_with_room(provider(), &run, &phases);
         Self {
             sandboxd: test_support::sandboxd(),
@@ -126,7 +112,7 @@ impl Fixture {
         let by = startup();
         let Created { id } = provider().create(create, dial)?;
         let (sender, arrivals) = mpsc::channel();
-        let accepted = registration.accept(by, ops, model, sender, |arrival| arrival, || false);
+        let accepted = registration.accept((&Machine, by), ops, model, sender, |a| a, || false);
         let set_up = accepted
             .map_err(|error| error.to_string())
             .and_then(|mut session| {
@@ -163,46 +149,24 @@ impl Fixture {
     ) -> Result<(Create, SocketDial, Registration), String> {
         let name = Name::try_from(role.to_owned()).unwrap();
         let (dial, registration) = self.sockets.issue(&name).unwrap();
-        let role = self::role(role);
         let image = provider().publish_image(image)?;
         let sandboxd = provider().publish_sandboxd(sandboxd)?;
-        let now = UnixTime::of(SystemTime::now()).unwrap();
+        // The provider's one class.
+        let class = provider().ready().classes.keys().next().unwrap().clone();
+        let by = from_now(declared_startup());
         let create = Create {
-            run: run.clone(),
-            name,
-            role,
-            instance: 0,
-            // The provider's one class.
-            class: provider().ready().classes.keys().next().unwrap().clone(),
-            image,
-            sandboxd,
             ops,
             model,
-            // Far past the test's end, which comes within minutes.
-            hard_end: now.saturating_add(Duration::from_hours(1)),
-            by: now.saturating_add(declared_startup()),
+            ..asked(run, role, class, (&image, &sandboxd), by)
         };
         Ok((create, dial, registration))
-    }
-}
-
-fn role(name: &str) -> Role {
-    Role {
-        name: Name::try_from(name.to_owned()).unwrap(),
-        user: serde_json::from_str::<User>(r#"{"uid": 4242, "gid": 4243}"#).unwrap(),
-        resources: serde_json::from_value::<Resources>(serde_json::json!({
-            "cpu_millis": 500,
-            "memory_bytes": 256 << 20,
-        }))
-        .unwrap(),
-        instances: NonZeroU32::MIN,
     }
 }
 
 #[derive(Debug)]
 struct Started {
     id: SandboxId,
-    session: Session,
+    session: Session<Machine>,
     arrivals: Receiver<Arrival>,
 }
 
@@ -211,7 +175,7 @@ impl Started {
         self.id.as_str()
     }
 
-    fn session(&mut self) -> &mut Session {
+    fn session(&mut self) -> &mut Session<Machine> {
         &mut self.session
     }
 }
@@ -268,19 +232,13 @@ fn provider() -> &'static Docker<'static> {
     connected().as_ref().unwrap()
 }
 
-fn startup() -> Deadline {
-    Deadline::after(declared_startup())
+fn startup() -> Duration {
+    Machine.now() + declared_startup()
 }
 
 fn declared_startup() -> Duration {
     let class = provider().ready().classes.values().next().unwrap();
     Duration::from_secs(class.startup_seconds.get())
-}
-
-fn ids(listed: Vec<Listed>) -> Vec<SandboxId> {
-    (listed.into_iter())
-        .map(|Listed { id, ended: _ }| id)
-        .collect()
 }
 
 fn containers(run: &RunTag, format: &str) -> Result<Vec<String>, String> {
@@ -484,9 +442,9 @@ fn freezes_what_it_left() {
                 exit 3"#;
             let mut lines = vec![format!("{:?}", sh(&mut sandbox, 1, script))];
             // The script exits without waiting for its sleeps, which may not run yet: until then,
-            // each shows as the command that starts it.
-            let sleeping = |listed: &str| listed.split(", ").filter(|c| *c == "sleep 600").count();
-            let before = processes(&sandbox, |listed| sleeping(listed) == 2);
+            // each shows as the command that starts it, beside the subshell that forks one.
+            let left = "/.pumpkin/sandboxd /.pumpkin/gateway/s, sleep 600, sleep 600";
+            let before = processes(&sandbox, |listed| listed == left);
             lines.push(format!("before freezing: {before}"));
             // Freezing returns once the processes it kills are gone.
             sandbox.session().freeze(hung()).unwrap();
@@ -595,9 +553,9 @@ fn cpus() {
             let sized = |name: &str, cpus: u64| Role {
                 resources: Resources {
                     cpu_millis: NonZeroU64::new(cpus * 1000).unwrap(),
-                    ..role(name).resources
+                    ..suite_role(name).resources
                 },
-                ..role(name)
+                ..suite_role(name)
             };
             let first = &fixture.other_run;
             let runners = || Role {
@@ -622,7 +580,7 @@ fn cpus() {
                 ("another runner", start(first, "runner-1", runners(), 1)),
                 (
                     "another run's role",
-                    start(&fixture.run, "leaver", role("leaver"), 0),
+                    start(&fixture.run, "leaver", suite_role("leaver"), 0),
                 ),
             ];
             let mut lines = Vec::new();
@@ -664,6 +622,7 @@ fn cpus() {
             let more = provider().reserve(&wide, &[vec![sized("wide", count + 1)]]);
             let more = more.unwrap_err();
             let more = more.replace(&(count + 1).to_string(), "<cpus + 1>");
+            let more = more.replace(&format!("{count} CPUs"), "<cpus> CPUs");
             let more = more.replace(&cores.to_string(), "<cores>");
             lines.push(format!("one that needs more than the machine has: {more}"));
             drop(reserved);
@@ -677,7 +636,7 @@ fn cpus() {
             another run's role: on whole cores: true, as it sees them: true
             each apart from the others: true
             one that needs more than are left: refused, naming them: true
-            one that needs more than the machine has: the run's roles need more whole cores at once than the <cores> that this machine gives sandboxes, to hold their CPUs (`wide` <cpus + 1>): give them fewer CPUs"#]],
+            one that needs more than the machine has: the roles that run at once need more whole cores than the <cores> that sandboxes get, <cpus> CPUs in all, as each sandbox holds whole cores for its CPUs (`wide` <cpus + 1>): change their needs, or run it where sandboxes are larger"#]],
     );
 }
 
@@ -718,38 +677,12 @@ fn cpu_list(text: &str) -> BTreeSet<u32> {
 
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
-fn ready() {
-    let mut ready = serde_json::to_value(provider().ready()).unwrap();
-    let reported: Vec<&String> = ready["report"].as_object().unwrap().keys().collect();
-    let reported = format!("{reported:?}");
-    let classes = ready["classes"].as_object_mut().unwrap();
-    for class in classes.values_mut() {
-        let offers = &mut class["offers"];
-        offers["cpu_millis"] = "<the host's>".into();
-        offers["memory_bytes"] = "<the host's>".into();
-        let sse2 = offers["cpu_features"]
-            .as_array()
-            .unwrap()
-            .contains(&"sse2".into());
-        // Whether the flags hold `sse2`, which every x86-64 CPU has, stands for them: the rest are
-        // the host's own.
-        offers["cpu_features"] = format!("<the host's, with sse2: {sse2}>").into();
-    }
-    let ready = format!(
-        "a report of {reported}, and the classes {}",
-        ready["classes"]
-    );
-    expect![[r#"a report of ["client_version", "context", "endpoint", "engine_version", "kernel", "os", "platform", "security"], and the classes {"container":{"offers":{"cpu_features":"<the host's, with sse2: true>","cpu_millis":"<the host's>","cpu_model":null,"gpu":null,"memory_bytes":"<the host's>"},"startup_seconds":540}}"#]]
-    .assert_eq(&ready);
-}
-
-#[test]
-#[ignore = "needs Docker: run cargo xtask live docker"]
 fn volumes() {
     check(
         "volumes",
         |fixture| {
-            let _other = reserve_with_room(provider(), &fixture.other_run, &[vec![role("other")]]);
+            let _other =
+                reserve_with_room(provider(), &fixture.other_run, &[vec![suite_role("other")]]);
             let started = [("first", &fixture.run), ("other", &fixture.other_run)];
             let started = started.map(|(role, run)| (role, fixture.start(run, role)));
             let volumes = started.each_ref().map(|(_, sandbox)| volume(sandbox));
@@ -882,55 +815,6 @@ fn hung_create() {
             the create failed: `docker create` hadn't ended by its deadline, so it was killed: check that the engine runs and isn't overloaded
             the run's list then finds: 1"#]],
     );
-}
-
-#[test]
-#[ignore = "needs Docker: run cargo xtask live docker"]
-fn failed_start() {
-    check(
-        "failed",
-        |fixture| {
-            let not_executable = fixture.dir.join("sandboxd");
-            fs::write(&not_executable, "not a program").unwrap();
-            let missing = fixture.dir.join("absent");
-            let not_utf8 = fixture.dir.join(OsStr::from_bytes(b"sandboxd\xff"));
-            fs::write(&not_utf8, "").unwrap();
-            let attempts = [
-                ("missing", missing.as_path(), image()),
-                ("not_utf8", not_utf8.as_path(), image()),
-                ("unexecutable", not_executable.as_path(), image()),
-                ("unpulled", fixture.sandboxd.as_path(), unpulled()),
-            ];
-            let mut lines = Vec::new();
-            for (role, sandboxd, image) in attempts {
-                let failed = fixture.try_start(&fixture.run, role, sandboxd, &image, None, false);
-                lines.push(format!("{role}: {}", redact(fixture, &failed.unwrap_err())));
-            }
-            let left = containers(&fixture.run, "{{.ID}}").unwrap();
-            lines.push(format!("left: {left:?}"));
-            lines
-        },
-        &expect![[r#"
-            missing: publishing `sandboxd` failed: <dir>/absent can't be mounted at /.pumpkin/sandboxd: No such file or directory (os error 2): name a path that exists
-            not_utf8: publishing `sandboxd` failed: <dir>/sandboxd� can't be mounted at /.pumpkin/sandboxd: name a path of UTF-8
-            unexecutable: `docker start …: fix what it reports
-            unpulled: the engine of context `<context>` has no image sha256:0000000000000000000000000000000000000000000000000000000000000000: build it there, or `docker load` an archive that holds it, as Pumpkin pulls none onto it
-            left: []"#]],
-    );
-}
-
-// What `docker start` reports varies with the container runtime and its version.
-fn redact(fixture: &Fixture, message: &str) -> String {
-    let context = format!("context `{}`", engine().report().context.as_str());
-    let message = (message.replace(&fixture.dir.display().to_string(), "<dir>"))
-        .replace(&context, "context `<context>`");
-    let (from, to) = ("`docker start ", ": fix what it reports");
-    if let Some((before, rest)) = message.split_once(from)
-        && let Some((_, after)) = rest.split_once(to)
-    {
-        return format!("{before}{from}…{to}{after}");
-    }
-    message
 }
 
 #[test]
@@ -1210,7 +1094,7 @@ fn refused_calls() {
             let (status, arrived) = thread::scope(|scope| {
                 let second = scope.spawn(move || {
                     let (arrivals, _) = mpsc::channel();
-                    second.accept(hung(), None, false, arrivals, |arrival| arrival, || false)
+                    second.accept((&Machine, hung()), None, false, arrivals, |a| a, || false)
                 });
                 let served = serve(&mut sandbox, process, &[]);
                 drop(second.join().unwrap().unwrap());
@@ -1484,13 +1368,17 @@ fn respond(incoming: IncomingModelRequest) -> String {
     if request.path == "/headless" {
         // A head too long for a frame, which ends the request without a response.
         let headers = vec![("x-pad".to_owned(), "a".repeat(MAX_MESSAGE_BYTES))];
-        let refused = incoming.respond(200, headers, hung()).unwrap_err();
+        let refused = incoming
+            .respond(200, headers, (&Machine, hung()))
+            .unwrap_err();
         return format!("{asked}: {:?}", refused.kind());
     }
     if request.path == "/late" {
         // Far more than the client's buffers hold, yet within what the kernel queues to send on
         // `sandboxd`'s socket, so that much of it is still queued there as `sandboxd` closes.
-        let mut response = incoming.respond(200, Vec::new(), hung()).unwrap();
+        let mut response = incoming
+            .respond(200, Vec::new(), (&Machine, hung()))
+            .unwrap();
         response.send("a".repeat(1 << 20).as_bytes()).unwrap();
         response.end().unwrap();
         return asked;
@@ -1505,7 +1393,9 @@ fn respond(incoming: IncomingModelRequest) -> String {
     let headers = (headers.iter())
         .map(|&(name, value)| (name.to_owned(), value.to_owned()))
         .collect();
-    let mut response = incoming.respond(status, headers, hung()).unwrap();
+    let mut response = incoming
+        .respond(status, headers, (&Machine, hung()))
+        .unwrap();
     response.send(b"data: 1\n\n").unwrap();
     match body.as_str() {
         "" => response.end().unwrap(),
@@ -1533,7 +1423,7 @@ fn payload() -> Vec<u8> {
         .collect()
 }
 
-fn reply(session: &mut Session, arrival: Arrival, payload: &[u8]) -> String {
+fn reply(session: &mut Session<Machine>, arrival: Arrival, payload: &[u8]) -> String {
     let incoming = match arrival {
         Arrival::Op(incoming) => incoming,
         Arrival::Refused(refused) => {

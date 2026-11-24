@@ -9,9 +9,9 @@ use sha2::{Digest as _, Sha256};
 /// The calling test's own directory, empty and private to this user, in the system's temporary
 /// directory, at a short path that names this checkout and the test.
 ///
-/// Making it removes what the test's last run left there, and prints where it is, which a failing
-/// test shows. Dropping it removes it, or fails the test if it can't, but while its thread panics:
-/// a failed test's stays for a look. So each test leaves at most one, its last failure's.
+/// A socket of a short name below it fits the 107 bytes of a socket's path. Making it removes the
+/// test's last one, and prints where it is, which a failed test shows. Dropping it removes it, or
+/// fails the test if it can't, but keeps a failed test's for a look.
 ///
 /// A test holds one at a time, made on the thread that the harness names after the test. Two runs
 /// of one test in one checkout at once share it, and wipe each other's.
@@ -30,10 +30,14 @@ impl TestDir {
         clippy::new_without_default,
         reason = "making one removes what the test's last run left"
     )]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "it is the scratch in the system's temporary directory that the ban leads to"
+    )]
     pub fn new() -> Self {
-        // As Cargo's tests have theirs, but at a path short enough that a socket's below it fits
-        // as it did below a `tempfile` directory `route-XXXXXX`, as a socket's path holds 107 bytes
-        // at most; Cargo's is in `target`, and named by the test's path.
+        // As Cargo's tests have theirs, but at a path no longer than a `tempfile` directory's, such
+        // as `/tmp/route-XXXXXX`, so that the tests' sockets fit below it; Cargo's is in `target`,
+        // and named by the test's path.
         // https://github.com/rust-lang/cargo/blob/111443f3dc4d82a65e2306a93028f122406401c1/crates/cargo-test-support/src/paths.rs#L64-L77
         // Each name is a hash, of 25 bits for the checkout and 30 for the test, so that two of
         // some hundreds share one about once in a thousand.

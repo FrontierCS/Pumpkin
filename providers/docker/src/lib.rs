@@ -40,10 +40,8 @@ mod cpus;
 /// gives a role as many CPUs as the provider gives sandboxes, and as much memory as the host has.
 const CLASS: Name = Name::from_static("container");
 
-/// The most seconds a sandbox's start takes, as [`Class::startup_seconds`] declares it.
 const STARTUP_SECONDS: NonZeroU64 = NonZeroU64::new(540).unwrap();
 
-/// Where the session's socket directory is mounted in the container.
 const GATEWAY_DIR: &str = "/.pumpkin/gateway";
 
 const RUN_LABEL: &str = "pumpkin.run";
@@ -56,9 +54,7 @@ const ROLE_LABEL: &str = "pumpkin.role";
 #[derive(Debug)]
 pub struct Docker<'e> {
     engine: &'e Engine,
-    /// What [`Provider::ready`] gives: the engine's report as JSON, and the one class.
     ready: Ready,
-    /// The CPUs it shares out between runs.
     cpus: Cpus,
 }
 
@@ -153,6 +149,10 @@ impl Provider for Docker<'_> {
         cpus::reserve(&self.cpus, run, phases)
     }
 
+    fn fits(&self, phases: &[Vec<Role>]) -> Result<(), String> {
+        cpus::fits(&self.cpus, phases).map(|_| ())
+    }
+
     // A sandbox runs what the engine has, as it pulls nothing, so a publish checks that the
     // engine has the image, for its own platform, and names it as it is.
     fn publish_image(&self, image: &Image) -> Result<ImageRef, String> {
@@ -221,8 +221,6 @@ impl Creator<SocketDial> for Docker<'_> {
     }
 }
 
-/// What [`Provider::ready`] gives of an engine that `report` describes, whose one class `offers`
-/// what its host has.
 fn ready(report: &engine::Report, offers: Offers) -> Ready {
     let class = Class {
         offers,
@@ -387,7 +385,7 @@ fn delete(context: &ContextName, run: &RunTag, ids: &[SandboxId]) -> Result<(), 
     Undeleted::of(failures.collect())
 }
 
-/// Run `run`'s containers, running or not: those whose run label holds its tag. A container
+/// The containers of `run`, running or not: those whose run label holds its tag. A container
 /// stays until it is removed, so one whose `sandboxd` has exited is listed as ended.
 fn of_run(context: &ContextName, run: &RunTag) -> Result<Vec<Listed>, String> {
     let filter = format!("label={RUN_LABEL}={}", run.as_str());

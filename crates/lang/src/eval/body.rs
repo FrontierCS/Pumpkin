@@ -50,7 +50,7 @@ pub enum BodyKind {
     /// A now function's body, which proposes effects on the run's state through its `Run`.
     Now,
     /// The final call's body, which drives its target through its `Target`, and which no caller
-    /// gives an argument after the payload.
+    /// gives an argument after the submissions.
     Final,
 }
 

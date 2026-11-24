@@ -29,6 +29,7 @@ use provider::{
 };
 use schema::ir::{AbsolutePath, Argv, Env, Image, Name, Resources, User};
 use schema::sandbox::{Launch, RelativePath, file_mode};
+use stdx::time::{Clock as _, Machine};
 use stdx::{Context, Deadline};
 
 use crate::TestDir;
@@ -72,19 +73,23 @@ pub struct Locals {
     pub unreachable_sandboxd: PathBuf,
 }
 
+// A started sandbox's session and what its reader hands over, or why it didn't start.
+type Started = Result<(Session<Machine>, Receiver<Arrival>), String>;
+
 // A wait that nothing can end sooner, such as a put to a `sandboxd` that has stopped reading, no
 // longer than any provider's startup, so that no outcome rests on its length.
-fn soon() -> Deadline {
-    Deadline::after(Duration::from_secs(1))
+fn soon() -> Duration {
+    Machine.now() + Duration::from_secs(1)
 }
 
 // The roles of the suite's run, each of which it starts sandboxes of only once those of the one
 // before are gone; the other run's is the first alone.
 const ROLES: [&str; 6] = ["lifecycle", "killed", "mute", "stalled", "broken", "late"];
 
-// How long the suite waits for room to reserve on its provider, which other tests may hold for as
-// long as they run.
-const ROOM: Duration = Duration::from_mins(10);
+// How long the suite waits for room to reserve on its provider, which other processes may hold for
+// as long as they run: under the 300 s at which the `live` profile kills a test, so that a test
+// that never gets room fails with the reason.
+const ROOM: Duration = Duration::from_mins(4);
 
 /// Runs the suite against each of `subjects` and checks that their outcomes are the same.
 ///
@@ -250,7 +255,7 @@ fn lifecycle(
 fn kills(suite: &mut Suite<'_>, image: &ImageRef, sandboxd: &SandboxdRef) -> Vec<String> {
     let (id, started) = suite.start("killed", image, sandboxd);
     let (mut session, arrivals) = started.unwrap();
-    let by = || Deadline::after(suite.startup());
+    let by = || Machine.now() + suite.startup();
     let process = session.start(sleep(), by()).unwrap();
     session.kill(process, by()).unwrap();
     let exited = match arrivals.recv_timeout(suite.startup()).unwrap() {
@@ -353,7 +358,7 @@ fn outcome<T>(session: &Result<T, String>) -> String {
     }
 }
 
-fn put(mut session: Session) -> String {
+fn put(mut session: Session<Machine>) -> String {
     // Many times what a Unix socket holds unread with the default buffers
     // (`net.core.wmem_default`), which the suite assumes of its host: buffers that held it all
     // would let the put succeed.
@@ -505,13 +510,13 @@ impl<'a> Suite<'a> {
         role: &'static str,
         image: &ImageRef,
         sandboxd: &SandboxdRef,
-    ) -> (SandboxId, Result<(Session, Receiver<Arrival>), String>) {
+    ) -> (SandboxId, Started) {
         let startup = self.startup();
-        let by = Deadline::after(startup);
+        let by = Machine.now() + startup;
         let (id, registration) = (self.create(role, image, sandboxd, from_now(startup))).unwrap();
         // Nothing stops the start, whose `sandboxd` dials.
         let (sender, arrivals) = mpsc::channel();
-        let accepted = registration.accept(by, None, false, sender, |arrival| arrival, || false);
+        let accepted = registration.accept((&Machine, by), None, false, sender, |a| a, || false);
         let accepted = accepted.map_err(|error| error.to_string());
         let session = accepted.and_then(|mut session| {
             session
@@ -606,7 +611,9 @@ impl<'a> Suite<'a> {
     }
 }
 
-fn asked(
+/// The create of `role`'s one instance in `run`, with neither ops nor a model route, and with a
+/// hard end far past a test's.
+pub fn asked(
     run: &RunTag,
     role: &str,
     class: Name,
@@ -634,8 +641,8 @@ fn reserved(provider: &dyn Provider, run: &RunTag, roles: &[&str]) -> Reservatio
     reserve_with_room(provider, run, &phases)
 }
 
-/// What `provider` holds for `run`, of `phases`, once it has room beside what other tests hold,
-/// which it waits for for up to 10 minutes.
+/// What `provider` holds for `run`, of `phases`, once it has room beside what other processes
+/// hold, which it waits for for up to 4 minutes.
 ///
 /// # Panics
 ///
@@ -655,7 +662,8 @@ pub fn reserve_with_room(
     }
 }
 
-fn suite_role(role: &str) -> Role {
+/// A role named `role`, as the suite runs it: of 500 CPU millis and 256 MiB.
+pub fn suite_role(role: &str) -> Role {
     Role {
         name: Name::try_from(role.to_owned()).unwrap(),
         user: serde_json::from_str::<User>(r#"{"uid": 4242, "gid": 4243}"#).unwrap(),
@@ -667,7 +675,7 @@ fn suite_role(role: &str) -> Role {
     }
 }
 
-fn from_now(after: Duration) -> UnixTime {
+pub fn from_now(after: Duration) -> UnixTime {
     UnixTime::of(SystemTime::now())
         .unwrap()
         .saturating_add(after)
@@ -698,7 +706,7 @@ impl Drop for Suite<'_> {
     }
 }
 
-fn ids(listed: Vec<Listed>) -> Vec<SandboxId> {
+pub fn ids(listed: Vec<Listed>) -> Vec<SandboxId> {
     (listed.into_iter())
         .map(|Listed { id, ended: _ }| id)
         .collect()

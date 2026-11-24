@@ -11,12 +11,12 @@ use gateway::IncomingModelRequest;
 use route::{Admission, Answer, Bar};
 use schema::ir::{Api, Name};
 use schema::workflow::{AgentId, RoleId};
+use stdx::time::Clock as _;
 
 use crate::budget::Budget;
-use crate::host::deadline;
 use crate::log::{Entry, ModelAnswer};
 use crate::model::{Exchange, Served};
-use crate::{Clock, Host, Inbox, Input, Runtime, Stopped};
+use crate::{Host, Inbox, Input, Runtime, Stopped};
 
 impl<'r, H: Host + 'r> Runtime<'r, H> {
     pub(crate) fn model_request<'s>(
@@ -58,7 +58,6 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             Caller::Agent(_) => self.teardown_end(),
             Caller::Job(job) => self.call(job).collect,
         };
-        let by = deadline(&self.clock, by);
         let reports = self.inbox.sender();
         let clock = self.clock.clone();
         let exchange = Exchange::new(self.dir, number, clock.clone());
