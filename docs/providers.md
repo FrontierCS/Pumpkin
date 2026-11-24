@@ -90,8 +90,6 @@ before, up to a minute. When an EC2 controller has stopped, as an idle one does,
 whether it runs (`aws ec2 describe-instances`), or probes the `address` of one on Docker.
 `view --runs .pumpkin/runs/<name>` serves the copies that `wait` made.
 
-![The data between a machine and its controller, over ssh: the task's tree to the controller's store, the job's start, what the run says as it is followed, what ls reads of each run, and an ended run's record, each as the controller modules of pumpkin carry it, and the view's requests for the runs' data and their replies, over one ssh to the view on the controller.](figures/controller-data.svg)
-
 An EC2 controller starts when a command needs it and stops itself once it has been idle a while,
 with no job and no ssh session. At boot, each controller reaps what lost runs left. A machine's
 keys go to it only with a job, into the job's directory in memory, which the job's unit removes as it ends. A job
