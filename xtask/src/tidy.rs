@@ -1,7 +1,7 @@
 //! The checks of the rules that a machine can check, which `cargo xtask ci` runs: of comments and
-//! docs, of a source file's lines and a document's words, of links, of the figures and of the
-//! layout of `tests/`. `docs/dev/` doesn't restate a rule that a check holds, so each problem says
-//! what is wrong and what to do.
+//! docs, of a source file's lines and a document's words and sentences, of links, of the figures
+//! and of the layout of `tests/`. `docs/dev/` doesn't restate a rule that a check holds, so each
+//! problem says what is wrong and what to do.
 //!
 //! Each file is read as proc-macro2's tokens, so a string literal is never taken for a comment: a
 //! doc comment is a token, and any other comment lies between two. Code in a comment is told from
@@ -23,6 +23,8 @@ use crate::repo::Repo;
 mod figures;
 #[path = "tidy/links.rs"]
 mod links;
+#[path = "tidy/sentences.rs"]
+mod sentences;
 
 // The 95th percentiles of module docs' and item docs' lengths in comparable Rust applications.
 const MODULE_CAP: usize = 25;
@@ -59,7 +61,7 @@ struct Cap {
     table: &'static str,
     /// The files it applies to, as a problem names a file that isn't one.
     kind: &'static str,
-    unit: &'static str,
+    unit: [&'static str; 2],
     limit: usize,
     /// What to do with a file over the cap.
     fix: &'static str,
@@ -68,7 +70,7 @@ struct Cap {
 const LINES: Cap = Cap {
     table: "long_files",
     kind: "source file",
-    unit: "lines",
+    unit: ["line", "lines"],
     limit: FILE_CAP,
     fix: "put what is new in a module of its own, or split the file into modules that each hold \
           one thing, in a pull request that only moves code",
@@ -77,15 +79,15 @@ const LINES: Cap = Cap {
 const WORDS: Cap = Cap {
     table: "words",
     kind: "Markdown document",
-    unit: "words",
+    unit: ["word", "words"],
     limit: WORD_CAP,
     fix: "shorten it, moving each fact to the help or the code it describes",
 };
 
 /// Fails unless each of the repository's Rust files, tracked or not yet, but not ignored, its
-/// other source files, its `ARCHITECTURE.md`, its Markdown documents, the tracked ones' words, its
-/// figures and the files under its `tests/` directories pass the checks. The error holds a line
-/// for each problem.
+/// other source files, its `ARCHITECTURE.md`, its Markdown documents, the tracked ones' words and
+/// sentences, its figures and the files under its `tests/` directories pass the checks. The error
+/// holds a line for each problem.
 pub(crate) fn check(repo: &Repo<'_>) -> Result<()> {
     let mut problems = Vec::new();
     let mut names = BTreeSet::new();
@@ -146,7 +148,10 @@ pub(crate) fn check(repo: &Repo<'_>) -> Result<()> {
     problems.extend(test_binaries(&listed));
     let ceilings = ceilings(repo)?;
     problems.extend(capped(&ceilings, &LINES, line_counts(repo, &listed)?)?);
-    problems.extend(capped(&ceilings, &WORDS, word_counts(repo)?)?);
+    let documents = documents(repo)?;
+    problems.extend(capped(&ceilings, &WORDS, word_counts(&documents))?);
+    let to_split = sentences::counts(&documents);
+    problems.extend(capped(&ceilings, &sentences::CAP, to_split)?);
     problems.extend(links::check(repo, &listed)?);
     names.extend(figures::packages(repo, &listed)?);
     problems.extend(figures::check(repo, &listed, &names)?);
@@ -263,10 +268,14 @@ fn ceilings_of(ceilings: &toml::Table, table: &str, unit: &str) -> Result<BTreeM
     Ok(read)
 }
 
-/// The problems of `counts`, each file of `cap`'s kind with how many of its unit it holds: one
-/// over the cap and not listed in `cap`'s table of `ceilings`, or past its ceiling there, and each
-/// entry of the table that is stale, its file gone, within the cap or under its ceiling.
-fn capped(ceilings: &toml::Table, cap: &Cap, counts: Vec<(String, usize)>) -> Result<Vec<String>> {
+/// Each file with its count of a cap's unit, and the problem of each where the unit is a problem.
+type Counts = Vec<(String, usize, Vec<String>)>;
+
+/// The problems of `counts`, of `cap`'s kind. A file over the cap that `cap`'s table of `ceilings`
+/// doesn't list, or one past its ceiling there, is a problem, and the problems of its unit follow
+/// it. So is an entry of the table that is stale: its file gone, within the cap or under its
+/// ceiling.
+fn capped(ceilings: &toml::Table, cap: &Cap, counts: Counts) -> Result<Vec<String>> {
     let Cap {
         table,
         kind,
@@ -274,13 +283,16 @@ fn capped(ceilings: &toml::Table, cap: &Cap, counts: Vec<(String, usize)>) -> Re
         limit: cap,
         fix,
     } = *cap;
-    let mut ceilings = ceilings_of(ceilings, table, unit)?;
+    let mut ceilings = ceilings_of(ceilings, table, unit[1])?;
     let mut problems = Vec::new();
-    for (path, count) in counts {
-        let file = format!("{path}: the file is {count} {unit}");
-        let problem = match ceilings.remove(&path) {
-            None if count > cap => format!("{file}, over the cap of {cap}: {fix}"),
-            Some(ceiling) if count > ceiling => format!(
+    for (path, count, each) in counts {
+        let unit = unit[usize::from(count != 1)];
+        let file = format!("{path}: the file has {count} {unit}");
+        let ceiling = ceilings.remove(&path);
+        let over = count > ceiling.unwrap_or(cap);
+        let problem = match ceiling {
+            None if over => format!("{file}, over the cap of {cap}: {fix}"),
+            Some(ceiling) if over => format!(
                 "{file}, over the cap of {cap} and its ceiling of {ceiling} in {CEILINGS}, which \
                  only goes down: {fix}"
             ),
@@ -293,6 +305,7 @@ fn capped(ceilings: &toml::Table, cap: &Cap, counts: Vec<(String, usize)>) -> Re
             None | Some(_) => continue,
         };
         problems.push(problem);
+        problems.extend(each.into_iter().filter(|_| over));
     }
     for path in ceilings.keys() {
         problems.push(format!(
@@ -303,33 +316,41 @@ fn capped(ceilings: &toml::Table, cap: &Cap, counts: Vec<(String, usize)>) -> Re
 }
 
 /// The lines of each of `paths` that is a source file ([`SOURCES`]) outside a `tests/` directory.
-fn line_counts(repo: &Repo<'_>, paths: &[String]) -> Result<Vec<(String, usize)>> {
+fn line_counts(repo: &Repo<'_>, paths: &[String]) -> Result<Counts> {
     let mut counts = Vec::new();
     for path in paths {
         let file = Path::new(path);
         let extension = file.extension().and_then(|extension| extension.to_str());
         if !under_tests(file) && extension.is_some_and(|extension| SOURCES.contains(&extension)) {
-            counts.push((path.clone(), repo.read(path)?.lines().count()));
+            counts.push((path.clone(), repo.read(path)?.lines().count(), Vec::new()));
         }
     }
     Ok(counts)
 }
 
-/// The words of each tracked Markdown document, as `wc -w` counts them.
-fn word_counts(repo: &Repo<'_>) -> Result<Vec<(String, usize)>> {
+/// The tracked Markdown documents, each with its text.
+fn documents(repo: &Repo<'_>) -> Result<Vec<(String, String)>> {
     // Only tracked documents count: a checkout's untracked notes aren't the repository's. A path
     // that a merge left in conflict is listed once.
     let tracked = repo.git(["ls-files", "-z", "--cached", "--deduplicate", "--", "*.md"])?;
-    let mut counts = Vec::new();
+    let mut documents = Vec::new();
     for path in tracked.split('\0').filter(|path| !path.is_empty()) {
         let file = Path::new(path);
         // A symbolic link counts as its target, and a document under `tests/` is a test's input.
         if !under_tests(file) && repo.has(file) && !repo.root.join(file).is_symlink() {
-            let words = repo.read(file)?.split_whitespace().count();
-            counts.push((path.to_owned(), words));
+            documents.push((path.to_owned(), repo.read(file)?));
         }
     }
-    Ok(counts)
+    Ok(documents)
+}
+
+/// The words of each of `documents`, as `wc -w` counts them.
+fn word_counts(documents: &[(String, String)]) -> Counts {
+    let counts = documents.iter().map(|(path, text)| {
+        let words = text.split_whitespace().count();
+        (path.clone(), words, Vec::new())
+    });
+    counts.collect()
 }
 
 /// The problems of `ARCHITECTURE.md`'s links: one to code, or to a document that isn't there.

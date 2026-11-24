@@ -5,10 +5,10 @@ assertions and errors.
 
 - PREFER types that only hold valid values: parse input once at the boundary, and take the
   parsed types everywhere past it
-- NAME a number by what it measures, its unit last (`payload_bytes`, `calls_count`): an `index`
-  counts from 0, a `count` from 1 and a `size` in bytes, and a time past the boundary is a
-  `Duration`. With these names, a mixed-up unit, or an index taken for a count, looks wrong where
-  it is written
+- NAME a number by what it measures, its unit last (`payload_bytes`, `calls_count`). An `index`
+  counts from 0, a `count` from 1 and a `size` in bytes. A time past the boundary is a `Duration`.
+  With these names, a mixed-up unit, or an index taken for a count, looks wrong where it is
+  written
 - PREFER interfaces (flags, configuration, protocol messages, `pub` APIs) that express exactly
   what real runs need. Each parameter is a case that every caller and test must get right. A value
   that stays the same in every real run is a constant
@@ -38,5 +38,5 @@ assertions and errors.
   message, in whichever of `String`, `io::Error` or `Box<dyn Error>` needs the fewest conversions
 - NEVER branch on the text of a message that Pumpkin wrote
 - WRITE error messages as what is wrong, then what is expected
-  (`the program is empty: name one`); passing an error up, add what was being done where the
+  (`the program is empty: name one`). Passing an error up, add what was being done where the
   error doesn't say it, as `stdx::Context` does

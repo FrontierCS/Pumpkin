@@ -613,17 +613,87 @@ fn ceilings() {
         ],
         tidy,
         &expect![[r#"
-            src/grown.rs: the file is 1002 lines, over the cap of 1000 and its ceiling of 1001 in .config/tidy.toml, which only goes down: put what is new in a module of its own, or split the file into modules that each hold one thing, in a pull request that only moves code
-            src/long.rs: the file is 1001 lines, over the cap of 1000: put what is new in a module of its own, or split the file into modules that each hold one thing, in a pull request that only moves code
-            src/page/long.js: the file is 1001 lines, over the cap of 1000: put what is new in a module of its own, or split the file into modules that each hold one thing, in a pull request that only moves code
-            src/shrunk.rs: the file is 1001 lines, under its ceiling of 1002 in .config/tidy.toml: lower the ceiling to 1001
-            src/split.rs: the file is 1000 lines, within the cap of 1000: take it off .config/tidy.toml
+            src/grown.rs: the file has 1002 lines, over the cap of 1000 and its ceiling of 1001 in .config/tidy.toml, which only goes down: put what is new in a module of its own, or split the file into modules that each hold one thing, in a pull request that only moves code
+            src/long.rs: the file has 1001 lines, over the cap of 1000: put what is new in a module of its own, or split the file into modules that each hold one thing, in a pull request that only moves code
+            src/page/long.js: the file has 1001 lines, over the cap of 1000: put what is new in a module of its own, or split the file into modules that each hold one thing, in a pull request that only moves code
+            src/shrunk.rs: the file has 1001 lines, under its ceiling of 1002 in .config/tidy.toml: lower the ceiling to 1001
+            src/split.rs: the file has 1000 lines, within the cap of 1000: take it off .config/tidy.toml
             .config/tidy.toml: `src/gone.rs` isn't a source file of the repository: take it off the list
-            docs/grown.md: the file is 1502 words, over the cap of 1500 and its ceiling of 1501 in .config/tidy.toml, which only goes down: shorten it, moving each fact to the help or the code it describes
-            docs/long.md: the file is 1501 words, over the cap of 1500: shorten it, moving each fact to the help or the code it describes
-            docs/shrunk.md: the file is 1501 words, under its ceiling of 1502 in .config/tidy.toml: lower the ceiling to 1501
-            docs/split.md: the file is 1500 words, within the cap of 1500: take it off .config/tidy.toml
+            docs/grown.md: the file has 1502 words, over the cap of 1500 and its ceiling of 1501 in .config/tidy.toml, which only goes down: shorten it, moving each fact to the help or the code it describes
+            docs/long.md: the file has 1501 words, over the cap of 1500: shorten it, moving each fact to the help or the code it describes
+            docs/shrunk.md: the file has 1501 words, under its ceiling of 1502 in .config/tidy.toml: lower the ceiling to 1501
+            docs/split.md: the file has 1500 words, within the cap of 1500: take it off .config/tidy.toml
             .config/tidy.toml: `docs/deleted.md` isn't a Markdown document of the repository: take it off the list"#]],
+    );
+}
+
+#[test]
+fn sentences() {
+    use Standing::Tracked;
+    // A sentence of `count` words.
+    let long = |count: usize| format!("A{}.", " word".repeat(count - 1));
+    let guide = [
+        format!("# {}", long(30)),
+        String::new(),
+        format!("{} {}", long(25), long(26)),
+        "Wrapped across".to_owned(),
+        format!("lines, {}", long(23)),
+        format!(
+            "Stops in 1.6.3, docs/dev/a.md, e.g. a word, end nothing: {}",
+            long(17)
+        ),
+        format!("(An aside.) **Bold.** #2, `a code span` and {}", long(23)),
+        format!(
+            "[Two words](https://example.com/a) and ![alt text](figures/a.svg) {}",
+            long(23)
+        ),
+        "A `;` in code is none, and so is [a link](https://example.com/a;b).".to_owned(),
+        "One; in prose.".to_owned(),
+        "Before a list, a paragraph ends in one;".to_owned(),
+        "- an item that ends in a semicolon;".to_owned(),
+        format!("- An item ends the sentence{}", " word".repeat(21)),
+        "1. a numbered item; with one inside".to_owned(),
+        String::new(),
+        format!("> {}", long(25)),
+        format!("> {}", long(26)),
+        String::new(),
+        format!("| {} |", long(30)),
+        "```text".to_owned(),
+        long(30),
+        "```".to_owned(),
+        String::new(),
+        format!("    {}", long(30)),
+        String::new(),
+        format!("<p>\n{}\n</p>", long(30)),
+    ];
+    let ceilings = "[sentences]\n\"docs/over.md\" = 1\n\"docs/under.md\" = 2\n";
+    let svg = "<svg><title>A</title><desc>A.</desc></svg>\n".to_owned();
+    let file = |path, text| (path, text, Tracked);
+    check(
+        &[
+            file(".config/tidy.toml", ceilings.to_owned()),
+            file("docs/guide.md", guide.join("\n")),
+            file("docs/figures/a.svg", svg),
+            file("docs/over.md", format!("{}\n{}\n", long(26), long(27))),
+            file("docs/under.md", format!("{}\n", long(26))),
+        ],
+        tidy,
+        &expect![[r#"
+            docs/guide.md: the file has 10 sentences to split, over the cap of 0: split each that a line below names
+            docs/guide.md:3: a sentence of 26 words, over the cap of 25: split it
+            docs/guide.md:4: a sentence of 26 words, over the cap of 25: split it
+            docs/guide.md:6: a sentence of 26 words, over the cap of 25: split it
+            docs/guide.md:7: a sentence of 26 words, over the cap of 25: split it
+            docs/guide.md:8: a sentence of 26 words, over the cap of 25: split it
+            docs/guide.md:10: a sentence chains clauses with a semicolon: make each a sentence, or each part an item of a list
+            docs/guide.md:11: a sentence chains clauses with a semicolon: make each a sentence, or each part an item of a list
+            docs/guide.md:13: a sentence of 26 words, over the cap of 25: split it
+            docs/guide.md:14: a sentence chains clauses with a semicolon: make each a sentence, or each part an item of a list
+            docs/guide.md:17: a sentence of 26 words, over the cap of 25: split it
+            docs/over.md: the file has 2 sentences to split, over the cap of 0 and its ceiling of 1 in .config/tidy.toml, which only goes down: split each that a line below names
+            docs/over.md:1: a sentence of 26 words, over the cap of 25: split it
+            docs/over.md:2: a sentence of 27 words, over the cap of 25: split it
+            docs/under.md: the file has 1 sentence to split, under its ceiling of 2 in .config/tidy.toml: lower the ceiling to 1"#]],
     );
 }
 
