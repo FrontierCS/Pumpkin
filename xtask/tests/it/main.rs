@@ -377,10 +377,12 @@ fn architecture() {
                [Crates](#crates) and [`style`](docs/dev/style.md#errors), with\n\
                [`main.rs`](src/main.rs) in [`src`](src/).\n"
         .to_owned();
+    let ceilings = "[words]\n\"ARCHITECTURE.md\" = 18\n\"AGENTS.md\" = 2\n";
     check(
         &[
             ("ARCHITECTURE.md", map, Tracked),
             ("AGENTS.md", "# Agents\n".to_owned(), Tracked),
+            (".config/tidy.toml", ceilings.to_owned(), Tracked),
             ("src/main.rs", "fn main() {}\n".to_owned(), Tracked),
         ],
         tidy,
@@ -418,10 +420,12 @@ fn figures() {
                 struct Run;\nfn prepare() {}\nconst OUTCOME: &str = \"outcome.json\";\n"
         .to_owned();
     let manifest = "[package]\nname = \"a-crate\"\n\n[[bin]]\nname = \"a-bin\"\n".to_owned();
+    let ceilings = "[words]\n\"ARCHITECTURE.md\" = 16\n\"docs/dev/guide.md\" = 18\n";
     check(
         &[
             ("ARCHITECTURE.md", map, Tracked),
             ("docs/dev/guide.md", guide, Tracked),
+            (".config/tidy.toml", ceilings.to_owned(), Tracked),
             ("docs/figures/good.svg", good, Tracked),
             ("docs/figures/bad.svg", bad, Tracked),
             (
@@ -496,15 +500,22 @@ fn test_data() {
 }
 
 #[test]
-fn long_files() {
-    use Standing::Tracked;
+fn ceilings() {
+    use Standing::{Deleted, Tracked, Untracked};
     let rust = |count| lines("fn f() {}", count);
     let ceilings = "[long_files]\n\
                     \"src/grown.rs\" = 1001\n\
                     \"src/held.rs\" = 1001\n\
                     \"src/shrunk.rs\" = 1002\n\
                     \"src/split.rs\" = 1001\n\
-                    \"src/gone.rs\" = 1001\n";
+                    \"src/gone.rs\" = 1001\n\
+                    [words]\n\
+                    \"docs/long.md\" = 2002\n\
+                    \"docs/grown.md\" = 4\n\
+                    \"docs/held.md\" = 4\n\
+                    \"docs/shrunk.md\" = 5\n\
+                    \"docs/deleted.md\" = 4\n";
+    let four = || "Four words,\n\tthen two.\n".to_owned();
     check(
         &[
             (".config/tidy.toml", ceilings.to_owned(), Tracked),
@@ -517,6 +528,17 @@ fn long_files() {
             ("src/held.rs", rust(1001), Tracked),
             ("src/shrunk.rs", rust(1001), Tracked),
             ("src/split.rs", rust(1000), Tracked),
+            ("docs/grown.md", four() + "More.\n", Tracked),
+            ("docs/held.md", four(), Tracked),
+            ("docs/shrunk.md", four(), Tracked),
+            ("docs/deleted.md", four(), Deleted),
+            ("docs/new.md", four(), Tracked),
+            ("notes.md", four(), Untracked),
+            (
+                "crates/lang/tests/conformance/suite/README.md",
+                four(),
+                Tracked,
+            ),
         ],
         tidy,
         &expect![[r#"
@@ -525,7 +547,11 @@ fn long_files() {
             src/page/long.js: the file is 1001 lines, over the cap of 1000: put what is new in a module of its own, or split the file into modules that each hold one thing, in a pull request that only moves code
             src/shrunk.rs: the file is 1001 lines, under its ceiling of 1002 in .config/tidy.toml: lower the ceiling to 1001
             src/split.rs: the file is 1000 lines, within the cap of 1000: take it off .config/tidy.toml
-            .config/tidy.toml: `src/gone.rs` isn't a source file of the repository: take it off the list"#]],
+            .config/tidy.toml: `src/gone.rs` isn't a source file of the repository: take it off the list
+            docs/grown.md: the document is 5 words, over its ceiling of 4 in .config/tidy.toml: shorten it, moving each fact to the help or the code it describes, or raise the ceiling in the same change
+            docs/new.md: the document is 4 words, with no ceiling in .config/tidy.toml: list it there with a ceiling of 4
+            docs/shrunk.md: the document is 4 words, under its ceiling of 5 in .config/tidy.toml: lower the ceiling to 4
+            .config/tidy.toml: `docs/deleted.md` isn't a Markdown document of the repository: take it off the list"#]],
     );
 }
 

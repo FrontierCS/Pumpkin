@@ -1,5 +1,6 @@
-//! The checks of the writing rule, of a source file's length, of `ARCHITECTURE.md`'s links, of the
-//! figures and of the layout of `tests/` that a machine can make, which `cargo xtask ci` runs.
+//! The checks of the writing rule, of a source file's length, of a document's words, of
+//! `ARCHITECTURE.md`'s links, of the figures and of the layout of `tests/` that a machine can make,
+//! which `cargo xtask ci` runs.
 //! `docs/dev/writing.md`, `docs/dev/style.md` and `docs/dev/testing.md` hold the rules, and each
 //! problem says what is wrong and what to do.
 //!
@@ -42,11 +43,14 @@ const SOURCES: [&str; 8] = ["rs", "star", "js", "css", "html", "py", "sh", "tf"]
 // others growing past its cap, and fails on an exception that names no file:
 // https://github.com/tigerbeetle/tigerbeetle/blob/24d92bff033453dcc757adfcd9aa14655d1b1734/src/tidy.zig#L731-L753
 // https://github.com/tigerbeetle/tigerbeetle/blob/24d92bff033453dcc757adfcd9aa14655d1b1734/src/tidy.zig#L1496-L1508
+// A document grows a sentence at a time, each harmless alone, so each Markdown document has a
+// ceiling on its words too, which only a change that says so there raises.
 const CEILINGS: &str = ".config/tidy.toml";
 
 /// Fails unless each of the repository's Rust files, tracked or not yet, but not ignored, its
-/// other source files, its `ARCHITECTURE.md`, its Markdown documents, its figures and the files
-/// under its `tests/` directories pass the checks. The error holds a line for each problem.
+/// other source files, its `ARCHITECTURE.md`, its Markdown documents, the tracked ones' words, its
+/// figures and the files under its `tests/` directories pass the checks. The error holds a line
+/// for each problem.
 pub(crate) fn check(repo: &Repo<'_>) -> Result<()> {
     let mut problems = Vec::new();
     let mut names = BTreeSet::new();
@@ -104,7 +108,9 @@ pub(crate) fn check(repo: &Repo<'_>) -> Result<()> {
     problems.extend(architecture(repo)?);
     let listed = listed(repo)?;
     problems.extend(test_data(&listed));
-    problems.extend(long_files(repo, &listed)?);
+    let ceilings = ceilings(repo)?;
+    problems.extend(long_files(repo, &listed, &ceilings)?);
+    problems.extend(document_words(repo, &ceilings)?);
     names.extend(figures::packages(repo, &listed)?);
     problems.extend(figures::check(repo, &listed, &names)?);
     if problems.is_empty() {
@@ -143,15 +149,12 @@ fn test_data(paths: &[String]) -> Vec<String> {
     let mut problems = Vec::new();
     for path in paths {
         let file = Path::new(path);
-        let under_tests = file.parent().is_some_and(|parent| {
-            (parent.components()).any(|component| component.as_os_str() == "tests")
-        });
         let extension = file.extension().and_then(|extension| extension.to_str());
         let input = path.starts_with("crates/lang/tests/conformance/")
             || (path.starts_with("crates/lang/tests/fixtures/") && extension == Some("star"));
         let snapshot =
             path.starts_with("crates/pumpkin/tests/it/help/") && extension == Some("svg");
-        if under_tests && extension != Some("rs") && !input && !snapshot {
+        if under_tests(file) && extension != Some("rs") && !input && !snapshot {
             problems.push(format!(
                 "{path}: a file that isn't Rust, under a `tests/` directory: make what the test \
                  reads in the test, with Pumpkin's own writer where Pumpkin reads it"
@@ -161,38 +164,50 @@ fn test_data(paths: &[String]) -> Vec<String> {
     problems
 }
 
+fn under_tests(file: &Path) -> bool {
+    (file.parent()).is_some_and(|parent| {
+        (parent.components()).any(|component| component.as_os_str() == "tests")
+    })
+}
+
+fn ceilings(repo: &Repo<'_>) -> Result<toml::Table> {
+    if !repo.has(CEILINGS) {
+        return Ok(toml::Table::new());
+    }
+    Ok(toml::from_str(&repo.read(CEILINGS)?)
+        .map_err(|error| format!("{CEILINGS} isn't TOML: {error}"))?)
+}
+
+fn ceilings_of(ceilings: &toml::Table, table: &str, unit: &str) -> Result<BTreeMap<String, usize>> {
+    let listed = ceilings.get(table).and_then(toml::Value::as_table);
+    let mut read = BTreeMap::new();
+    for (path, ceiling) in listed.into_iter().flatten() {
+        let ceiling = ceiling
+            .as_integer()
+            .and_then(|ceiling| usize::try_from(ceiling).ok());
+        let Some(ceiling) = ceiling else {
+            return Err(format!(
+                "{CEILINGS}: `{path}`'s ceiling isn't a count of {unit}: give it the file's"
+            )
+            .into());
+        };
+        read.insert(path.clone(), ceiling);
+    }
+    Ok(read)
+}
+
 /// The problems of `paths` that are source files ([`SOURCES`]) outside a `tests/` directory: one
 /// over [`FILE_CAP`] and not listed in [`CEILINGS`], or past its ceiling there, and each entry
 /// of the list that is stale, its file gone, within the cap or under its ceiling.
-fn long_files(repo: &Repo<'_>, paths: &[String]) -> Result<Vec<String>> {
-    let mut ceilings = BTreeMap::new();
-    if repo.has(CEILINGS) {
-        let table: toml::Table = toml::from_str(&repo.read(CEILINGS)?)
-            .map_err(|error| format!("{CEILINGS} isn't TOML: {error}"))?;
-        let listed = table.get("long_files").and_then(toml::Value::as_table);
-        for (path, ceiling) in listed.into_iter().flatten() {
-            let ceiling = ceiling
-                .as_integer()
-                .and_then(|ceiling| usize::try_from(ceiling).ok());
-            let Some(ceiling) = ceiling else {
-                return Err(format!(
-                    "{CEILINGS}: `{path}`'s ceiling isn't a count of lines: give it the file's"
-                )
-                .into());
-            };
-            ceilings.insert(path.clone(), ceiling);
-        }
-    }
+fn long_files(repo: &Repo<'_>, paths: &[String], ceilings: &toml::Table) -> Result<Vec<String>> {
+    let mut ceilings = ceilings_of(ceilings, "long_files", "lines")?;
     let split = "put what is new in a module of its own, or split the file into modules that \
                  each hold one thing, in a pull request that only moves code";
     let mut problems = Vec::new();
     for path in paths {
         let file = Path::new(path);
         let extension = file.extension().and_then(|extension| extension.to_str());
-        let under_tests = file.parent().is_some_and(|parent| {
-            (parent.components()).any(|component| component.as_os_str() == "tests")
-        });
-        if under_tests || !extension.is_some_and(|extension| SOURCES.contains(&extension)) {
+        if under_tests(file) || !extension.is_some_and(|extension| SOURCES.contains(&extension)) {
             continue;
         }
         let lines = repo.read(path)?.lines().count();
@@ -219,6 +234,47 @@ fn long_files(repo: &Repo<'_>, paths: &[String]) -> Result<Vec<String>> {
     for path in ceilings.keys() {
         problems.push(format!(
             "{CEILINGS}: `{path}` isn't a source file of the repository: take it off the list"
+        ));
+    }
+    Ok(problems)
+}
+
+fn document_words(repo: &Repo<'_>, ceilings: &toml::Table) -> Result<Vec<String>> {
+    let mut ceilings = ceilings_of(ceilings, "words", "words")?;
+    // Only tracked documents count: a checkout's untracked notes aren't the repository's. A path
+    // that a merge left in conflict is listed once.
+    let tracked = repo.git(["ls-files", "-z", "--cached", "--deduplicate", "--", "*.md"])?;
+    let mut problems = Vec::new();
+    for path in tracked.split('\0').filter(|path| !path.is_empty()) {
+        let file = Path::new(path);
+        // A symbolic link counts as its target, and a document under `tests/` is a test's input.
+        if under_tests(file) || !repo.has(file) || repo.root.join(file).is_symlink() {
+            continue;
+        }
+        // As `wc -w` counts them.
+        let words = repo.read(file)?.split_whitespace().count();
+        let problem = match ceilings.remove(path) {
+            None => format!(
+                "{path}: the document is {words} words, with no ceiling in {CEILINGS}: list it \
+                 there with a ceiling of {words}"
+            ),
+            Some(ceiling) if words > ceiling => format!(
+                "{path}: the document is {words} words, over its ceiling of {ceiling} in \
+                 {CEILINGS}: shorten it, moving each fact to the help or the code it describes, \
+                 or raise the ceiling in the same change"
+            ),
+            Some(ceiling) if words < ceiling => format!(
+                "{path}: the document is {words} words, under its ceiling of {ceiling} in \
+                 {CEILINGS}: lower the ceiling to {words}"
+            ),
+            Some(_) => continue,
+        };
+        problems.push(problem);
+    }
+    for path in ceilings.keys() {
+        problems.push(format!(
+            "{CEILINGS}: `{path}` isn't a Markdown document of the repository: take it off the \
+             list"
         ));
     }
     Ok(problems)

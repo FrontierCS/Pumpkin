@@ -47,15 +47,16 @@ The rules for Pumpkin's rustdoc, comments, commit messages and pull request text
   an SVG in `docs/figures/`, its text kept as text in the system's fonts, in the style the others
   share, embedded beside that prose with alt text that says what it shows, and changed in the
   change that changes what it shows. `cargo xtask figures` writes the one drawn from the workspace
-- `cargo xtask ci` checks the rest: doc lengths, no doc on a test and no `//` of over 2 lines
-  on one, no doc whose first sentence only restates its item's name, doc form (first paragraph,
+- `cargo xtask ci` checks the rest: doc lengths, no doc on a test and no `//` of over 2 lines on
+  one, no doc whose first sentence only restates its item's name, doc form (first paragraph,
   punctuation, backticks, links), `# Panics` on a public function that can panic, no `TODO`,
-  `FIXME`, `XXX` or code commented out, no line of a doc or comment past 100 columns but a table
-  row or a single word, no link in `ARCHITECTURE.md` to code or to a document the
-  repository lacks, no image in a document, a Markdown image or an HTML `<img>`, but a figure in
-  `docs/figures/` with alt text, no figure that no document embeds, a `<title>` and a `<desc>` in
-  each figure and no `<image>`, `<script>` or `@font-face`, no name set as code in a figure that
-  the workspace lacks, and the figure of the crates as `cargo xtask figures` draws it
+  `FIXME`, `XXX` or code commented out, no line of a doc or comment past 100 columns but a table row
+  or a single word, each Markdown document's words at its ceiling in `.config/tidy.toml`, no link in
+  `ARCHITECTURE.md` to code or to a document the repository lacks, no image in a document, a
+  Markdown image or an HTML `<img>`, but a figure in `docs/figures/` with alt text, no figure that
+  no document embeds, a `<title>` and a `<desc>` in each figure and no `<image>`, `<script>` or
+  `@font-face`, no name set as code in a figure that the workspace lacks, and the figure of the
+  crates as `cargo xtask figures` draws it
 - WRITE commit subjects in lowercase imperative, with bodies that explain what and why to a
   reader without other context
 - LIST schema changes in the pull request description

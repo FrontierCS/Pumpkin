@@ -3,3 +3,25 @@
 [long_files]
 "crates/gateway/src/lib.rs" = 1210
 "crates/runtime/src/record.rs" = 1213
+
+# Each Markdown document, with its ceiling, the most words it may hold, as `wc -w` counts them.
+[words]
+"AGENTS.md" = 391
+"ARCHITECTURE.md" = 2693
+"README.md" = 2974
+"deploy/aws/README.md" = 2061
+"docs/dev/style.md" = 518
+"docs/dev/testing.md" = 970
+"docs/dev/writing.md" = 871
+"docs/ideas.md" = 242
+"docs/language.md" = 1534
+"docs/models.md" = 625
+"docs/providers.md" = 1261
+"docs/record.md" = 1126
+"docs/running.md" = 2055
+"docs/workflows.md" = 3925
+"examples/README.md" = 382
+"examples/hypergraph-benchmark/README.md" = 541
+"examples/hypergraph-benchmark/base/repo/README.md" = 1080
+"examples/hypergraph/README.md" = 276
+"examples/team/README.md" = 895
