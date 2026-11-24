@@ -611,7 +611,9 @@ impl<'a> Suite<'a> {
     }
 }
 
-fn asked(
+/// The create of `role`'s one instance in `run`, with neither ops nor a model route, and with a
+/// hard end far past a test's.
+pub fn asked(
     run: &RunTag,
     role: &str,
     class: Name,
@@ -660,7 +662,8 @@ pub fn reserve_with_room(
     }
 }
 
-fn suite_role(role: &str) -> Role {
+/// A role named `role`, as the suite runs it: of 500 CPU millis and 256 MiB.
+pub fn suite_role(role: &str) -> Role {
     Role {
         name: Name::try_from(role.to_owned()).unwrap(),
         user: serde_json::from_str::<User>(r#"{"uid": 4242, "gid": 4243}"#).unwrap(),
@@ -672,7 +675,7 @@ fn suite_role(role: &str) -> Role {
     }
 }
 
-fn from_now(after: Duration) -> UnixTime {
+pub fn from_now(after: Duration) -> UnixTime {
     UnixTime::of(SystemTime::now())
         .unwrap()
         .saturating_add(after)
@@ -703,7 +706,7 @@ impl Drop for Suite<'_> {
     }
 }
 
-fn ids(listed: Vec<Listed>) -> Vec<SandboxId> {
+pub fn ids(listed: Vec<Listed>) -> Vec<SandboxId> {
     (listed.into_iter())
         .map(|Listed { id, ended: _ }| id)
         .collect()
