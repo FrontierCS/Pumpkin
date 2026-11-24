@@ -19,12 +19,18 @@
 # https://github.com/hashicorp/terraform-provider-aws/blob/bc18835a79b092336914f2105a03a200324ea6a9/internal/service/ec2/ebs_volume_attachment.go#L45-L48
 # https://github.com/systemd/systemd/blob/db11bab38ccf1ed257f310d29070843d4c58ea01/rules.d/60-persistent-storage.rules.in#L52-L53
 # https://docs.aws.amazon.com/ebs/latest/userguide/identify-nvme-ebs-device.html
-# The volume gets a filesystem only where `blkid` finds no signature, as its exit status 2 says,
-# and its first MiB, where a partition table or a superblock would be, reads as zeros, as a new
-# volume's does. Any other answer stops the boot. No blocks are kept for root, as GitLab's toolkit
-# formats a data disk. fstab names the volume by its UUID, without `nofail`, so that a boot that
-# lacks it stops before Docker or `sshd` start on the root volume. Each later boot grows the
-# filesystem to a volume that an apply grew, as cloud-init grows the root's:
+# The volume gets a filesystem only where `blkid` identifies nothing on it, as its exit status 2
+# says. Since util-linux 2.39, a probe that can't read the volume or finds two signatures exits 2
+# too. `mkfs.ext4` checks for an existing filesystem only on a terminal. So `blkid` alone decides,
+# as in Kubernetes' mount-utils. Any other failure of `blkid` stops the boot. No blocks are kept
+# for root, as GitLab's toolkit formats a data disk. fstab names the volume by its UUID, without
+# `nofail`, so that a boot that lacks it stops before Docker or `sshd` start on the root volume.
+# Each later boot grows the filesystem to a volume that an apply grew, as cloud-init grows the
+# root's:
+# https://github.com/util-linux/util-linux/blob/2da5c904e18fdcffd2b252d641e6f76374c7b406/libblkid/src/probe.c#L1618-L1634
+# https://github.com/util-linux/util-linux/blob/2da5c904e18fdcffd2b252d641e6f76374c7b406/misc-utils/blkid.c#L528-L579
+# https://github.com/tytso/e2fsprogs/blob/25ad8a431331b4d1d444a70b6079456cc612ac40/misc/mke2fs.c#L2723-L2733
+# https://github.com/kubernetes/kubernetes/blob/8db047b9682a763d9110f321919afdd6e522fe72/staging/src/k8s.io/mount-utils/mount_linux.go#L667-L686
 # https://gitlab.com/gitlab-org/gitlab-environment-toolkit/-/blob/fc323545a6db17046ccd940d38c50fb68581f93c/ansible/roles/common/tasks/data_disks.yml#L7-L57
 # https://gitlab.com/gitlab-org/gitlab-environment-toolkit/-/blob/fc323545a6db17046ccd940d38c50fb68581f93c/ansible/roles/common/defaults/main.yml#L23
 # https://github.com/systemd/systemd/blob/db11bab38ccf1ed257f310d29070843d4c58ea01/man/systemd.mount.xml#L373-L385
@@ -36,8 +42,8 @@ bootcmd:
     volume=/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${replace(volume_id, "-", "")}_1
     udevadm wait --timeout=300 "$volume"
     blkid --probe "$volume" || case $? in
-    2) cmp --quiet --bytes=1048576 "$volume" /dev/zero; mkfs.ext4 -q -m 0 "$volume" ;;
-    *) exit 1 ;;
+    2) mkfs.ext4 -q -m 0 "$volume" ;;
+    *) echo "pumpkin: blkid can't tell what $volume holds, so the boot stops before formatting it" >&2; exit 1 ;;
     esac
     mkdir --parents /srv/pumpkin /var/lib/docker /var/lib/containerd /home/pumpkin /etc/ssh/keys
     mount "$volume" /srv/pumpkin
