@@ -12,8 +12,9 @@ request's text answers `.github/PULL_REQUEST_TEMPLATE.md`.
 - LIMIT the docs of a test helper, and of an item, field or variant private to its crate. Give
   one of them a doc or a `//` only for what its type can't say, or for a why. The limit doesn't
   apply to a doc that clap or xflags shows as help
-- WRITE each sentence subject and verb first. `cargo xtask ci` caps the words of each sentence in a
-  tracked Markdown document, and rejects a semicolon that chains clauses there
+- WRITE one idea per sentence, subject and verb first. Split a sentence that chains clauses with
+  commas or semicolons. In each tracked Markdown document, `cargo xtask ci` caps a sentence at 25
+  words and rejects a semicolon that chains clauses
 - SAY an action with its verb, not a noun made from it
 - DROP a qualifier that changes nothing the reader does
 - NEVER write history or hedges
