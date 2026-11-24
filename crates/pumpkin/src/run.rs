@@ -23,7 +23,7 @@ use stdx::Context;
 
 use crate::bodies::{Bodies, Sources};
 use crate::cli::Exit;
-use crate::driver::{ARGV0, Driver, Handoff};
+use crate::driver::{Driver, Handoff};
 use crate::ending::{Printed, closing, end, follow, followed, following};
 use crate::sandboxd::Sandboxd;
 use crate::workspace::Workspace;
@@ -135,10 +135,10 @@ fn recorded_args(run: &cli::Run) -> Result<Vec<String>, String> {
     Ok(words)
 }
 
-/// The driver of the run that `args` name, until the run ends; `args` are those that
-/// [`Driver::spawn`] gives it. A run that stops short of its outcome is a failure.
-pub(crate) fn driver_run(args: Vec<OsString>) -> Result<Exit, String> {
-    let (id, reader, run) = driver_started(args)?;
+/// The driver of the run that `driver` names, until the run ends; `driver` is the command line
+/// that [`Driver::spawn`] gives it. A run that stops short of its outcome is a failure.
+pub(crate) fn driver_run(driver: cli::Driver) -> Result<Exit, String> {
+    let (id, reader, run) = driver_started(driver)?;
     let words = recorded_args(&run)?;
     // A controller's client says how to run it again from its own workspace: from its copy of
     // the record, or, of a job that made none, from the job's log.
@@ -238,26 +238,24 @@ fn begun(id: &str, dir: &Path, pushing: &[String], reader: Reader) {
     ));
 }
 
-fn driver_started(args: Vec<OsString>) -> Result<(RunTag, Reader, cli::Run), String> {
-    // Only `run` starts the driver, with its process ID and the run's id, but an `argv[0]` of
-    // the driver's name can come from anyone.
-    let refused = || {
-        "the driver was asked for something other than `pumpkin run` asks of it: start a run \
-         with `pumpkin run`"
-            .to_owned()
-    };
-    let mut args = args.into_iter();
-    let run_pid = args.next().and_then(|pid| pid.to_str()?.parse().ok());
-    driver::die_with_run(run_pid.ok_or_else(refused)?)?;
+fn driver_started(driver: cli::Driver) -> Result<(RunTag, Reader, cli::Run), String> {
+    let cli::Driver {
+        run_pid,
+        id,
+        reader,
+        run,
+    } = driver;
+    driver::die_with_run(run_pid)?;
     // `ps` and `pgrep` show the driver by this name, rather than as `exe`, the base name of the
     // path that `run` executes.
-    rustix::thread::set_name(ARGV0).context("naming the driver failed")?;
-    let id = (args.next().and_then(|id| id.into_string().ok())).map(RunTag::try_from);
-    let reader = (args.next()).and_then(|word| Reader::from_word(word.to_str()?));
-    match (id, reader, cli::parse(args)) {
-        (Some(Ok(id)), Some(reader), Ok(cli::Command::Run(run))) => Ok((id, reader, run)),
-        _ => Err(refused()),
-    }
+    rustix::thread::set_name(driver::NAME).context("naming the driver failed")?;
+    // `run` passes on its own command line, which it has parsed, but anyone can start the driver.
+    let Some(run) = cli::parse(run).ok().and_then(cli::Command::into_run) else {
+        let refused = "the driver was asked for something other than `pumpkin run` asks of it: \
+                       start a run with `pumpkin run`";
+        return Err(refused.to_owned());
+    };
+    Ok((id, reader, run))
 }
 
 struct Prepared<'e> {

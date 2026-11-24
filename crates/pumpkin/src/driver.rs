@@ -1,25 +1,25 @@
 //! The driver, the process that drives a run, and how `pumpkin run` starts it and learns that
 //! the run has started.
 //!
-//! `run` starts the driver by executing itself under the name [`ARGV0`], in the process group
-//! `run` is in, and the driver first asks the kernel to kill it if `run` ends
+//! `run` starts the driver by executing itself as `pumpkin driver`, a hidden command, in the
+//! process group `run` is in, and the driver first asks the kernel to kill it if `run` ends
 //! ([`die_with_run`]). So until the run has started, what ends `run`, a signal from its
 //! terminal or one sent to it alone, ends the driver too. The driver
 //! reads the configuration and the upstream's key itself: the key never crosses argv, the
 //! environment or the pipe.
 //!
-//! The driver's first argument is `run`'s process ID, its second the run's id, which `run` mints
-//! ([`runtime::new_id`]), its third who reads what it says ([`crate::Reader`]), and the rest are
-//! `run`'s own: the driver also builds the task's images. Its standard output is a pipe
+//! The driver's arguments are `run`'s process ID, the run's id, which `run` mints
+//! ([`runtime::new_id`]), who reads what it says ([`crate::Reader`]), and, after `--`, `run`'s
+//! own: the driver also builds the task's images. Its standard output is a pipe
 //! to `run`, which carries at most two lines: the run's id once its record is locked
 //! ([`locked`]), then [`STARTED`] once the run has started ([`announce`]). Before the second,
 //! the driver withdraws the kernel's signal and leaves `run`'s session, so no signal aimed at
 //! `run` reaches a run that `run` says has started.
 
-use std::ffi::{CStr, OsStr, OsString};
+use std::env;
+use std::ffi::{CStr, OsString};
 use std::fs::OpenOptions;
 use std::io::{self, BufRead as _, BufReader, PipeReader};
-use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::process::CommandExt as _;
 use std::path::Path;
 use std::process::{Child, ExitStatus, Stdio};
@@ -31,9 +31,8 @@ use rustix::stdio::{dup2_stderr, dup2_stdout};
 use stdx::Context;
 use stdx::process::Environment;
 
-/// The name that `run` gives the driver as its `argv[0]`, by which `main` knows it, and that
-/// the driver gives its process, as `ps` shows it.
-pub(crate) const ARGV0: &CStr = c"pumpkin-driver";
+/// The name that the driver gives its process, as `ps` and `pgrep` show it.
+pub(crate) const NAME: &CStr = c"pumpkin-driver";
 
 const STARTED: &str = "started";
 
@@ -61,11 +60,22 @@ impl Driver {
         let (pipe, output) = io::pipe().context("making the driver's pipe failed")?;
         // `pumpkin` itself, even if its file is replaced meanwhile.
         let mut command = stdx::process::command("/proc/self/exe", Environment::Inherited);
+        // An emulator that binfmt_misc starts without its `P` flag gets the executable's path as
+        // `argv[0]`. Lima registers Rosetta so. The kernel passes the other arguments on as they
+        // are, so the command is the first argument, as OpenJDK gives `jspawnhelper` its mode:
+        // https://github.com/openjdk/jdk/commit/47d00a4cbeff5d757dda9c660dfd2385c02a57d7
+        // `argv[0]` is this process's own, as runc gives its `init`, so `ps -f` shows the driver as
+        // `pumpkin driver …` rather than as `/proc/self/exe driver …`:
+        // https://github.com/opencontainers/runc/blob/48dfb3a2c0bc9967074e04609493a500120ba018/libcontainer/container_linux.go#L530-L537
+        if let Some(argv0) = env::args_os().next() {
+            command.arg0(argv0);
+        }
         command
-            .arg0(OsStr::from_bytes(ARGV0.to_bytes()))
+            .arg("driver")
             .arg(std::process::id().to_string())
             .arg(id.as_str())
             .arg(reader.word())
+            .arg("--")
             .args(args);
         let child =
             stdx::process::spawn(&mut command, Stdio::null(), output.into(), Stdio::inherit());
