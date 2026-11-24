@@ -881,6 +881,7 @@ impl StandIn {
             ir::Api::Responses => "responses",
             ir::Api::Chat => "chat/completions",
             ir::Api::Messages => "messages",
+            ir::Api::GenerateContent => "models",
         };
         let url = format!("http://{}/v1/{path}", self.address);
         Serving {

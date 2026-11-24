@@ -9,9 +9,9 @@ use schema::ir::Api;
 use serde_json::{Value, json};
 
 use super::kept::{
-    CHAT_ANSWER, CHAT_REQUEST, CHAT_STREAM, MESSAGES_ANSWER, MESSAGES_CUT, MESSAGES_FAILED,
-    MESSAGES_REQUEST, MESSAGES_STREAM, RESPONSES_CUT, RESPONSES_FAILED, RESPONSES_REQUEST,
-    RESPONSES_STREAM,
+    CHAT_ANSWER, CHAT_REQUEST, CHAT_STREAM, GENERATE_CONTENT_ANSWER, GENERATE_CONTENT_REQUEST,
+    GENERATE_CONTENT_STREAM, MESSAGES_ANSWER, MESSAGES_CUT, MESSAGES_FAILED, MESSAGES_REQUEST,
+    MESSAGES_STREAM, RESPONSES_CUT, RESPONSES_FAILED, RESPONSES_REQUEST, RESPONSES_STREAM,
 };
 
 fn shown(items: &[Item]) -> String {
@@ -63,15 +63,16 @@ fn requests() {
         (Api::Responses, RESPONSES_REQUEST),
         (Api::Chat, CHAT_REQUEST),
         (Api::Messages, MESSAGES_REQUEST),
+        (Api::GenerateContent, GENERATE_CONTENT_REQUEST),
     ] {
         let body: Value = serde_json::from_str(body).unwrap();
         let items = read::items(api, &body);
         // A record keeps each item apart, and the reader reads one alone as it does in its body,
         // after the entries of the fields it reads first, such as the Messages API's `system`.
-        let field = if api == Api::Responses {
-            "input"
-        } else {
-            "messages"
+        let field = match api {
+            Api::Responses => "input",
+            Api::Chat | Api::Messages => "messages",
+            Api::GenerateContent => "contents",
         };
         let alone = (body[field].as_array().unwrap().iter()).flat_map(|item| read::item(api, item));
         assert!(items.ends_with(&alone.collect::<Vec<_>>()), "{api}");
@@ -111,6 +112,13 @@ fn requests() {
           System { text: "Primary working directory: /workspace" }
           Assistant { text: "Done." }
 
+        generate_content: Config { model: None, reasoning_effort: Some("LOW"), temperature: Some(1.0), max_tokens: Some(2000), stop: [], stream: false, tools: ["run_command"] }
+          System { text: "You are a coding agent. Think briefly, say in a few words what you will do, then use the tool." }
+          User { text: "What is this machine's hostname?" }
+          Assistant { text: "I will run `hostname` to check the machine's hostname." }
+          Call { id: Some("call_1470369258147036"), name: "run_command", arguments: "{\"command\":\"hostname\"}" }
+          Output { call_id: Some("call_1470369258147036"), text: "{\"output\":\"box-17\\n\"}", error: false }
+
     "#]].assert_eq(&out);
 }
 
@@ -128,6 +136,7 @@ fn answers() {
     let chat_torn = CHAT_STREAM.find("\"content\":\"pumpkin\"").unwrap();
     // Within the line of its text's second delta.
     let messages_torn = MESSAGES_STREAM.find(" them.").unwrap();
+    let generate_content_torn = GENERATE_CONTENT_STREAM.find("\"functionCall\"").unwrap();
     // Broken off in a second part of its reasoning.
     let parts = RESPONSES_CUT.to_owned()
         + "event: response.reasoning_text.delta\n"
@@ -168,6 +177,21 @@ fn answers() {
             ),
             ("failed", Api::Messages, MESSAGES_FAILED.as_bytes()),
             ("no stream", Api::Messages, MESSAGES_ANSWER.as_bytes()),
+            (
+                "of the Gemini API",
+                Api::GenerateContent,
+                GENERATE_CONTENT_STREAM.as_bytes(),
+            ),
+            (
+                "torn in its call",
+                Api::GenerateContent,
+                &GENERATE_CONTENT_STREAM.as_bytes()[..generate_content_torn],
+            ),
+            (
+                "no stream",
+                Api::GenerateContent,
+                GENERATE_CONTENT_ANSWER.as_bytes(),
+            ),
         ],
         &expect![[r#"
             a stream: 25 events, first output by byte Some(1275) of 6988, stop Some("completed"), whole: true
@@ -216,6 +240,16 @@ fn answers() {
             no stream: 0 events, first output by byte None of 357, stop Some("tool_use"), whole: true
               Assistant { text: "I'll read it." }
               Call { id: Some("toolu_01D"), name: "Read", arguments: "{\"path\":\"README.md\"}" }
+
+            of the Gemini API: 3 events, first output by byte Some(440) of 1353, stop Some("STOP"), whole: true
+              Assistant { text: "I will run `hostname` to check the machine's hostname." }
+              Call { id: Some("call_1470369258147036"), name: "run_command", arguments: "{\"command\":\"hostname\"}" }
+
+            torn in its call: 1 events, first output by byte Some(440) of 484, stop None, whole: false
+              Assistant { text: "I will run `hostname` to check the machine's hostname." }
+
+            no stream: 0 events, first output by byte None of 477, stop Some("STOP"), whole: true
+              Assistant { text: "This machine's hostname is `box-17`." }
 
         "#]],
     );

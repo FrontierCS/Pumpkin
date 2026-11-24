@@ -10,6 +10,7 @@
 //! forms are its own module's; what the reader makes of them is the same for every API.
 
 mod chat;
+mod generate_content;
 mod messages;
 mod responses;
 
@@ -119,6 +120,7 @@ pub(crate) fn dialect(api: Api) -> &'static Dialect {
         Api::Responses => &responses::DIALECT,
         Api::Chat => &chat::DIALECT,
         Api::Messages => &messages::DIALECT,
+        Api::GenerateContent => &generate_content::DIALECT,
     }
 }
 
@@ -200,7 +202,7 @@ pub fn config(api: Api, body: &Value) -> Config {
 /// The field of a request's body, as `api` writes it, that holds its list of tools.
 pub fn tools_field(api: Api) -> &'static str {
     match api {
-        Api::Responses | Api::Chat | Api::Messages => "tools",
+        Api::Responses | Api::Chat | Api::Messages | Api::GenerateContent => "tools",
     }
 }
 
@@ -210,6 +212,7 @@ pub fn system_field(api: Api) -> Option<&'static str> {
     match api {
         Api::Responses => Some("instructions"),
         Api::Messages => Some("system"),
+        Api::GenerateContent => Some("systemInstruction"),
         Api::Chat => None,
     }
 }

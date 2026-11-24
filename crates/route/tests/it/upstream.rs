@@ -21,12 +21,13 @@ use test_support::http::{read_request, write_chunk};
 use test_support::{HUNG, TestDir, hung};
 
 use super::kept::{
-    CHAT_ANSWER, CHAT_STREAM, MESSAGES_CUT, MESSAGES_STREAM, RESPONSES_CUT, RESPONSES_STREAM,
+    CHAT_ANSWER, CHAT_STREAM, GENERATE_CONTENT_STREAM, MESSAGES_CUT, MESSAGES_STREAM,
+    RESPONSES_CUT, RESPONSES_STREAM,
 };
 use super::read::CHAT_CUSTOM;
 use super::{
-    Request, chat, fake_sandbox, listed, meeting, messages, models, next_model_request, post,
-    shown_received,
+    Request, chat, fake_sandbox, generate_content, listed, meeting, messages, models,
+    next_model_request, post, shown_received,
 };
 
 const KEY: &str = "sk-test-0123\n";
@@ -204,6 +205,14 @@ fn messages_case(name: &'static str, answer: Answer) -> Case {
     Case {
         api: Api::Messages,
         url: "http://{stand-in}/v1/messages",
+        ..case(name, answer)
+    }
+}
+
+fn generate_content_case(name: &'static str, answer: Answer) -> Case {
+    Case {
+        api: Api::GenerateContent,
+        url: "http://{stand-in}/v1beta/models",
         ..case(name, answer)
     }
 }
@@ -394,6 +403,7 @@ fn request(api: Api) -> Request {
         Api::Responses => post(|_| {}),
         Api::Chat => chat(|_| {}),
         Api::Messages => messages(|_| {}),
+        Api::GenerateContent => generate_content(|_| {}),
     }
 }
 
@@ -699,6 +709,11 @@ fn first_output_as_read() {
             Api::Messages,
             MESSAGES_CUT,
         ),
+        (
+            "a stream of the Gemini API",
+            Api::GenerateContent,
+            GENERATE_CONTENT_STREAM,
+        ),
     ];
     let mut cases = Vec::new();
     let mut read = Vec::new();
@@ -716,6 +731,7 @@ fn first_output_as_read() {
                 Api::Responses => case(name, answer),
                 Api::Chat => chat_case(name, answer),
                 Api::Messages => messages_case(name, answer),
+                Api::GenerateContent => generate_content_case(name, answer),
             });
             read.push((name, split, stream.len()));
         }
@@ -744,6 +760,8 @@ fn first_output_as_read() {
         a stream of Messages, split at 603 of 2207: begun by 2207
         a stream of Messages broken off, split at 385 of 525: begun by 385
         a stream of Messages broken off, split at 384 of 525: begun by 525
+        a stream of the Gemini API, split at 440 of 1353: begun by 440
+        a stream of the Gemini API, split at 439 of 1353: begun by 1353
     "#]]
     .assert_eq(&shown);
 }
@@ -771,6 +789,12 @@ fn mislabelled() {
             "text/event-stream",
             CHAT_ANSWER,
         ),
+        (
+            "a stream of the Gemini API",
+            Api::GenerateContent,
+            "application/json",
+            GENERATE_CONTENT_STREAM,
+        ),
     ];
     let cases = bodies.map(|(name, api, content_type, body)| {
         let (first, rest) = body.split_at(body.floor_char_boundary(body.len() / 2));
@@ -779,6 +803,7 @@ fn mislabelled() {
             Api::Responses => case(name, answer),
             Api::Chat => chat_case(name, answer),
             Api::Messages => messages_case(name, answer),
+            Api::GenerateContent => generate_content_case(name, answer),
         }
     });
     let exchanged = exchanged(&cases);
@@ -791,5 +816,6 @@ fn mislabelled() {
         a stream as application/json: Some(Forwarded { model: ModelName("m-large"), status: 200, request_id: Some("req_1"), usage: Some(Usage { input_tokens: 102967, output_tokens: 88, cached_tokens: Some(102720), cache_write_tokens: None, reasoning_tokens: Some(4) }), failed: None }); kept: request 552 bytes, response 6988 bytes, its output begun by byte 3494; key refused: false
         a stream of Chat Completions as application/json: Some(Forwarded { model: ModelName("m-small"), status: 200, request_id: Some("req_1"), usage: Some(Usage { input_tokens: 20, output_tokens: 57, cached_tokens: Some(0), cache_write_tokens: None, reasoning_tokens: Some(52) }), failed: None }); kept: request 355 bytes, response 1206 bytes, its output begun by byte 603; key refused: false
         an answer of Chat Completions as text/event-stream: Some(Forwarded { model: ModelName("m-small"), status: 200, request_id: Some("req_1"), usage: Some(Usage { input_tokens: 3323, output_tokens: 57, cached_tokens: Some(0), cache_write_tokens: None, reasoning_tokens: Some(34) }), failed: None }); kept: request 355 bytes, response 798 bytes; key refused: false
+        a stream of the Gemini API as application/json: Some(Forwarded { model: ModelName("m-large"), status: 200, request_id: Some("req_1"), usage: Some(Usage { input_tokens: 118, output_tokens: 61, cached_tokens: None, cache_write_tokens: None, reasoning_tokens: Some(25) }), failed: None }); kept: request 746 bytes, response 1353 bytes, its output begun by byte 676; key refused: false
     "#]].assert_eq(&shown);
 }

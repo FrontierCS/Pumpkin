@@ -1,15 +1,16 @@
 //! The rules of a route: which model requests it admits, and the form in which it sends them on.
 //!
 //! An entry admits a request only if it is a `POST` to its API's endpoint, passes on only the
-//! headers of its API's own and those the entry lists, and holds a JSON object that names a model
-//! the route allows. Nowhere in that object may it keep state on the provider's side, run a tool
-//! there or have the provider fetch a URL that isn't inline data, nor pick a feature of the
-//! provider's beyond the models and tools: `RESPONSES`, `CHAT` and `MESSAGES` name the fields.
-//! Any other request is answered with a [`Refusal`] that says what to send instead.
+//! headers of its API's own and those the entry lists, holds a JSON object, and names a model
+//! the route allows, in that object or in its path as its API has it. Nowhere in that object may
+//! it keep state on the provider's side, run a tool there or have the provider fetch a URL that
+//! isn't inline data, nor pick a feature of the provider's beyond the models and tools:
+//! `RESPONSES`, `CHAT`, `MESSAGES` and `generate_content::RULES` name the fields. Any other
+//! request is answered with a [`Refusal`] that says what to send instead.
 //!
 //! The rules refuse the forms they name and pass every other field. They read the body's JSON
-//! fields, never the text of its context, and the body that goes upstream is the one they read,
-//! its model named as the upstream takes it.
+//! fields, never the text of its context, and the body that goes upstream is the one they read.
+//! The request that goes upstream names its model as the upstream takes it.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -25,6 +26,8 @@ use ureq::http::{HeaderName, HeaderValue};
 use super::upstream::{Answer, Bar};
 use super::{read, usage};
 use crate::Apart;
+
+mod generate_content;
 
 // The request headers of each API's own: the form of the request and of its answer. A client's
 // product adds its own, which its entry lists ([`Headers`]). Any other could reach more of the
@@ -74,12 +77,31 @@ pub const MAX_DROPPED_HEADERS: usize = 32;
 // refusal stays small however large the request.
 const MAX_SHOWN_BYTES: usize = 256;
 
+/// Where an API's requests go, and where each names its model.
+#[derive(Debug)]
+enum Endpoint {
+    /// To one path, each naming its model in its body's `model`. The first target is the path,
+    /// and any other is it with a query that goes upstream with it.
+    Fixed(&'static [&'static str]),
+    /// To a path of its model's: `prefix`, the model's name, `:` and one of `methods`, each with
+    /// the query that it takes, which goes upstream with it.
+    Models {
+        prefix: &'static str,
+        methods: &'static [(&'static str, Option<&'static str>)],
+    },
+}
+
+/// What a request's target names, as its API's endpoint reads it.
+pub(crate) struct Target<'p> {
+    query: Option<&'static str>,
+    /// The model and the method that the path names, of an endpoint that has a path for each.
+    method: Option<(&'p str, &'static str)>,
+}
+
 /// What differs between the APIs: the endpoints, headers and checks of each.
 #[derive(Debug)]
 struct Rules {
-    /// The targets of the API's endpoint: the first is its own, and any other is it with a query
-    /// that goes upstream with it.
-    targets: &'static [&'static str],
+    endpoint: Endpoint,
     headers: &'static [&'static str],
     response_headers: &'static [&'static str],
     apart: Apart,
@@ -100,7 +122,7 @@ type Tool = fn(&Value) -> Result<(), Refusal>;
 type Object = fn(&Map<String, Value>) -> Result<Option<&'static str>, Refusal>;
 
 const RESPONSES: Rules = Rules {
-    targets: &["/responses"],
+    endpoint: Endpoint::Fixed(&["/responses"]),
     headers: &RESPONSES_HEADERS,
     response_headers: &RESPONSE_HEADERS,
     apart: Apart {
@@ -118,7 +140,7 @@ const RESPONSES: Rules = Rules {
 };
 
 const CHAT: Rules = Rules {
-    targets: &["/v1/chat/completions"],
+    endpoint: Endpoint::Fixed(&["/v1/chat/completions"]),
     headers: &CHAT_HEADERS,
     response_headers: &RESPONSE_HEADERS,
     apart: Apart {
@@ -138,7 +160,7 @@ const CHAT: Rules = Rules {
 const MESSAGES: Rules = Rules {
     // With the API's beta namespace, to which Anthropic's SDKs send a request through their beta
     // client: the features a beta turns on, the rules refuse by their fields.
-    targets: &["/v1/messages", "/v1/messages?beta=true"],
+    endpoint: Endpoint::Fixed(&["/v1/messages", "/v1/messages?beta=true"]),
     headers: &MESSAGES_HEADERS,
     response_headers: &MESSAGES_RESPONSE_HEADERS,
     apart: Apart {
@@ -177,12 +199,15 @@ pub struct Headers {
 /// makes one.
 #[derive(Debug)]
 pub(crate) struct Closed<'r> {
+    /// What the upstream's URL takes after the endpoint's, of an API whose path names the model:
+    /// the model, as the upstream takes it, and the method.
+    path: Option<String>,
     query: Option<&'static str>,
     headers: Vec<(HeaderName, HeaderValue)>,
     dropped_headers: Vec<String>,
     body: Vec<u8>,
     /// The model that the request named, and the name that its upstream takes for it, which
-    /// `body` names.
+    /// `body` or `path` names.
     model: (ModelName, ModelName),
     route: &'r Route,
 }
@@ -215,6 +240,7 @@ impl Route {
             Api::Responses => &RESPONSES,
             Api::Chat => &CHAT,
             Api::Messages => &MESSAGES,
+            Api::GenerateContent => &generate_content::RULES,
         };
         let Headers { request, response } = headers;
         let joined = |own: &'static [&'static str], listed: &[schema::ir::HeaderName]| {
@@ -247,13 +273,63 @@ impl Route {
 
     /// Whether `request` is addressed to one of this route's endpoints, whatever else it holds.
     pub(crate) fn takes(&self, request: &ModelRequest) -> bool {
-        self.target(&request.path).is_some()
+        match self.rules.endpoint {
+            Endpoint::Fixed(_) => self.target(&request.path).is_some(),
+            Endpoint::Models { prefix, .. } => request.path.starts_with(prefix),
+        }
     }
 
-    fn target(&self, path: &str) -> Option<&'static str> {
-        (self.rules.targets.iter())
-            .find(|&&target| target == path)
-            .copied()
+    fn target<'p>(&self, path: &'p str) -> Option<Target<'p>> {
+        match self.rules.endpoint {
+            Endpoint::Fixed(targets) => {
+                let target = targets.iter().find(|&&target| target == path)?;
+                let query = target.split_once('?').map(|(_, query)| query);
+                Some(Target {
+                    query,
+                    method: None,
+                })
+            }
+            Endpoint::Models { prefix, methods } => {
+                let named = path.strip_prefix(prefix)?;
+                let (named, query) = match named.split_once('?') {
+                    Some((named, query)) => (named, Some(query)),
+                    None => (named, None),
+                };
+                // A model's name may hold a `:` of its own.
+                let (model, method) = named.rsplit_once(':')?;
+                let (method, query) = (methods.iter())
+                    .find(|(name, takes)| *name == method && *takes == query)
+                    .copied()?;
+                Some(Target {
+                    query,
+                    method: Some((model, method)),
+                })
+            }
+        }
+    }
+
+    /// What `path` names, or the refusal of one below the endpoint that names no method of it.
+    pub(crate) fn addressed<'p>(&self, path: &'p str) -> Result<Target<'p>, Refusal> {
+        self.target(path).ok_or_else(|| {
+            bad(format!(
+                "`{}` is not a method of the endpoint: send {}",
+                shown(path),
+                self.rules.endpoint.forms().join(" or ")
+            ))
+        })
+    }
+
+    /// The model that `request` names, where its API has it: in its path, or in `body`, its
+    /// body's object.
+    pub(crate) fn named<'a>(
+        &self,
+        request: &'a ModelRequest,
+        body: Option<&'a Map<String, Value>>,
+    ) -> Option<&'a str> {
+        match self.rules.endpoint {
+            Endpoint::Fixed(_) => body?.get("model")?.as_str(),
+            Endpoint::Models { .. } => Some(self.target(&request.path)?.method?.0),
+        }
     }
 
     /// The form of `request` that goes upstream, with its model named as its upstream takes it, or
@@ -274,28 +350,33 @@ impl Route {
             return Err(refusal(Status::MethodNotAllowed, message));
         }
         let rules = self.rules;
-        let query = (self.target(path))
-            .and_then(|target| target.split_once('?'))
-            .map(|(_, query)| query);
+        let Target { query, method } = self.addressed(path)?;
         let dropped_headers = self.dropped(headers);
         let headers = passed(&self.request_headers, headers)?;
         let mut body = body?;
         (rules.stored)(&body)?;
-        let named = body.get("model").and_then(Value::as_str);
+        let named = match method {
+            Some((model, _)) => Some(model),
+            None => body.get("model").and_then(Value::as_str),
+        };
         let allowed = named.and_then(|named| self.allows(named));
         let (model, upstream_name) =
             allowed.ok_or_else(|| Refusal::unallowed(named, self.models.keys()))?;
         (rules.feature)(&body)?;
         (rules.choice)(&body)?;
         closed_fields(rules, &body)?;
-        let named = Value::String(upstream_name.as_str().to_owned());
-        body.insert("model".to_owned(), named);
+        let path = method.map(|(_, method)| format!("/{upstream_name}:{method}"));
+        if path.is_none() {
+            let named = Value::String(upstream_name.as_str().to_owned());
+            body.insert("model".to_owned(), named);
+        }
         // What goes upstream is the body as parsed here, not as sent, so that no other parser can
         // read it otherwise: one that keeps the first of a field sent twice, say, where this
         // keeps the last.
         let body = Value::Object(body).to_string().into_bytes();
         let model = (model.clone(), upstream_name.clone());
         Ok(Closed {
+            path,
             query,
             headers,
             dropped_headers,
@@ -356,6 +437,11 @@ impl Closed<'_> {
         &self.dropped_headers
     }
 
+    /// What the upstream's URL takes after the endpoint's, before its query, if anything.
+    pub(crate) fn path(&self) -> Option<&str> {
+        self.path.as_deref()
+    }
+
     /// The query that the upstream's URL takes, as the request's target carried it.
     pub(crate) fn query(&self) -> Option<&'static str> {
         self.query
@@ -398,15 +484,32 @@ impl Closed<'_> {
     }
 }
 
+impl Endpoint {
+    /// Each form of request that the endpoint takes, as a refusal names it: its own, without
+    /// the queries that a fixed path may carry.
+    fn forms(&self) -> Vec<String> {
+        match *self {
+            Self::Fixed(targets) => vec![format!("POST {}", targets[0])],
+            Self::Models { prefix, methods } => (methods.iter())
+                .map(|(method, query)| {
+                    let query = query.map(|query| format!("?{query}")).unwrap_or_default();
+                    format!("POST {prefix}<model>:{method}{query}")
+                })
+                .collect(),
+        }
+    }
+}
+
 impl Refusal {
     /// The refusal of a request to none of `routes`' endpoints, which names each.
     pub(crate) fn unserved<'a>(path: &str, routes: impl Iterator<Item = &'a Route>) -> Self {
         let mut targets: Vec<String> = Vec::new();
         for route in routes {
             // Several entries may be for one API.
-            let target = format!("POST {}", route.rules.targets[0]);
-            if !targets.contains(&target) {
-                targets.push(target);
+            for target in route.rules.endpoint.forms() {
+                if !targets.contains(&target) {
+                    targets.push(target);
+                }
             }
         }
         let message = format!(
@@ -522,6 +625,22 @@ impl Refusal {
             };
             let error = json!({ "type": kind, "message": self.message });
             return json!({ "type": "error", "error": error }).to_string();
+        }
+        if api == Api::GenerateContent {
+            // As the Gemini API's own errors are, of the statuses its documentation gives for
+            // each code: https://ai.google.dev/gemini-api/docs/troubleshooting
+            let status = match self.status {
+                Status::BadRequest | Status::MethodNotAllowed => "INVALID_ARGUMENT",
+                Status::NotFound => "NOT_FOUND",
+                Status::BadGateway => "UNAVAILABLE",
+                Status::GatewayTimeout => "DEADLINE_EXCEEDED",
+            };
+            let error = json!({
+                "code": self.status.code(),
+                "message": self.message,
+                "status": status,
+            });
+            return json!({ "error": error }).to_string();
         }
         // A 4xx is a request for its client to mend, which a client takes as final rather than
         // trying again; a 5xx, the route's own failure, it may try again.

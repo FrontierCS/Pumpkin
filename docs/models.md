@@ -19,8 +19,9 @@ A role's model egress is its route's entries, each for one API:
 ]},
 ```
 
-`api` is `responses` (OpenAI's Responses API), `chat` (Chat Completions) or `messages`
-(Anthropic's Messages API). `models` names the models that requests through the entry may name;
+`api` is `responses` (OpenAI's Responses API), `chat` (Chat Completions), `messages`
+(Anthropic's Messages API) or `generate_content` (Google's Gemini API). `models` names the models
+that requests through the entry may name;
 an API may have several entries, and a model is in one entry alone for its API. A request goes
 through the entry for its API that allows the model it names; one that names a model no entry
 allows is refused, with a message that names every model they allow.

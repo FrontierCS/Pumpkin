@@ -376,6 +376,7 @@ fn endpoint(base: &str, api: Api) -> String {
         Api::Responses => "/responses",
         Api::Chat => "/chat/completions",
         Api::Messages => "/messages",
+        Api::GenerateContent => "/models",
     };
     format!("{base}{path}")
 }

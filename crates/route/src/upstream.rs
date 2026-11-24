@@ -263,6 +263,7 @@ impl Upstream {
                 (AUTHORIZATION, bearer)
             }
             Api::Messages => (HeaderName::from_static("x-api-key"), key.clone()),
+            Api::GenerateContent => (HeaderName::from_static("x-goog-api-key"), key.clone()),
         };
         authorization.1.set_sensitive(true);
         Self {
@@ -450,15 +451,25 @@ impl Upstream {
         self.agent.clone().shutdown();
     }
 
-    /// The endpoint's URL for `closed`, with the query that its target carried.
+    /// The URL that `closed` goes to: the endpoint's, with the path and the query that `closed`
+    /// gives it.
     fn url(&self, closed: &Closed<'_>) -> Result<Uri, Refusal> {
-        let Some(query) = closed.query() else {
+        let (path, query) = (closed.path(), closed.query());
+        if path.is_none() && query.is_none() {
             return Ok(self.url.clone());
-        };
-        Uri::try_from(format!("{}?{query}", self.url)).map_err(|error| {
+        }
+        let path = path.unwrap_or_default();
+        let query = query.map(|query| format!("?{query}")).unwrap_or_default();
+        // A `?` or a `#` in the path, which holds the model's name as the upstream takes it,
+        // would end the path early.
+        let url = (!path.contains(['?', '#']))
+            .then(|| format!("{}{path}{query}", self.url))
+            .ok_or_else(|| "the model's name holds `?` or `#`".to_owned())
+            .and_then(|url| Uri::try_from(url).map_err(|error| error.to_string()));
+        url.map_err(|error| {
             let message = format!(
-                "the upstream's URL with the request's query is invalid ({error}): \
-                 check the configured upstream URL"
+                "the upstream's URL for the request is invalid ({error}): check the configured \
+                 upstream URL and the model's name"
             );
             refusal(Status::BadGateway, message)
         })
@@ -511,13 +522,15 @@ pub fn serve<'b, C: Clock>(
     let Some((first, _)) = taking().next() else {
         let routes = || entries.iter().map(|(route, _)| route);
         let refusal = Refusal::unserved(&request.path, routes());
-        // In the form of the entries' API, so that a client of the Messages API alone, which may
-        // try its other endpoints, reads it.
-        let messages = routes().all(|route| route.api() == Api::Messages) && !entries.is_empty();
-        let api = if messages {
-            Api::Messages
-        } else {
-            Api::Responses
+        // In the form of the entries' API, if they are of one, so that a client of that API
+        // alone, which may try its other endpoints, reads it.
+        let api = match entries.split_first() {
+            Some(((first, _), rest))
+                if rest.iter().all(|(route, _)| route.api() == first.api()) =>
+            {
+                first.api()
+            }
+            Some(_) | None => Api::Responses,
         };
         let _ = barred((Bar::Rules, refusal), api, client, |answer| {
             answered(None, answer);
@@ -528,16 +541,18 @@ pub fn serve<'b, C: Clock>(
     let index = if taking().nth(1).is_none() {
         first
     } else {
-        let named = (body.as_ref().ok())
-            .and_then(|body| body.get("model"))
-            .and_then(Value::as_str);
+        let named = entries[first].0.named(request, body.as_ref().ok());
         let allows = |route: &Route| named.is_some_and(|named| route.allows(named).is_some());
         let Some((index, _)) = taking().find(|(_, (route, _))| allows(route)) else {
             let allowed = taking().flat_map(|(_, (route, _))| route.models());
-            // A body that is no JSON object names no model: say what is wrong with it instead.
-            let refusal = match body {
+            // A target that names no method, or a body that is no JSON object, names no model:
+            // say what is wrong with it instead.
+            let refusal = match entries[first].0.addressed(&request.path) {
                 Err(refusal) => refusal,
-                Ok(_) => Refusal::unallowed(named, allowed),
+                Ok(_) => match body {
+                    Err(refusal) => refusal,
+                    Ok(_) => Refusal::unallowed(named, allowed),
+                },
             };
             let api = entries[first].0.api();
             let _ = barred((Bar::Rules, refusal), api, client, |answer| {

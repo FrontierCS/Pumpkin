@@ -81,6 +81,28 @@ pub(crate) fn messages(before: Option<Usage>, value: &Value) -> Option<Usage> {
     })
 }
 
+/// The Gemini API's usage: a response's, or that of the last chunk that holds one, in its
+/// `usageMetadata`.
+// The prompt's count holds the cached tokens, and the candidates' leaves the thoughts out:
+// https://ai.google.dev/api/generate-content#UsageMetadata
+pub(crate) fn generate_content(before: Option<Usage>, value: &Value) -> Option<Usage> {
+    let usage = &value["usageMetadata"];
+    let count = |field: &str| usage.get(field).and_then(Value::as_u64);
+    let Some(input_tokens) = count("promptTokenCount") else {
+        return before;
+    };
+    let reasoning = count("thoughtsTokenCount");
+    // A chunk that comes before any output gives no count of it.
+    let candidates = count("candidatesTokenCount").unwrap_or_default();
+    Some(Usage {
+        input_tokens,
+        output_tokens: candidates.saturating_add(reasoning.unwrap_or_default()),
+        cached_tokens: count("cachedContentTokenCount"),
+        cache_write_tokens: None,
+        reasoning_tokens: reasoning,
+    })
+}
+
 /// Whether an event of an API's stream is the model's output: the first that is marks the
 /// stream's first token.
 pub(crate) type Output = fn(&Value) -> bool;
