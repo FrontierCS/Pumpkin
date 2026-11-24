@@ -21,7 +21,7 @@ use schema::ir::{self, Api, ModelName, Name};
 use schema::workflow::{ByProvider, ByRole, Placed, Workflow};
 use serde_json::Value;
 use stdx::process::Environment;
-use test_support::{TestDir, WORKFLOW, files};
+use test_support::{TestDir, files, unrouted, workflow};
 
 use crate::sim::Sim;
 
@@ -226,12 +226,7 @@ fn build() {
 // CPUs at once, more than the provider holds, though each role fits its class.
 #[test]
 fn prepare() {
-    let ir: Value = serde_json::from_str(WORKFLOW).unwrap();
-    let mut no_route = ir.clone();
-    no_route["roles"][0]["runtime"]["agent"]
-        .as_object_mut()
-        .unwrap()
-        .remove("egress");
+    let (ir, no_route) = (workflow(), unrouted());
     let mut wide = no_route.clone();
     for (role, cpu_millis) in [(0, 1_000_000), (1, 100_000), (2, 1_000_000)] {
         wide["roles"][role]["needs"]["cpu_millis"] = cpu_millis.into();
@@ -274,13 +269,10 @@ fn prepare() {
     );
 }
 
-/// What becomes of a run of [`WORKFLOW`], with no model route, prepared into `runs`, below `dir`:
-/// the record it is begun in, or why it is refused; `dir` is shown as `<dir>`.
+/// What becomes of a run of [`unrouted`], prepared into `runs`, below `dir`: the record it is begun
+/// in, or why it is refused; `dir` is shown as `<dir>`.
 fn prepared_in(dir: &Path, runs: &str) -> String {
-    let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
-    let agent = ir["roles"][0]["runtime"]["agent"].as_object_mut().unwrap();
-    agent.remove("egress");
-    let ir: ir::Workflow = serde_json::from_value(ir).unwrap();
+    let ir: ir::Workflow = serde_json::from_value(unrouted()).unwrap();
     let sim = Sim::new();
     let placed = placed(&ir, sim.ready()).unwrap();
     let on = providers_of(&placed, |_| &sim);
@@ -387,11 +379,9 @@ fn is_private_group(dir: &Path) -> bool {
 
 #[test]
 fn reserves_the_leases_of_every_concurrent_target_instance() {
-    let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
+    let mut ir = unrouted();
     ir["deadline_seconds"] = 30.into();
     let roles = ir["roles"].as_array_mut().unwrap();
-    let agent = roles[0]["runtime"]["agent"].as_object_mut().unwrap();
-    agent.remove("egress");
     let mut peer = roles[0].clone();
     peer["name"] = "peer".into();
     let mut runner = roles[1].clone();
@@ -810,9 +800,9 @@ fn reads_agent_end() {
     .assert_eq(&read.join("\n"));
 }
 
-/// [`WORKFLOW`] with its agent named `solver`, holding `grants`.
+/// [`workflow`] with its agent named `solver`, holding `grants`.
 fn solver(grants: Value) -> Value {
-    let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
+    let mut ir = workflow();
     ir["roles"][0]["name"] = serde_json::json!("solver");
     ir["roles"][0]["runtime"]["agent"]["grants"] = grants;
     ir
@@ -832,8 +822,7 @@ fn reads_core_times() {
     let dir = TestDir::new();
     let record = dir.path().join("20261114-120000-00000001");
     begin_record(&record);
-    let workflow: Value = serde_json::from_str(WORKFLOW).unwrap();
-    let train = workflow["roles"][0]["runtime"]["agent"]["grants"][0].clone();
+    let train = workflow()["roles"][0]["runtime"]["agent"]["grants"][0].clone();
     let ir = solver(serde_json::json!([train, lease("runner")]));
     fs::write(record.join("ir.json"), ir.to_string()).unwrap();
     let place = |class: &str| serde_json::json!({ "provider": "aws", "class": class });

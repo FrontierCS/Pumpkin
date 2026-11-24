@@ -31,7 +31,7 @@ use schema::workflow::{ByRole, Placed, Workflow};
 use serde_json::{Value, json};
 use stdx::Deadline;
 use test_support::http::{read_request, write_chunk};
-use test_support::{TestDir, WORKFLOW, files, sandboxes, standard_outputs};
+use test_support::{TestDir, files, sandboxes, standard_outputs};
 
 use crate::body::Bodies;
 use crate::host::{LateTake, SimHost, SimTime, SlowSync, Synced};
@@ -1231,10 +1231,8 @@ fn when(placed: &Placed, last: Duration) -> &'static str {
 }
 
 fn workflow(argv: &[&str]) -> Value {
-    let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
-    let agent = &mut ir["roles"][0]["runtime"]["agent"];
-    agent.as_object_mut().unwrap().remove("egress");
-    agent["command"]["argv"] = json!(argv);
+    let mut ir = test_support::unrouted();
+    ir["roles"][0]["runtime"]["agent"]["command"]["argv"] = json!(argv);
     ir
 }
 

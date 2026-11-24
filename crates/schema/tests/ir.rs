@@ -1,8 +1,8 @@
 //! The workflow IR and its parsing, tested through the crate's public API against a complete
-//! workflow, [`WORKFLOW`], beside the crate's other schemas.
+//! workflow, [`workflow`], beside the crate's other schemas.
 //!
 //! The workflow stays whole, as the IR's golden fixture: every IR case is a change to it
-//! (`fixture`, `fixture_with`).
+//! (`workflow`, `fixture_with`).
 
 #![expect(
     clippy::unwrap_used,
@@ -25,17 +25,13 @@ use schema::sandbox::{
 use schema::workflow::{Class, Offers, Placement, UsdPerHour, Workflow};
 use schema::{ec2_boot, frame, ir};
 use serde_json::{Value, json};
-use test_support::WORKFLOW;
+use test_support::workflow;
 
 const HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-fn fixture() -> Value {
-    serde_json::from_str(WORKFLOW).unwrap()
-}
-
-/// [`WORKFLOW`] with `value` set at `pointer`, whose parent is an object.
+/// [`workflow`] with `value` set at `pointer`, whose parent is an object.
 fn fixture_with(pointer: &str, value: Value) -> Value {
-    let mut ir = fixture();
+    let mut ir = workflow();
     let (parent, key) = pointer.rsplit_once('/').unwrap();
     let parent = ir.pointer_mut(parent).unwrap().as_object_mut().unwrap();
     parent.insert(key.to_owned(), value);
@@ -124,7 +120,7 @@ struct Needing(Value);
 
 impl Case for Needing {
     fn outcome(self) -> String {
-        let mut ir = fixture();
+        let mut ir = workflow();
         ir["roles"][1]["needs"] = self.0.clone();
         let ir = serde_json::from_value::<ir::Workflow>(ir).unwrap();
         let offered = offered();
@@ -392,11 +388,11 @@ fn placement() {
     );
     // Past what any class offers: 8 GPUs, where the most is 4, and one thousandth of a CPU over
     // the most, 64.
-    let mut unplaced = fixture();
+    let mut unplaced = workflow();
     unplaced["roles"][0]["needs"]["gpu"] = h100(8);
     unplaced["roles"][2]["needs"]["cpu_millis"] = json!(64_001);
     check(
-        [Placing(fixture()), Placing(unplaced)],
+        [Placing(workflow()), Placing(unplaced)],
         &expect![[r#"
             agent, on `aws` in `agent`, whose starts take at most 30s; trainer, on `aws` in `judge`, whose starts take at most 60s; final_judge, on `aws` in `judge`, whose starts take at most 60s; providers `aws`
             /roles/0/needs: `agent` fits no class of sandbox, as `aws`'s `agent` has no GPU, and it needs 8 × `NVIDIA H100 80GB HBM3`; `aws`'s `ice_lake` offers 4000 thousandths of a CPU, fewer than its 8000; `aws`'s `judge` offers 17179869184 bytes of memory, fewer than its 34359738368; `aws`'s `judge_60` has no GPU, and it needs 8 × `NVIDIA H100 80GB HBM3`; `aws`'s `judge_memory` has no GPU, and it needs 8 × `NVIDIA H100 80GB HBM3`; `gpus`'s `h100` has GPUs, 1 × `NVIDIA H100 80GB HBM3`, and it needs 8 × `NVIDIA H100 80GB HBM3`; `gpus`'s `h100_4` has GPUs, 4 × `NVIDIA H100 80GB HBM3`, and it needs 8 × `NVIDIA H100 80GB HBM3`: change its needs, or run it where sandboxes are larger
@@ -900,7 +896,7 @@ fn ops_frame_bound() {
 fn parsed() {
     check(
         [
-            Parsed(fixture()),
+            Parsed(workflow()),
             Parsed(fixture_with("/final/keywords", json!({ "mode": "final" }))),
             Parsed(leasing()),
             Parsed(agents()),
@@ -927,7 +923,7 @@ fn checked_values() {
     let agent = "/roles/0";
     let command = "/roles/0/runtime/agent/command";
     let route = "/roles/0/runtime/agent/egress/model";
-    let entry = &fixture()["roles"][0]["runtime"]["agent"]["egress"]["model"][0];
+    let entry = &workflow()["roles"][0]["runtime"]["agent"]["egress"]["model"][0];
     check(
         [
             fixture_with("/name", json!("example task")),
@@ -1116,7 +1112,7 @@ fn agent_files() {
     let agent = "/roles/0/runtime/agent";
     let dir = |path: &str| json!({ "path": path, "mode": "0755" });
     let file = |path: &str| json!({ "path": path, "mode": "0644", "content": "" });
-    let mut broken = fixture();
+    let mut broken = workflow();
     let runtime = &mut broken["roles"][0]["runtime"]["agent"];
     runtime["dirs"] = json!([
         dir("/workspace/a"),
@@ -1158,7 +1154,7 @@ fn agent_files() {
 
 #[test]
 fn broken_references() {
-    let mut ir = fixture();
+    let mut ir = workflow();
     let trainer = ir["roles"][1].clone();
     ir["roles"].as_array_mut().unwrap().push(trainer);
     let grants = &mut ir["roles"][0]["runtime"]["agent"]["grants"];
@@ -1181,7 +1177,7 @@ fn broken_references() {
 #[test]
 fn grant_forms() {
     let with = |change: fn(&mut Value)| {
-        let mut ir = fixture();
+        let mut ir = workflow();
         change(&mut ir["roles"][0]["runtime"]["agent"]["grants"][0]);
         ir
     };
@@ -1202,10 +1198,10 @@ fn grant_forms() {
     );
 }
 
-/// [`WORKFLOW`] with a runner, `gpu`, of an image of its own, that the agent leases under grant
+/// [`workflow`] with a runner, `gpu`, of an image of its own, that the agent leases under grant
 /// `gpu`, before its now function.
 fn leasing() -> Value {
-    let mut ir = fixture();
+    let mut ir = workflow();
     let mut runner = ir["roles"][1].clone();
     runner["name"] = json!("gpu");
     runner["image"] = json!(format!("sha256:{}", "3".repeat(64)));
@@ -1438,7 +1434,7 @@ fn target_leases() {
 
 #[test]
 fn broken_roles() {
-    let mut ir = fixture();
+    let mut ir = workflow();
     let mut helper = ir["roles"][0].clone();
     helper["name"] = json!("helper");
     ir["roles"].as_array_mut().unwrap().push(helper);
@@ -1451,7 +1447,7 @@ fn broken_roles() {
     retrain["name"] = json!("retrain");
     grants.as_array_mut().unwrap().extend([submit, retrain]);
     ir["final"]["target"] = json!("trainer");
-    let mut none = fixture();
+    let mut none = workflow();
     none["roles"].as_array_mut().unwrap().remove(0);
     check(
         [ir, none],

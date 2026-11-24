@@ -5,7 +5,7 @@
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs::Permissions;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::PermissionsExt as _;
@@ -18,7 +18,8 @@ use expect_test::expect;
 use provider::{RunTag, Sweep as _};
 use schema::sandbox::{MODEL_PORT, SANDBOXCTL_PATH};
 use serde_json::{Value, json};
-use test_support::{BUSYBOX, WORKFLOW, docker, docker_context, files, sandboxd, standard_outputs};
+use test_support::http::{read_request, write_chunk};
+use test_support::{BUSYBOX, docker, docker_context, files, sandboxd, standard_outputs};
 
 use super::{
     EC2, LOCAL, PUMPKIN, RUNNER, Scratch, Step, check, containers, copy_tree, docker_table, engine,
@@ -317,10 +318,7 @@ fn usage() {
 )]
 fn unrunnable() {
     let scratch = Scratch::new();
-    scratch.write_task(
-        "workflow",
-        &serde_json::from_str::<Value>(WORKFLOW).unwrap(),
-    );
+    scratch.write_task("workflow", &test_support::workflow());
     scratch.write("empty/task.star", "");
     scratch.write_sandboxd("sandboxd");
     scratch.write_sandboxd("private");
@@ -515,7 +513,7 @@ fn modes_below(dir: &Path) -> String {
 )]
 fn refusals() {
     let scratch = Scratch::new();
-    let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
+    let mut ir = test_support::workflow();
     scratch.write_task("workflow", &ir);
     let mut budgeted = ir.clone();
     budgeted["roles"][0]["runtime"]["agent"]["egress"]["model"][0]["budget"] =
@@ -658,13 +656,8 @@ fn refusals() {
 )]
 fn configurations() {
     let scratch = Scratch::new();
-    let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
-    scratch.write_task("workflow", &ir);
-    ir["roles"][0]["runtime"]["agent"]
-        .as_object_mut()
-        .unwrap()
-        .remove("egress");
-    scratch.write_task("unrouted", &ir);
+    scratch.write_task("workflow", &test_support::workflow());
+    scratch.write_task("unrouted", &test_support::unrouted());
     write_configurations(&scratch);
     let run = |entry, config: &[&str]| {
         let mut command = scratch.pumpkin(&["run", entry, "--sandboxd", "sandboxd"]);
@@ -1121,9 +1114,8 @@ models = [{{ name = "gpt-6-astra", upstream_name = "vendor/gpt-6-astra", usd_per
          {SANDBOXCTL_PATH} call submit six --arg finalize=true"
     );
     let mut asks = workflow("", &["sh", "-c", &ask]);
-    let fixture: Value = serde_json::from_str(WORKFLOW).unwrap();
     asks["roles"][0]["runtime"]["agent"]["egress"] =
-        fixture["roles"][0]["runtime"]["agent"]["egress"].clone();
+        test_support::workflow()["roles"][0]["runtime"]["agent"]["egress"].clone();
     let body = r#"{"model": "gpt-6-astra", "messages": [{"role": "user", "content": "grade"}]}"#;
     let grade = format!(
         "wget --quiet --output-document=/pumpkin/out/answer \
@@ -1151,33 +1143,22 @@ impl Upstream {
         let thread = thread::spawn(move || {
             for connection in listener.incoming() {
                 let mut connection = connection.unwrap();
-                let mut reader = BufReader::new(&connection);
-                let mut head = Vec::new();
-                while head.last().is_none_or(|line: &String| !line.is_empty()) {
-                    let mut line = String::new();
-                    reader.read_line(&mut line).unwrap();
-                    head.push(line.trim_end().to_owned());
-                }
+                let (line, headers, body) = read_request(&mut BufReader::new(&connection));
                 // The connection that `stop` makes holds no request.
-                if head[0].is_empty() {
+                if line.is_empty() {
                     return;
                 }
-                let header = |name| head.iter().find_map(|line| line.strip_prefix(name));
-                let length = header("content-length: ").unwrap();
-                let mut body = vec![0; length.parse().unwrap()];
-                reader.read_exact(&mut body).unwrap();
+                let authorization = headers.iter().find(|(name, _)| name == "authorization");
+                let authorization = authorization.map(|(_, value)| value);
                 let body = String::from_utf8(body).unwrap();
-                let echo = format!(
-                    "data: {} {:?} {body}\n\n",
-                    head[0],
-                    header("authorization: ")
+                let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                            transfer-encoding: chunked\r\nconnection: close\r\n\r\n";
+                connection.write_all(head.as_bytes()).unwrap();
+                write_chunk(
+                    &mut connection,
+                    &format!("data: {line} {authorization:?} {body}\n\n"),
                 );
-                let stream = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
-                     transfer-encoding: chunked\r\nconnection: close\r\n\r\n{:x}\r\n{echo}\r\n0\r\n\r\n",
-                    echo.len()
-                );
-                connection.write_all(stream.as_bytes()).unwrap();
+                write_chunk(&mut connection, "");
             }
         });
         Self { address, thread }

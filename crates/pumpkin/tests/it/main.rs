@@ -28,7 +28,7 @@ use engine::{ContextName, Engine};
 use expect_test::Expect;
 use serde_json::{Value, json};
 use stdx::process::Environment;
-use test_support::{BUSYBOX, TestDir, WORKFLOW, files};
+use test_support::{BUSYBOX, TestDir, files};
 
 mod cancel;
 mod check;
@@ -1200,11 +1200,7 @@ fn write_docker_record(scratch: &Scratch, id: &str, context: &str, outcome: Opti
 /// The fixture's workflow with `argv` as the agent's command and no model route, every role
 /// running `image` with a small share of a machine.
 fn workflow(image: &str, argv: &[&str]) -> Value {
-    let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
-    ir["roles"][0]["runtime"]["agent"]
-        .as_object_mut()
-        .unwrap()
-        .remove("egress");
+    let mut ir = test_support::unrouted();
     ir["roles"][0]["runtime"]["agent"]["command"]["argv"] = json!(argv);
     for role in ir["roles"].as_array_mut().unwrap() {
         role["image"] = json!(image);

@@ -1,4 +1,4 @@
-//! The driver's decision core, fed event scripts on [`WORKFLOW`], or on variants of it. Each
+//! The driver's decision core, fed event scripts on [`workflow`], or on variants of it. Each
 //! test shows what the core did after each event, and when it next wants a tick whenever that
 //! changes. Each role is placed in a class whose sandboxes may take [`STARTUP`] to start, or
 //! [`SLOW_STARTUP`] for a role that needs the CPU model `slow`, which sets the run's hard end.
@@ -45,7 +45,7 @@ use schema::sandbox::op::{CommandEnd, OpReply, REASON_BYTES, SessionOp, Transfer
 use schema::sandbox::{ExitStatus, RESULT_MAX_BYTES};
 use schema::workflow::{Class, Offers, Workflow};
 use serde_json::{Value, json};
-use test_support::WORKFLOW;
+use test_support::workflow;
 
 /// How long a sandbox may take to start in class `fast`.
 const STARTUP: Duration = Duration::from_secs(10);
@@ -53,10 +53,10 @@ const STARTUP: Duration = Duration::from_secs(10);
 /// How long a sandbox may take to start in class `slow`.
 const SLOW_STARTUP: Duration = Duration::from_secs(30);
 
-/// Runs `script` on [`WORKFLOW`] with `edit` applied, and compares what the core did
+/// Runs `script` on [`workflow`] with `edit` applied, and compares what the core did
 /// with `expect`.
 fn check(edit: impl FnOnce(&mut Value), script: &str, expect: &Expect) {
-    let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
+    let mut ir = workflow();
     edit(&mut ir);
     let ir: ir::Workflow = serde_json::from_value(ir).unwrap();
     let offered = offered();
@@ -1870,7 +1870,7 @@ fn unknown_jobs() {
     );
 }
 
-/// [`WORKFLOW`] with a runner, `gpu_runner`, of an image of its own, that the agent leases under
+/// [`workflow`] with a runner, `gpu_runner`, of an image of its own, that the agent leases under
 /// grant `gpu`: 2 leases at once, each for 900 s, 1200 s in all, 3 commands in all, and transfers
 /// of 4096 bytes each.
 fn leasing(ir: &mut Value) {
