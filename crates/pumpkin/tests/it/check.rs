@@ -1,6 +1,6 @@
 //! `check`: a task's source, read below the root of its repository, evaluated and checked with
-//! no engine and no configuration, then linted by the formatter beside `pumpkin`, the real one;
-//! nothing said on success, and else every problem at its place.
+//! no engine, then linted by the formatter beside `pumpkin`, the real one; nothing said on
+//! success, and else every problem at its place.
 
 use std::ffi::OsStr;
 use std::fs;
@@ -854,33 +854,14 @@ fn library_lints() {
 const EXAMPLE_ARGS: &[(&str, &[&str])] = &[
     ("codex/task.star", &["--arg", "model=model-a"]),
     ("hypergraph/task.star", &["--arg", "model=model-a"]),
+    (
+        "hypergraph-benchmark/task.star",
+        &["--arg", "model=model-a", "--arg", "budget_microusd=5000000"],
+    ),
     ("team/codex.star", &["--arg", "model=model-a"]),
     // So that the GPU runner, which the smoke adds only for a GPU's model, is checked too.
     ("smoke/task.star", &["--arg", "gpu_model=gpu-a"]),
 ];
-
-fn write_benchmark_inputs(scratch: &Scratch) {
-    // Preparation supplies the upstream recipes, source trees and replay selections.
-    for context in [
-        "agent-base",
-        "verifier-base",
-        "native-agent",
-        "native-verifier",
-    ] {
-        scratch.write(
-            &format!("examples/benchmark-input/{context}/Dockerfile"),
-            "FROM scratch\n",
-        );
-    }
-    for mount in [
-        "benchmark-input/generation",
-        "benchmark-input/agent",
-        "benchmark-input/judge",
-        "benchmark-replay",
-    ] {
-        fs::create_dir_all(scratch.0.join("examples").join(mount)).unwrap();
-    }
-}
 
 #[test]
 fn examples() {
@@ -902,7 +883,8 @@ fn examples() {
             fs::copy(entry.path(), dest).unwrap();
         }
     }
-    write_benchmark_inputs(&scratch);
+    // What `replay/prepare.py` makes of a run's record.
+    fs::create_dir_all(root.join("benchmark-replay")).unwrap();
     names.extend([
         "team/codex.star".into(),
         "hypergraph-benchmark/replay/task.star".into(),
@@ -927,7 +909,7 @@ fn examples() {
             exit status: Some(0)
             $ pumpkin check hypergraph-benchmark/replay/task.star
             exit status: Some(0)
-            $ pumpkin check hypergraph-benchmark/task.star
+            $ pumpkin check hypergraph-benchmark/task.star --arg model=model-a --arg budget_microusd=5000000
             exit status: Some(0)
             $ pumpkin check hypergraph/task.star --arg model=model-a
             exit status: Some(0)

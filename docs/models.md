@@ -44,7 +44,8 @@ requests that the entry takes, with a 400 that names the entry's models, and tak
 other entries as before. An entry without a budget spends without a bound.
 
 Spend is counted at the prices of the machine's configuration, from the tokens each response
-reports, so `pumpkin run` refuses a budget whose models lack a price for a kind of token.
+reports, so `pumpkin run` and `pumpkin check` refuse a budget whose models lack a price for a kind
+of token.
 `pumpkin wait`'s summary has a `budget <role> (<models>)` line for each budgeted entry, which
 says what the role spent of its bound.
 

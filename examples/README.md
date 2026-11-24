@@ -9,32 +9,36 @@
 | [Native hypergraph benchmark](hypergraph-benchmark/README.md) | Five Codex agents develop C++ with a shared board, native training feedback and a timed final judge. Includes a model-free replay of their selections. |
 | [Smoke](smoke/task.star) | A deployment check probes sandbox confinement in the agent, a runner lease and the judge. No model required. |
 
-Copy the whole `examples/` directory next to `./pumpkin` and `.pumpkinversion` in your task
-repository. Keep [`PUMPKIN.star`](PUMPKIN.star) and [`submit.star`](submit.star) in place so the
-tasks can load their shared files. See [installing Pumpkin](../docs/running.md#installing) in the
-Pumpkin source repository for launcher setup.
-
-From the task repository, check and run the workflows below. For Codex, set `MODEL` to a model
-in your [upstream configuration](../docs/models.md#upstreams-and-prices). The
+Run them in place, from the root of a Pumpkin checkout. `cargo xtask build` builds `pumpkin`
+into the checkout's `.pumpkin/bin`, and the commands below run it from there. Runs use the
+machine's [configuration](../docs/running.md#the-machines-configuration), and their records are
+in `.pumpkin/runs`. For Codex, set `MODEL` to a model in your
+[upstream configuration](../docs/models.md#upstreams-and-prices). The
 [hypergraph guide](hypergraph/README.md#run-codex) and
 [team guide](team/README.md#run-two-codex-agents) give their Codex run and verification commands.
 
 ```sh
-./pumpkin check examples/hello/task.star &&
-./pumpkin run examples/hello/task.star --wait
+cargo xtask build
 
-./pumpkin check examples/codex/task.star --arg "model=${MODEL:?set MODEL}" &&
-./pumpkin run examples/codex/task.star --arg "model=$MODEL" --wait
+.pumpkin/bin/pumpkin check examples/hello/task.star &&
+.pumpkin/bin/pumpkin run examples/hello/task.star --wait
 
-./pumpkin check examples/team/task.star &&
-./pumpkin run examples/team/task.star --wait
+.pumpkin/bin/pumpkin check examples/codex/task.star --arg "model=${MODEL:?set MODEL}" &&
+.pumpkin/bin/pumpkin run examples/codex/task.star --arg "model=$MODEL" --wait
 
-./pumpkin check examples/smoke/task.star &&
-./pumpkin run examples/smoke/task.star --wait
+.pumpkin/bin/pumpkin check examples/team/task.star &&
+.pumpkin/bin/pumpkin run examples/team/task.star --wait
+
+.pumpkin/bin/pumpkin check examples/smoke/task.star &&
+.pumpkin/bin/pumpkin run examples/smoke/task.star --wait
 ```
 
-To check Team's cross-agent message, selected C++ source, scores and cleanup in a copied record,
-run `python3 examples/team/verify.py /path/to/record`. To exercise missing submissions, pass
+Each example that runs a model takes `--arg budget_microusd=<n>`, a model budget for each agent in
+millionths of a dollar, such as `500000` for $0.50. A budget needs the model's prices in the
+configuration. Without the arg, the agents have no budget.
+
+To check Team's cross-agent message, selected C++ source, scores and cleanup in a run's record,
+run `python3 examples/team/verify.py .pumpkin/runs/<id>`. To exercise missing submissions, pass
 `--arg omit=bob` or `--arg omit=all` to the run and the matching `--omit bob` or `--omit all`
 to the checker.
 

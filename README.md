@@ -53,18 +53,20 @@ context = "default"
 [providers.local.docker]
 ```
 
-Each task is an entry file, `task.star`. The [examples](examples/README.md) start with
-`examples/hello`, which needs no model and runs once `./pumpkin` and `.pumpkinversion` sit beside
-`examples/`. From that directory:
+Each task is an entry file, `task.star`. The [examples](examples/README.md) run in place from a
+Pumpkin checkout, once `cargo xtask build` has built `pumpkin` into its `.pumpkin/bin`. They start
+with `examples/hello`, which needs no model. From the checkout's root:
 
 ```console
-$ ./pumpkin check examples/hello/task.star
-$ ./pumpkin run examples/hello/task.star
+$ .pumpkin/bin/pumpkin check examples/hello/task.star
+$ .pumpkin/bin/pumpkin run examples/hello/task.star
 20261116-195228-234cd166
-$ ./pumpkin wait 234c
-$ ./pumpkin ls
-$ ./pumpkin view
+$ .pumpkin/bin/pumpkin wait 234c
+$ .pumpkin/bin/pumpkin ls
+$ .pumpkin/bin/pumpkin view
 ```
+
+A task repository's `./pumpkin` runs its own tasks with the same commands.
 
 `check` prints nothing when it finds no problem. `run` builds the images, starts the run and prints
 its id. `wait` follows a run named by a prefix of that id; ending it leaves the run going. `ls`
@@ -318,18 +320,18 @@ context = "default"
 [providers.local.docker]
 ```
 
-With Pumpkin's `examples/` directory copied into the repository of tasks, `examples/hello`, which
-needs no model, goes through the five commands:
+From the root of a Pumpkin checkout, `examples/hello`, which needs no model, goes through the
+five commands:
 
 ```console
-$ ./pumpkin check examples/hello/task.star   # evaluates and checks; silent if no problem
-$ ./pumpkin run examples/hello/task.star     # builds the images, starts the run, prints its id
+$ .pumpkin/bin/pumpkin check examples/hello/task.star  # evaluates and checks; silent if no problem
+$ .pumpkin/bin/pumpkin run examples/hello/task.star    # builds the images, starts the run, prints its id
 20261116-195228-234cd166
-$ ./pumpkin wait 234c                        # follows the run, named by a prefix of its digits
+$ .pumpkin/bin/pumpkin wait 234c                       # follows the run, named by a prefix of its digits
 pumpkin: run 20261116-195228-234cd166 finished with a result (score=6 lines=1), ...
-$ ./pumpkin ls                               # lists the runs live or ended in the last day
+$ .pumpkin/bin/pumpkin ls                              # lists the runs live or ended in the last day
 20261116-195228-234cd166 finished         2s  -               -  examples/hello: score=6 lines=1
-$ ./pumpkin view                             # serves the runs to this machine's browser
+$ .pumpkin/bin/pumpkin view                            # serves the runs to this machine's browser
 ```
 
 [docs/running.md](docs/running.md) goes through installing, configuring and these commands in order,

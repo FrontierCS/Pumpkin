@@ -51,9 +51,11 @@ enum Parsed {
     ///
     /// `check` evaluates each task's entry file and the files it loads with the given `--arg`s.
     /// Every task gets the same `--arg`s. It then checks each image's recipe and the workflow, and
-    /// lints the files it read. It says every problem in every task, and prints nothing when it
-    /// finds none. It reads only files below each task's root. It reaches no Docker engine,
-    /// network or configuration, so an image's build can still fail.
+    /// lints the files it read. With the machine's configuration, where there is one, it checks
+    /// that an upstream serves each model of each role's route, and prices each model that a
+    /// budget counts. It says every problem in every task, and prints nothing when it finds none.
+    /// It reads only files below each task's root and the configuration. It reaches no Docker
+    /// engine or network, so an image's build can still fail.
     Check(Check),
     /// Format `.star` files.
     ///
@@ -511,6 +513,10 @@ pub(crate) struct Check {
     pub(crate) entries: Vec<Entry>,
     #[command(flatten)]
     pub(crate) args: TaskArgs,
+    /// The machine's configuration, which `pumpkin help config` describes, to check the model
+    /// routes against (default: `$HOME/.config/pumpkin/pumpkin.toml`, if it exists).
+    #[arg(long, value_name = "file", value_parser = utf8(NAMED_NEXT))]
+    pub(crate) config: Option<String>,
 }
 
 #[derive(Args)]

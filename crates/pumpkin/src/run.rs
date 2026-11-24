@@ -278,14 +278,13 @@ fn prepared<'e>(
         gateway,
         upstreams,
     } = config::read(config)?;
-    let servings = task
-        .workflow()
-        .by_role(|(role, _)| match task.workflow().model(role) {
-            Some(route) => upstreams.serving(route).context(config.display()),
-            None => Ok(Vec::new()),
-        })?;
-    let prices = upstreams.prices();
-    let budgets = runtime::budgets(task.workflow(), &prices).context(config.display())?;
+    let config::Models {
+        servings,
+        budgets,
+        prices,
+    } = upstreams
+        .models(task.workflow())
+        .context(config.display())?;
     let engine = &*engine.insert(crate::engine(context, reader)?);
     // The engine's own provider is reached here, so that an engine that can't run sandboxes is
     // refused before any image is built.

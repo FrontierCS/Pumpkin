@@ -41,10 +41,12 @@ work of solving them, so elapsed time does not enter the score.
 
 ## Run two Codex agents
 
-Copy the whole `examples/` directory into a task repository with its Pumpkin launcher. Set
-`MODEL` to a priced Responses API model that supports the Codex harness’s native tools.
-Each role has a $0.25 model budget and a compiler. They share a fifteen-minute work deadline.
-An admitted request can take a role past its budget. [Model budgets](../../docs/models.md#a-budget)
+From the root of a Pumpkin checkout, with `pumpkin` built as the [examples guide](../README.md)
+says, set `MODEL` to a Responses API model that supports the Codex harness’s native tools.
+Each role has a compiler. They share a fifteen-minute work deadline. Add
+`--arg budget_microusd=250000` to `check` and `run` to give each role a $0.25 model budget, which
+needs the model's prices. An admitted request can take a role past its budget.
+[Model budgets](../../docs/models.md#a-budget)
 
 Alice writes a straightforward implementation and designs a small test of whole-edge removal.
 Bob writes an incidence-list peeling algorithm, reads Alice’s case and sends her his result.
@@ -55,9 +57,9 @@ supply each agent with command usage, argument defaults, limits and task-specifi
 
 ```sh
 task=examples/team/codex.star
-./pumpkin check "$task" --arg "model=${MODEL:?set MODEL}" &&
-team=$(./pumpkin run "$task" --arg "model=$MODEL") &&
-./pumpkin wait --outcome "$team" &&
+.pumpkin/bin/pumpkin check "$task" --arg "model=${MODEL:?set MODEL}" &&
+team=$(.pumpkin/bin/pumpkin run "$task" --arg "model=$MODEL") &&
+.pumpkin/bin/pumpkin wait --outcome "$team" &&
 python3 examples/team/verify.py ".pumpkin/runs/$team"
 ```
 
@@ -76,17 +78,17 @@ version uses the same board and final judge and runs without a model.
 
 ```sh
 task=examples/team/task.star
-./pumpkin check "$task" &&
-team=$(./pumpkin run "$task") &&
-./pumpkin wait --outcome "$team" &&
+.pumpkin/bin/pumpkin check "$task" &&
+team=$(.pumpkin/bin/pumpkin run "$task") &&
+.pumpkin/bin/pumpkin wait --outcome "$team" &&
 python3 examples/team/verify.py ".pumpkin/runs/$team"
 ```
 
 To see Bob leave without selecting, give the run and its checker the same case.
 
 ```sh
-missing=$(./pumpkin run examples/team/task.star --arg omit=bob) &&
-./pumpkin wait --outcome "$missing" &&
+missing=$(.pumpkin/bin/pumpkin run examples/team/task.star --arg omit=bob) &&
+.pumpkin/bin/pumpkin wait --outcome "$missing" &&
 python3 examples/team/verify.py ".pumpkin/runs/$missing" --omit bob
 ```
 

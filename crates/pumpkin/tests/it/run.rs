@@ -523,6 +523,9 @@ fn refusals() {
     scratch.write_task_in("it's broken", "tasks", &ir);
     scratch.write_task_in("a~b", "tasks", &ir);
     write_configurations(&scratch);
+    let uncosted = fs::read_to_string(scratch.0.join("conf/uncosted.toml")).unwrap();
+    scratch.write("home/.config/pumpkin/pumpkin.toml", &uncosted);
+    scratch.write("home/.config/pumpkin/key", "sk-test\n");
     let run = |entry, config: &str| {
         let mut command = scratch.pumpkin(&["run", entry, "--sandboxd", "sandboxd"]);
         command.args(["--runs", "runs", "--config", config]);
@@ -540,6 +543,16 @@ fn refusals() {
         Step::from(run("budgeted/task.star", "conf/uncached.toml")),
         Step::from(run("budgeted/task.star", "conf/unwritten.toml")),
         Step::from(run("budgeted/task.star", "conf/uncosted.toml")),
+        // `check` refuses what `run` does, by the configuration that `--config` names, or else
+        // by the default one.
+        Step::from(scratch.pumpkin(&["check", "budgeted/task.star", "--config", "unserved.toml"])),
+        Step::from(scratch.pumpkin(&[
+            "check",
+            "budgeted/task.star",
+            "--config",
+            "conf/served.toml",
+        ])),
+        Step::from(scratch.pumpkin(&["check", "budgeted/task.star"])),
     ];
     check(
         &scratch,
@@ -596,7 +609,40 @@ fn refusals() {
             $ pumpkin run budgeted/task.star --sandboxd sandboxd --runs runs --config conf/uncosted.toml
             exit status: Some(1)
             pumpkin: conf/uncosted.toml: `agent` has a model budget, but `gpt-6-astra` has no price for `cached` or `cache_write` tokens: price them in its `usd_per_mtok` in the configuration, or remove the budget
-            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/conf/uncosted.toml --sandboxd <scratch>/sandboxd <scratch>/budgeted/task.star"#]],
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/conf/uncosted.toml --sandboxd <scratch>/sandboxd <scratch>/budgeted/task.star
+            $ pumpkin check budgeted/task.star --config unserved.toml
+            exit status: Some(1)
+            budgeted/task.star:1:1: the file has no docstring: begin it with a string that says what it holds
+                1 | load("//lib/train.star", "train")
+                  | ^
+            budgeted/submit.star:1:1: the file has no docstring: begin it with a string that says what it holds
+                1 | def submit(run, payload, finalize: bool = False):
+                  | ^
+            pumpkin: budgeted/task.star: the task has 2 problems
+            pumpkin: budgeted/task.star: unserved.toml: no upstream serves every model that the workflow's route allows, `gpt-6-astra`: list them all under one
+            pumpkin: to check it again: pumpkin check --config <scratch>/unserved.toml <scratch>/budgeted/task.star
+            $ pumpkin check budgeted/task.star --config conf/served.toml
+            exit status: Some(1)
+            budgeted/task.star:1:1: the file has no docstring: begin it with a string that says what it holds
+                1 | load("//lib/train.star", "train")
+                  | ^
+            budgeted/submit.star:1:1: the file has no docstring: begin it with a string that says what it holds
+                1 | def submit(run, payload, finalize: bool = False):
+                  | ^
+            pumpkin: budgeted/task.star: the task has 2 problems
+            pumpkin: budgeted/task.star: conf/served.toml: `agent` has a model budget, but `gpt-6-astra` has no price for `input`, `cached`, `cache_write` or `output` tokens: price them in its `usd_per_mtok` in the configuration, or remove the budget
+            pumpkin: to check it again: pumpkin check --config <scratch>/conf/served.toml <scratch>/budgeted/task.star
+            $ pumpkin check budgeted/task.star
+            exit status: Some(1)
+            budgeted/task.star:1:1: the file has no docstring: begin it with a string that says what it holds
+                1 | load("//lib/train.star", "train")
+                  | ^
+            budgeted/submit.star:1:1: the file has no docstring: begin it with a string that says what it holds
+                1 | def submit(run, payload, finalize: bool = False):
+                  | ^
+            pumpkin: budgeted/task.star: the task has 2 problems
+            pumpkin: budgeted/task.star: <scratch>/home/.config/pumpkin/pumpkin.toml: `agent` has a model budget, but `gpt-6-astra` has no price for `cached` or `cache_write` tokens: price them in its `usd_per_mtok` in the configuration, or remove the budget
+            pumpkin: to check it again: pumpkin check <scratch>/budgeted/task.star"#]],
     );
     assert!(!scratch.0.join("runs").exists(), "a refusal made a record");
 }

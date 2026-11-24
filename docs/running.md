@@ -41,8 +41,10 @@ runs stay on its own Docker engine.
 A task is an entry file below a root: the nearest directory, at or above it, that holds a
 `PUMPKIN.star`, where the task's `//` labels start. `pumpkin check` evaluates the entry file and
 the files it loads, with the `--arg`s given, then checks each image's recipe and the workflow, then
-lints the files it read. It reaches no Docker engine, no network and no configuration, and prints
-nothing when it finds no problem.
+lints the files it read. With the machine's configuration, or the file that `--config` names, it
+checks each role's model route as `run` does: an upstream serves its models, and prices each model
+that a budget counts. It reaches no Docker engine and no network, and prints nothing when it finds
+no problem.
 
 ```console
 $ ./pumpkin check tasks/bench/task.star --arg model=model-a
@@ -65,8 +67,10 @@ repository by its full commit; a stage that pins a step's downloads by checksum,
 `pumpkin run` starts a driver process, which builds the task's images on the Docker engine,
 places each role, reserves what the run needs on its providers, and runs it. `run` prints the
 run's id once the run has started, then returns; the run goes on without it. On a machine with a
-controller, the controller builds the images and starts the driver. `run` then prints the id at
-once, before the build, and `pumpkin wait` follows the build and the run.
+controller, the controller builds the images and starts the driver. `run` sends it the files below
+the paths that the task reaches in its Git repository, whether Git tracks them, ignores them or
+neither. `run` then prints the id at once, before the build, and
+`pumpkin wait` follows the build and the run.
 
 ```console
 $ ./pumpkin run tasks/bench/task.star --arg model=model-a
