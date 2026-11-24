@@ -116,17 +116,34 @@ pub(crate) const CHECK: Check = Check {
         ["ec2", "describe-instances"],
         Allow::new(&["ec2:DescribeInstances"], &[Resource::Any]),
     ),
-    // On any profile and any principal. The controller's instance names its profile, and so its
-    // role, and no placeholder stands for either.
     profile: Call::new(
         ["iam", "get-instance-profile"],
-        Allow::new(&["iam:GetInstanceProfile"], &[Resource::Any]),
+        Allow::new(
+            &["iam:GetInstanceProfile"],
+            &[Resource::Arn(&CONTROLLER_PROFILE)],
+        ),
     ),
     simulate: Call::new(
         ["iam", "simulate-principal-policy"],
-        Allow::new(&["iam:SimulatePrincipalPolicy"], &[Resource::Any]),
+        Allow::new(
+            &["iam:SimulatePrincipalPolicy"],
+            &[
+                Resource::Arn(&CONTROLLER_ROLE),
+                Resource::Arn(&ec2::iam::TIMER_ROLE),
+                Resource::Arn(&ec2::iam::SANDBOX_ROLE),
+                Resource::Arn(&modal::iam::PULL_ROLE),
+            ],
+        ),
     ),
 };
+
+const CONTROLLER_PROFILE: Placeholder = Placeholder::new(
+    "controller_profile_arn",
+    "the ARN of the controller's instance profile",
+);
+
+const CONTROLLER_ROLE: Placeholder =
+    Placeholder::new("controller_role_arn", "the ARN of the controller's role");
 
 /// What `cargo xtask live` allows itself beyond the client's calls and the check's: it lists the
 /// schedules of the timer that a run left, as `aws scheduler list-schedules` does, which

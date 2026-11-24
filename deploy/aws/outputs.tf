@@ -26,15 +26,21 @@ output "client_policy_arn" {
 
 # What a contributor's machine needs for `cargo xtask live`: the client's, what `pumpkin-admin
 # check` reads, and the list of the timer's schedules that a run left. The team's root attaches
-# it to the contributors.
+# it to the contributors. The pull role exists only with `modal_workspaces`, so its ARN is built
+# from its name.
 resource "aws_iam_policy" "contributor" {
   name        = "${local.prefix}-contributor"
   description = "What the machine of a contributor needs to run the live checks on its Pumpkin controller"
   policy = templatefile("${path.module}/policies/contributor.json.tftpl", {
     controller_instance_arn = "${local.ec2}:instance/${aws_instance.controller.id}"
+    controller_profile_arn  = aws_iam_instance_profile.controller.arn
+    controller_role_arn     = aws_iam_role.controller.arn
     members_parameter_arn   = aws_ssm_parameter.members.arn
+    modal_pull_role_arn     = "${local.arn}:iam::${local.account}:role/${local.prefix}-modal-pull"
     sandbox_profile_arn     = aws_iam_instance_profile.sandbox.arn
+    sandbox_role_arn        = aws_iam_role.sandbox.arn
     settings_parameter_arn  = aws_ssm_parameter.settings.arn
+    timer_role_arn          = aws_iam_role.timer.arn
   })
 }
 

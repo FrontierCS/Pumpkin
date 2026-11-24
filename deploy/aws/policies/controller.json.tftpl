@@ -83,28 +83,6 @@
     },
     {
       "Action": [
-        "ec2:RunInstances"
-      ],
-      "Condition": {
-        "ArnEquals": {
-          "ec2:LaunchTemplate": ${jsonencode(launch_template_arns)}
-        },
-        "Bool": {
-          "ec2:IsLaunchTemplateResource": [
-            "true"
-          ]
-        },
-        "StringEqualsIfExists": {
-          "ec2:InstanceType": ${jsonencode(instance_types)}
-        }
-      },
-      "Effect": "Allow",
-      "Resource": [
-        "*"
-      ]
-    },
-    {
-      "Action": [
         "ec2:DescribeInstances",
         "ecr:GetAuthorizationToken"
       ],
@@ -137,9 +115,42 @@
     },
     {
       "Action": [
+        "ec2:RunInstances"
+      ],
+      "Condition": {
+        "ArnEquals": {
+          "ec2:LaunchTemplate": ${jsonencode(launch_template_arns)}
+        },
+        "Bool": {
+          "ec2:IsLaunchTemplateResource": [
+            "true"
+          ]
+        },
+        "Null": {
+          "aws:RequestTag/pumpkin:run": [
+            "false"
+          ]
+        },
+        "StringEqualsIfExists": {
+          "ec2:InstanceType": ${jsonencode(instance_types)}
+        }
+      },
+      "Effect": "Allow",
+      "Resource": [
+        "arn:${partition}:ec2:${region}:${account}:instance/*",
+        "arn:${partition}:ec2:${region}:${account}:volume/*"
+      ]
+    },
+    {
+      "Action": [
         "ec2:CreateTags"
       ],
       "Condition": {
+        "Null": {
+          "aws:RequestTag/pumpkin:run": [
+            "false"
+          ]
+        },
         "StringEquals": {
           "ec2:CreateAction": [
             "RunInstances"
@@ -160,6 +171,26 @@
       "Effect": "Allow",
       "Resource": [
         "arn:${partition}:scheduler:${region}:${account}:schedule/${timer_group}/*"
+      ]
+    },
+    {
+      "Action": [
+        "ec2:RunInstances"
+      ],
+      "Condition": {
+        "ArnEquals": {
+          "ec2:LaunchTemplate": ${jsonencode(launch_template_arns)}
+        },
+        "Bool": {
+          "ec2:IsLaunchTemplateResource": [
+            "true"
+          ]
+        }
+      },
+      "Effect": "Allow",
+      "NotResource": [
+        "arn:${partition}:ec2:${region}:${account}:instance/*",
+        "arn:${partition}:ec2:${region}:${account}:volume/*"
       ]
     }
   ],
