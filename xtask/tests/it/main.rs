@@ -470,7 +470,7 @@ fn links() {
         format!("// <{}>, a directory at a tag\n", at("tree/v1.0/src")),
         format!("// ({}), at a short SHA\n", at("blob/0123456/a.zig")),
         format!("// {}, a document\n", at("blob/main/docs/a.md#part")),
-        format!("// {}, {}\n", at(""), at("tree/main")),
+        format!("// {}, {}, {}\n", at(""), at("tree/main"), at("tree/main/")),
         format!("// {}\n", at("releases/download/v1/a.tgz")),
         format!("const S: &str = \"{}\";\n", at("blob/main/a.rs")),
     ];
@@ -489,6 +489,11 @@ fn links() {
                 Tracked,
             ),
             ("d.txt", text(at("blob/main/d.rs")), Tracked),
+            (
+                "crates/lang/tests/conformance/suite/e.star",
+                text(format!("# {}", at("blob/main/e.star"))),
+                Tracked,
+            ),
         ],
         tidy,
         &expect![[r#"
@@ -520,7 +525,9 @@ fn test_binaries() {
             file("loose/tests/b/main.rs", ""),
         ],
         tidy,
-        &expect!["loose/Cargo.toml: the package has 2 integration test binaries, `tests/a.rs`, `tests/b/main.rs`: make each a module of one, as each links the package and its dependencies again"],
+        &expect![
+            "loose/Cargo.toml: the package has 2 integration test binaries, `tests/a.rs`, `tests/b/main.rs`: make each a module of one, as each links the package and its dependencies again"
+        ],
     );
 }
 

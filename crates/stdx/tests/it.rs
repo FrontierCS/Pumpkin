@@ -2,11 +2,6 @@
     clippy::unwrap_used,
     reason = "a test helper fails the test that calls it"
 )]
-#![expect(
-    clippy::disallowed_methods,
-    reason = "`test_support::TestDir` depends on stdx, so stdx's tests make their scratch with \
-              `tempfile`"
-)]
 
 use std::env;
 use std::ffi::OsStr;
@@ -50,6 +45,15 @@ enum Caller<'a> {
     Runs(Run<'a>),
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "`test_support::TestDir` depends on stdx, so stdx's tests make their scratch with \
+              `tempfile`"
+)]
+fn scratch() -> tempfile::TempDir {
+    tempfile::tempdir().unwrap()
+}
+
 /// Runs `script` with `sh`, from `caller`, in a directory of its own, and checks how it ended,
 /// what this process printed meanwhile, and how each process whose ID it wrote, a line each, to
 /// `pids` there ended, against `expect`. A script writes an ID once it has started that process,
@@ -58,7 +62,7 @@ enum Caller<'a> {
 fn check(script: &str, caller: Caller<'_>, expect: &Expect) {
     // Adopted, a process the script left can be waited for.
     rustix::process::set_child_subreaper(Some(rustix::process::getpid())).unwrap();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scratch();
     let pids = || fs::read_to_string(dir.path().join("pids")).unwrap_or_default();
     let printing = Printing::start();
     let ended = match caller {
@@ -128,7 +132,7 @@ struct Printing {
 
 impl Printing {
     fn start() -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = scratch();
         let stdout = saved(rustix::stdio::stdout());
         let stderr = saved(rustix::stdio::stderr());
         rustix::stdio::dup2_stdout(File::create(dir.path().join("stdout")).unwrap()).unwrap();
@@ -461,7 +465,7 @@ fn reported() {
 
 #[test]
 fn unstarted() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scratch();
     let only = Environment::Only(&["PATH"]);
     let run = |command: &mut std::process::Command| {
         let failure = stdx::process::run(command, Run::new(LONG_BOUND, Echo::Silent));
@@ -511,7 +515,7 @@ fn unstarted() {
 // https://github.com/git/git/blob/fb255012acbcbe81189cb8014da0280b09c66ecc/t/test-lib.sh#L1876-L1905
 #[test]
 fn unenterable() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scratch();
     let unsearchable = dir.path().join("unsearchable");
     fs::create_dir(&unsearchable).unwrap();
     fs::set_permissions(&unsearchable, fs::Permissions::from_mode(0o600)).unwrap();
@@ -618,7 +622,7 @@ fn tcp_options() {
 // first let go; with each held again, a take whose `waiting` fails fails with its error.
 #[test]
 fn slots() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scratch();
     let count = NonZeroUsize::new(2).unwrap();
     let free = |_: &[String]| Err("waited, though a slot was free".to_owned());
     let first = stdx::slots::take(dir.path(), count, "first", free).unwrap();

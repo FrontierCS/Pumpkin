@@ -44,6 +44,9 @@ const WORD_CAP: usize = 1_500;
 
 const SOURCES: [&str; 8] = ["rs", "star", "js", "css", "html", "py", "sh", "tf"];
 
+/// Where the suites that a third party wrote are vendored, which the checks leave as they are.
+const VENDORED: &str = "crates/lang/tests/conformance/";
+
 // The files over a cap, each with its ceiling, the most it may hold, which only goes down: a
 // ratchet, as TigerBeetle's tidy holds the functions that are already long and stops the others
 // growing past its cap, and fails on an exception that names no file:
@@ -184,7 +187,7 @@ fn test_data(paths: &[String]) -> Vec<String> {
     for path in paths {
         let file = Path::new(path);
         let extension = file.extension().and_then(|extension| extension.to_str());
-        let input = path.starts_with("crates/lang/tests/conformance/")
+        let input = path.starts_with(VENDORED)
             || (path.starts_with("crates/lang/tests/fixtures/") && extension == Some("star"));
         let snapshot =
             path.starts_with("crates/pumpkin/tests/it/help/") && extension == Some("svg");

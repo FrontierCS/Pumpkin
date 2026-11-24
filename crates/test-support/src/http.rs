@@ -1,4 +1,8 @@
 //! A stand-in HTTP/1.1 server's end of a connection, such as a stand-in model provider's.
+//!
+//! A stand-in serves only a documented network API that Pumpkin speaks as a client, as cargo's
+//! tests serve a registry over crates.io's documented protocol:
+//! <https://github.com/rust-lang/cargo/blob/111443f3dc4d82a65e2306a93028f122406401c1/crates/cargo-test-support/src/registry.rs#L790-L834>.
 
 use std::io::{BufRead, Write as _};
 use std::net::TcpStream;

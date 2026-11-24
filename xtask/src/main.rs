@@ -144,15 +144,15 @@ mod flags {
                 optional --publish
             }
 
-            /// Runs cargo-mutants on the working tree's changes. Each missed mutant, which
-            /// `mutants.out` lists, is a finding to read, not a failure. Given paths that the
-            /// changes leave as they are, it mutates their source whole. It then names the missed
-            /// mutants that the tests of the merge base catch.
+            /// Runs cargo-mutants on the working tree's changes below its paths. Each missed
+            /// mutant, which `mutants.out` lists, is a finding to read, not a failure. Where the
+            /// changes leave the paths as they are, it mutates their source whole. It then names
+            /// the missed mutants that the tests of the merge base catch.
             cmd mutants {
-                /// The paths whose changes alone are taken. By default, they are the crates whose
-                /// tests guard the most: `decision`, `schema` and `route` guard the operator's key,
+                /// The paths whose changes are taken. By default, they are the crates whose tests
+                /// guard the most: `decision`, `schema` and `route` guard the operator's key,
                 /// `retention` decides what the controller's prune removes, and `members` guards
-                /// the controller's forced command.
+                /// the controller's forced command. `crates providers xtask` takes every change.
                 repeated paths: PathBuf
                 /// The revision since whose merge base with `HEAD` the changes are taken,
                 /// `origin/main` by default.
@@ -572,7 +572,7 @@ fn mutants(paths: &[PathBuf], rev: Option<&str>) -> Result<()> {
         .collect();
     let mut list = cargo_mutants()?;
     list.arg("--list-files");
-    let whole = !paths.is_empty() && unchanged(&repo, list, &base, &files)?;
+    let whole = unchanged(&repo, list, &base, &files)?;
     let mut run = cargo_mutants()?;
     if whole {
         run.args(&files);
