@@ -128,10 +128,11 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 .name(which.name().to_string())
                 .stack_size(bodies.stack_bytes())
                 .spawn_scoped(scope, move || {
-                    let arrivals = move |arrival| Input::Shared(target, observed.now(), arrival);
+                    // A target's sandbox holds no companions, so each arrival is its own
+                    // container's.
+                    let arrivals = move |_, arrival| Input::Shared(target, observed.now(), arrival);
                     let by = (&clock, by);
-                    let started =
-                        sandboxes.start(which, None, by, hard_end, inbox.clone(), arrivals);
+                    let started = sandboxes.start(which, None, by, hard_end, &inbox, arrivals);
                     let mut sandbox = match started {
                         Ok(sandbox) => {
                             let at = clock.now();

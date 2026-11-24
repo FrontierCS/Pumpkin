@@ -766,12 +766,14 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                     command,
                     argv,
                     timeout,
+                    container,
                 } => {
                     let run = lease::Run {
                         command,
                         argv,
                         timeout,
                         required_output: self.waiting.contains_key(&lease),
+                        container,
                     };
                     self.send_lease(lease, Message::Order(lease::Order::Run(run)));
                 }
@@ -781,6 +783,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                     transfer: number,
                     direction,
                     max_bytes,
+                    container,
                 } => {
                     let holder = self.holder_trees(lease, holder);
                     let transfer = lease::Transfer {
@@ -788,6 +791,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                         direction,
                         max_bytes,
                         holder,
+                        container,
                     };
                     let order = lease::Order::Transfer(transfer);
                     self.send_lease(lease, Message::Order(order));

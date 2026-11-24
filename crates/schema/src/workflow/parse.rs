@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::iter;
 use std::num::NonZeroU64;
 use std::time::Duration;
 
@@ -112,21 +113,34 @@ impl<'ir> Parser<'ir> {
                 needs,
                 runtime,
             } = role;
+            let companions = match runtime {
+                ir::Runtime::Runner(runner) => runner.companions.len(),
+                ir::Runtime::Agent(_) | ir::Runtime::Target(_) => 0,
+            };
             self.roles.push(Sandbox {
                 name: name.clone(),
                 image: image.clone(),
                 user: *user,
                 needs: needs.clone(),
+                companions,
                 at: at.clone(),
             });
             let runtime_at = at.token("runtime");
             match runtime {
                 ir::Runtime::Agent(agent) => self.agent(runtime_at.token("agent"), id, agent),
                 ir::Runtime::Target(target) => self.target(&runtime_at.token("target"), id, target),
-                ir::Runtime::Runner(ir::RunnerRuntime { cwd, env }) => {
+                ir::Runtime::Runner(ir::RunnerRuntime {
+                    cwd,
+                    env,
+                    companions,
+                }) => {
+                    let list = runtime_at.token("runner").token("companions");
+                    let names = companions.iter().map(|companion| &companion.name);
+                    self.errors.unique(names, |index| list.token(index));
                     let runner = Runner {
                         cwd: cwd.clone(),
                         env: env.clone(),
+                        companions: companions.clone(),
                     };
                     self.runners.insert(id, runner);
                 }
@@ -408,20 +422,31 @@ impl<'ir> Parser<'ir> {
     }
 
     fn agents_runner(&mut self, at: &JsonPointer, runner: RoleId) -> Result<(), Reported> {
-        // So that the agent never runs what a target's image holds ([`ir::Session::runner`]).
-        let (role, image) = (&self.roles[runner.0].name, &self.roles[runner.0].image);
-        let mut targets = self.targets.keys();
-        let Some(target) = targets.find(|target| self.roles[target.0].image == *image) else {
-            return Ok(());
-        };
-        let target = &self.roles[target.0].name;
-        Err(self.errors.report(
-            at.clone(),
-            format!(
-                "`{role}` runs target `{target}`'s image, {image}: give the runner an image no \
-                 target has"
-            ),
-        ))
+        // So that the agent never runs what a target's image holds ([`ir::Session::runner`]), in
+        // the runner's own container or a companion.
+        let role = &self.roles[runner.0].name;
+        let companions = self.runners[&runner].companions.iter();
+        let images = iter::once((None, &self.roles[runner.0].image))
+            .chain(companions.map(|companion| (Some(&companion.name), &companion.image)));
+        for (companion, image) in images {
+            let mut targets = self.targets.keys();
+            let Some(target) = targets.find(|target| self.roles[target.0].image == *image) else {
+                continue;
+            };
+            let target = &self.roles[target.0].name;
+            let runs = match companion {
+                None => format!("`{role}`"),
+                Some(companion) => format!("`{role}`'s companion `{companion}`"),
+            };
+            return Err(self.errors.report(
+                at.clone(),
+                format!(
+                    "{runs} runs target `{target}`'s image, {image}: give the runner an image no \
+                     target has"
+                ),
+            ));
+        }
+        Ok(())
     }
 
     fn unleased(&mut self, grants: &[(Holder, &Name, &ir::Session)]) {

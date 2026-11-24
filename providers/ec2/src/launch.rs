@@ -67,6 +67,8 @@ impl Ec2<'_> {
             model,
             hard_end,
             by,
+            // Its classes offer no companions, so placing gives a sandbox none.
+            companions: _,
         } = create;
         let SocketAddr::V4(gateway) = gateway else {
             // Docker's default bridge, which the container is on, has no IPv6.

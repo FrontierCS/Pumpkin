@@ -260,10 +260,16 @@ fn scoped(
         &tree.join(&schema::sandbox::RelativePath::from_static("source")),
         input,
     )?;
-    target.runner_put(&grant, lease, tree, AbsolutePath::from_static("/work/src"))?;
+    target.runner_put(
+        &grant,
+        lease,
+        tree,
+        AbsolutePath::from_static("/work/src"),
+        None,
+    )?;
     let argv: Argv = serde_json::from_value(keywords["argv"].clone()).unwrap();
     let timeout = std::num::NonZeroU64::new(1);
-    let command = target.runner_run(&grant, lease, argv.clone(), timeout)?;
+    let command = target.runner_run(&grant, lease, argv.clone(), timeout, None)?;
     let received = AbsolutePath::try_from(format!(
         "/pumpkin/out/{}",
         target.caller().unwrap_or("final")
@@ -274,8 +280,11 @@ fn scoped(
         lease,
         AbsolutePath::from_static("/work/src/source"),
         received,
+        None,
     )?;
-    let refused = target.runner_run(&grant, lease, argv, timeout).unwrap_err();
+    let refused = target
+        .runner_run(&grant, lease, argv, timeout, None)
+        .unwrap_err();
     assert!(refused.contains("no commands left"));
     target.runner_close(&grant, lease)?;
     Ok(vec![(Name::from_static("command"), json!(command))])

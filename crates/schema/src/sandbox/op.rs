@@ -34,7 +34,7 @@ use serde_json::{Map, Value};
 
 use super::ExitStatus;
 use crate::frame;
-use crate::ir::{AbsolutePath, Argument, Argv, Name, Resources};
+use crate::ir::{AbsolutePath, Argument, Argv, CompanionName, Name, Resources};
 
 /// The most bytes of why a transfer failed, and of why a runner failed, that a lease's status
 /// gives ([`LeaseStatusReply`]).
@@ -105,20 +105,26 @@ pub enum SessionOp {
     },
     /// Runs `argv` in lease `lease`'s runner, once it is ready and runs no other command, killing
     /// it once it has run for `timeout_seconds`, if given, which is at most what the lease has
-    /// left; without one, it may run until the lease ends.
+    /// left; without one, it may run until the lease ends. It runs in the runner's companion
+    /// `container`, if given; without one, in the runner's own container.
     Run {
         lease: u64,
         argv: Argv,
         timeout_seconds: Option<NonZeroU64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        container: Option<CompanionName>,
     },
     /// Copies the tree in the caller's directory `tree` to `to` in lease `lease`'s runner, once it
     /// is ready and runs nothing else: the tree's root becomes `to`, which must not exist, or, if
     /// `replace`, which is removed first, whatever it is.
+    /// It copies into the runner's companion `container`, if given, as [`SessionOp::Run`] runs.
     Put {
         lease: u64,
         tree: AbsolutePath,
         to: AbsolutePath,
         replace: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        container: Option<CompanionName>,
     },
     /// Copies the tree in lease `lease`'s runner's directory `from` to `to` in the caller's
     /// sandbox, as [`SessionOp::Put`] copies one the other way.
@@ -126,6 +132,8 @@ pub enum SessionOp {
         lease: u64,
         from: AbsolutePath,
         to: AbsolutePath,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        container: Option<CompanionName>,
     },
     /// Asks how lease `lease` is doing.
     Status { lease: u64 },

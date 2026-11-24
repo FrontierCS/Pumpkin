@@ -156,6 +156,7 @@ fn offered() -> BTreeMap<ir::Name, BTreeMap<ir::Name, Class>> {
         gpu: None,
         cpu_features: flags(&["avx2", "sse4_2"]),
         cpu_model: None,
+        companions: 0,
     };
     let class = |provider: &str, class: &str, offers, startup_seconds| {
         let declared = Class {
@@ -191,6 +192,7 @@ fn offered() -> BTreeMap<ir::Name, BTreeMap<ir::Name, Class>> {
             Offers {
                 gpu: h100(1),
                 cpu_features: BTreeSet::new(),
+                companions: 250,
                 ..offers(8, 64)
             },
             600,
@@ -1283,6 +1285,54 @@ fn broken_leases() {
             /roles/3: `gpu` is a runner that no session names: name it from one
             /roles/0/runtime/agent/grants/1/session/transfer_bytes: `gpu`'s `transfer_bytes` is 1073741825, over the transfer limit of 1073741824: give at most that
             parsed"#]],
+    );
+}
+
+/// [`leasing`]'s workflow, its runner on an H100 with `companions` beside its own container.
+fn pod(companions: Value) -> Value {
+    let mut ir = leasing();
+    ir["roles"][3]["needs"]["gpu"] = json!({ "count": 1, "model": "NVIDIA H100 80GB HBM3" });
+    ir["roles"][3]["runtime"]["runner"]["companions"] = companions;
+    ir
+}
+
+fn companion(name: &str, image: char) -> Value {
+    json!({
+        "name": name, "image": format!("sha256:{}", image.to_string().repeat(64)),
+        "user": { "uid": 65532, "gid": 65532 }, "cwd": "/testbed",
+    })
+}
+
+#[test]
+fn pods() {
+    let two = json!([
+        companion("scheduler", '4'),
+        companion("swe-000-candidate", '5')
+    ]);
+    let many: Vec<Value> = (0..251).map(|i| companion(&format!("c{i}"), '4')).collect();
+    check(
+        [
+            pod(two.clone()),
+            pod(json!([
+                companion("scheduler", '4'),
+                companion("scheduler", '5')
+            ])),
+            pod(json!([companion("swe_000", '4')])),
+            pod(json!([companion("swe-", '4')])),
+            pod(json!([companion("scheduler", '2')])),
+        ],
+        &expect![[r#"
+            parsed
+            /roles/3/runtime/runner/companions/1/name: `scheduler` also names /roles/3/runtime/runner/companions/0: give each a unique name
+            `swe_000` is not a valid companion name: use 1 to 63 characters from a-z, 0-9 and `-`, starting with a letter and ending with a letter or a digit
+            `swe-` is not a valid companion name: use 1 to 63 characters from a-z, 0-9 and `-`, starting with a letter and ending with a letter or a digit
+            /roles/0/runtime/agent/grants/1/session/runner: `gpu`'s companion `scheduler` runs target `trainer`'s image, sha256:2222222222222222222222222222222222222222222222222222222222222222: give the runner an image no target has"#]],
+    );
+    check(
+        [Placing(pod(two)), Placing(pod(json!(many)))],
+        &expect![[r#"
+        agent, on `aws` in `agent`, whose starts take at most 30s; trainer, on `aws` in `judge`, whose starts take at most 60s; final_judge, on `aws` in `judge`, whose starts take at most 60s; gpu, on `gpus` in `h100`, whose starts take at most 600s; providers `aws`, `gpus`
+        /roles/3/needs: `gpu` fits no class of sandbox, as `aws`'s `agent` has no GPU, and it needs 1 × `NVIDIA H100 80GB HBM3`; `aws`'s `ice_lake` offers 4000 thousandths of a CPU, fewer than its 8000; `aws`'s `judge` has no GPU, and it needs 1 × `NVIDIA H100 80GB HBM3`; `aws`'s `judge_60` has no GPU, and it needs 1 × `NVIDIA H100 80GB HBM3`; `aws`'s `judge_memory` has no GPU, and it needs 1 × `NVIDIA H100 80GB HBM3`; `gpus`'s `h100` holds at most 250 containers beside a sandbox's own, fewer than its 251 companions; `gpus`'s `h100_4` has GPUs, 4 × `NVIDIA H100 80GB HBM3`, and it needs 1 × `NVIDIA H100 80GB HBM3`: change its needs, or run it where sandboxes are larger"#]],
     );
 }
 

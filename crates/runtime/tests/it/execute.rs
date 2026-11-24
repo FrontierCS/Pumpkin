@@ -20,8 +20,8 @@ use decision::{Outcome, lasts};
 use expect_test::{Expect, expect};
 use gateway::Dialer;
 use provider::{
-    Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation,
-    Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
+    Console, Create, Created, Creator, Dials, ImageRef, Listed, Meeting, Provider, Ready,
+    Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
 use route::Serving;
 use runtime::{Host, ModelRoutes, Reaped, Record, Recorded, Run, System, TokenPrices, new_id};
@@ -145,11 +145,11 @@ impl Provider for Interrupting<'_> {
 }
 
 impl Creator<SocketDial> for Interrupting<'_> {
-    fn create(&self, create: &Create, dial: SocketDial) -> Result<Created, String> {
+    fn create(&self, create: &Create, dials: Dials<SocketDial>) -> Result<Created, String> {
         if create.name.as_str().starts_with("shared-") {
             assert!(!create.ops && !create.model);
         }
-        let created = self.sim.create(create, dial);
+        let created = self.sim.create(create, dials);
         if let Some(At::Created(name)) = self.at
             && create.name.as_str() == name
         {
@@ -3874,6 +3874,77 @@ fn hard_ends() {
         lease-0's hard end: 150 s after the run's start
         job-1's hard end: 300 s after the run's start"#]]
     .assert_eq(&hard_ends.join("\n"));
+}
+
+// Each container of a runner's pod has a session of its own: a command or a transfer that names a
+// companion goes there, and the lease's end collects the runner's own `out` alone.
+#[test]
+fn pods() {
+    let argv = [
+        "ops",
+        "gpu.open",
+        "await_lease gpu 0 ready",
+        "gpu.run 0 - print one",
+        "await_lease gpu 0 ready",
+        "gpu.run 0 -@scheduler print two",
+        "await_lease gpu 0 ready",
+        "gpu.put 0 /pumpkin/in/payload swe-000:/work/in",
+        "await_transfer gpu 0 moved",
+        "gpu.run 0 -@ghost print three",
+        "gpu.close 0",
+        "await_lease gpu 0 closed",
+        "call submit 6 finalize=true",
+    ];
+    let mut ir = lease_workflow(&argv, 30, RUNNER);
+    let companion = |name: &str, image: &str| json!({ "name": name, "image": image, "user": { "uid": 65532, "gid": 65532 }, "cwd": "/work" });
+    ir["roles"][3]["runtime"]["runner"]["companions"] = json!([
+        companion("scheduler", RUNNER_TOO),
+        companion("swe-000", RUNNER)
+    ]);
+    let shown = executed(
+        &SimHost::new(),
+        "pods",
+        &[(PROVIDER, &Sim::new())],
+        &ir,
+        SANDBOXD,
+        &[Also::Listing],
+    );
+    expect![[r#"
+        finished, showing [score=6]
+        record: agents/agent/log/collected, agents/agent/out/collected, agents/agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/got/1/result.json, jobs/0/log/0/collected, jobs/0/out/collected, jobs/0/out/result.json, jobs/0/sandbox.json, leases/0/log/0/collected, leases/0/log/0/command.stdout, leases/0/log/1/collected, leases/0/log/1/command.stdout, leases/0/out/collected, leases/0/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+        payloads hold: ["xxxxxx"]
+        outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
+        log.jsonl:
+        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+        {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
+        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
+        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":4,"cumulative_seconds":null,"instance_seconds":600,"instances":1}}},{"grant":"gpu","holder":"agent-0","instance":0,"kind":"start_lease","lease":0,"start_by_ns":"30000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"gpu","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"0","seq":3}
+        {"actions":[],"at_ns":"0","event":{"kind":"lease_ready","lease":0},"observed_ns":"0","seq":4}
+        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":3,"cumulative_seconds":null,"instance_seconds":600,"instances":1}}},{"command":0,"kind":"run_command","lease":0,"timeout_ns":null}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":1,"request":{"argv":["print","one"],"grant":"gpu","kind":"lease_run","lease":0,"timeout_seconds":null}},"observed_ns":"0","seq":5}
+        {"actions":[],"at_ns":"0","event":{"command":0,"end":{"exited":{"code":0}},"kind":"command_ended","lease":0},"observed_ns":"0","seq":6}
+        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":2,"cumulative_seconds":null,"instance_seconds":600,"instances":1}}},{"command":1,"kind":"run_command","lease":0,"timeout_ns":null}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":2,"request":{"argv":["print","two"],"container":"scheduler","grant":"gpu","kind":"lease_run","lease":0,"timeout_seconds":null}},"observed_ns":"0","seq":7}
+        {"actions":[],"at_ns":"0","event":{"command":1,"end":{"exited":{"code":0}},"kind":"command_ended","lease":0},"observed_ns":"0","seq":8}
+        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":1,"cumulative_seconds":null,"instance_seconds":600,"instances":1}}},{"direction":"put","kind":"transfer","lease":0,"max_bytes":64,"transfer":2}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":3,"request":{"container":"swe-000","grant":"gpu","kind":"lease_put","lease":0,"replace":false,"to":"/work/in","tree":"/pumpkin/in/payload"}},"observed_ns":"0","seq":9}
+        {"actions":[],"at_ns":"0","event":{"end":{"moved":{"bytes":9,"entries":1}},"kind":"transfer_ended","lease":0,"transfer":2},"observed_ns":"0","seq":10}
+        {"actions":[{"kind":"reply","reply":{"kind":"refused","message":"lease 0's runner, `gpu_runner`, holds no companion `ghost`: name one of `scheduler`, `swe-000`, or none for its own container"}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":4,"request":{"argv":["print","three"],"container":"ghost","grant":"gpu","kind":"lease_run","lease":0,"timeout_seconds":null}},"observed_ns":"0","seq":11}
+        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":1,"cumulative_seconds":null,"instance_seconds":0,"instances":1}}},{"kind":"close_lease","lease":0}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":5,"request":{"grant":"gpu","kind":"lease_close","lease":0}},"observed_ns":"0","seq":12}
+        {"actions":[],"at_ns":"0","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"lease-0"},"seq":13}
+        {"actions":[],"at_ns":"0","event":{"kind":"lease_ended","lease":0},"observed_ns":"0","seq":14}
+        {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":30,"returned":{"state":"accepted"}}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":6,"request":{"evaluated":{"effects":["set_submission","end_work"],"returned":[{"name":"state","value":"accepted"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":15}
+        {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"0","seq":16}
+        {"at_ns":"0","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":17}
+        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_collected"},"seq":18}
+        {"actions":[],"at_ns":"0","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":19}
+        {"actions":[{"job":0,"kind":"start_final_call","selections":[{"role":"agent","selection":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}],"timeout_ns":"120000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"0","seq":20}
+        {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_started"},"observed_ns":"0","seq":21}
+        {"actions":[],"at_ns":"0","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":0,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"0","seq":22}
+        {"actions":[],"at_ns":"0","event":{"argv":["judge","/pumpkin/in/payload/raw"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"0","seq":23}
+        {"actions":[],"at_ns":"0","event":{"command":0,"end":{"exited":{"code":0}},"job":0,"kind":"command_ended"},"observed_ns":"0","seq":24}
+        {"actions":[],"at_ns":"0","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":0,"kind":"target_get","path":"/pumpkin/out/result.json"},"observed_ns":"0","seq":25}
+        {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_returned","returned":[{"name":"score","value":6}]},"observed_ns":"0","seq":26}
+        {"actions":[],"at_ns":"0","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":27}
+        {"actions":[{"kind":"finish"}],"at_ns":"0","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"0","seq":28}
+        its last record came before the agent's teardown was to end"#]].assert_eq(&shown);
 }
 
 #[test]

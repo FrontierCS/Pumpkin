@@ -5,7 +5,7 @@ use std::fmt;
 use std::num::NonZeroU32;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use schema::ir::{Name, Resources, User};
+use schema::ir::{CompanionName, Name, Resources, User};
 use schema::workflow::Class;
 use serde::Serialize;
 use serde_json::Value;
@@ -88,6 +88,31 @@ pub struct Create {
     /// When the run stops waiting for the sandbox to start, by this host's clock, at most the
     /// hard end: the create's deadline ([`Creator::create`](crate::Creator::create)).
     pub by: UnixTime,
+    /// The containers that the sandbox holds beside its own, a runner's companions, in their order,
+    /// each with a `sandboxd` of its own, passive, as the role's own container's is not if `ops`:
+    /// at most as many as its [class](Create::class) offers. They share the sandbox's resources
+    /// and its lifetime, so the sandbox's delete ends them too.
+    pub companions: Vec<CompanionCreate>,
+}
+
+/// A container of a sandbox's beside its own ([`Create::companions`]).
+#[derive(Debug)]
+pub struct CompanionCreate {
+    pub name: CompanionName,
+    pub image: ImageRef,
+    /// The user its commands run as, which its `sandboxd` takes as the role's own container's does.
+    pub user: User,
+}
+
+/// What each container of a sandbox has to meet the gateway by ([`Creator::create`]).
+///
+/// It is its own container's, and each of its [companions'](Create::companions), in their order.
+///
+/// [`Creator::create`]: crate::Creator::create
+#[derive(Debug)]
+pub struct Dials<D> {
+    pub main: D,
+    pub companions: Vec<D>,
 }
 
 /// A time by a machine's clock, as the time since the Unix epoch, never before it: apart from

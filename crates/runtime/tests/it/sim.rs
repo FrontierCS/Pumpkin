@@ -30,7 +30,6 @@
 )]
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::fs;
 use std::net::Shutdown;
 use std::num::{NonZeroU32, NonZeroU64};
 use std::os::unix::fs::PermissionsExt;
@@ -39,13 +38,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+use std::{fs, iter};
 
 use provider::{
-    Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation,
-    Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted, UnixTime,
+    Console, Create, Created, Creator, Dials, ImageRef, Listed, Meeting, Provider, Ready,
+    Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted, UnixTime,
 };
 use schema::frame;
-use schema::ir::{AbsolutePath, Argv, CpuModel, Image, Mode, Name, Sha256Digest};
+use schema::ir::{AbsolutePath, Argv, CompanionName, CpuModel, Image, Mode, Name, Sha256Digest};
 use schema::sandbox::op::{
     JobState, Last, LeaseStatusReply, OpCall, OpReply, SessionOp, StatusReply, TransferStatus,
 };
@@ -244,7 +244,12 @@ struct Sandbox {
     // connection.
     shared: Arc<Mutex<Status>>,
     thread: JoinHandle<()>,
+    // Its companions' `sandboxd`s, each a thread of its own, which end with it.
+    companions: Vec<Companion>,
 }
+
+// A companion's `sandboxd`: what its thread shares, and the thread.
+type Companion = (Arc<Mutex<Status>>, JoinHandle<()>);
 
 impl Sandbox {
     fn of(&self, run: &RunTag) -> bool {
@@ -503,6 +508,10 @@ impl Sim {
     }
 }
 
+// The most containers that a simulated sandbox holds beside its own, a runner's companions: more
+// than any test's runner has.
+const COMPANIONS: usize = 4;
+
 fn ready(startup_seconds: NonZeroU64) -> Ready {
     let class = |name: &str, startup_seconds, cpu_model| {
         let offers = Offers {
@@ -511,6 +520,7 @@ fn ready(startup_seconds: NonZeroU64) -> Ready {
             gpu: None,
             cpu_features: BTreeSet::new(),
             cpu_model,
+            companions: COMPANIONS,
         };
         let class = Class {
             offers,
@@ -700,15 +710,22 @@ impl Provider for Sim {
 }
 
 impl Creator<SocketDial> for Sim {
-    fn create(&self, create: &Create, dial: SocketDial) -> Result<Created, String> {
-        self.made(create, dial.dir.join(SOCKET_NAME))
+    fn create(&self, create: &Create, dials: Dials<SocketDial>) -> Result<Created, String> {
+        let socket = |dial: SocketDial| dial.dir.join(SOCKET_NAME);
+        let companions = dials.companions.into_iter().map(socket).collect();
+        self.made(create, socket(dials.main), companions)
     }
 }
 
 impl Sim {
     // A sandbox, a thread of this process, ends with it, so the hard end needs nothing more; and
     // the name needs no use, as each sandbox is created once.
-    fn made(&self, create: &Create, socket: PathBuf) -> Result<Created, String> {
+    fn made(
+        &self,
+        create: &Create,
+        socket: PathBuf,
+        companions: Vec<PathBuf>,
+    ) -> Result<Created, String> {
         let by = self.by(create);
         if by.passed() {
             let passed =
@@ -733,10 +750,7 @@ impl Sim {
         let hello = json!({ "version": PROTOCOL_VERSION });
         let sockets = fs::metadata(socket.parent().unwrap().parent().unwrap()).unwrap();
         let mode = sockets.permissions().mode() & 0o777;
-        let state = self.state();
-        let (record, time) = (state.record.clone(), state.time.clone());
-        drop(state);
-        let shared = Arc::new(Mutex::new(Status::new(self.journal.clone(), record, time)));
+        let shared = self.shared();
         // Before its thread starts, so that the console shows it once the create returns, however
         // late the thread runs.
         (status(&shared).console).push_str(if mute { NEVER_DIALS } else { "" });
@@ -748,6 +762,7 @@ impl Sim {
             .spawn(move || sandboxd(&socket, mute, hung, &hello, model, &ours))
             .map_err(|error| format!("the sandbox's thread didn't start: {error}"))?;
         ended(&thread, mute && !hung);
+        let started = self.companions(create, companions)?;
         let late = made == Made::Slow && by.slept();
         let mut state = self.state();
         let id = format!("sim-{}", state.next);
@@ -763,6 +778,7 @@ impl Sim {
             listing,
             shared,
             thread,
+            companions: started,
         };
         state.sandboxes.insert(id.clone(), sandbox);
         self.tell(|| format!("created {id}"));
@@ -780,6 +796,32 @@ impl Sim {
         Ok(Created {
             id: SandboxId::from(id),
         })
+    }
+
+    // What the thread of a new `sandboxd` shares.
+    fn shared(&self) -> Arc<Mutex<Status>> {
+        let state = self.state();
+        let (record, time) = (state.record.clone(), state.time.clone());
+        drop(state);
+        Arc::new(Mutex::new(Status::new(self.journal.clone(), record, time)))
+    }
+
+    // Starts the `sandboxd` of each of `create`'s companions, each dialing its own socket, which
+    // serves as any other does.
+    fn companions(&self, create: &Create, sockets: Vec<PathBuf>) -> Result<Vec<Companion>, String> {
+        let mut started = Vec::new();
+        for (socket, companion) in sockets.into_iter().zip(&create.companions) {
+            self.own("the companion's image", companion.image.as_str())?;
+            let shared = self.shared();
+            let ours = Arc::clone(&shared);
+            let hello = json!({ "version": PROTOCOL_VERSION });
+            let thread = thread::Builder::new()
+                .name("sim-companion".to_owned())
+                .spawn(move || sandboxd(&socket, false, false, &hello, false, &ours))
+                .map_err(|error| format!("a companion's thread didn't start: {error}"))?;
+            started.push((shared, thread));
+        }
+        Ok(started)
     }
 
     // When `create` gives up, by the run's clock on a simulated host.
@@ -990,17 +1032,20 @@ fn stop(sandbox: Sandbox) {
         listing: _,
         shared,
         thread,
+        companions,
     } = sandbox;
-    let mut status = status(&shared);
-    status.deleted = true;
-    if let Some(connection) = status.connection.take() {
-        let _ = connection.shutdown(Shutdown::Both);
+    for (shared, thread) in iter::once((shared, thread)).chain(companions) {
+        let mut status = status(&shared);
+        status.deleted = true;
+        if let Some(connection) = status.connection.take() {
+            let _ = connection.shutdown(Shutdown::Both);
+        }
+        drop(status);
+        // A thread that hangs waits to be woken once its sandbox is deleted.
+        thread.thread().unpark();
+        // Only a bug panics the thread, and joining raises its panic here.
+        thread.join().unwrap();
     }
-    drop(status);
-    // A thread that hangs waits to be woken once its sandbox is deleted.
-    thread.thread().unpark();
-    // Only a bug panics the thread, and joining raises its panic here.
-    thread.join().unwrap();
 }
 
 // Waits for the thread of a sandbox that `ends` at once to end, so that every list after its
@@ -1620,28 +1665,43 @@ fn session_call(words: &[&str]) -> OpCall {
         ("open", seconds) => SessionOp::Open {
             instance_seconds: seconds.first().map(|seconds| seconds.parse().unwrap()),
         },
+        // `<timeout>[@<companion>] <argv>…`.
         ("run", [_, timeout, command @ ..]) => {
             let command = command
                 .iter()
                 .map(|&arg| arg.to_owned())
                 .collect::<Vec<_>>();
+            let (timeout, container) = match timeout.split_once('@') {
+                Some((timeout, companion)) => (timeout, Some(companion_named(companion))),
+                None => (*timeout, None),
+            };
             SessionOp::Run {
                 lease: lease(),
                 argv: Argv::try_from(command).unwrap(),
                 timeout_seconds: timeout.parse().ok(),
+                container,
             }
         }
-        ("put", [_, tree, to, replace @ ..]) => SessionOp::Put {
-            lease: lease(),
-            tree: AbsolutePath::try_from((*tree).to_owned()).unwrap(),
-            to: AbsolutePath::try_from((*to).to_owned()).unwrap(),
-            replace: replace == ["replace"],
-        },
-        ("get", [_, from, to]) => SessionOp::Get {
-            lease: lease(),
-            from: AbsolutePath::try_from((*from).to_owned()).unwrap(),
-            to: AbsolutePath::try_from((*to).to_owned()).unwrap(),
-        },
+        // The runner's path as `[<companion>:]<path>`.
+        ("put", [_, tree, to, replace @ ..]) => {
+            let (container, to) = in_runner(to);
+            SessionOp::Put {
+                lease: lease(),
+                tree: AbsolutePath::try_from((*tree).to_owned()).unwrap(),
+                to,
+                replace: replace == ["replace"],
+                container,
+            }
+        }
+        ("get", [_, from, to]) => {
+            let (container, from) = in_runner(from);
+            SessionOp::Get {
+                lease: lease(),
+                from,
+                to: AbsolutePath::try_from((*to).to_owned()).unwrap(),
+                container,
+            }
+        }
         ("status", [_]) => SessionOp::Status { lease: lease() },
         ("close", [_]) => SessionOp::Close { lease: lease() },
         _ => panic!(
@@ -1653,6 +1713,20 @@ fn session_call(words: &[&str]) -> OpCall {
         grant: Name::try_from(grant.to_owned()).unwrap(),
         op,
     }
+}
+
+fn companion_named(name: &str) -> CompanionName {
+    CompanionName::try_from(name.to_owned()).unwrap()
+}
+
+/// A path in a lease's runner, `[<companion>:]<path>`: in that companion, or in the runner's own
+/// container.
+fn in_runner(path: &str) -> (Option<CompanionName>, AbsolutePath) {
+    let (container, path) = match path.split_once(':') {
+        Some((companion, path)) => (Some(companion_named(companion)), path),
+        None => (None, path),
+    };
+    (container, AbsolutePath::try_from(path.to_owned()).unwrap())
 }
 
 #[derive(Default)]

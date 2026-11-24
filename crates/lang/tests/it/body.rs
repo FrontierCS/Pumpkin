@@ -7,7 +7,7 @@ use std::num::NonZeroU64;
 
 use expect_test::{Expect, expect};
 use lang::{Args, Body, BodyKind, Bounds, Host, Label};
-use schema::ir::{AbsolutePath, ArgumentValue, Argv, Name};
+use schema::ir::{AbsolutePath, ArgumentValue, Argv, CompanionName, Name};
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::{CommandEnd, RunnerOutput};
 use serde_json::{Value, json};
@@ -19,6 +19,14 @@ const RESULT: (&str, &str) = (
     "/pumpkin/out/result.json",
     r#"{"raw_score": 43.12, "failure": "slow", "metrics": {"passed": 7, "total": 10}}"#,
 );
+
+/// `path` in the runner's companion `container`, if one, as `container:path`.
+fn companion_path(container: Option<&CompanionName>, path: &str) -> String {
+    match container {
+        Some(container) => format!("{container}:{path}"),
+        None => path.to_owned(),
+    }
+}
 
 /// A host that logs each method a handle calls, a line each.
 #[derive(Default)]
@@ -37,7 +45,9 @@ impl lang::Target for Logged {
         lease: u64,
         tree: AbsolutePath,
         to: AbsolutePath,
+        container: Option<CompanionName>,
     ) -> Result<(), String> {
+        let to = companion_path(container.as_ref(), to.as_str());
         self.0.push(format!("{grant} {lease} put {tree} at {to}"));
         Ok(())
     }
@@ -48,7 +58,9 @@ impl lang::Target for Logged {
         lease: u64,
         from: AbsolutePath,
         to: AbsolutePath,
+        container: Option<CompanionName>,
     ) -> Result<(), String> {
+        let from = companion_path(container.as_ref(), from.as_str());
         self.0.push(format!("{grant} {lease} get {from} at {to}"));
         Ok(())
     }
@@ -59,10 +71,11 @@ impl lang::Target for Logged {
         lease: u64,
         argv: Argv,
         timeout_seconds: Option<NonZeroU64>,
+        container: Option<CompanionName>,
     ) -> Result<RunnerOutput, String> {
+        let program = companion_path(container.as_ref(), argv.program());
         self.0.push(format!(
-            "{grant} {lease} run {} with timeout {timeout_seconds:?}",
-            argv.program()
+            "{grant} {lease} run {program} with timeout {timeout_seconds:?}"
         ));
         Ok(RunnerOutput {
             end: CommandEnd::Exited(ExitStatus::Code(7)),

@@ -22,10 +22,10 @@ use std::process::Output;
 
 use engine::{ContextName, Engine, REMOVE_TIMEOUT, confinement, docker, docker_to, fix_reported};
 use provider::{
-    Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation,
-    Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
+    CompanionCreate, Console, Create, Created, Creator, Dials, ImageRef, Listed, Meeting, Provider,
+    Ready, Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
-use schema::ir::{Image, Name};
+use schema::ir::{Image, Name, User};
 use schema::sandbox::{SANDBOXCTL_PATH, SANDBOXD_PATH, SOCKET_NAME, SocketDial};
 use schema::workflow::{Class, Offers};
 use serde_json::json;
@@ -47,6 +47,16 @@ const GATEWAY_DIR: &str = "/.pumpkin/gateway";
 const RUN_LABEL: &str = "pumpkin.run";
 
 const ROLE_LABEL: &str = "pumpkin.role";
+
+/// The label of a companion's container, which holds the ID of its sandbox's own container, in
+/// place of the run's: so the run's list finds the sandbox alone, and its delete the companion
+/// too.
+const POD_LABEL: &str = "pumpkin.pod";
+
+/// The most containers that a sandbox holds beside its own, a runner's companions, as
+/// [`Offers::companions`] declares it: as many as a Modal sandbox holds sidecars, so that a pod
+/// that runs on one provider runs on the other.
+const COMPANIONS: usize = 250;
 
 /// The provider of sandboxes as containers on an [`Engine`], which every container of its runs
 /// in. Its commands are bounded as the engine's are, a create's at the create's deadline
@@ -93,6 +103,7 @@ impl<'e> Docker<'e> {
             // A class that states its CPU's model is offered only to roles that need that model,
             // and the engine has this one class, which every role is to fit.
             cpu_model: None,
+            companions: COMPANIONS,
         };
         Ok(Self {
             engine,
@@ -193,7 +204,11 @@ impl Provider for Docker<'_> {
 }
 
 impl Creator<SocketDial> for Docker<'_> {
-    fn create(&self, create: &Create, dial: SocketDial) -> Result<Created, String> {
+    fn create(&self, create: &Create, dials: Dials<SocketDial>) -> Result<Created, String> {
+        let Dials {
+            main: dial,
+            companions: companion_dials,
+        } = dials;
         let context = self.context();
         // Each of its commands gives up at its deadline (`Docker`). A `docker create` given up on
         // may still make its container: the engine finishes a request whose client has gone, and
@@ -201,15 +216,31 @@ impl Creator<SocketDial> for Docker<'_> {
         // the run's end has listed. Nothing starts it (`Creator::create`).
         let by = Bound::By(Deadline::at_unix(create.by.since_epoch()));
         // Creating and starting apart gives the container's ID before anything can fail with
-        // a container left behind, so a failure removes this container by its ID.
+        // a container left behind, so a failure removes this container by its ID, and each
+        // companion's by its label, which holds that ID.
         let args = create_args(create, &dial, &self.cpus);
         let args = args.context("creating the container failed")?;
         let created = docker_to(context, &args, by).map_err(|error| fix_reported(&error))?;
         let id = String::from_utf8_lossy(&created.stdout).trim().to_owned();
-        if let Err(error) = docker_to(context, ["start", &id], by) {
-            let mut message = fix_reported(&error);
-            let left = format_args!("container {id} is left behind, as removing it failed");
-            let removed = remove(context, &id, by).map_err(|failure| fix_reported(&failure));
+        let mut containers = vec![id.clone()];
+        let made = (create.companions.iter().zip(&companion_dials)).try_for_each(|companion| {
+            let args = companion_args(create, companion, &id, &self.cpus);
+            let args = args.context("creating a companion's container failed")?;
+            let created = docker_to(context, &args, by).map_err(|error| fix_reported(&error))?;
+            containers.push(String::from_utf8_lossy(&created.stdout).trim().to_owned());
+            Ok::<_, String>(())
+        });
+        let started = made.and_then(|()| {
+            (containers.iter()).try_for_each(|container| {
+                let started = docker_to(context, ["start", container], by);
+                started.map(drop).map_err(|error| fix_reported(&error))
+            })
+        });
+        if let Err(mut message) = started {
+            let left = format_args!(
+                "container {id} or a companion's is left behind, as removing it failed"
+            );
+            let removed = remove_pod(context, &id, by).map_err(|failure| fix_reported(&failure));
             if let Err(removal) = removed.context(left) {
                 message = format!("{message}; {removal}");
             }
@@ -240,7 +271,8 @@ fn create_args(create: &Create, dial: &SocketDial, cpus: &Cpus) -> Result<Vec<St
         run,
         name: sandbox_name,
         role,
-        instance,
+        // Every container of the pod takes its share of the CPUs by it (`container_args`).
+        instance: _,
         // The provider has one class (`CLASS`), so every container is of it.
         class: _,
         image,
@@ -254,16 +286,10 @@ fn create_args(create: &Create, dial: &SocketDial, cpus: &Cpus) -> Result<Vec<St
         hard_end: _,
         // The deadline bounds the create's commands (`Docker::create`), and none of their options.
         by: _,
+        // Each has a container of its own (`companion_args`).
+        companions: _,
     } = create;
     let SocketDial { dir } = dial;
-    let Role {
-        name,
-        user,
-        resources,
-        // The ledger holds a share for each instance, and `instance` names the one to take.
-        instances: _,
-    } = role;
-    let sandboxd = Path::new(sandboxd.as_str());
     let mut args = vec![
         "create".to_owned(),
         // `<run>.<name>`, so that `docker ps` shows which sandbox of which run it is: unique on
@@ -271,25 +297,11 @@ fn create_args(create: &Create, dial: &SocketDial, cpus: &Cpus) -> Result<Vec<St
         // name holds no `.`.
         format!("--name={}.{sandbox_name}", run.as_str()),
         format!("--label={RUN_LABEL}={}", run.as_str()),
-        format!("--label={ROLE_LABEL}={name}"),
-        "--network=none".to_owned(),
     ];
-    args.extend(confinement(*user, *resources));
-    let share = cpus::share(cpus, run, name, *instance)?;
-    args.push(format!("--cpuset-cpus={share}"));
-    args.extend([
-        bind_mount(sandboxd, SANDBOXD_PATH)?,
-        bind_mount(dir, GATEWAY_DIR)?,
-    ]);
     if *ops {
-        args.push(bind_mount(sandboxd, SANDBOXCTL_PATH)?);
+        args.push(bind_mount(Path::new(sandboxd.as_str()), SANDBOXCTL_PATH)?);
     }
-    args.extend([
-        format!("--entrypoint={SANDBOXD_PATH}"),
-        "--".to_owned(),
-        image.as_str().to_owned(),
-        format!("{GATEWAY_DIR}/{SOCKET_NAME}"),
-    ]);
+    args.extend(container_args(create, (image, role.user), dir, cpus)?);
     if *ops {
         args.push("--ops".to_owned());
     }
@@ -297,6 +309,81 @@ fn create_args(create: &Create, dial: &SocketDial, cpus: &Cpus) -> Result<Vec<St
         args.push("--model".to_owned());
     }
     Ok(args)
+}
+
+/// What `docker create` takes for any container of `create`'s pod, after its name: its role's
+/// label, no network, the role's confinement as `user`, on its run's share of `cpus`, and `image`
+/// running `sandboxd`, which dials the socket in `dir`.
+fn container_args(
+    create: &Create,
+    (image, user): (&ImageRef, User),
+    dir: &Path,
+    cpus: &Cpus,
+) -> Result<Vec<String>, String> {
+    let Role {
+        name,
+        // Each container runs as a user of its own.
+        user: _,
+        resources,
+        // The ledger holds a share for each instance, and `create.instance` names the one to take.
+        instances: _,
+    } = &create.role;
+    let mut args = vec![
+        format!("--label={ROLE_LABEL}={name}"),
+        "--network=none".to_owned(),
+    ];
+    args.extend(confinement(user, *resources));
+    let share = cpus::share(cpus, &create.run, name, create.instance)?;
+    args.push(format!("--cpuset-cpus={share}"));
+    args.extend([
+        bind_mount(Path::new(create.sandboxd.as_str()), SANDBOXD_PATH)?,
+        bind_mount(dir, GATEWAY_DIR)?,
+        format!("--entrypoint={SANDBOXD_PATH}"),
+        "--".to_owned(),
+        image.as_str().to_owned(),
+        format!("{GATEWAY_DIR}/{SOCKET_NAME}"),
+    ]);
+    Ok(args)
+}
+
+/// The arguments of `docker create` for the container of `create`'s `companion`, which dials the
+/// socket its dial names, in the pod of the sandbox's container `pod`: with the sandbox's
+/// resources, on its CPUs, and as passive, as every companion's `sandboxd` is.
+fn companion_args(
+    create: &Create,
+    (companion, dial): (&CompanionCreate, &SocketDial),
+    pod: &str,
+    cpus: &Cpus,
+) -> Result<Vec<String>, String> {
+    let CompanionCreate { name, image, user } = companion;
+    let mut args = vec![
+        "create".to_owned(),
+        format!("--name={}.{}.{name}", create.run.as_str(), create.name),
+        format!("--label={POD_LABEL}={pod}"),
+    ];
+    args.extend(container_args(create, (image, *user), &dial.dir, cpus)?);
+    Ok(args)
+}
+
+/// Removes the containers of the companions of the sandbox whose container's ID is `id`, then
+/// that container, as [`remove`] removes one, within `bound`.
+fn remove_pod(context: &ContextName, id: &str, bound: Bound) -> Result<(), Failure> {
+    let filter = format!("label={POD_LABEL}={id}");
+    let ls = [
+        "container",
+        "ls",
+        "--all",
+        "--no-trunc",
+        "--quiet",
+        "--filter",
+        &filter,
+    ];
+    let listed = docker_to(context, ls, bound)?;
+    let rows = String::from_utf8_lossy(&listed.stdout);
+    for companion in rows.lines() {
+        remove(context, companion, bound)?;
+    }
+    remove(context, id, bound)
 }
 
 /// A read-only `--mount` of `host`, which must exist, at `container`.
@@ -375,8 +462,8 @@ fn delete(context: &ContextName, run: &RunTag, ids: &[SandboxId]) -> Result<(), 
         // A forced removal stops the container, then removes it and its anonymous volumes,
         // and the engine answers once all are done, but for a volume it fails to remove,
         // which it only logs; `sandboxd`, the container's first process, takes every other
-        // process of its PID namespace with it as it ends.
-        let removed = remove(context, id, Bound::Within(REMOVE_TIMEOUT))
+        // process of its PID namespace with it as it ends. Its companions' containers go first.
+        let removed = remove_pod(context, id, Bound::Within(REMOVE_TIMEOUT))
             .map_err(|error| fix_reported(&error));
         let left = format_args!("container {id} is left, as removing it failed");
         let left = removed.context(left).err();

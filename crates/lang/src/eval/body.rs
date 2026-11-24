@@ -23,7 +23,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::num::NonZeroU64;
 
-use schema::ir::{self, AbsolutePath, Argv};
+use schema::ir::{self, AbsolutePath, Argv, CompanionName};
 use schema::sandbox::op::RunnerOutput;
 
 use super::call::refusal_inside;
@@ -86,6 +86,7 @@ pub trait Target {
         lease: u64,
         tree: AbsolutePath,
         to: AbsolutePath,
+        container: Option<CompanionName>,
     ) -> Result<(), String>;
 
     /// Copies the runner's file or tree into a new directory on the target.
@@ -95,6 +96,7 @@ pub trait Target {
         lease: u64,
         from: AbsolutePath,
         to: AbsolutePath,
+        container: Option<CompanionName>,
     ) -> Result<(), String>;
 
     /// Waits for a started command's exit or timeout and both recorded output streams.
@@ -104,6 +106,7 @@ pub trait Target {
         lease: u64,
         argv: Argv,
         timeout_seconds: Option<NonZeroU64>,
+        container: Option<CompanionName>,
     ) -> Result<RunnerOutput, String>;
 
     /// Waits for deletion of the callback's runner.

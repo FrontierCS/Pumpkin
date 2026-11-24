@@ -35,7 +35,7 @@ use decision::{
 use gateway::RefusedOp;
 use provider::UnixTime;
 use route::{Answer, Bar, Usage};
-use schema::ir::{AbsolutePath, Api, Argv, GpuModel, Name};
+use schema::ir::{AbsolutePath, Api, Argv, CompanionName, GpuModel, Name};
 use schema::sandbox::op::{CommandEnd, OpReply, SessionOp};
 use schema::workflow::{AgentId, TargetId, Workflow};
 use serde::Deserialize;
@@ -650,33 +650,49 @@ fn session_json(grant: &Name, op: &SessionOp) -> Value {
             lease,
             argv,
             timeout_seconds,
-        } => json!({
-            "kind": "lease_run",
-            "grant": grant,
-            "lease": lease,
-            "argv": argv,
-            "timeout_seconds": timeout_seconds,
-        }),
+            container,
+        } => in_container(
+            json!({
+                "kind": "lease_run",
+                "grant": grant,
+                "lease": lease,
+                "argv": argv,
+                "timeout_seconds": timeout_seconds,
+            }),
+            container.as_ref(),
+        ),
         SessionOp::Put {
             lease,
             tree,
             to,
             replace,
-        } => json!({
-            "kind": "lease_put",
-            "grant": grant,
-            "lease": lease,
-            "tree": tree,
-            "to": to,
-            "replace": replace,
-        }),
-        SessionOp::Get { lease, from, to } => json!({
-            "kind": "lease_get",
-            "grant": grant,
-            "lease": lease,
-            "from": from,
-            "to": to,
-        }),
+            container,
+        } => in_container(
+            json!({
+                "kind": "lease_put",
+                "grant": grant,
+                "lease": lease,
+                "tree": tree,
+                "to": to,
+                "replace": replace,
+            }),
+            container.as_ref(),
+        ),
+        SessionOp::Get {
+            lease,
+            from,
+            to,
+            container,
+        } => in_container(
+            json!({
+                "kind": "lease_get",
+                "grant": grant,
+                "lease": lease,
+                "from": from,
+                "to": to,
+            }),
+            container.as_ref(),
+        ),
         SessionOp::Status { lease } => {
             json!({ "kind": "lease_status", "grant": grant, "lease": lease })
         }
@@ -684,6 +700,14 @@ fn session_json(grant: &Name, op: &SessionOp) -> Value {
             json!({ "kind": "lease_close", "grant": grant, "lease": lease })
         }
     }
+}
+
+/// `op`, a lease's op, with the runner's companion that it names, if it names one.
+fn in_container(mut op: Value, container: Option<&CompanionName>) -> Value {
+    if let Some(container) = container {
+        op["container"] = json!(container);
+    }
+    op
 }
 
 #[expect(clippy::too_many_lines, reason = "one arm per action")]
@@ -748,6 +772,8 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
             command,
             argv: _,
             timeout,
+            // The op that made the action says it.
+            container: _,
         } => json!({
             "kind": "run_command",
             "lease": lease.0,
@@ -760,6 +786,8 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
             transfer,
             direction,
             max_bytes,
+            // The op that made the action says it.
+            container: _,
         } => {
             let direction = match direction {
                 decision::Direction::Put { replace: true, .. } => Direction::Replace,

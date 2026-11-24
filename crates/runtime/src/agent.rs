@@ -42,13 +42,14 @@ impl<C: Clock> Agent<C> {
         agent: &workflow::Agent,
         by: Duration,
         hard_end: UnixTime,
-        inbox: Sender<Input<C>>,
+        inbox: &Sender<Input<C>>,
         clock: &C,
     ) -> Result<(Self, Result<Launch, String>), Unstarted> {
         let id = agent.id;
         let ops = Some(op_payload_limit(sandboxes.workflow(), id));
         let stamp = clock.clone();
-        let wrap = move |arrival| Input::Agent(id, stamp.now(), arrival);
+        // An agent's sandbox holds no companions, so each arrival is its own container's.
+        let wrap = move |_, arrival| Input::Agent(id, stamp.now(), arrival);
         let which = Which::Agent(id);
         let mut sandbox = sandboxes.start(which, ops, (clock, by), hard_end, inbox, wrap)?;
         let launch = put(&mut sandbox.session, agent, by).map(|stdin| Launch {
@@ -222,7 +223,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             let clock = self.clock.clone();
             let inbox = self.inbox.sender();
             let bound = self.placed.startup(id.role());
-            let prepare = move || Agent::prepare(sandboxes, role, bound, hard_end, inbox, &clock);
+            let prepare = move || Agent::prepare(sandboxes, role, bound, hard_end, &inbox, &clock);
             startup = startup.max(bound);
             self.starting.insert(id, false);
             let (release, gate) = mpsc::channel();

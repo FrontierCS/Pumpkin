@@ -55,6 +55,8 @@ pub(super) enum Message<O> {
     ///
     /// [`Registration::accept`]: gateway::Registration::accept
     Session(Arrival),
+    /// What the session of the sandbox's companion of this index handed over, as `Session`.
+    Companion(usize, Arrival),
     Stop,
     /// An order of the core's for its driver, or the core's reply to its op.
     Order(O),
@@ -126,14 +128,15 @@ impl End {
 }
 
 /// Runs `child` to its end, reporting as it goes: starts its sandbox, whose session takes ops
-/// with `ops` as their payload limit, if given, then hands its session to `drive`, whose end it
+/// with `ops` as their payload limit, if given, then hands its session, and those of its
+/// companions, in their order, to `drive`, whose end it
 /// reports around the sandbox's delete ([`Child::close`]). A child whose start is due by a time
 /// that has passed fails at once, with nothing created, as one whose sandbox doesn't start does
 /// ([`End::failed`]).
 pub(super) fn run<H: Host, O: Send + 'static>(
     child: &mut Child<'_, H, O>,
     ops: Option<OpPayloadLimit>,
-    drive: impl FnOnce(&mut Child<'_, H, O>, &mut Session<H::Clock>) -> End,
+    drive: impl FnOnce(&mut Child<'_, H, O>, &mut Session<H::Clock>, &mut [Session<H::Clock>]) -> End,
 ) {
     let which = child.which;
     let noun = which.noun();
@@ -147,7 +150,11 @@ pub(super) fn run<H: Host, O: Send + 'static>(
     }
     let by = (&child.clock, child.deadlines.startup);
     let inbox = child.inbox.sender();
-    let started = (child.sandboxes).start(which, ops, by, child.hard_end, inbox, Message::Session);
+    let wrap = |container, arrival| match container {
+        None => Message::Session(arrival),
+        Some(index) => Message::Companion(index, arrival),
+    };
+    let started = (child.sandboxes).start(which, ops, by, child.hard_end, &inbox, wrap);
     let mut sandbox = match started {
         Ok(sandbox) => sandbox,
         Err(failure) => match failure.dispose(child.sandboxes) {
@@ -158,7 +165,7 @@ pub(super) fn run<H: Host, O: Send + 'static>(
             Err(reason) => return child.report(Report::Undeleted(reason)),
         },
     };
-    let last = drive(child, &mut sandbox.session);
+    let last = drive(child, &mut sandbox.session, &mut sandbox.companions);
     child.close(last, || {
         let (logged, deleted) = child.sandboxes.delete(sandbox);
         for entry in logged {

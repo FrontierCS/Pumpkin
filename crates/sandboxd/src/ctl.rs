@@ -87,6 +87,9 @@ mod flags {
                 optional --seconds seconds: OsString
                 /// With `put`, removes whatever is at <to> in the runner first.
                 optional --replace
+                /// With `run`, `put` and `get`, the runner's companion to run in or copy to or
+                /// from, by its name; without it, the runner's own container.
+                optional --companion name: OsString
                 /// Waits up to this many seconds for a function's result. Retries an uncharged
                 /// busy call, then follows the admitted job by its number. Prints the terminal
                 /// status, or a now function's immediate reply. A timeout leaves an admitted job
@@ -132,6 +135,7 @@ mod flags {
         pub timeout: Option<OsString>,
         pub seconds: Option<OsString>,
         pub replace: bool,
+        pub companion: Option<OsString>,
         pub wait: Option<NonZeroU32>,
         pub arg: Vec<OsString>,
     }

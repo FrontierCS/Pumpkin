@@ -24,11 +24,14 @@ use engine::{BuildContext, ContextName, Engine, Recipe, Security};
 use expect_test::{Expect, expect};
 use gateway::{Arrival, IncomingModelRequest, Op, Process, Put, Registration, Session, Sockets};
 use provider::{
-    Create, Created, Creator, Provider, Reservation, Role, RunTag, SandboxId, Sweep, UnixTime,
+    CompanionCreate, Create, Created, Creator, Dials, Provider, Reservation, Role, RunTag,
+    SandboxId, Sweep, UnixTime,
 };
 use recipe::Given;
 use schema::frame::MAX_MESSAGE_BYTES;
-use schema::ir::{AbsolutePath, Argv, Env, EnvVar, Image, Mode, Name, Resources};
+use schema::ir::{
+    AbsolutePath, Argv, CompanionName, Env, EnvVar, Image, Mode, Name, Resources, User,
+};
 use schema::sandbox::op::{
     CallReply, CommandEnd, CommandStatus, Failure, FailureCode, JobReply, JobState, Last,
     LeaseRemaining, LeaseReply, LeaseState, LeaseStatusReply, NowReply, OpReply, OpsReply,
@@ -51,8 +54,8 @@ use test_support::{BUSYBOX, TestDir, docker, hung};
 const STAND_IN: &str = "PUMPKIN_TEST_STAND_IN";
 
 // The roles that a fixture reserves for, one to a phase, so that a test may start any of them.
-const ROLES: [&str; 9] = [
-    "confined", "first", "hung", "leaver", "model", "ops", "refused", "stand-in", "turns",
+const ROLES: [&str; 10] = [
+    "confined", "first", "hung", "leaver", "model", "ops", "pod", "refused", "stand-in", "turns",
 ];
 
 struct Fixture {
@@ -110,7 +113,7 @@ impl Fixture {
     ) -> Result<Started, String> {
         let run = &create.run;
         let by = startup();
-        let Created { id } = provider().create(create, dial)?;
+        let Created { id } = provider().create(create, alone(dial))?;
         let (sender, arrivals) = mpsc::channel();
         let accepted = registration.accept((&Machine, by), ops, model, sender, |a| a, || false);
         let set_up = accepted
@@ -136,6 +139,45 @@ impl Fixture {
                 ))
             }
         }
+    }
+
+    // Starts a sandbox of the role `pod` with `companions` beside its own container, each as
+    // the user 5151:5152; returns its own container's session and theirs.
+    fn start_pod(&self, companions: &[&str]) -> (Started, Vec<Started>) {
+        let published = self.publish(&self.run, "pod", &self.sandboxd, &image(), false, false);
+        let (mut create, dial, registration) = published.unwrap();
+        let (mut dials, mut registrations) = (Vec::new(), Vec::new());
+        for (index, name) in companions.iter().enumerate() {
+            let socket = Name::try_from(format!("pod-c{index}")).unwrap();
+            let (dial, registration) = self.sockets.issue(&socket).unwrap();
+            dials.push(dial);
+            registrations.push(registration);
+            create.companions.push(CompanionCreate {
+                name: CompanionName::try_from((*name).to_owned()).unwrap(),
+                image: create.image.clone(),
+                user: serde_json::from_str::<User>(r#"{"uid": 5151, "gid": 5152}"#).unwrap(),
+            });
+        }
+        let dials = Dials {
+            main: dial,
+            companions: dials,
+        };
+        let Created { id } = provider().create(&create, dials).unwrap();
+        let by = startup();
+        let accept = |registration: Registration| {
+            let (sender, arrivals) = mpsc::channel();
+            let accepted =
+                registration.accept((&Machine, by), None, false, sender, |a| a, || false);
+            let mut session = accepted.unwrap();
+            session.set_up(by).unwrap();
+            Started {
+                id: id.clone(),
+                session,
+                arrivals,
+            }
+        };
+        let companions = registrations.into_iter().map(&accept).collect();
+        (accept(registration), companions)
     }
 
     fn publish(
@@ -465,6 +507,79 @@ fn freezes_what_it_left() {
     );
 }
 
+// A companion is a container of its own, with its own user and no network, on its sandbox's CPUs:
+// the run's list finds the sandbox alone, and its delete removes the companion too.
+#[test]
+#[ignore = "needs Docker: run cargo xtask live docker"]
+fn pods() {
+    check(
+        "pods",
+        |fixture| {
+            let (mut sandbox, companions) = fixture.start_pod(&["scheduler"]);
+            let [mut companion] = <[Started; 1]>::try_from(companions).unwrap();
+            let id = sandbox.id.clone();
+            let script = r#"
+                echo "uid=$(id -u) gid=$(id -g)"
+                echo "interfaces: $(ls /sys/class/net)"
+                echo "cpus: $(cat /sys/fs/cgroup/cpuset.cpus.effective)""#;
+            let mut lines = vec![format!("companion: {:?}", sh(&mut companion, 1, script))];
+            sh(&mut sandbox, 1, "cat /sys/fs/cgroup/cpuset.cpus.effective");
+            let stdout = |sandbox: &mut Started, dir: &str| {
+                let into = fixture.dir.join(dir);
+                let limits = Limits {
+                    bytes: 1 << 20,
+                    entries: 100,
+                };
+                let from = absolute("/pumpkin/log");
+                sandbox
+                    .session()
+                    .collect(&from, &into, limits, hung())
+                    .unwrap();
+                fs::read_to_string(into.join("1.stdout")).unwrap()
+            };
+            let cpus = format!("cpus: {}", stdout(&mut sandbox, "main-log").trim());
+            let said = stdout(&mut companion, "companion-log");
+            let shared = said.contains(&cpus);
+            lines.extend(
+                said.lines()
+                    .filter(|line| !line.starts_with("cpus:"))
+                    .map(str::to_owned),
+            );
+            lines.push(format!("the companion's CPUs are the sandbox's: {shared}"));
+            let listed = ids(provider().list(&fixture.run).unwrap());
+            lines.push(format!("the run's list finds: {}", listed.len()));
+            let pod = |id: &SandboxId| {
+                let filter = format!("label=pumpkin.pod={}", id.as_str());
+                let ps = docker()
+                    .args(["ps", "--all", "--quiet", "--filter", &filter])
+                    .output();
+                String::from_utf8(ps.unwrap().stdout)
+                    .unwrap()
+                    .lines()
+                    .count()
+            };
+            lines.push(format!("the pod's companions' containers: {}", pod(&id)));
+            drop((sandbox, companion));
+            provider()
+                .delete(&fixture.run, std::slice::from_ref(&id))
+                .unwrap();
+            lines.push(format!(
+                "once deleted, its companions' containers: {}",
+                pod(&id)
+            ));
+            lines
+        },
+        &expect![[r#"
+            companion: Code(0)
+            uid=5151 gid=5152
+            interfaces: lo
+            the companion's CPUs are the sandbox's: true
+            the run's list finds: 1
+            the pod's companions' containers: 1
+            once deleted, its companions' containers: 0"#]],
+    );
+}
+
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn confinement() {
@@ -774,7 +889,7 @@ fn hung_create() {
         let (mut create, dial, _registration) = made.unwrap();
         // Long after the stand-in has started Docker's create, and long before its sleep would end.
         create.by = UnixTime::of(SystemTime::now() + Duration::from_secs(5)).unwrap();
-        let failed = provider().create(&create, dial).unwrap_err();
+        let failed = provider().create(&create, alone(dial)).unwrap_err();
         let listed = provider().list(&fixture.run).unwrap().len();
         let created = format!("the create failed: {failed}\nthe run's list then finds: {listed}");
         fs::write(Path::new(&dir).join("created"), created).unwrap();
@@ -827,7 +942,7 @@ fn console() {
             let published =
                 fixture.publish(&fixture.run, "stand-in", &stand_in, &image(), false, false);
             let (create, dial, _) = published.unwrap();
-            let Created { id } = provider().create(&create, dial).unwrap();
+            let Created { id } = provider().create(&create, alone(dial)).unwrap();
             // Docker finishes writing a container's log before it marks the container stopped,
             // which `docker wait` waits for, so the console then holds all the stand-in printed.
             run(&["wait", id.as_str()]);
@@ -1015,9 +1130,9 @@ fn ops() {
             $ sandboxctl call gpu.close 0: exit 0
               {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":60,"cumulative_seconds":null,"commands":3}}
             $ sandboxctl call gpu.run 0: exit 1
-              sandboxctl: `gpu.run 0` is no session op: give `gpu.open [--seconds <seconds>]`, `gpu.run <lease> [--timeout <seconds>] -- <program> [<arg>...]`, `gpu.put <lease> <tree> <to> [--replace]`, `gpu.get <lease> <from> <to>`, `gpu.status <lease>` or `gpu.close <lease>`
+              sandboxctl: `gpu.run 0` is no session op: give `gpu.open [--seconds <seconds>]`, `gpu.run <lease> [--timeout <seconds>] [--companion <name>] -- <program> [<arg>...]`, `gpu.put <lease> <tree> <to> [--replace] [--companion <name>]`, `gpu.get <lease> <from> <to> [--companion <name>]`, `gpu.status <lease>` or `gpu.close <lease>`
             $ sandboxctl call gpu.close: exit 1
-              sandboxctl: `gpu.close` is no session op: give `gpu.open [--seconds <seconds>]`, `gpu.run <lease> [--timeout <seconds>] -- <program> [<arg>...]`, `gpu.put <lease> <tree> <to> [--replace]`, `gpu.get <lease> <from> <to>`, `gpu.status <lease>` or `gpu.close <lease>`
+              sandboxctl: `gpu.close` is no session op: give `gpu.open [--seconds <seconds>]`, `gpu.run <lease> [--timeout <seconds>] [--companion <name>] -- <program> [<arg>...]`, `gpu.put <lease> <tree> <to> [--replace] [--companion <name>]`, `gpu.get <lease> <from> <to> [--companion <name>]`, `gpu.status <lease>` or `gpu.close <lease>`
             control socket's directory: drwx------; TCP listeners: 0
             stderr: sh: can't create /.pumpkin/bin/sandboxctl: Read-only file system
             owner: ops
@@ -1486,6 +1601,19 @@ fn reply(session: &mut Session<Machine>, arrival: Arrival, payload: &[u8]) -> St
     asked
 }
 
+/// The dials of a sandbox that holds no companions.
+fn alone(main: SocketDial) -> Dials<SocketDial> {
+    Dials {
+        main,
+        companions: Vec::new(),
+    }
+}
+
+/// Where an op of a lease's goes: ` in <companion>`, or nothing for the runner's own container.
+fn companion(container: Option<&CompanionName>) -> String {
+    container.map_or(String::new(), |container| format!(" in {container}"))
+}
+
 fn session_reply(grant: &Name, op: &SessionOp) -> (String, OpReply) {
     match op {
         SessionOp::Open { instance_seconds } => {
@@ -1495,9 +1623,11 @@ fn session_reply(grant: &Name, op: &SessionOp) -> (String, OpReply) {
             lease,
             argv,
             timeout_seconds,
+            container,
         } => {
             let asked = format!(
-                "{grant}.run {lease}: {}, {timeout_seconds:?}",
+                "{grant}.run {lease}{}: {}, {timeout_seconds:?}",
+                companion(container.as_ref()),
                 serde_json::json!(argv)
             );
             (asked, leased(*lease))
@@ -1507,12 +1637,24 @@ fn session_reply(grant: &Name, op: &SessionOp) -> (String, OpReply) {
             tree,
             to,
             replace,
+            container,
         } => (
-            format!("{grant}.put {lease}: {tree} to {to}, replace {replace}"),
+            format!(
+                "{grant}.put {lease}{}: {tree} to {to}, replace {replace}",
+                companion(container.as_ref())
+            ),
             leased(*lease),
         ),
-        SessionOp::Get { lease, from, to } => (
-            format!("{grant}.get {lease}: {from} to {to}"),
+        SessionOp::Get {
+            lease,
+            from,
+            to,
+            container,
+        } => (
+            format!(
+                "{grant}.get {lease}{}: {from} to {to}",
+                companion(container.as_ref())
+            ),
             leased(*lease),
         ),
         &SessionOp::Status { lease } => {

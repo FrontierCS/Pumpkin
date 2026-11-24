@@ -17,15 +17,16 @@ use std::{fmt, io};
 
 use decision::{JobId, LeaseId};
 use gateway::{Arrival, Dialer, Listener, Session, Sockets};
+use meets::{Meets, Registrations};
 use provider::{
-    Admits, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Role, RunTag, SandboxId,
+    CompanionCreate, Create, Created, ImageRef, Listed, Meeting, Provider, Role, RunTag, SandboxId,
     SandboxdRef, Sweep, Undeleted, UnixTime,
 };
 use schema::ir::{Command, GpuModel, Image, Name};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
-    Endpoint, Launch, Listening, OpPayloadLimit, PUMPKIN_BYTES, PrivateDial, RelativePath,
-    SocketDial, command_env, command_stderr, command_stdout, pumpkin_dir,
+    Launch, OpPayloadLimit, PUMPKIN_BYTES, RelativePath, command_env, command_stderr,
+    command_stdout, pumpkin_dir,
 };
 use schema::workflow::{
     AgentId, ByProvider, ByRole, JobFunctionId, Placed, RoleId, RunnerId, SessionId, TargetId,
@@ -35,6 +36,8 @@ use serde::{Deserialize, Deserializer, de};
 use stdx::{Context, Deadline, time};
 
 use super::{Clock, Host, Input, Stopped, interruption, log, record};
+
+mod meets;
 
 /// The most entries, files and directories, that the host collects from a sandbox in one tree.
 pub(super) const ENTRIES: u64 = 100_000;
@@ -150,6 +153,8 @@ fn provider_role(workflow: &Workflow, role: RoleId, instances: NonZeroU32) -> Ro
 pub(super) struct Published<'p> {
     providers: ByProvider<Hosting<'p>>,
     images: ByRole<ImageRef>,
+    /// Each role's companions' images, in the companions' order.
+    companions: ByRole<Vec<ImageRef>>,
     sockets: Sockets,
 }
 
@@ -160,6 +165,7 @@ pub(super) struct Sandboxes<'p, H: Host> {
     placed: &'p Placed,
     providers: ByProvider<Hosting<'p>>,
     images: ByRole<ImageRef>,
+    companions: ByRole<Vec<ImageRef>>,
     sockets: Sockets,
     record: &'p Path,
     host: &'p H,
@@ -191,47 +197,6 @@ struct Hosting<'p> {
     provider: &'p dyn Provider,
     sandboxd: SandboxdRef,
     meets: Meets<'p>,
-}
-
-/// How a provider's sandboxes and the gateway meet ([`Meeting`]), with what the run supplies for
-/// it.
-#[derive(Clone, Copy)]
-enum Meets<'p> {
-    Sockets(&'p dyn Creator<SocketDial>),
-    Private(
-        &'p dyn Creator<PrivateDial, (Created, Admits)>,
-        &'p Listener,
-    ),
-    Dials(&'p dyn Creator<Listening, (Created, Endpoint)>, &'p Dialer),
-}
-
-impl Meets<'_> {
-    /// Issues what the new sandbox dials, creates it, and returns the registration of its session,
-    /// which awaits it by `by`.
-    fn create(
-        self,
-        sockets: &Sockets,
-        create: &Create,
-        by: Deadline,
-    ) -> Result<(Created, gateway::Registration), String> {
-        let issued = |error: io::Error| error.to_string();
-        match self {
-            Self::Sockets(creator) => {
-                let (dial, registration) = sockets.issue(&create.name).map_err(issued)?;
-                Ok((creator.create(create, dial)?, registration))
-            }
-            Self::Private(creator, listener) => {
-                let (dial, unattested) = listener.issue(by);
-                let (created, admits) = creator.create(create, dial)?;
-                Ok((created, unattested.admitting(admits)))
-            }
-            Self::Dials(creator, dialer) => {
-                let (dial, unreached) = dialer.issue().map_err(issued)?;
-                let (created, endpoint) = creator.create(create, dial)?;
-                Ok((created, unreached.at(endpoint)))
-            }
-        }
-    }
 }
 
 /// Whose sandbox: the agent's, a work-lifetime target's, a call's target, or an instance of a
@@ -374,12 +339,17 @@ impl Unstarted {
     }
 }
 
-/// A sandbox whose session is up, to be deleted through [`Sandboxes::delete`].
+/// A sandbox whose sessions are up, to be deleted through [`Sandboxes::delete`].
 pub(super) struct Started<C> {
     which: Which,
     id: SandboxId,
     pub(super) session: Session<C>,
+    /// The sessions of its companions, in their order.
+    pub(super) companions: Vec<Session<C>>,
 }
+
+/// The sessions of a sandbox's containers: its own, and its companions', in their order.
+type Sessions<C> = (Session<C>, Vec<Session<C>>);
 
 impl<'p> Published<'p> {
     /// Publishes `sandboxd` on each provider that hosts a role, and each role's image there, once
@@ -427,20 +397,37 @@ impl<'p> Published<'p> {
             })
         })?;
         let mut published = BTreeMap::<(&Name, Image), ImageRef>::new();
+        // Publishes `image`, `whose` it is, on provider `on`, once.
+        let mut publish = |on, image: &Image, whose: &dyn fmt::Display| match published
+            .entry((on, image.clone()))
+        {
+            Entry::Occupied(entry) => Ok(entry.get().clone()),
+            Entry::Vacant(entry) => {
+                interruption::check()?;
+                let image = providers.get(on).provider.publish_image(&entry.key().1);
+                let image = image.context(format_args!(
+                    "publishing {whose} image on provider `{on}` failed"
+                ))?;
+                Ok::<_, Stopped>(entry.insert(image).clone())
+            }
+        };
         let images = workflow.by_role(|(role, sandbox)| {
             let on = &placed.placement(role).provider;
-            match published.entry((on, sandbox.image.clone())) {
-                Entry::Occupied(entry) => Ok(entry.get().clone()),
-                Entry::Vacant(entry) => {
-                    interruption::check()?;
-                    let image = providers.get(on).provider.publish_image(&entry.key().1);
-                    let image = image.context(format_args!(
-                        "publishing role `{}`'s image on provider `{on}` failed",
-                        sandbox.name
-                    ))?;
-                    Ok::<_, Stopped>(entry.insert(image).clone())
-                }
-            }
+            publish(
+                on,
+                &sandbox.image,
+                &format_args!("role `{}`'s", sandbox.name),
+            )
+        })?;
+        let companions = workflow.by_role(|(role, sandbox)| {
+            let on = &placed.placement(role).provider;
+            (workflow.companions(role).iter())
+                .map(|companion| {
+                    let whose =
+                        format_args!("role `{}`'s companion `{}`'s", sandbox.name, companion.name);
+                    publish(on, &companion.image, &whose)
+                })
+                .collect::<Result<Vec<_>, _>>()
         })?;
         // In the record, so that they go where it goes: `record::create` made it, and checked the
         // path to it, so that no other user may rename entries in it, or above it, as
@@ -450,6 +437,7 @@ impl<'p> Published<'p> {
         Ok(Self {
             providers,
             images,
+            companions,
             sockets,
         })
     }
@@ -468,6 +456,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         let Published {
             providers,
             images,
+            companions,
             sockets,
         } = published;
         // A start ends within a fortieth of its role's startup, or 15 s, and a list's time, of its
@@ -482,6 +471,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             placed,
             providers,
             images,
+            companions,
             sockets,
             record,
             host,
@@ -493,15 +483,16 @@ impl<'p, H: Host> Sandboxes<'p, H> {
 
     /// Creates and registers a sandbox by `by`, its startup bound as a time on `clock`. On failure
     /// the caller owns disposal, so it can release prepared peers before a console read or
-    /// deletion.
+    /// deletion. `wrap` makes what `arrivals` takes of an arrival on the session of the sandbox's
+    /// own container, `None`, or of its companion of that index.
     pub(super) fn start<T: Send + 'static>(
         &self,
         which: Which,
         ops: Option<OpPayloadLimit>,
         (clock, by): (&H::Clock, Duration),
         hard_end: UnixTime,
-        arrivals: Sender<T>,
-        wrap: impl Fn(Arrival) -> T + Send + 'static,
+        arrivals: &Sender<T>,
+        wrap: impl Fn(Option<usize>, Arrival) -> T + Clone + Send + 'static,
     ) -> Result<Started<H::Clock>, Unstarted> {
         let name = which.name();
         let now = UnixTime::of(SystemTime::now())?;
@@ -524,10 +515,18 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             model,
             hard_end,
             by: by_unix.min(hard_end),
+            companions: (self.workflow().companions(role).iter())
+                .zip(self.companions.get(role))
+                .map(|(companion, image)| CompanionCreate {
+                    name: companion.name.clone(),
+                    image: image.clone(),
+                    user: companion.user,
+                })
+                .collect(),
         };
         let by_machine = Deadline::after(time::left(clock, by).unwrap_or_default());
         let started = hosting.meets.create(&self.sockets, &create, by_machine);
-        let (Created { id }, registration) = started.inspect_err(|_| {
+        let (Created { id }, registrations) = started.inspect_err(|_| {
             let mut inventory = stdx::unpoisoned(self.inventory.lock());
             inventory.unnamed.insert(&placement.provider);
         })?;
@@ -548,36 +547,75 @@ impl<'p, H: Host> Sandboxes<'p, H> {
                 reason: error,
             });
         }
-        let looks = Looks::new(clock);
-        // The wait ends at once for a signal, and for a sandbox that its provider lists as
-        // ended, which will never connect.
-        let stopped = || {
-            interruption::signal().is_some()
-                || looks.ended(self.between_looks, || self.ended(hosting.provider, &id))
-        };
-        let accepted = registration.accept((clock, by), ops, model, arrivals, wrap, stopped);
-        let accepted = accepted.map_err(|error| match looks.found() {
-            (true, _) => "it ended before it met the gateway: expected its `sandboxd` to run \
-                          until it connects"
-                .to_owned(),
-            (false, Some(failed)) if error.kind() == io::ErrorKind::TimedOut => {
-                format!("{error}; the last list of its provider failed: {failed}")
-            }
-            (false, _) => error.to_string(),
-        });
-        let session = accepted.and_then(|mut session| session.set_up(by).map(|()| session));
-        let session = session.and_then(|session| match session.gpus() {
-            Some(gpus) => self.saw(which, &id, gpus).map(|()| session),
-            None => Ok(session),
-        });
-        match session {
-            Ok(session) => Ok(Started { which, id, session }),
+        let wanted = ((clock, by), ops, model);
+        let sessions = self.accept((which, &id, hosting), registrations, wanted, arrivals, wrap);
+        match sessions {
+            Ok((session, companions)) => Ok(Started {
+                which,
+                id,
+                session,
+                companions,
+            }),
             Err(error) => Err(Unstarted::Created {
                 which,
                 id,
                 reason: error,
             }),
         }
+    }
+
+    /// Accepts and sets up, by `by`, the sessions of sandbox `id`'s containers, whose
+    /// registrations these are, as [`Sandboxes::start`] says: its own container's, which takes ops
+    /// as `ops` says and serves the model if `model`, and its companions', which are passive.
+    fn accept<T: Send + 'static>(
+        &self,
+        (which, id, hosting): (Which, &SandboxId, &Hosting<'p>),
+        (registration, companions): Registrations,
+        ((clock, by), ops, model): ((&H::Clock, Duration), Option<OpPayloadLimit>, bool),
+        arrivals: &Sender<T>,
+        wrap: impl Fn(Option<usize>, Arrival) -> T + Clone + Send + 'static,
+    ) -> Result<Sessions<H::Clock>, String> {
+        let looks = Looks::new(clock);
+        // The wait ends at once for a signal, and for a sandbox that its provider lists as
+        // ended, which will never connect.
+        let stopped = || {
+            interruption::signal().is_some()
+                || looks.ended(self.between_looks, || self.ended(hosting.provider, id))
+        };
+        let companions_of = self.workflow().companions(which.role());
+        let accept = |registration: gateway::Registration, container: Option<usize>| {
+            // A companion's session is passive, and serves no model.
+            let (ops, model) = container.map_or((ops, model), |_| (None, false));
+            let wrap = wrap.clone();
+            let wrap = move |arrival| wrap(container, arrival);
+            let accepted =
+                registration.accept((clock, by), ops, model, arrivals.clone(), wrap, stopped);
+            let accepted = accepted.map_err(|error| match looks.found() {
+                (true, _) => "it ended before it met the gateway: expected its `sandboxd` to run \
+                              until it connects"
+                    .to_owned(),
+                (false, Some(failed)) if error.kind() == io::ErrorKind::TimedOut => {
+                    format!("{error}; the last list of its provider failed: {failed}")
+                }
+                (false, _) => error.to_string(),
+            });
+            let session = accepted.and_then(|mut session| session.set_up(by).map(|()| session));
+            match container {
+                None => session,
+                Some(index) => {
+                    let name = &companions_of[index].name;
+                    session.context(format_args!("its companion `{name}`"))
+                }
+            }
+        };
+        let session = accept(registration, None)?;
+        if let Some(gpus) = session.gpus() {
+            self.saw(which, id, gpus)?;
+        }
+        let companions = (companions.into_iter().enumerate())
+            .map(|(index, registration)| accept(registration, Some(index)))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((session, companions))
     }
 
     fn saw(&self, which: Which, id: &SandboxId, gpus: &[GpuModel]) -> Result<(), String> {
@@ -656,10 +694,17 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         &self,
         started: Started<H::Clock>,
     ) -> (Vec<log::Entry>, Result<(), String>) {
-        let Started { which, id, session } = started;
+        let Started {
+            which,
+            id,
+            session,
+            companions,
+        } = started;
         let provider = self.provider(which);
+        // The delete ends the companions with the sandbox.
         let deleted = provider.delete(&self.run, std::slice::from_ref(&id));
         drop(session);
+        drop(companions);
         let (logged, recorded) =
             self.record_deletes(self.on(which), std::slice::from_ref(&id), &deleted);
         let deleted = deleted.context("deleting the sandbox failed");
@@ -876,8 +921,10 @@ impl<'c, C: Clock> Looks<'c, C> {
         self.ended.get()
     }
 
-    fn found(self) -> (bool, Option<String>) {
-        (self.ended.get(), self.failed.into_inner())
+    /// Whether a look found the sandbox ended, and the failure of the last look, if no look has
+    /// succeeded since.
+    fn found(&self) -> (bool, Option<String>) {
+        (self.ended.get(), self.failed.borrow().clone())
     }
 }
 

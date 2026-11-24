@@ -3,6 +3,10 @@
 //! how each ended. A command that runs past its timeout, if it has one, is killed alone
 //! ([`Session::kill`]). The core's stop closes the lease: its runner is frozen, and its `out`, and
 //! the log of a command that still ran, are collected.
+//!
+//! A runner's sandbox may hold companions, each with a session of its own. A command or a transfer
+//! that names one runs there. The lease's end freezes a companion only if a command still ran
+//! there, to collect its log, and collects no companion's `out`: its holder gets what it wants.
 
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom};
@@ -13,7 +17,7 @@ use std::time::Duration;
 
 use decision::{Direction, Event, LeaseId};
 use gateway::{Arrival, Process, Put, Session, Trees};
-use schema::ir::Argv;
+use schema::ir::{Argv, CompanionName};
 use schema::sandbox::op::{self, CommandEnd, OUTPUT_TAIL_BYTES, TransferEnd};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
@@ -44,6 +48,9 @@ pub(super) struct Transfer {
     pub(super) max_bytes: NonZeroU64,
     /// The holder's sandbox's trees.
     pub(super) holder: Trees,
+    /// The runner's companion it copies to or from, one the runner holds, or none for the runner's
+    /// own container.
+    pub(super) container: Option<CompanionName>,
 }
 
 /// The core's order to run a command in a lease's runner, its `command`th.
@@ -53,10 +60,32 @@ pub(super) struct Run {
     /// The longest it may run, if it has a bound of its own.
     pub(super) timeout: Option<Duration>,
     pub(super) required_output: bool,
+    /// The runner's companion it runs in, one the runner holds, or none for the runner's own
+    /// container.
+    pub(super) container: Option<CompanionName>,
+}
+
+/// The sessions of a lease's sandbox: its own container's, and each of its companions', in the
+/// runner's order.
+struct Pod<'s, C> {
+    main: &'s mut Session<C>,
+    companions: &'s mut [Session<C>],
+}
+
+impl<C> Pod<'_, C> {
+    /// The session of the runner's container `container`: its companion of that index, or its own.
+    fn of(&mut self, container: Option<usize>) -> &mut Session<C> {
+        match container {
+            None => self.main,
+            Some(index) => &mut self.companions[index],
+        }
+    }
 }
 
 struct Running {
     command: u64,
+    /// The runner's container it runs in: its companion of that index, or none for its own.
+    container: Option<usize>,
     process: Process,
     /// When it is to be killed, since the run started, until it has been.
     kill_at: Option<Duration>,
@@ -75,17 +104,17 @@ pub(super) struct Leased<'r> {
 }
 
 pub(super) fn run<H: Host>(leased: &Leased<'_>, child: &mut Child<'_, H, Order>) {
-    super::child::run(child, None, |child, session| {
-        End::Event(drive(leased, child, session))
+    super::child::run(child, None, |child, main, companions| {
+        End::Event(drive(leased, child, &mut Pod { main, companions }))
     });
 }
 
-/// Runs the commands the core orders in `child`'s sandbox, whose session is `session`, until the
+/// Runs the commands the core orders in `child`'s sandbox, whose sessions are `pod`'s, until the
 /// core's stop, and returns the report of the lease's end.
 fn drive<H: Host>(
     leased: &Leased<'_>,
     child: &mut Child<'_, H, Order>,
-    session: &mut Session<H::Clock>,
+    pod: &mut Pod<'_, H::Clock>,
 ) -> Event {
     let lease = leased.lease;
     let failed = |reason: String| Event::LeaseFailed { lease, reason };
@@ -99,33 +128,62 @@ fn drive<H: Host>(
     }
     child.event(Event::LeaseReady { lease });
     let mut running = None;
-    let served = serve(leased, child, session, &mut running);
+    let served = serve(leased, child, pod, &mut running);
     let by = child.deadlines.collect;
-    if let Err(error) = session.freeze(by) {
-        let reason = served
-            .err()
-            .unwrap_or_else(|| format!("freezing the runner's sandbox failed: {error}"));
-        return failed(reason);
+    // The containers that hold what the record keeps: the runner's own, and the companion whose
+    // command still runs, if one's does.
+    let ran_in = running.as_ref().and_then(|running| running.container);
+    let frozen = (iter::once(None).chain(ran_in.map(Some))).try_for_each(|container| {
+        let frozen = pod.of(container).freeze(by);
+        frozen.map_err(|error| {
+            let whose = whose(leased.runner, container);
+            format!("freezing {whose} failed: {error}")
+        })
+    });
+    if let Err(reason) = frozen {
+        return failed(served.err().unwrap_or(reason));
     }
     if let Some(running) = running {
         let dir = command_dir(running.command);
-        if let Err(error) = collect(session, &dir, &child.dir, by) {
+        if let Err(error) = collect(pod.of(running.container), &dir, &child.dir, by) {
             child.note(format!("lease {}'s {dir} is incomplete: {error}", lease.0));
         }
     }
-    if let Err(error) = collect(session, &out_dir(), &child.dir, by) {
+    if let Err(error) = collect(pod.main, &out_dir(), &child.dir, by) {
         child.note(format!("lease {}'s out is incomplete: {error}", lease.0));
     }
     served.map_or_else(failed, |()| Event::LeaseEnded { lease })
 }
 
-/// Runs the commands and transfers the core orders in `child`'s sandbox, whose session is
-/// `session`, one at a time, until the core's stop, which leaves in `running` the command that
+/// The runner's container `container`, as a message names it.
+fn whose(runner: &Runner, container: Option<usize>) -> String {
+    match container {
+        None => "the runner's sandbox".to_owned(),
+        Some(index) => format!("the runner's companion `{}`", runner.companions[index].name),
+    }
+}
+
+/// The index of `runner`'s companion `container`, which the runner holds, as the core checks; none
+/// for the runner's own container.
+fn index(runner: &Runner, container: Option<&CompanionName>) -> Option<usize> {
+    let container = container?;
+    let found = (runner.companions.iter()).position(|companion| companion.name == *container);
+    let Some(index) = found else {
+        unreachable!(
+            "the core ordered work in companion `{container}`, which the runner doesn't hold, \
+             though it refuses an op that names one it doesn't"
+        )
+    };
+    Some(index)
+}
+
+/// Runs the commands and transfers the core orders in `child`'s sandbox, whose sessions are
+/// `pod`'s, one at a time, until the core's stop, which leaves in `running` the command that
 /// still runs then, if one does; or fails with why the runner failed first.
 fn serve<H: Host>(
     leased: &Leased<'_>,
     child: &mut Child<'_, H, Order>,
-    session: &mut Session<H::Clock>,
+    pod: &mut Pod<'_, H::Clock>,
     running: &mut Option<Running>,
 ) -> Result<(), String> {
     let Leased {
@@ -143,12 +201,13 @@ fn serve<H: Host>(
         match message {
             None => {
                 if let Some(running) = running {
-                    kill(child, by_start, running, session)?;
+                    kill(child, by_start, running, pod.of(running.container))?;
                 }
             }
             Some(Message::Stop) => return Ok(()),
             Some(Message::Order(Order::Transfer(order))) => {
-                let end = transfer(child, &session.trees(), &order, &mut held);
+                let trees = pod.of(index(runner, order.container.as_ref())).trees();
+                let end = transfer(child, &trees, &order, &mut held);
                 let transfer = order.number;
                 child.event(Event::TransferEnded {
                     lease,
@@ -157,11 +216,13 @@ fn serve<H: Host>(
                 });
             }
             Some(Message::Order(Order::Run(run))) => {
-                match start(runner, (&run, by_start), session) {
+                let container = index(runner, run.container.as_ref());
+                match start(runner, (&run, by_start), (pod.of(container), container)) {
                     Ok(process) => {
                         let kill_at = run.timeout.map(|timeout| child.clock.now() + timeout);
                         *running = Some(Running {
                             command: run.command,
+                            container,
                             process,
                             kill_at,
                             timed_out: false,
@@ -174,33 +235,62 @@ fn serve<H: Host>(
                     }
                 }
             }
-            Some(Message::Session(Arrival::Exited { process, status })) => {
-                let Some(ran) = running.take_if(|running| running.process == process) else {
-                    continue;
-                };
-                let end = if ran.timed_out {
-                    CommandEnd::TimedOut
-                } else {
-                    CommandEnd::Exited(status)
-                };
-                let (stdout, stderr) = outputs(child, ran.command, session, ran.required_output)?;
-                child.event(command_ended(lease, ran.command, (end, stdout, stderr)));
+            Some(Message::Session(arrival)) => {
+                arrived(child, (leased, pod), running, (None, arrival))?;
             }
-            Some(Message::Session(Arrival::Ended { reason })) => {
-                return Err(format!("the runner's session ended: {reason}"));
+            Some(Message::Companion(index, arrival)) => {
+                arrived(child, (leased, pod), running, (Some(index), arrival))?;
             }
-            // A type for a passive session's arrivals would split the gateway's `pub` `Arrival` by
-            // the kind of session.
-            Some(Message::Session(
-                Arrival::Op(_) | Arrival::Refused(_) | Arrival::ModelRequest(_),
-            )) => unreachable!(
-                "lease {}'s passive session handed out an op or a model request, though it was \
-                 accepted without an op payload limit and without model requests, so either \
-                 ends the session instead, and arrives as its end",
-                lease.0
-            ),
         }
     }
+}
+
+/// Acts on `arrival`, from the session of the runner's container `container`: reports the end of
+/// the running command, if the arrival is its exit, once its output is collected; or says why the
+/// runner failed, if the session ended.
+fn arrived<H: Host>(
+    child: &Child<'_, H, Order>,
+    (leased, pod): (&Leased<'_>, &mut Pod<'_, H::Clock>),
+    running: &mut Option<Running>,
+    (container, arrival): (Option<usize>, Arrival),
+) -> Result<(), String> {
+    let lease = leased.lease;
+    let (process, status) = match arrival {
+        Arrival::Exited { process, status } => (process, status),
+        Arrival::Ended { reason } => {
+            let whose = match container {
+                None => "the runner's session".to_owned(),
+                Some(index) => {
+                    let name = &leased.runner.companions[index].name;
+                    format!("the session of the runner's companion `{name}`")
+                }
+            };
+            return Err(format!("{whose} ended: {reason}"));
+        }
+        // A type for a passive session's arrivals would split the gateway's `pub` `Arrival` by
+        // the kind of session.
+        Arrival::Op(_) | Arrival::Refused(_) | Arrival::ModelRequest(_) => unreachable!(
+            "lease {}'s passive session handed out an op or a model request, though it was \
+             accepted without an op payload limit and without model requests, so either ends \
+             the session instead, and arrives as its end",
+            lease.0
+        ),
+    };
+    // A process of one container may have the number of another's.
+    let ran =
+        running.take_if(|running| running.process == process && running.container == container);
+    let Some(ran) = ran else {
+        return Ok(());
+    };
+    let end = if ran.timed_out {
+        CommandEnd::TimedOut
+    } else {
+        CommandEnd::Exited(status)
+    };
+    let session = pod.of(container);
+    let (stdout, stderr) = outputs(child, ran.command, session, ran.required_output)?;
+    child.event(command_ended(lease, ran.command, (end, stdout, stderr)));
+    Ok(())
 }
 
 /// Kills `running`, whose timeout has passed, in the runner's sandbox, whose session is
@@ -225,20 +315,25 @@ fn kill<H: Host>(
     Ok(())
 }
 
-/// Starts `run` in the runner's `cwd` with its `env`, its output in [`command_dir`].
+/// Starts `run` in the runner's container `container`, whose session is `session`, in its `cwd`
+/// with its `env`, its output in [`command_dir`].
 fn start(
     runner: &Runner,
     (run, by): (&Run, Duration),
-    session: &mut Session<impl Clock>,
+    (session, container): (&mut Session<impl Clock>, Option<usize>),
 ) -> Result<Process, String> {
+    let (cwd, env) = match container {
+        None => (&runner.cwd, &runner.env),
+        Some(index) => (&runner.companions[index].cwd, &runner.companions[index].env),
+    };
     let dir = command_dir(run.command);
     let put = session.put(&pumpkin_dir(), [Put::Dir(dir.clone(), dir_mode())], by);
     put.context(format_args!("making {dir} failed"))?;
     let output = |name: RelativePath| pumpkin_dir().join(&dir.join(&name));
     let launch = Launch {
         argv: run.argv.clone(),
-        env: command_env(&runner.env),
-        cwd: runner.cwd.clone(),
+        env: command_env(env),
+        cwd: cwd.clone(),
         stdin: None,
         stdout: output(const { RelativePath::from_static("command.stdout") }),
         stderr: output(const { RelativePath::from_static("command.stderr") }),

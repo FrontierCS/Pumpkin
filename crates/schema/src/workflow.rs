@@ -14,8 +14,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::ir::{
-    AbsolutePath, Command, CpuFlag, CpuModel, Dir, Env, File, Gpu, Image, JsonPointer, ModelRoute,
-    Name, Needs, TargetLifetime, User, WorkflowName,
+    AbsolutePath, Command, Companion, CpuFlag, CpuModel, Dir, Env, File, Gpu, Image, JsonPointer,
+    ModelRoute, Name, Needs, TargetLifetime, User, WorkflowName,
 };
 use crate::sandbox::OpPayloadLimit;
 
@@ -76,6 +76,14 @@ impl Workflow {
 
     pub fn runner(&self, id: RunnerId) -> &Runner {
         &self.runners[&id.0]
+    }
+
+    /// The containers that each of `role`'s sandboxes holds beside its own: a runner's companions,
+    /// and none for any other role.
+    pub fn companions(&self, role: RoleId) -> &[Companion] {
+        self.runners
+            .get(&role)
+            .map_or(&[], |runner| runner.companions.as_slice())
     }
 
     pub fn sandbox(&self, role: RoleId) -> &Sandbox {
@@ -266,6 +274,8 @@ pub struct Offers {
     pub cpu_features: BTreeSet<CpuFlag>,
     /// None if the provider states no model.
     pub cpu_model: Option<CpuModel>,
+    /// The most containers a sandbox may hold beside its own: a runner's companions.
+    pub companions: usize,
 }
 
 /// A value for each provider that a [`Placed`] workflow places a role on: what its placing gave
@@ -377,6 +387,8 @@ pub struct Sandbox {
     pub image: Image,
     pub user: User,
     pub needs: Needs,
+    /// How many containers each of its sandboxes holds beside its own: a runner's companions.
+    pub companions: usize,
     /// The role's place in the IR, where placing it reports what is wrong.
     pub(crate) at: JsonPointer,
 }
@@ -413,6 +425,8 @@ pub struct Target {
 pub struct Runner {
     pub cwd: AbsolutePath,
     pub env: Env,
+    /// Each with a name of its own among them.
+    pub companions: Vec<Companion>,
 }
 
 /// A job function of the agent's; see [`ir::JobFunction`](crate::ir::JobFunction).

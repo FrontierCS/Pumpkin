@@ -851,8 +851,8 @@ pub(crate) fn disk(path: &Path) -> Result<Disk, String> {
     })
 }
 
-/// The images that the IR at `path` names. It names none if there is no IR there, as for a job
-/// that ended before its run started.
+/// The images that the IR at `path` names, its roles' and its runners' companions'. It names none
+/// if there is no IR there, as for a job that ended before its run started.
 fn images(path: &Path) -> Result<Vec<Image>, String> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
@@ -865,7 +865,13 @@ fn images(path: &Path) -> Result<Vec<Image>, String> {
         .as_array()
         .map(Vec::as_slice)
         .unwrap_or_default();
-    let named = roles.iter().filter_map(|role| role["image"].as_str());
+    let companions = roles.iter().flat_map(|role| {
+        let companions = role["runtime"]["runner"]["companions"].as_array();
+        companions.map(Vec::as_slice).unwrap_or_default()
+    });
+    let named = (roles.iter().map(|role| &role["image"]))
+        .chain(companions.map(|companion| &companion["image"]))
+        .filter_map(serde_json::Value::as_str);
     Ok(named
         .filter_map(|image| Image::try_from(image.to_owned()).ok())
         .collect())

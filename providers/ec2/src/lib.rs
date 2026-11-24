@@ -28,7 +28,7 @@ use aws::{Bound, Cli, Region, Repository, RepositoryName, RoleArn};
 use engine::{Platform, Pusher};
 use identity::Documents;
 use provider::{
-    Admits, Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready,
+    Admits, Console, Create, Created, Creator, Dials, ImageRef, Listed, Meeting, Provider, Ready,
     Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
 use schema::ec2_boot::{BOOT_IN_IMAGE, SANDBOXD_IN_IMAGE};
@@ -89,6 +89,7 @@ impl Settings {
                 gpu: None,
                 cpu_features: class.cpu_features.clone(),
                 cpu_model: class.cpu_model.clone(),
+                companions: 0,
             };
             let class = Class {
                 offers,
@@ -382,8 +383,13 @@ impl Provider for Ec2<'_> {
 }
 
 impl Creator<PrivateDial, (Created, Admits)> for Ec2<'_> {
-    fn create(&self, create: &Create, dial: PrivateDial) -> Result<(Created, Admits), String> {
-        self.create_instance(create, dial.gateway)
+    fn create(
+        &self,
+        create: &Create,
+        dials: Dials<PrivateDial>,
+    ) -> Result<(Created, Admits), String> {
+        // Its classes offer no companions (`ready`), so placing gives a sandbox none.
+        self.create_instance(create, dials.main.gateway)
     }
 }
 

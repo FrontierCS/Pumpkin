@@ -19,6 +19,7 @@ pub(super) fn call(call: flags::Call) -> Result<(OpCall, Vec<u8>), String> {
         timeout,
         seconds,
         replace,
+        companion,
         wait,
         arg,
     } = call;
@@ -38,12 +39,17 @@ pub(super) fn call(call: flags::Call) -> Result<(OpCall, Vec<u8>), String> {
                 op.1
             ));
         }
-        let flags = (timeout.as_deref(), seconds.as_deref(), replace);
+        let flags = (
+            timeout.as_deref(),
+            seconds.as_deref(),
+            replace,
+            companion.as_deref(),
+        );
         return Ok((session::op(op, &args, flags)?, Vec::new()));
     }
     let function = parse_grant(&function)?;
-    match (&args[..], timeout, seconds, replace) {
-        (files @ ([] | [_]), None, None, false) => {
+    match (&args[..], timeout, seconds, replace, companion) {
+        (files @ ([] | [_]), None, None, false, None) => {
             let arguments = arguments(&arg)?;
             let call = OpCall::Call {
                 grant: function,

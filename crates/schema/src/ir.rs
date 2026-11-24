@@ -35,8 +35,8 @@ pub use label::{Label, Root};
 pub use now::NowFunction;
 pub use session::{NamedSession, Session};
 pub use values::{
-    AbsolutePath, Argv, CpuFlag, CpuModel, Env, EnvVar, GpuModel, HeaderName, Image, JsonPointer,
-    Mode, ModelName, Models, Name, RolePath, Sha256Digest, WorkflowName,
+    AbsolutePath, Argv, CompanionName, CpuFlag, CpuModel, Env, EnvVar, GpuModel, HeaderName, Image,
+    JsonPointer, Mode, ModelName, Models, Name, RolePath, Sha256Digest, WorkflowName,
 };
 
 /// The IR's root: a workflow as written, which [`crate::workflow::Workflow::parse`] checks.
@@ -221,6 +221,26 @@ pub struct File {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunnerRuntime {
+    /// The directory each command starts in.
+    pub cwd: AbsolutePath,
+    /// Variables added to each command's environment, as [`Command::env`]'s are.
+    #[serde(default, skip_serializing_if = "Env::is_empty")]
+    pub env: Env,
+    /// The containers that each of the runner's sandboxes holds beside its own, its pod, in their
+    /// order: each with a name of its own among them. They share the sandbox's needs and its
+    /// lifetime, and the holder's commands and copies may name any of them. Absent, none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub companions: Vec<Companion>,
+}
+
+/// A container of a runner's pod beside the runner's own ([`RunnerRuntime::companions`]), which
+/// runs the commands that the lease's holder sends it as its own user, as the runner does.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Companion {
+    pub name: CompanionName,
+    pub image: Image,
+    pub user: User,
     /// The directory each command starts in.
     pub cwd: AbsolutePath,
     /// Variables added to each command's environment, as [`Command::env`]'s are.

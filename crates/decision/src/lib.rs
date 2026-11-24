@@ -22,7 +22,7 @@ use alloc::vec::Vec;
 use core::num::NonZeroU64;
 use core::time::Duration;
 
-use schema::ir::{AbsolutePath, ArgumentValue, Argv, Name, Sha256Digest};
+use schema::ir::{AbsolutePath, ArgumentValue, Argv, CompanionName, Name, Sha256Digest};
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::{CommandEnd, OpReply, SessionOp, TransferEnd};
 use schema::workflow::{AgentId, JobFunctionId, Placed, SessionId, TargetId, Workflow};
@@ -273,23 +273,28 @@ pub enum Action {
         start_by: Duration,
     },
     /// Runs `argv` as lease `lease`'s `command`th command, killing it once it has run for
-    /// `timeout`, from its start, if given; without one, it runs until the lease is closed.
+    /// `timeout`, from its start, if given; without one, it runs until the lease is closed. It
+    /// runs in the runner's companion `container`, one the runner holds, if given; without one,
+    /// in the runner's own container.
     RunCommand {
         lease: LeaseId,
         command: u64,
         argv: Argv,
         timeout: Option<Duration>,
+        container: Option<CompanionName>,
     },
     /// Copies a tree between the sandbox of the lease's holder, `holder`, and lease `lease`'s
     /// runner, as `direction` says, as the lease's `transfer`th command or transfer, failing once
     /// its files hold more than `max_bytes`. The runtime reports [`Event::TransferEnded`] once it
-    /// has ended, which [`Action::CloseLease`] makes come early, cut short.
+    /// has ended, which [`Action::CloseLease`] makes come early, cut short. It copies to or from
+    /// the runner's companion `container`, if given, as [`Action::RunCommand`] runs.
     Transfer {
         lease: LeaseId,
         holder: Caller,
         transfer: u64,
         direction: Direction,
         max_bytes: NonZeroU64,
+        container: Option<CompanionName>,
     },
     /// Closes lease `lease` wherever it is, and destroys its sandbox with whatever runs in it.
     CloseLease { lease: LeaseId },

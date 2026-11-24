@@ -40,7 +40,9 @@ use decision::{
     Outcome, PayloadRef, Request, Submission, Unevaluated,
 };
 use expect_test::{Expect, expect};
-use schema::ir::{self, AbsolutePath, ArgumentValue, Argv, CpuModel, Name, Sha256Digest};
+use schema::ir::{
+    self, AbsolutePath, ArgumentValue, Argv, CompanionName, CpuModel, Name, Sha256Digest,
+};
 use schema::sandbox::op::{CommandEnd, OpReply, REASON_BYTES, SessionOp, TransferEnd};
 use schema::sandbox::{ExitStatus, RESULT_MAX_BYTES};
 use schema::workflow::{Class, Offers, Workflow};
@@ -149,6 +151,7 @@ fn offered() -> BTreeMap<Name, BTreeMap<Name, Class>> {
             gpu: None,
             cpu_features: BTreeSet::new(),
             cpu_model,
+            companions: 1,
         };
         let declared = Class {
             offers,
@@ -448,9 +451,11 @@ impl Run<'_> {
                 command,
                 argv,
                 timeout,
+                container,
             } => format!(
-                "run command {command} of lease {}, {}, with a timeout of {timeout:?}",
+                "run command {command} of lease {}{}, {}, with a timeout of {timeout:?}",
                 lease.0,
+                companion(container.as_ref()),
                 json!(argv)
             ),
             Action::Transfer {
@@ -459,7 +464,11 @@ impl Run<'_> {
                 transfer,
                 direction,
                 max_bytes,
-            } => transfer_text((*lease, *holder), *transfer, direction, *max_bytes),
+                container,
+            } => {
+                let text = transfer_text((*lease, *holder), *transfer, direction, *max_bytes);
+                format!("{text}{}", companion(container.as_ref()))
+            }
             Action::CloseLease { lease } => format!("close lease {}", lease.0),
             Action::TearDownShared { target } => format!(
                 "tear down shared {}",
@@ -560,19 +569,31 @@ fn lease_event(words: &[&str]) -> Event {
     }
 }
 
+/// Where a lease's command or transfer goes: ` in <companion>`, or nothing for the runner's own
+/// container.
+fn companion(container: Option<&CompanionName>) -> String {
+    container.map_or(String::new(), |container| format!(" in {container}"))
+}
+
 fn session_op(op: &str, words: &[&str]) -> SessionOp {
     let lease = || words[1].parse().unwrap();
     match op {
         "open" => SessionOp::Open {
             instance_seconds: words.get(1).map(|seconds| seconds.parse().unwrap()),
         },
+        // `<timeout>[@<companion>] <argv>`.
         "run" => {
             let (timeout, argv) = words[2].split_once(' ').unwrap();
+            let (timeout, container) = match timeout.split_once('@') {
+                Some((timeout, companion)) => (timeout, Some(companion.to_owned())),
+                None => (timeout, None),
+            };
             let argv = argv.split(' ').map(str::to_owned).collect::<Vec<_>>();
             SessionOp::Run {
                 lease: lease(),
                 argv: Argv::try_from(argv).unwrap(),
                 timeout_seconds: timeout.parse().ok(),
+                container: container.map(|name| CompanionName::try_from(name).unwrap()),
             }
         }
         "put" | "get" => {
@@ -585,12 +606,14 @@ fn session_op(op: &str, words: &[&str]) -> SessionOp {
                     tree: from,
                     to,
                     replace: replace == "replace",
+                    container: None,
                 }
             } else {
                 SessionOp::Get {
                     lease: lease(),
                     from,
                     to,
+                    container: None,
                 }
             }
         }
@@ -1901,6 +1924,7 @@ fn leases() {
         2100 gpu.status 0
         2200 gpu.run 0 - nvidia-smi
         3000 lease_ready 0
+        3500 gpu.run 0 -@scheduler true
         4000 gpu.run 0 - nvidia-smi -L
         4100 gpu.run 0 - true
         4200 gpu.status 0
@@ -1934,36 +1958,76 @@ fn leases() {
               refuse op 4: lease 0 is still starting: run a command once `gpu.status` says it is ready
             3000 lease_ready 0
               (tick due at 903000)
+            3500 gpu.run 0 -@scheduler true
+              refuse op 5: lease 0's runner, `gpu_runner`, has no companions: name none, to use its own container
             4000 gpu.run 0 - nvidia-smi -L
-              reply to op 5: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":899,"cumulative_seconds":1199,"commands":2}}
+              reply to op 6: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":899,"cumulative_seconds":1199,"commands":2}}
               run command 0 of lease 0, ["nvidia-smi","-L"], with a timeout of None
             4100 gpu.run 0 - true
-              refuse op 6: lease 0 runs command 0, one at a time: run a command once `gpu.status` says it has ended
+              refuse op 7: lease 0 runs command 0, one at a time: run a command once `gpu.status` says it has ended
             4200 gpu.status 0
-              reply to op 7: {"kind":"lease_status","lease":0,"state":"running","elapsed_seconds":2,"busy_seconds":0,"idle_seconds":1,"failure":null,"last":{"kind":"command","command":0,"end":null,"stdout":"","stderr":""},"remaining":{"instances":1,"instance_seconds":898,"cumulative_seconds":1198,"commands":2}}
+              reply to op 8: {"kind":"lease_status","lease":0,"state":"running","elapsed_seconds":2,"busy_seconds":0,"idle_seconds":1,"failure":null,"last":{"kind":"command","command":0,"end":null,"stdout":"","stderr":""},"remaining":{"instances":1,"instance_seconds":898,"cumulative_seconds":1198,"commands":2}}
             6000 command_ended 0 0 0 GPU 0
             7000 gpu.status 0
-              reply to op 8: {"kind":"lease_status","lease":0,"state":"ready","elapsed_seconds":5,"busy_seconds":2,"idle_seconds":2,"failure":null,"last":{"kind":"command","command":0,"end":{"exited":{"code":0}},"stdout":"GPU 0","stderr":""},"remaining":{"instances":1,"instance_seconds":896,"cumulative_seconds":1196,"commands":2}}
+              reply to op 9: {"kind":"lease_status","lease":0,"state":"ready","elapsed_seconds":5,"busy_seconds":2,"idle_seconds":2,"failure":null,"last":{"kind":"command","command":0,"end":{"exited":{"code":0}},"stdout":"GPU 0","stderr":""},"remaining":{"instances":1,"instance_seconds":896,"cumulative_seconds":1196,"commands":2}}
             8000 gpu.run 0 899 echo it's
-              refuse op 9: the timeout of 899 s is longer than lease 0 has left, 895 s: run it again as `sandboxctl call gpu.run 0 --timeout 895 -- echo 'it'\''s'`
+              refuse op 10: the timeout of 899 s is longer than lease 0 has left, 895 s: run it again as `sandboxctl call gpu.run 0 --timeout 895 -- echo 'it'\''s'`
             8100 gpu.run 0 894 sleep 1000
-              reply to op 10: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":894,"cumulative_seconds":1194,"commands":1}}
+              reply to op 11: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":894,"cumulative_seconds":1194,"commands":1}}
               run command 1 of lease 0, ["sleep","1000"], with a timeout of Some(894s)
             9000 command_ended 0 1 timed_out
             9100 command_ended 0 0 1
             10000 gpu.close 0
-              reply to op 11: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":0,"cumulative_seconds":1193,"commands":1}}
+              reply to op 12: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":0,"cumulative_seconds":1193,"commands":1}}
               close lease 0
               (tick due at 18000000)
             10100 gpu.status 0
-              reply to op 12: {"kind":"lease_status","lease":0,"state":"closing","elapsed_seconds":8,"busy_seconds":2,"idle_seconds":4,"failure":null,"last":{"kind":"command","command":1,"end":"timed_out","stdout":"","stderr":""},"remaining":{"instances":1,"instance_seconds":0,"cumulative_seconds":1193,"commands":1}}
+              reply to op 13: {"kind":"lease_status","lease":0,"state":"closing","elapsed_seconds":8,"busy_seconds":2,"idle_seconds":4,"failure":null,"last":{"kind":"command","command":1,"end":"timed_out","stdout":"","stderr":""},"remaining":{"instances":1,"instance_seconds":0,"cumulative_seconds":1193,"commands":1}}
             10200 gpu.close 0
-              reply to op 13: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":0,"cumulative_seconds":1193,"commands":1}}
+              reply to op 14: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":0,"cumulative_seconds":1193,"commands":1}}
             10300 gpu.run 0 - true
-              refuse op 14: lease 0 has ended: open another
+              refuse op 15: lease 0 has ended: open another
             11000 lease_ended 0
             11100 gpu.status 0
-              reply to op 15: {"kind":"lease_status","lease":0,"state":"closed","elapsed_seconds":9,"busy_seconds":2,"idle_seconds":4,"failure":null,"last":{"kind":"command","command":1,"end":"timed_out","stdout":"","stderr":""},"remaining":{"instances":2,"instance_seconds":0,"cumulative_seconds":1193,"commands":1}}
+              reply to op 16: {"kind":"lease_status","lease":0,"state":"closed","elapsed_seconds":9,"busy_seconds":2,"idle_seconds":4,"failure":null,"last":{"kind":"command","command":1,"end":"timed_out","stdout":"","stderr":""},"remaining":{"instances":2,"instance_seconds":0,"cumulative_seconds":1193,"commands":1}}
+        "#]],
+    );
+}
+
+// The line that a refusal offers names the companion as `sandboxctl` takes it.
+#[test]
+fn companion_reruns() {
+    check(
+        |ir| {
+            leasing(ir);
+            let runner = ir["roles"].as_array().unwrap().len() - 1;
+            let companion = json!({
+                "name": "scheduler",
+                "image": format!("sha256:{}", "4".repeat(64)),
+                "user": ir["roles"][runner]["user"],
+                "cwd": "/work",
+            });
+            ir["roles"][runner]["runtime"]["runner"]["companions"] = json!([companion]);
+        },
+        r"
+        0 work_started
+        2000 gpu.open
+        3000 lease_ready 0
+        8000 gpu.run 0 899@scheduler echo it's
+        ",
+        &expect![[r#"
+            start
+              start agents
+              (tick due at 18010000)
+            0 work_started
+              (tick due at 18000000)
+            2000 gpu.open
+              reply to op 1: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
+              open lease 0 of gpu, as instance 0, started by 18000000
+            3000 lease_ready 0
+              (tick due at 903000)
+            8000 gpu.run 0 899@scheduler echo it's
+              refuse op 2: the timeout of 899 s is longer than lease 0 has left, 895 s: run it again as `sandboxctl call gpu.run 0 --timeout 895 --companion scheduler -- echo 'it'\''s'`
         "#]],
     );
 }

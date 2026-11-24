@@ -59,11 +59,15 @@ fn smallest<'p>(
     offered: &'p [Placement],
 ) -> Result<&'p Placement, Reported> {
     let Sandbox {
-        name, needs, at, ..
+        name,
+        needs,
+        companions,
+        at,
+        ..
     } = sandbox;
     let (mut fits, mut misfits) = (Vec::new(), Vec::new());
     for placement in offered {
-        match misfit(needs, &placement.declared.offers) {
+        match misfit(needs, *companions, &placement.declared.offers) {
             None => fits.push(placement),
             Some(why) => misfits.push(format!(
                 "`{}`'s `{}` {why}",
@@ -105,9 +109,24 @@ fn size(placement: &Placement) -> (NonZeroU64, NonZeroU64, &Name, &Name) {
     )
 }
 
-/// Why a role that has `needs` doesn't fit a class that `offers` them: the first of its needs, in
-/// the IR's order, that the class doesn't meet; or `None` if it fits.
-fn misfit(needs: &Needs, offers: &Offers) -> Option<String> {
+/// Why a role that has `needs`, and `companions` containers beside its own, doesn't fit a class
+/// that `offers` them: the first of its needs, in the IR's order, that the class doesn't meet, then
+/// its companions; or `None` if it fits.
+fn misfit(needs: &Needs, companions: usize, offers: &Offers) -> Option<String> {
+    let why = needs_misfit(needs, offers);
+    if why.is_some() || companions <= offers.companions {
+        return why;
+    }
+    Some(format!(
+        "holds at most {} containers beside a sandbox's own, fewer than its {companions} \
+         companions",
+        offers.companions
+    ))
+}
+
+/// Why a role that has `needs` doesn't fit a class that `offers` them, as [`misfit`] says, but for
+/// its companions.
+fn needs_misfit(needs: &Needs, offers: &Offers) -> Option<String> {
     let Needs {
         cpu_millis,
         memory_bytes,

@@ -14,11 +14,12 @@ configuration and keys. This page says what each is, what it needs, and where ea
 Every image is built on the Docker engine of the machine that runs the driver, the controller's
 own when runs go to a controller, whichever provider runs it, and tagged by the digest of its
 inputs. A role's `needs` says what one sandbox of it needs: its CPUs, its memory, and
-a GPU or a CPU feature if any. The run places each role in the smallest class of sandbox, of every
-provider's in the configuration, that offers that, and refuses a role that fits none, saying why
-of each class, before any image is built. Of the providers but the engine's own, it reaches only
-those that it places a role on. A provider whose sandboxes pull their images, EC2 or Modal, first
-pushes them to where they pull from. Every sandbox carries its run's tag, so runs
+a GPU or a CPU feature if any. A runner's sandbox also holds its companions. The run places each
+role in the smallest class of sandbox, of every provider's in the configuration, that offers that,
+and refuses a role that fits none, saying why of each class, before any image is built. The Docker
+provider's class offers companions. An EC2 or a Modal class offers none. Of the
+providers but the engine's own, it reaches only those that it places a role on. A provider whose
+sandboxes pull their images, EC2 or Modal, first pushes them to where they pull from. Every sandbox carries its run's tag, so runs
 that share a provider never reach each other's sandboxes.
 
 ## The Docker provider
@@ -26,7 +27,9 @@ that share a provider never reach each other's sandboxes.
 Its sandboxes are containers on the machine's own engine, each confined, with no network but
 loopback, on whole cores that no other run's containers get while the run lasts. A run whose roles
 need more cores than other runs leave is refused, and can be run again once they end. It has one
-class, `container`, that offers the machine's CPUs and memory and no GPU. A machine that uses it
+class, `container`, that offers the machine's CPUs and memory, no GPU, and up to 250 companions. A
+companion is a container of its own, confined as the sandbox's own is, on the sandbox's CPUs. A
+machine that uses it
 uses no other provider, so where a run's roles are placed never depends on how much memory the
 machine has. Rootless Docker is the recommended engine: `pumpkin run` warns of one that runs as
 root.

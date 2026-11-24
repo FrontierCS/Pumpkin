@@ -15,7 +15,7 @@ use std::{fs, io};
 
 use decision::{Event, JobId, PayloadRef};
 use gateway::{Process, Put, Session};
-use schema::ir::{self, AbsolutePath, Argv, Name, TargetLifetime};
+use schema::ir::{self, AbsolutePath, Argv, CompanionName, Name, TargetLifetime};
 use schema::sandbox::op::{
     CommandEnd, CommandStatus, Last, LeaseStatusReply, RunnerOutput, SessionOp, TransferEnd,
     TransferStatus,
@@ -111,6 +111,7 @@ pub trait Target {
         lease: u64,
         tree: AbsolutePath,
         to: AbsolutePath,
+        container: Option<CompanionName>,
     ) -> Result<(), String>;
 
     /// Copies the runner's file or tree into a new directory on the target.
@@ -120,6 +121,7 @@ pub trait Target {
         lease: u64,
         from: AbsolutePath,
         to: AbsolutePath,
+        container: Option<CompanionName>,
     ) -> Result<(), String>;
 
     /// Waits for a started command's exit or timeout and both recorded output streams.
@@ -129,6 +131,7 @@ pub trait Target {
         lease: u64,
         argv: Argv,
         timeout_seconds: Option<NonZeroU64>,
+        container: Option<CompanionName>,
     ) -> Result<RunnerOutput, String>;
 
     /// Waits for deletion of the callback's runner.
@@ -629,12 +632,14 @@ impl<H: Host> Target for OnTarget<'_, '_, '_, H> {
         lease: u64,
         tree: AbsolutePath,
         to: AbsolutePath,
+        container: Option<CompanionName>,
     ) -> Result<(), String> {
         let op = SessionOp::Put {
             lease,
             tree,
             to,
             replace: false,
+            container,
         };
         self.runner_copy(grant, op)
     }
@@ -645,8 +650,15 @@ impl<H: Host> Target for OnTarget<'_, '_, '_, H> {
         lease: u64,
         from: AbsolutePath,
         to: AbsolutePath,
+        container: Option<CompanionName>,
     ) -> Result<(), String> {
-        self.runner_copy(grant, SessionOp::Get { lease, from, to })
+        let op = SessionOp::Get {
+            lease,
+            from,
+            to,
+            container,
+        };
+        self.runner_copy(grant, op)
     }
 
     fn runner_run(
@@ -655,11 +667,13 @@ impl<H: Host> Target for OnTarget<'_, '_, '_, H> {
         lease: u64,
         argv: Argv,
         timeout_seconds: Option<NonZeroU64>,
+        container: Option<CompanionName>,
     ) -> Result<RunnerOutput, String> {
         let op = SessionOp::Run {
             lease,
             argv,
             timeout_seconds,
+            container,
         };
         let status = self.scoped(grant, Waiting::Work, op)?;
         let Some(Last::Command(CommandStatus {

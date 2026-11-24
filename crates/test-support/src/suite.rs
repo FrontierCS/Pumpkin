@@ -24,8 +24,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use expect_test::expect;
 use gateway::{Arrival, Dialer, Put, Registration, Session, Sockets};
 use provider::{
-    Console, Create, ImageRef, Listed, Meeting, Provider, Reservation, Role, RunTag, SandboxId,
-    SandboxdRef, UnixTime,
+    Console, Create, Dials, ImageRef, Listed, Meeting, Provider, Reservation, Role, RunTag,
+    SandboxId, SandboxdRef, UnixTime,
 };
 use schema::ir::{AbsolutePath, Argv, Env, Image, Name, Resources, User};
 use schema::sandbox::{Launch, RelativePath, file_mode};
@@ -466,11 +466,11 @@ impl<'a> Suite<'a> {
             Meeting::Local(creator) => {
                 let socket = Name::try_from(socket.to_owned()).unwrap();
                 let (dial, registration) = self.sockets.issue(&socket).unwrap();
-                Ok((creator.create(&create, dial)?.id, registration))
+                Ok((creator.create(&create, alone(dial))?.id, registration))
             }
             Meeting::Listen(creator) => {
                 let (dial, unreached) = self.dialer.issue().unwrap();
-                let (created, endpoint) = creator.create(&create, dial)?;
+                let (created, endpoint) = creator.create(&create, alone(dial))?;
                 Ok((created.id, unreached.at(endpoint)))
             }
             Meeting::Private(_) => panic!(
@@ -633,6 +633,15 @@ pub fn asked(
         // Far past the suite's end, which comes within minutes on any provider.
         hard_end: from_now(Duration::from_hours(1)),
         by,
+        companions: Vec::new(),
+    }
+}
+
+/// The dials of a sandbox that holds no companions.
+fn alone<D>(main: D) -> Dials<D> {
+    Dials {
+        main,
+        companions: Vec::new(),
     }
 }
 

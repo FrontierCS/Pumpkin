@@ -30,7 +30,7 @@ use alloc::vec::Vec;
 use core::num::NonZeroU64;
 use core::time::Duration;
 
-use schema::ir::{Argv, Name};
+use schema::ir::{Argv, CompanionName, Name};
 use schema::sandbox::op::{
     CommandStatus, JobState, Last, LeaseRemaining, LeaseReply, LeaseState, LeaseStatusReply,
     OpReply, OpsReply, REASON_BYTES, SessionOp, StatusReply, TransferEnd, TransferStatus,
@@ -197,8 +197,10 @@ impl Core<'_> {
                 lease,
                 argv,
                 timeout_seconds,
+                container,
             } => {
-                let ran = self.lease_run((caller, id, lease), end, argv, timeout_seconds, then);
+                let run = (argv, timeout_seconds, container);
+                let ran = self.lease_run((caller, id, lease), end, run, then);
                 ran.map(OpReply::Lease)
             }
             SessionOp::Put {
@@ -206,13 +208,21 @@ impl Core<'_> {
                 tree,
                 to,
                 replace,
+                container,
             } => {
                 let direction = Direction::Put { tree, to, replace };
-                (self.transfer((caller, id, lease), direction, then)).map(OpReply::Lease)
+                let transfer = self.transfer((caller, id, lease), direction, container, then);
+                transfer.map(OpReply::Lease)
             }
-            SessionOp::Get { lease, from, to } => {
+            SessionOp::Get {
+                lease,
+                from,
+                to,
+                container,
+            } => {
                 let direction = Direction::Get { from, to };
-                (self.transfer((caller, id, lease), direction, then)).map(OpReply::Lease)
+                let transfer = self.transfer((caller, id, lease), direction, container, then);
+                transfer.map(OpReply::Lease)
             }
             SessionOp::Status { lease } => {
                 let lease = self.own_lease((caller, id), lease)?;
@@ -386,10 +396,46 @@ impl Core<'_> {
         Ok((id, since))
     }
 
+    /// Checks that lease `number` of `session`'s runner holds the companion `container`, if one is
+    /// named.
+    fn container(
+        &self,
+        (session, number): (SessionId, u64),
+        container: Option<&CompanionName>,
+    ) -> Result<(), String> {
+        let Some(container) = container else {
+            return Ok(());
+        };
+        let runner = self.workflow.session(session).runner;
+        let companions = &self.workflow.runner(runner).companions;
+        if companions
+            .iter()
+            .any(|companion| companion.name == *container)
+        {
+            return Ok(());
+        }
+        let role = &self.workflow.sandbox(runner.role()).name;
+        if companions.is_empty() {
+            return Err(format!(
+                "lease {number}'s runner, `{role}`, has no companions: name none, to use its own \
+                 container"
+            ));
+        }
+        let names: Vec<String> = (companions.iter())
+            .map(|companion| format!("`{}`", companion.name))
+            .collect();
+        Err(format!(
+            "lease {number}'s runner, `{role}`, holds no companion `{container}`: name one of {}, \
+             or none for its own container",
+            names.join(", ")
+        ))
+    }
+
     fn transfer(
         &mut self,
         (caller, session, number): (Caller, SessionId, u64),
         direction: Direction,
+        container: Option<CompanionName>,
         then: &mut Vec<Action>,
     ) -> Result<LeaseReply, String> {
         let act = match direction {
@@ -397,6 +443,7 @@ impl Core<'_> {
             Direction::Get { .. } => "get a tree",
         };
         let (id, _) = self.idle_lease((caller, session, number), act)?;
+        self.container((session, number), container.as_ref())?;
         let work = |number| Work::Transfer {
             number,
             ended: None,
@@ -408,6 +455,7 @@ impl Core<'_> {
             transfer,
             direction,
             max_bytes: self.workflow.session(self.leases[id].grant).transfer_bytes,
+            container,
         });
         Ok(self.lease_reply(id))
     }
@@ -416,11 +464,11 @@ impl Core<'_> {
         &mut self,
         (caller, session, number): (Caller, SessionId, u64),
         work_end: Duration,
-        argv: Argv,
-        timeout_seconds: Option<NonZeroU64>,
+        (argv, timeout_seconds, container): (Argv, Option<NonZeroU64>, Option<CompanionName>),
         then: &mut Vec<Action>,
     ) -> Result<LeaseReply, String> {
         let (id, since) = self.idle_lease((caller, session, number), "run a command")?;
+        self.container((session, number), container.as_ref())?;
         let lease = &self.leases[id];
         let timeout = timeout_seconds.map(|seconds| Duration::from_secs(seconds.get()));
         // The lease ends by its own time, and by its holder's work's end.
@@ -430,7 +478,12 @@ impl Core<'_> {
             && timeout.get() > left
         {
             let name = &self.workflow.session(session).name;
-            let rerun = rerun((name, number), NonZeroU64::new(left), &argv);
+            let rerun = rerun(
+                (name, number),
+                NonZeroU64::new(left),
+                container.as_ref(),
+                &argv,
+            );
             return Err(format!(
                 "the timeout of {timeout} s is longer than lease {number} has left, {left} s: \
                  run it again as `{rerun}`"
@@ -446,6 +499,7 @@ impl Core<'_> {
             command,
             argv,
             timeout,
+            container,
         });
         Ok(self.lease_reply(id))
     }
@@ -600,7 +654,12 @@ fn cut(text: &str) -> String {
 }
 
 // A refusal offers this line to be pasted back, so each word is quoted for a POSIX shell.
-fn rerun((session, lease): (&Name, u64), timeout: Option<NonZeroU64>, argv: &Argv) -> String {
+fn rerun(
+    (session, lease): (&Name, u64),
+    timeout: Option<NonZeroU64>,
+    container: Option<&CompanionName>,
+    argv: &Argv,
+) -> String {
     let quoted = |arg: &str| {
         let plain = |byte: u8| byte.is_ascii_alphanumeric() || b"-_./=:@%+,".contains(&byte);
         if !arg.is_empty() && arg.bytes().all(plain) {
@@ -610,10 +669,13 @@ fn rerun((session, lease): (&Name, u64), timeout: Option<NonZeroU64>, argv: &Arg
         }
     };
     let timeout = timeout.map_or(String::new(), |seconds| format!(" --timeout {seconds}"));
+    let container = container.map_or(String::new(), |container| {
+        format!(" --companion {container}")
+    });
     let words = core::iter::once(argv.program()).chain(argv.args().iter().map(String::as_str));
     let words: Vec<String> = words.map(quoted).collect();
     format!(
-        "sandboxctl call {session}.run {lease}{timeout} -- {}",
+        "sandboxctl call {session}.run {lease}{timeout}{container} -- {}",
         words.join(" ")
     )
 }

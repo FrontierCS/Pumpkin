@@ -52,6 +52,15 @@ checked_string!(
 );
 
 checked_string!(
+    /// The name of a runner's companion, which a command or a copy names it by.
+    ///
+    /// It is a host name of 1 to 63 characters from a-z, 0-9 and `-`, starting with a letter and
+    /// ending with a letter or a digit.
+    CompanionName,
+    check_companion_name
+);
+
+checked_string!(
     /// A workflow's name, such as `vendor/task`: 1 to 128 characters
     /// from A-Z, a-z, 0-9, `.`, `_`, `-` and `/`.
     WorkflowName,
@@ -181,6 +190,27 @@ fn check_name(name: &str) -> Result<(), String> {
         Err(format!(
             "`{}` is not a valid name: use 1 to 64 characters from a-z, 0-9, `_` and `-`, \
              starting with a letter",
+            name.escape_debug()
+        ))
+    }
+}
+
+fn check_companion_name(name: &str) -> Result<(), String> {
+    let mut chars = name.chars();
+    let first = chars.next().is_some_and(|char| char.is_ascii_lowercase());
+    let last = name
+        .chars()
+        .last()
+        .is_some_and(|char| char.is_ascii_lowercase() || char.is_ascii_digit());
+    let rest = name
+        .chars()
+        .all(|char| char.is_ascii_lowercase() || char.is_ascii_digit() || char == '-');
+    if first && last && rest && name.len() <= 63 {
+        Ok(())
+    } else {
+        Err(format!(
+            "`{}` is not a valid companion name: use 1 to 63 characters from a-z, 0-9 and `-`, \
+             starting with a letter and ending with a letter or a digit",
             name.escape_debug()
         ))
     }

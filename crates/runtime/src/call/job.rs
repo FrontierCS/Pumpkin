@@ -35,7 +35,8 @@ pub(crate) fn run<H: Host>(
         .sessions()
         .any(|(_, grant)| grant.holder == holder)
         .then_some(OpPayloadLimit::NONE);
-    crate::child::run(child, ops, |child, session| {
+    // A target's sandbox holds no companions.
+    crate::child::run(child, ops, |child, session, _| {
         evaluate(call, bodies, child, session, &mut body::Stdin::default())
     });
 }

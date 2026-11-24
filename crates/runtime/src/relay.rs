@@ -189,6 +189,11 @@ impl Relay {
                 let at = child.clock.now();
                 child.report(Report::Model { at, job, incoming });
             }
+            Message::Companion(..) => unreachable!(
+                "job {}'s target had an arrival from a companion, though only a runner's sandbox \
+                 holds companions",
+                job.0
+            ),
         }
         Ok(None)
     }

@@ -34,6 +34,12 @@ Every sandbox has `/pumpkin`, which holds Pumpkin's own files. The `schema` crat
 - `home/` is the commands' `HOME`.
 - `log/` holds the commands' output.
 
+A runner's `companions` are the containers that each of its sandboxes holds beside its own: its
+pod ([`Companion`](../crates/schema/src/ir.rs)). Each has its own image, user, `cwd` and `env`, and
+runs the commands that the holder sends it. The companions share the sandbox's `needs` and its
+lifetime. Only a class that offers companions takes such a runner ([providers](providers.md)). A
+lease's record keeps the runner's own `out` alone.
+
 ## Grants
 
 A grant is a name and one function, under its kind's key: `{"name": "count", "job": {…}}`. Its
@@ -89,15 +95,16 @@ body that was checked as the run started. A body's parameters, in order:
 | `target.get(path)` | returns the text of the file at `path` |
 | `target.caller()` | returns the calling agent's role, in a job's body |
 | `target.with_runner(session, callback, ...)` | opens a lease of the target's session, calls `callback(runner, ...)`, closes the lease even if the callback fails, and returns what the callback returned once the runner is deleted |
-| `runner.put(tree, to)` | copies the target's tree to a new path in the runner |
-| `runner.get(from, to)` | copies the runner's file or tree into a new directory on the target, where a file keeps its name |
-| `runner.run(argv, timeout_seconds = seconds)` | runs `argv` in the runner, and returns a [`RunnerOutput`](../crates/schema/src/sandbox/op.rs) |
+| `runner.put(tree, to, companion = name)` | copies the target's tree to a new path in the runner |
+| `runner.get(from, to, companion = name)` | copies the runner's file or tree into a new directory on the target, where a file keeps its name |
+| `runner.run(argv, timeout_seconds = seconds, companion = name)` | runs `argv` in the runner, and returns a [`RunnerOutput`](../crates/schema/src/sandbox/op.rs) |
 | `run.set_submission(payload)`, `run.end_work()` | propose a now function's changes, as above |
 
 `get` and `capture` return at most 1 MiB of UTF-8 text. A runner handle works only in its
-callback. Any of these fails the body: a refused op, a failed copy, a command that doesn't start
-or whose output isn't collected whole, or a lease that runs out. A runner that can't be deleted
-fails the run.
+callback. A runner's `put`, `get` and `run` act on the companion that `companion` names, or on the
+runner's own container. Any of these fails the body: a refused op, a failed copy, a command that
+doesn't start or whose output isn't collected whole, or a lease that runs out. A runner that can't
+be deleted fails the run.
 
 A body returns a dict of at most 1 MiB of JSON. Its keys are names, and JSON can hold its values.
 The body fails if its evaluation fails, as on `fail()` or a `get` of a missing file. It also fails

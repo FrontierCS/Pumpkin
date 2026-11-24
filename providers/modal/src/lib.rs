@@ -29,8 +29,8 @@ use std::path::Path;
 use aws::{Cli, Region, Repository, RepositoryName, RoleArn};
 use engine::{Platform, Pusher};
 use provider::{
-    Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation,
-    Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
+    Console, Create, Created, Creator, Dials, ImageRef, Listed, Meeting, Provider, Ready,
+    Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
 use schema::ir::{self, GpuModel, Image, Name};
 use schema::sandbox::{Endpoint, Listening};
@@ -192,6 +192,7 @@ impl TryFrom<ClassTable> for SandboxClass {
             gpu: offered,
             cpu_features: BTreeSet::new(),
             cpu_model: None,
+            companions: 0,
         };
         let class = Class {
             offers,
@@ -217,6 +218,7 @@ impl From<SandboxClass> for ClassTable {
             gpu: offered,
             cpu_features: _,
             cpu_model: _,
+            companions: _,
         } = offers;
         Self {
             gpu,
@@ -397,7 +399,12 @@ impl Provider for Modal<'_> {
 }
 
 impl Creator<Listening, (Created, Endpoint)> for Modal<'_> {
-    fn create(&self, create: &Create, dial: Listening) -> Result<(Created, Endpoint), String> {
-        self.create_sandbox(create, &dial)
+    fn create(
+        &self,
+        create: &Create,
+        dials: Dials<Listening>,
+    ) -> Result<(Created, Endpoint), String> {
+        // Its classes offer no companions, so placing gives a sandbox none.
+        self.create_sandbox(create, &dials.main)
     }
 }
