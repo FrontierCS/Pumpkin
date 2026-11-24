@@ -1,13 +1,15 @@
 //! A simulated world for a process's loop ([`stdx::io::Backend`]), one loop at a time.
 //!
 //! The world holds a clock, Unix sockets as streams in memory, and the paths of real files. A sync
-//! of a file makes nothing last and completes as the world's script says.
+//! of a file makes nothing last and completes as the world's script says. A file's lock is the
+//! world's, which a close lets go.
 //!
-//! The world moves its clock by itself only to complete a sync that the script delays. On the way
-//! it stops at the time that the loop waits until. It never jumps to the loop's deadline by itself,
-//! as other threads may still send the loop what it waits for. Other threads move the clock too
-//! ([`World::reach`], [`Peer::move_on_write`]). A wait with nothing to complete and nothing sent
-//! blocks for real, a few milliseconds at a time.
+//! The world moves its clock by itself only to complete a sync that the script delays, a timeout,
+//! or a stand-in's call that it times ([`World::at`]). On the way it stops at the time that the
+//! loop waits until. It never jumps to the loop's deadline by itself, as other threads may still
+//! send the loop what it waits for. Other threads move the clock too ([`World::reach`],
+//! [`Peer::move_on_write`]). A wait with nothing to complete and nothing sent blocks for real, a
+//! few milliseconds at a time.
 // The world simulates the loop's operations, below TigerBeetle's simulator, which stands in for
 // the storage and the network above its IO:
 // https://github.com/tigerbeetle/tigerbeetle/blob/68958eb757747d0fc96a79d1f9c2fa6766b67b48/src/testing/cluster.zig#L65-L74
@@ -93,7 +95,14 @@ struct State {
     woken: bool,
     // How many things had reached the loop as the last sync began.
     synced_events: usize,
+    // Each file's lock, by its path, with the handle that holds it.
+    locks: BTreeMap<PathBuf, Handle>,
+    // What the world calls once its clock reaches each time ([`World::at`]).
+    timed: Vec<(Duration, Timed)>,
 }
+
+// A call that a stand-in times on the world's clock.
+type Timed = Box<dyn FnOnce() + Send>;
 
 enum Object {
     Listener(PathBuf),
@@ -195,6 +204,15 @@ impl World {
     /// It runs under the world's lock, so it must not call the world.
     pub fn observe(&self, observe: Observer) {
         self.state().observers.push(observe);
+    }
+
+    /// Calls `call`, work that lasts a simulated time and sends the loop an event as it ends, once
+    /// the clock reaches `at`, which the world moves it to as it does to complete a sync. Calls due
+    /// at one time are called in the order that they were given. A call still due as the loop's
+    /// backend drops is dropped with it.
+    pub fn at(&self, at: Duration, call: impl FnOnce() + Send + 'static) {
+        self.state().timed.push((at, Box::new(call)));
+        self.shared.changed.notify_all();
     }
 
     /// Adds `script`, which the first sync that it matches meets, after the scripts before it.
@@ -512,7 +530,15 @@ impl State {
                 pipe.to_peer.extend(&buffer[from..from + sent]);
                 Ok(Outcome::Sent(buffer, Ok(sent)))
             }
-            Op::Fsync(handle, durable) => Err(Op::Fsync(handle, durable)),
+            Op::Timeout(at) if self.now >= at => Ok(Outcome::TimedOut),
+            op @ (Op::Fsync(..) | Op::Timeout(_)) => Err(op),
+            Op::TryLock(handle) => {
+                let Object::File(path) = self.object(handle) else {
+                    panic!("a lock of {handle:?}, which is no file")
+                };
+                let held = *self.locks.entry(path.clone()).or_insert(handle);
+                Ok(Outcome::Locked(Ok(held == handle)))
+            }
         }
     }
 
@@ -554,15 +580,20 @@ impl State {
         self.ready.len() > ready
     }
 
-    // The earliest time that a sync waits to complete at, whose events have been sent.
+    // The earliest time that a sync whose events have been sent, a timeout or a timed call waits
+    // to complete at.
     fn next_due(&self) -> Option<Duration> {
         let events = self.events;
-        (self.held.iter())
-            .filter_map(|(_, synced, began, _)| match synced {
-                Synced::Lasts { at, events: more } if events >= began + more => Some(*at),
-                Synced::Lasts { .. } | Synced::Fails | Synced::Held(_) => None,
-            })
-            .min()
+        let syncs = (self.held.iter()).filter_map(|(_, synced, began, _)| match synced {
+            Synced::Lasts { at, events: more } if events >= began + more => Some(*at),
+            Synced::Lasts { .. } | Synced::Fails | Synced::Held(_) => None,
+        });
+        let timeouts = (self.parked.iter()).filter_map(|(_, op)| match op {
+            Op::Timeout(at) => Some(*at),
+            Op::Accept(_) | Op::Recv(..) | Op::Send { .. } | Op::Fsync(..) | Op::TryLock(_) => None,
+        });
+        let timed = self.timed.iter().map(|(at, _)| *at);
+        syncs.chain(timeouts).chain(timed).min()
     }
 }
 
@@ -607,19 +638,25 @@ impl Backend for Loop {
         let mut state = self.world.state();
         let object = state.release(handle);
         state.end(object);
+        state.locks.retain(|_, holder| *holder != handle);
         let parked = std::mem::take(&mut state.parked);
         for (slot, op) in parked {
+            // A lock completes at once, and a timeout waits on the clock, not on a handle.
             let on = match &op {
-                Op::Accept(on) | Op::Recv(on, _) | Op::Fsync(on, _) => *on,
-                Op::Send { handle, .. } => *handle,
+                Op::Accept(on) | Op::Recv(on, _) | Op::Fsync(on, _) => Some(*on),
+                Op::Send { handle, .. } => Some(*handle),
+                Op::TryLock(_) | Op::Timeout(_) => None,
             };
-            if on == handle {
+            if on == Some(handle) {
                 let aborted = || io::Error::from(io::ErrorKind::ConnectionAborted);
                 let outcome = match op {
                     Op::Accept(_) => Outcome::Accepted(Err(aborted())),
                     Op::Recv(_, buffer) => Outcome::Received(buffer, Err(aborted())),
                     Op::Send { buffer, .. } => Outcome::Sent(buffer, Err(aborted())),
                     Op::Fsync(..) => Outcome::Synced(Err(aborted())),
+                    Op::TryLock(_) | Op::Timeout(_) => {
+                        unreachable!("{op:?} was aborted, though it waits on no handle")
+                    }
                 };
                 state.ready.push((slot, outcome));
             } else {
@@ -666,6 +703,20 @@ impl Backend for Loop {
         let mut idled = false;
         loop {
             changed |= state.settle();
+            let now = state.now;
+            let due: Vec<Timed> = (state.timed.extract_if(.., |(at, _)| *at <= now))
+                .map(|(_, call)| call)
+                .collect();
+            if !due.is_empty() {
+                // Each sends the loop an event, whose wake takes the world's lock.
+                drop(state);
+                for call in due {
+                    call();
+                }
+                state = self.world.state();
+                changed = true;
+                continue;
+            }
             let woken = std::mem::take(&mut state.woken);
             if idled || woken || !state.ready.is_empty() || state.now >= until {
                 break;
@@ -719,8 +770,12 @@ impl Drop for Loop {
         state.parked.clear();
         state.ready.clear();
         state.held.clear();
+        state.locks.clear();
+        // Dropped once the lock is let go, as what a call holds may wake the loop as it drops.
+        let timed = std::mem::take(&mut state.timed);
         state.looped = false;
         drop(state);
+        drop(timed);
         self.world.shared.changed.notify_all();
     }
 }

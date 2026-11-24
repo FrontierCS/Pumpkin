@@ -26,6 +26,7 @@ use schema::sandbox::RelativePath;
 use stdx::process::Environment;
 use test_support::{BUSYBOX, TestDir, docker};
 
+mod builds;
 mod prune;
 
 struct Fixture {

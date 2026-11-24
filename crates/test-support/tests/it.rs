@@ -46,6 +46,13 @@ fn check<P: Read + Write + Send + 'static>(
             7 sent through `Events`: batch 1 took 7
             8 sent through an `Edge`: batch 2 took 8
             an `Edge` dropped unsent: batch 3 took nothing
+        a file's lock, which another open file of its path tries for:
+            the first file took it
+            the first file again took it
+            the second file found it held
+            the second file, once the first closed, took it
+        a timeout:
+            ran at its time or later
     "#]];
     expected.assert_eq(&outcomes);
 }
@@ -78,6 +85,7 @@ fn world_clock_script_and_peers() {
         a send once the peer reads no more: at 30s, the send failed: BrokenPipe
         the peer's shutdown, then its drop: at 30s, the recv of 0 bytes
         an event: at 30s, the sync of counted completed, took 2
+        a call timed at 45s, which sends 3: at 45s, took 3
         a held sync, once the world reached 50s: at 50s, nothing
         once its function says so: at 50s, the sync of held completed
         a stream that the loop held as its backend dropped: its peer read 0 bytes

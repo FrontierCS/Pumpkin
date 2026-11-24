@@ -61,6 +61,10 @@ pub enum Op {
     },
     /// Makes what was written to a file last through a crash of the machine.
     Fsync(Handle, Durable),
+    /// Takes a file's lock, as `flock`'s exclusive lock, if no other open file of it holds one.
+    TryLock(Handle),
+    /// Waits until the backend's clock reads this time.
+    Timeout(Duration),
 }
 
 /// What an [`Op`] came to.
@@ -72,6 +76,9 @@ pub enum Outcome {
     /// The buffer, and how many bytes from `from` went.
     Sent(Vec<u8>, io::Result<usize>),
     Synced(io::Result<()>),
+    /// Whether the lock was taken: `false` while another open file of it holds one.
+    Locked(io::Result<bool>),
+    TimedOut,
 }
 
 /// How much of a file an [`Op::Fsync`] makes last.
@@ -142,12 +149,15 @@ pub struct File(Handle);
 pub type OnAccept<C> = fn(&mut C, &mut Io<C>, u64, io::Result<Stream>);
 pub type OnBytes<C> = fn(&mut C, &mut Io<C>, u64, Vec<u8>, io::Result<usize>);
 pub type OnSync<C> = fn(&mut C, &mut Io<C>, u64, io::Result<()>);
+pub type OnLock<C> = fn(&mut C, &mut Io<C>, u64, io::Result<bool>);
 pub type OnTick<C> = fn(&mut C, &mut Io<C>, u64);
 
 enum Callback<C: Loop> {
     Accept(OnAccept<C>),
     Bytes(OnBytes<C>),
     Sync(OnSync<C>),
+    Lock(OnLock<C>),
+    Tick(OnTick<C>),
 }
 
 struct Pending<C: Loop> {
@@ -335,7 +345,18 @@ impl<C: Loop> Io<C> {
                 (Callback::Sync(callback), Outcome::Synced(result)) => {
                     callback(owner, self, token, result);
                 }
-                (Callback::Accept(_) | Callback::Bytes(_) | Callback::Sync(_), outcome) => {
+                (Callback::Lock(callback), Outcome::Locked(locked)) => {
+                    callback(owner, self, token, locked);
+                }
+                (Callback::Tick(callback), Outcome::TimedOut) => callback(owner, self, token),
+                (
+                    Callback::Accept(_)
+                    | Callback::Bytes(_)
+                    | Callback::Sync(_)
+                    | Callback::Lock(_)
+                    | Callback::Tick(_),
+                    outcome,
+                ) => {
                     unreachable!(
                         "slot {slot} completed with {outcome:?}, which is no outcome of its \
                          operation, though a backend answers each operation with its own kind"
@@ -466,6 +487,24 @@ impl<C: Loop> Io<C> {
             token,
             Callback::Sync(callback),
         );
+    }
+
+    /// Takes `file`'s lock, as `flock`'s exclusive lock, if no other open file of its path holds
+    /// one: `true` once taken, which `file` holds until it is closed, as it does if it held it
+    /// already. It never waits for the lock to be let go, but completes in the next batch.
+    // A `flock` with `LOCK_NB`, as TigerBeetle's IO locks its data file, which it tries again after
+    // a sleep where a caller here submits a timeout:
+    // https://github.com/tigerbeetle/tigerbeetle/blob/68958eb757747d0fc96a79d1f9c2fa6766b67b48/src/stdx/io/linux.zig#L1579-L1605
+    pub fn try_lock(&mut self, file: &File, token: u64, callback: OnLock<C>) {
+        self.submit(Op::TryLock(file.0), None, token, Callback::Lock(callback));
+    }
+
+    /// Runs `callback` with `token` in a batch whose time, [`Io::now`], is `at` or later, once the
+    /// backend's clock has reached `at`.
+    // As TigerBeetle's `timeout`, but at a time on the loop's clock rather than after a span:
+    // https://github.com/tigerbeetle/tigerbeetle/blob/68958eb757747d0fc96a79d1f9c2fa6766b67b48/src/stdx/io/linux.zig#L1226-L1254
+    pub fn timeout(&mut self, at: Duration, token: u64, callback: OnTick<C>) {
+        self.submit(Op::Timeout(at), None, token, Callback::Tick(callback));
     }
 
     fn submit(&mut self, op: Op, way: Option<Way>, token: u64, callback: Callback<C>) {

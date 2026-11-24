@@ -293,7 +293,7 @@ fn prepared<'e>(
     let engine = &*engine.insert(crate::engine(context, reader)?);
     let here = Offered::Here { entry, config };
     let reached = reached(task.workflow(), providers, engine, &here)?;
-    let (workflow, _, sources) = match task.build(engine, &mut ()) {
+    let (workflow, _, sources) = match task.build(engine, &mut (), None)? {
         Ok(built) => built,
         Err(problems) => return Ok(Err(problems)),
     };

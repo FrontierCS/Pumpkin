@@ -1,5 +1,6 @@
 //! The machine's backend: sockets on edge-triggered epoll, and files, which epoll can't wait on,
-//! synced on a thread of the backend's, which completes each sync into the loop.
+//! synced on a thread of the backend's, which completes each sync into the loop. A file's lock is
+//! tried as it is submitted, and a timeout completes at the first wait that ends past its time.
 // A socket is registered once, for both directions, and an operation is tried as it is submitted
 // and again at each edge until it would no longer block, as TigerBeetle's epoll backend retries at
 // each wakeup:
@@ -9,6 +10,8 @@
 // https://github.com/libuv/libuv/blob/0c1fa696aa502eb749c2c4735005f41ba00a27b8/src/unix/fs.c#L150-L166
 // https://github.com/mitchellh/libxev/blob/59ca768ca869e51c277ede3dc19ff73a89875f81/src/backend/epoll.zig#L36-L37
 
+use std::fs::{self, TryLockError};
+use std::io;
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::UnixListener;
@@ -17,7 +20,6 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-use std::{fs, io};
 
 use rustix::event::{EventfdFlags, epoll};
 use rustix::net::{RecvFlags, SendFlags, Shutdown, SocketFlags};
@@ -46,6 +48,8 @@ pub(super) struct Epoll {
     free: Vec<u32>,
     // What completed without waiting on epoll, for the next wait to hand over.
     ready: Vec<(Slot, Outcome)>,
+    // Each timeout in flight, by the time it waits until.
+    timeouts: Vec<(Duration, Slot)>,
     // The thread that syncs files, from the first sync on.
     syncer: Option<Syncer>,
 }
@@ -135,6 +139,7 @@ impl Epoll {
             entries: Vec::new(),
             free: Vec::new(),
             ready: Vec::new(),
+            timeouts: Vec::new(),
             syncer: None,
         })
     }
@@ -259,6 +264,18 @@ impl Epoll {
                 let file = Arc::clone(file);
                 return self.sync(slot, file, *durable);
             }
+            Op::TryLock(handle) => {
+                let Kind::File(file) = &self.held(*handle).kind else {
+                    unreachable!("{handle:?}, locked, is no file, though `Io::try_lock` takes one")
+                };
+                let locked = match file.try_lock() {
+                    Ok(()) => Ok(true),
+                    Err(TryLockError::WouldBlock) => Ok(false),
+                    Err(TryLockError::Error(error)) => Err(error),
+                };
+                return self.ready.push((slot, Outcome::Locked(locked)));
+            }
+            Op::Timeout(at) => return self.timeouts.push((*at, slot)),
         };
         let held = self.held(handle);
         match attempt(&mut held.kind, op) {
@@ -288,6 +305,10 @@ fn aborted(op: Op) -> Outcome {
         Op::Recv(_, buffer) => Outcome::Received(buffer, Err(error())),
         Op::Send { buffer, .. } => Outcome::Sent(buffer, Err(error())),
         Op::Fsync(..) => Outcome::Synced(Err(error())),
+        op @ (Op::TryLock(_) | Op::Timeout(_)) => unreachable!(
+            "{op:?} was aborted with its handle, though it never waits on a socket: a lock \
+             completes as it is submitted, and a timeout waits on the clock"
+        ),
     }
 }
 
@@ -408,8 +429,9 @@ impl Backend for Epoll {
         // TigerBeetle's epoll backend polls with no timeout in each `run`:
         // https://github.com/tigerbeetle/tigerbeetle/blob/68958eb757747d0fc96a79d1f9c2fa6766b67b48/src/stdx/io/linux_epoll.zig#L102-L124
         self.take_synced();
+        let due = (self.timeouts.iter()).fold(until, |due, (at, _)| due.min(*at));
         let left = if self.ready.is_empty() {
-            until.saturating_sub(self.now()).min(LOOK)
+            due.saturating_sub(self.now()).min(LOOK)
         } else {
             Duration::ZERO
         };
@@ -431,6 +453,11 @@ impl Backend for Epoll {
             self.ready_at(event.data.u64(), event.flags);
         }
         self.take_synced();
+        // Each timeout whose time has come, as TigerBeetle's epoll backend fires them at each wait:
+        // https://github.com/tigerbeetle/tigerbeetle/blob/68958eb757747d0fc96a79d1f9c2fa6766b67b48/src/stdx/io/linux_epoll.zig#L1023-L1037
+        let now = self.now();
+        let timed_out = self.timeouts.extract_if(.., |(at, _)| *at <= now);
+        (self.ready).extend(timed_out.map(|(_, slot)| (slot, Outcome::TimedOut)));
         done.append(&mut self.ready);
     }
 

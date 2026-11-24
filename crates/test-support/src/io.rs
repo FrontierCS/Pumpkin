@@ -61,7 +61,7 @@ pub fn outcomes<P: Read + Write + Send + 'static>(
 ) -> String {
     let dir = TestDir::new();
     let connect = |path: &Path| connect(path).unwrap();
-    let cases: [(&str, Run<P>); 10] = [
+    let cases: [(&str, Run<P>); 12] = [
         ("an accept, then a recv and a send", exchange),
         (
             "a recv that waits, beside a stream whose recvs never wait",
@@ -78,6 +78,11 @@ pub fn outcomes<P: Read + Write + Send + 'static>(
         ("a file's sync, whose callback syncs it again", file),
         ("a next tick, whose callback submits another", next_tick),
         ("events from other threads", events),
+        (
+            "a file's lock, which another open file of its path tries for",
+            lock,
+        ),
+        ("a timeout", timeout),
     ];
     let mut text = String::new();
     for (index, (name, run)) in cases.into_iter().enumerate() {
@@ -383,6 +388,44 @@ fn events<P>(case: &mut Case, _: &Path, _: &dyn Fn(&Path) -> P) -> Vec<String> {
     ]
 }
 
+// Two open files of one path try for its lock: the second takes it once the first closes.
+fn lock<P>(case: &mut Case, at: &Path, _: &dyn Fn(&Path) -> P) -> Vec<String> {
+    let mut open = || {
+        let opened = (fs::OpenOptions::new().write(true).create(true))
+            .truncate(false)
+            .open(at);
+        case.io.file(opened.unwrap())
+    };
+    let (first, second) = (open(), open());
+    let mut lines = Vec::new();
+    let mut try_lock = |case: &mut Case, file: &File, which: &str| {
+        let token = case.owner.token();
+        case.io.try_lock(file, token, on_locked);
+        let (locked, _) = case.wait(token);
+        lines.push(format!("{which} {}", shown(&locked)));
+    };
+    try_lock(case, &first, "the first file");
+    try_lock(case, &first, "the first file again");
+    try_lock(case, &second, "the second file");
+    case.io.close_file(first);
+    try_lock(case, &second, "the second file, once the first closed,");
+    case.io.close_file(second);
+    lines
+}
+
+fn timeout<P>(case: &mut Case, _: &Path, _: &dyn Fn(&Path) -> P) -> Vec<String> {
+    let at = case.io.now() + WAIT;
+    let token = case.owner.token();
+    case.io.timeout(at, token, on_tick);
+    let (done, _) = case.wait(token);
+    let when = if case.io.now() >= at {
+        "at its time or later"
+    } else {
+        "early"
+    };
+    vec![format!("{} {when}", shown(&done))]
+}
+
 // The files that the world's steps sync, in the order of their scripts.
 const SYNCED: [&str; 5] = ["failed", "late", "owed", "counted", "held"];
 
@@ -485,6 +528,10 @@ pub fn world_outcomes() -> String {
     case.io.events().send(2);
     step(&mut case, "an event", 40, BATCHES);
 
+    let events = case.io.events();
+    world.at(secs(45), move || events.send(3));
+    step(&mut case, "a call timed at 45s, which sends 3", 60, BATCHES);
+
     sync(&mut case, "held");
     world.reach(secs(50));
     step(&mut case, "a held sync, once the world reached 50s", 60, 1);
@@ -518,10 +565,13 @@ fn shown(done: &Done) -> String {
             format!("{:?}", String::from_utf8_lossy(&buffer[..*bytes]))
         }
         Done::Synced(Ok(())) => "completed".to_owned(),
+        Done::Locked(Ok(true)) => "took it".to_owned(),
+        Done::Locked(Ok(false)) => "found it held".to_owned(),
         Done::Ticked => "ran".to_owned(),
-        Done::Accepted(Err(error)) | Done::Bytes(_, Err(error)) | Done::Synced(Err(error)) => {
-            format!("failed: {:?}", error.kind())
-        }
+        Done::Accepted(Err(error))
+        | Done::Bytes(_, Err(error))
+        | Done::Synced(Err(error))
+        | Done::Locked(Err(error)) => format!("failed: {:?}", error.kind()),
     }
 }
 
@@ -701,6 +751,7 @@ enum Done {
     Accepted(io::Result<Stream>),
     Bytes(Vec<u8>, io::Result<usize>),
     Synced(io::Result<()>),
+    Locked(io::Result<bool>),
     Ticked,
 }
 
@@ -773,6 +824,10 @@ fn on_bytes(
 
 fn on_synced(owner: &mut Owner, _: &mut Io<Owner>, token: u64, result: io::Result<()>) {
     owner.complete(token, Done::Synced(result));
+}
+
+fn on_locked(owner: &mut Owner, _: &mut Io<Owner>, token: u64, locked: io::Result<bool>) {
+    owner.complete(token, Done::Locked(locked));
 }
 
 fn on_tick(owner: &mut Owner, _: &mut Io<Owner>, token: u64) {

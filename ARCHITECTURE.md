@@ -149,7 +149,9 @@ API and those its entry lists.
 could ever fit (`Provider::fits`), reserves what they need, publishes their images, says how the
 sandboxes meet the gateway (`Meeting`), and creates them. `Sweep`, its part that lists and deletes
 a run's sandboxes, is all a reap needs. `engine` is the operator's Docker engine, which builds
-every image, whichever provider runs it. `aws` is AWS's command line as Pumpkin runs it (`Cli`).
+every image, whichever provider runs it. A task's builds run on a loop (`Builds`): each on an edge
+worker of its own, once the loop has taken a build slot, if the builds take one. `aws` is AWS's
+command line as Pumpkin runs it (`Cli`).
 
 **Architecture Invariant:** runs that share a provider never reach each other's sandboxes. Every
 sandbox carries its run's `RunTag`, and a provider lists and deletes only the sandboxes that carry

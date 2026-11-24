@@ -39,14 +39,15 @@ impl Engine {
         }
         let (archive, image) = archive(&read, &Platform::sandboxd())?;
         let context = &self.report.context;
-        let _slot = self.publishing()?;
-        in_scratch(&self.dir, "load", |scratch| {
-            let file = scratch.join("image.tar");
-            fs::write(&file, &archive).context(file.display())?;
-            let load = ["load", "--quiet", "--input"].map(OsStr::new);
-            let load = load.into_iter().chain([file.as_os_str()]);
-            docker(context, load).map_err(|error| fix_reported(&error))?;
-            Ok(image)
+        self.publishing(|| {
+            in_scratch(&self.dir, "load", |scratch| {
+                let file = scratch.join("image.tar");
+                fs::write(&file, &archive).context(file.display())?;
+                let load = ["load", "--quiet", "--input"].map(OsStr::new);
+                let load = load.into_iter().chain([file.as_os_str()]);
+                docker(context, load).map_err(|error| fix_reported(&error))?;
+                Ok(image)
+            })
         })
     }
 }

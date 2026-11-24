@@ -40,7 +40,7 @@ use sha2::{Digest, Sha256};
 use stdx::Context;
 use tempfile::TempDir;
 
-use crate::{ContextName, Engine, docker, docker_command, fix_reported, image_id};
+use crate::{Admit, ContextName, Engine, docker, docker_command, fix_reported, image_id};
 
 // Git's two modes for a regular file, as a checkout under a 022 umask gives them, so that one
 // commit has one tag whatever the umask of its checkout. The build reads the staged bits that the
@@ -114,7 +114,7 @@ fn options() -> impl Iterator<Item = String> {
 
 /// An image that [`Engine::build`] built or found, which only it makes, so that a build may be
 /// [`Given`] it as a named context.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Built {
     image: Image,
     tag: String,
@@ -174,7 +174,7 @@ pub fn mounted<'m, 'p, D>(
 }
 
 /// A build's recipe, a Dockerfile.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Recipe {
     /// The regular file at this path in the context.
     File(RelativePath),
@@ -182,34 +182,9 @@ pub enum Recipe {
     Text(String),
 }
 
-/// What [`Engine::start`] asks of its caller, to hold each image and admit each build.
-///
-/// It holds each image by the tag of its build's inputs before it looks the image up, so that a
-/// prune that spares what the caller holds spares it once found or built; and admits each build
-/// that finds no image before it starts.
-pub trait Admit {
-    /// Holds the image tagged `tag`, from now until the caller lets it go; an error fails the
-    /// build.
-    fn hold(&mut self, tag: &str) -> Result<(), String>;
-
-    /// Admits a build on `engine`, waiting, if need be, for its turn; an error refuses it, and
-    /// fails the build.
-    fn admit(&mut self, engine: &Engine) -> Result<(), String>;
-}
-
-impl Admit for () {
-    fn hold(&mut self, _: &str) -> Result<(), String> {
-        Ok(())
-    }
-
-    fn admit(&mut self, _: &Engine) -> Result<(), String> {
-        Ok(())
-    }
-}
-
 impl Engine {
     /// The image that `recipe` builds with `context`, given `given`, tagged `<repository>:<hex>`,
-    /// as [`Engine::start`] starts its build, once that build has ended ([`finish`]).
+    /// as [`Engine::look`] finds it, or its build, run to its end ([`Missing::build`]).
     pub fn build(
         &self,
         context: &BuildContext,
@@ -217,81 +192,134 @@ impl Engine {
         given: &Given<&Built>,
         repository: &str,
     ) -> Result<Built, String> {
-        match self.start(context, recipe, given, repository, &mut ())? {
-            Started::Found(built) => Ok(built),
-            Started::Building(building) => finish(&mut Vec::from([((), building)])).1,
+        match self.look(context, recipe, given, repository, &mut ())? {
+            Looked::Found(built) => Ok(built),
+            Looked::Missing(missing) => missing.build(),
         }
     }
 
-    /// Starts the build of the image that `recipe`, once [`recipe::check`] passes it, builds with
-    /// `context` and `given`, tagged `<repository>:<hex>`, the digest of the build's inputs: once
-    /// `admit` holds the tag, the engine's image under it, or, once `admit` admits the build, a
-    /// `docker build` of a stage of the context, to be tagged once it has ended ([`finish`]).
+    /// Looks for the image that `recipe`, once [`recipe::check`] passes it, builds with `context`
+    /// and `given`, tagged `<repository>:<hex>`, the digest of the build's inputs, once `admit`
+    /// holds the tag: the engine's image under the tag, or what its build needs.
     ///
     /// Refuses a recipe that [`recipe::check`] refuses, a `context` that isn't as [`BuildContext`]
-    /// says, and a [`Recipe::File`] that is no regular file of it; and fails if `admit` does.
-    pub fn start(
+    /// says, and a [`Recipe::File`] that is no regular file of it; and fails if `admit`'s hold
+    /// does.
+    pub fn look(
         &self,
         context: &BuildContext,
         recipe: &Recipe,
         given: &Given<&Built>,
         repository: &str,
         admit: &mut dyn Admit,
-    ) -> Result<Started, String> {
+    ) -> Result<Looked, String> {
         // An image found by the tag was built from a stage whose inputs are those the context's own
         // files give now, so only a build needs a stage.
         let inputs = Inputs::checked(read_context(context)?, None, recipe, given)?;
         let tag = format!("{repository}:{}", inputs.digest());
         // Before the look, so that a prune that would remove what it finds spares it.
         admit.hold(&tag)?;
-        if let Some(built) = self.tagged(&tag)? {
-            return Ok(Started::Found(built));
+        let context = &self.report.context;
+        if let Some(built) = tagged(context, &tag)? {
+            return Ok(Looked::Found(built));
         }
-        admit.admit(self)?;
-        // Another build of the same inputs may have ended while this one waited its turn.
-        if let Some(built) = self.tagged(&tag)? {
-            return Ok(Started::Found(built));
-        }
-        let scratch = make_scratch(&self.dir, "build")?;
-        match self.start_in(scratch.path(), inputs, recipe, given, repository) {
-            Ok((child, recipe, tag)) => Ok(Started::Building(Building {
-                child,
-                scratch,
-                recipe,
-                tag,
-                context: self.report.context.clone(),
-            })),
-            Err(error) => removed(scratch, "build", Err(error)),
-        }
-    }
-
-    fn tagged(&self, tag: &str) -> Result<Option<Built>, String> {
-        let found = image_id(&self.report.context, tag).map_err(|error| {
-            let error = fix_reported(&error);
-            format!("the image tagged `{tag}` can't be looked up: {error}")
-        })?;
-        let Some(id) = found else {
-            return Ok(None);
-        };
-        let image = Image::try_from(id)?;
-        Ok(Some(Built {
-            image,
-            tag: tag.to_owned(),
+        Ok(Looked::Missing(Missing {
+            inputs,
+            recipe: recipe.clone(),
+            given: Given {
+                target: given.target.clone(),
+                args: given.args.clone(),
+                contexts: (given.contexts.iter())
+                    .map(|(name, built)| (name.clone(), (*built).clone()))
+                    .collect(),
+            },
+            repository: repository.to_owned(),
+            tag,
+            context: context.clone(),
+            dir: self.dir.clone(),
         }))
     }
+}
 
-    fn start_in(
-        &self,
-        scratch: &Path,
-        inputs: Inputs,
-        recipe: &Recipe,
-        given: &Given<&Built>,
-        repository: &str,
-    ) -> Result<(Child, String, String), String> {
+fn tagged(context: &ContextName, tag: &str) -> Result<Option<Built>, String> {
+    let found = image_id(context, tag).map_err(|error| {
+        let error = fix_reported(&error);
+        format!("the image tagged `{tag}` can't be looked up: {error}")
+    })?;
+    let Some(id) = found else {
+        return Ok(None);
+    };
+    let image = Image::try_from(id)?;
+    Ok(Some(Built {
+        image,
+        tag: tag.to_owned(),
+    }))
+}
+
+/// What [`Engine::look`] found: the image under the tag of the build's inputs, or what its build
+/// needs.
+#[derive(Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "a look's outcome moves once, at once, into the builds or to its caller"
+)]
+pub enum Looked {
+    Found(Built),
+    Missing(Missing),
+}
+
+/// What the build of an image that [`Engine::look`] didn't find needs, all of it owned, so that
+/// the build may run on a thread of its own ([`Missing::build`]).
+#[derive(Debug)]
+pub struct Missing {
+    inputs: Inputs,
+    recipe: Recipe,
+    given: Given<Built>,
+    repository: String,
+    tag: String,
+    context: ContextName,
+    dir: PathBuf,
+}
+
+impl Missing {
+    /// The image, built from a stage of the build's own once its `docker build` has ended, and
+    /// tagged as [`Engine::look`] says.
+    ///
+    /// A failed `docker build` has all it wrote put on standard error at once, as `make
+    /// --output-sync` does.
+    pub fn build(self) -> Result<Built, String> {
+        let scratch = make_scratch(&self.dir, "build")?;
+        let built = self.build_in(scratch.path());
+        removed(scratch, "build", built)
+    }
+
+    // The image that another build of the same inputs tagged since the look, as one that waited
+    // its turn may find.
+    pub(crate) fn found(&self) -> Result<Option<Built>, String> {
+        tagged(&self.context, &self.tag)
+    }
+
+    fn build_in(self, scratch: &Path) -> Result<Built, String> {
+        let Self {
+            inputs,
+            recipe,
+            given,
+            repository,
+            tag: _,
+            context,
+            dir,
+        } = self;
+        let given = Given {
+            target: given.target,
+            args: given.args,
+            contexts: (given.contexts.iter())
+                .map(|(name, built)| (name.clone(), built))
+                .collect(),
+        };
         let staging = scratch.join("context");
         // The stage is this build's alone, so the bytes the check reads there are those the digest
         // covers and the build reads, which may differ from those `inputs` read.
-        let staged = Inputs::checked(inputs.stage(&staging)?, Some(&staging), recipe, given)?;
+        let staged = Inputs::checked(inputs.stage(&staging)?, Some(&staging), &recipe, &given)?;
         let digest = staged.digest();
         // Named by its digest: Buildx keys what it sends of a build's directories, its context's
         // and its recipe's, by the name of the context's directory alone, and the machine, and
@@ -307,7 +335,7 @@ impl Engine {
         ))?;
         // Once renamed, which may change its time.
         set_build_time(&stage)?;
-        let (file, shown) = match recipe {
+        let (file, shown) = match &recipe {
             Recipe::File(path) => (stage.join(path.as_str()), format!("`{path}`")),
             Recipe::Text(text) => {
                 let file = scratch.join("Dockerfile");
@@ -315,104 +343,61 @@ impl Engine {
                 (file, "its recipe's text".to_owned())
             }
         };
-        let child = start_untagged(self, &stage, &file, given, scratch)?;
-        Ok((child, shown, format!("{repository}:{digest}")))
-    }
-}
-
-/// What [`Engine::start`] gives: the image found by its tag, or its build, started.
-#[derive(Debug)]
-pub enum Started {
-    /// The image the engine has under the tag of the build's inputs.
-    Found(Built),
-    /// Its `docker build`, running.
-    Building(Building),
-}
-
-/// A `docker build` that [`Engine::start`] has started, and [`finish`] waits for.
-#[derive(Debug)]
-pub struct Building {
-    child: Child,
-    scratch: TempDir,
-    recipe: String,
-    tag: String,
-    context: ContextName,
-}
-
-/// Waits until one of `building` has ended, takes it out, and gives its key with its image.
-///
-/// The image is tagged as [`Engine::start`] says, once its directory is removed. A failed `docker
-/// build` has all it wrote put on standard error at once, as `make --output-sync` does.
-///
-/// # Panics
-///
-/// If `building` is empty, as none of it would ever end.
-pub fn finish<K>(building: &mut Vec<(K, Building)>) -> (K, Result<Built, String>) {
-    let mut children: Vec<&mut Child> = (building.iter_mut()).map(|(_, b)| &mut b.child).collect();
-    let (index, status) = stdx::process::wait_any(&mut children);
-    let (key, mut ended) = building.remove(index);
-    let built = match status {
-        // A build that succeeds says nothing that its image doesn't: only a failure's output tells
-        // the operator something to act on.
-        Ok(status) if status.success() => ended.built(),
-        Ok(status) => ended.shown().and_then(|()| {
-            Err(format!(
-                "`docker build` of {} failed with {status}: its output above says why: fix what \
-                 Docker reports",
-                ended.recipe
-            ))
-        }),
-        Err(error) => {
-            // Killed, and reaped, so that it stops using its directory before it is removed.
-            let _ = ended.child.kill().and_then(|()| ended.child.wait());
-            Err(format!(
-                "`docker build` of {} can't be waited for, so it is killed: {error}",
-                ended.recipe
-            ))
+        let mut child = start_untagged((&context, &dir), &stage, &file, &given, scratch)?;
+        let tag = format!("{repository}:{digest}");
+        match child.wait() {
+            // A build that succeeds says nothing that its image doesn't: only a failure's output
+            // tells the operator something to act on.
+            Ok(status) if status.success() => built(&context, scratch, tag),
+            Ok(status) => show_output(scratch).and_then(|()| {
+                Err(format!(
+                    "`docker build` of {shown} failed with {status}: its output above says why: \
+                     fix what Docker reports"
+                ))
+            }),
+            Err(error) => {
+                // Killed, and reaped, so that it stops using its directory before it is removed.
+                let _ = child.kill().and_then(|()| child.wait());
+                Err(format!(
+                    "`docker build` of {shown} can't be waited for, so it is killed: {error}"
+                ))
+            }
         }
-    };
-    (key, removed(ended.scratch, "build", built))
+    }
 }
 
-impl Building {
-    fn shown(&self) -> Result<(), String> {
-        let output = self.scratch.path().join("output");
-        let mut output = File::open(&output).context(output.display())?;
-        let mut stderr = io::stderr().lock();
-        // A standard error that can't be written leaves the output unshown, as `pumpkin` leaves
-        // whatever else it says, and the build's outcome still stands.
-        let _ = io::copy(&mut output, &mut stderr).and_then(|_| stderr.flush());
-        Ok(())
-    }
+// Puts all that a failed build in `scratch` wrote on standard error.
+fn show_output(scratch: &Path) -> Result<(), String> {
+    let output = scratch.join("output");
+    let mut output = File::open(&output).context(output.display())?;
+    let mut stderr = io::stderr().lock();
+    // A standard error that can't be written leaves the output unshown, as `pumpkin` leaves
+    // whatever else it says, and the build's outcome still stands.
+    let _ = io::copy(&mut output, &mut stderr).and_then(|_| stderr.flush());
+    Ok(())
+}
 
-    fn built(&self) -> Result<Built, String> {
-        let id_file = self.scratch.path().join("id");
-        let id = fs::read_to_string(&id_file).map_err(|error| {
-            format!(
-                "the ID of the image `docker build` built can't be read from {}: {error}: the \
-                 build should have written it there",
-                id_file.display()
-            )
-        })?;
-        // In the containerd image store, which `Engine::connect` requires, the ID of an image built
-        // for the engine's platform alone, with no attestation (`OPTIONS`), is its manifest's
-        // digest.
-        let image = Image::try_from(id.trim().to_owned())?;
-        let tag = &self.tag;
-        // The tag moves only if an image of the same inputs has it: one that another build tagged
-        // since the lookup, or one of what the context's files changed to since they were read. And
-        // it is `docker tag`'s, not the build's: in the containerd image store, a tag that a build
-        // moves to its image drops the image the tag named, which a run may still be using, whereas
-        // one that `docker tag` moves leaves that image, untagged.
-        let tagged = docker(&self.context, ["tag", "--", image.as_str(), tag]);
-        tagged.map_err(|error| {
-            format!("{image} can't be tagged `{tag}`: {}", fix_reported(&error))
-        })?;
-        Ok(Built {
-            image,
-            tag: tag.clone(),
-        })
-    }
+// The image that the build in `scratch` built, tagged `tag`.
+fn built(context: &ContextName, scratch: &Path, tag: String) -> Result<Built, String> {
+    let id_file = scratch.join("id");
+    let id = fs::read_to_string(&id_file).map_err(|error| {
+        format!(
+            "the ID of the image `docker build` built can't be read from {}: {error}: the build \
+             should have written it there",
+            id_file.display()
+        )
+    })?;
+    // In the containerd image store, which `Engine::connect` requires, the ID of an image built
+    // for the engine's platform alone, with no attestation (`OPTIONS`), is its manifest's digest.
+    let image = Image::try_from(id.trim().to_owned())?;
+    // The tag moves only if an image of the same inputs has it: one that another build tagged
+    // since the lookup, or one of what the context's files changed to since they were read. And
+    // it is `docker tag`'s, not the build's: in the containerd image store, a tag that a build
+    // moves to its image drops the image the tag named, which a run may still be using, whereas
+    // one that `docker tag` moves leaves that image, untagged.
+    let tagged = docker(context, ["tag", "--", image.as_str(), &tag]);
+    tagged.map_err(|error| format!("{image} can't be tagged `{tag}`: {}", fix_reported(&error)))?;
+    Ok(Built { image, tag })
 }
 
 pub(crate) fn in_scratch<T>(
@@ -494,7 +479,7 @@ fn removed<T>(scratch: TempDir, task: &str, done: Result<T, String>) -> Result<T
 }
 
 fn start_untagged(
-    engine: &Engine,
+    (context, dir): (&ContextName, &Path),
     stage: &Path,
     recipe: &Path,
     given: &Given<&Built>,
@@ -543,21 +528,23 @@ fn start_untagged(
     let output = scratch.join("output");
     let file = File::create(&output).context(output.display())?;
     let errors = file.try_clone().context(output.display())?;
-    let mut command = docker_command(&engine.report.context, build);
+    let mut command = docker_command(context, build);
     // Buildx keeps a state of its own, the builds' references and this machine's ID among it, in
     // the engine's directory, rather than in Docker's configuration.
-    command.env("BUILDX_CONFIG", engine.dir.join("buildx"));
+    command.env("BUILDX_CONFIG", dir.join("buildx"));
     // In this process's group, so that the terminal's interrupt reaches it too: a session that
     // BuildKit cancels once its client is gone.
     stdx::process::spawn(&mut command, Stdio::null(), file.into(), errors.into())
 }
 
+#[derive(Debug)]
 struct Inputs {
     recipe: String,
     given: Vec<String>,
     entries: BTreeMap<String, Entry>,
 }
 
+#[derive(Debug)]
 enum Entry {
     Dir,
     File {

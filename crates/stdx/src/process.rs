@@ -12,7 +12,7 @@ mod failure;
 mod run;
 mod watch;
 
-pub use children::{kill_group, spawn, wait_any};
+pub use children::{kill_group, spawn};
 pub use command::{Environment, command, shown};
 pub use failure::Failure;
 pub use run::{Bound, Echo, Run, Stream, printed, run};
