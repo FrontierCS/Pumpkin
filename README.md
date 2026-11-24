@@ -36,15 +36,15 @@ We built Pumpkin to provide clean abstractions so people can easily do error han
 
 ## How it works
 
-`pumpkin` evaluates a task to its workflow IR, and each run's driver carries that out in sandboxes and writes the record that `wait`, `ls` and `view` read.
+`pumpkin` evaluates a task to its workflow IR. Each run's driver carries out the IR in sandboxes, and writes the record that `wait`, `ls` and `view` read.
 
 ![A task's sources go to pumpkin, which evaluates them to the workflow IR and builds the images; the driver, one process for each run, reads the IR, calls the functions' bodies from the sources the evaluation read, and has a provider create a sandbox for each instance of a role; it writes the record, which pumpkin wait, pumpkin ls and the page read.](docs/figures/overview.svg)
 
-Each run's sandboxes come from Docker, EC2 or Modal, on this machine or, over `ssh`, on a team's controller.
+Each run's sandboxes come from Docker, EC2 or Modal. Each run's driver runs on this machine, or on a team's controller, which this machine reaches over `ssh`.
 
-![On the operator's machine, pumpkin builds images on the Docker engine, where the Docker provider's containers also run; a machine with a controller sends its runs over ssh to the controller, an EC2 instance or a privileged container on a Docker host. An EC2 controller builds the images on its own engine, pushes them to ECR, launches EC2 instances that pull them, and creates Modal sandboxes, which Modal imports from the same repositories. A Docker controller builds the images on an engine of its container's own, never the host's, where the Docker provider's containers also run.](docs/figures/providers.svg)
+![On the operator's machine, pumpkin builds images on the Docker engine, where the Docker provider's containers also run. A machine with a controller sends its runs over ssh to the controller. The controller is an EC2 instance or a privileged container on a Docker host. An EC2 controller builds the images on its own engine and pushes them to ECR. It launches EC2 instances that pull the images, and creates Modal sandboxes, which Modal imports from the same repositories. A Docker controller builds the images on an engine inside its own container, never on the host's. The Docker provider's containers also run on that engine.](docs/figures/providers.svg)
 
-[`ARCHITECTURE.md`](ARCHITECTURE.md) maps the code, and [Providers](docs/providers.md) says what each provider and the controller need.
+[`ARCHITECTURE.md`](ARCHITECTURE.md) maps the code. [Providers](docs/providers.md) says what each provider and the controller need.
 
 ## Quickstart
 
@@ -80,8 +80,8 @@ $ .pumpkin/bin/pumpkin view
 ```
 
 A task repository's `./pumpkin` runs its own tasks with the same commands. `pumpkin --help` lists
-them. [Writing workflows](docs/workflows.md) says how a workflow's parts fit, and
-[running workflows](docs/running.md) how the commands do.
+them. [Writing workflows](docs/workflows.md) says how a workflow's parts fit.
+[Running workflows](docs/running.md) says how the commands fit together.
 
 ### Installing or upgrading a task repository
 
@@ -112,6 +112,6 @@ requires.
 
 ## Contributing
 
-[`ARCHITECTURE.md`](ARCHITECTURE.md) is the map of the code, and [`docs/dev/`](docs/dev/) holds the
-rules for changing it. `cargo xtask ci` runs the checks that every change must pass, and
+[`ARCHITECTURE.md`](ARCHITECTURE.md) is the map of the code. [`docs/dev/`](docs/dev/) holds the
+rules for changing it. `cargo xtask ci` runs the checks that every change must pass.
 `cargo xtask release --help` says how a release is made.

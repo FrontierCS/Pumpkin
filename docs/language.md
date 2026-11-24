@@ -33,7 +33,7 @@ with what to write instead, rather than calling it unknown:
 lib.star:2:5: a `for` statement is not in Pumpkin's Starlark: build the list with a comprehension, as `[f(x) for x in xs]`
 ```
 
-[Workflows](workflows.md) says how a workflow's parts fit; this page says how files are
+[Workflows](workflows.md) says how a workflow's parts fit. This page says how files are
 written and evaluated.
 
 ## Files and `load`
