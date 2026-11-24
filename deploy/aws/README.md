@@ -5,26 +5,6 @@ administrator credentials, and lists the members by key. Every name it makes beg
 `pumpkin-<name>`, where `<name>` is the team's name, so teams share an account without colliding.
 Its state is in an S3 bucket of the account, so no laptop can lose it.
 
-| What | Why |
-| --- | --- |
-| the sandboxes' security group: out to HTTPS and to the controller's ephemeral ports; nothing in | sandboxes pull from ECR and dial the gateway at port 0's pick, and reach nothing else |
-| the controller's security group: in from the sandboxes on the ephemeral ports, and from the VPC's IPv4 blocks on port 22; out to anywhere | the gateway, and `sshd`, which admits for `pumpkin` the members' keys alone; builds fetch from wherever their tasks name |
-| ECR `pumpkin-<name>/roles` and `/sandboxd`, immutable tags, untagged images expire after 14 days | private images, pushed tagged by digest |
-| a launch template per class: the AMI, the type, a root volume deleted with the instance | the EC2 classes, and what the `ec2` provider relies on; the provider's launch sets the metadata options |
-| the sandboxes' role: ECR pulls only | each sandbox's pulls |
-| the timer: a schedule group and a role that terminates the run instances of this envelope's sandbox profile | a kill bound outside each guest |
-| the Modal pull role, if `modal_workspaces` lists any: ECR pulls from `roles`, assumed only by the tokens of those workspaces | Modal imports the images of calls' targets, which hold hidden data |
-| an AMI baked by EC2 Image Builder from a named AL2023 release, with Docker, ECR's credential helper and nftables | each sandbox's boot runs them, at the release's versions |
-| the controller's role and instance profile: access to its jobs' settings parameter, the members' parameter and the EC2 provider's resources: launches from its templates with nothing they name overridden and at their instance types, and terminations and console reads of its own sandboxes alone | the runs' launches, timers, sweeps and pushes, from the controller |
-| the controller: an on-demand instance on Ubuntu 24.04 LTS, with a public IPv4 address, IMDSv2 within one hop, an encrypted gp3 root, stopping on shutdown, tagged `pumpkin:controller=<name>`; an apply replaces it only for a new `pumpkin_release` | builds the tasks' images and runs the drivers, which a person's machine sends it, and runs no role |
-| what cloud-init installs there: Docker, which runs as root, so its `docker` group, which holds `pumpkin` alone, is root-equivalent; Buildx, AWS CLI v2 and uv at exact versions, and the rest of `controller.yaml`'s packages from a snapshot of Ubuntu's archive | builds with the containerd image store |
-| what the Pumpkin release `pumpkin_release` installs there, with `pumpkin-admin install` (`pumpkin-admin install --help` says what): the user `pumpkin`, lingering; an `sshd` that admits concurrent openings and ends a session whose client has gone; a unit that stops the controller after 30 minutes with no job and no SSH session; and one that runs each installed build's reap at boot | jobs that outlive every connection; a stop and a reap that need no client |
-| the SSM parameter `/pumpkin-<name>/settings` (advanced tier), of envelope 1.1: the `[deployment]` that the host reads, with the deployment's `name` and members' parameter; the Docker engine, the EC2 provider `aws`, and, with the pull role, the Modal provider `modal`'s `images` | each job's settings, which an apply changes for the next job; the rest of the Modal provider is the client's |
-| the SSM parameter `/pumpkin-<name>/members` (advanced tier): a line `<member> <key>` for each key in `members`; the controller copies it every minute into `/etc/ssh/pumpkin/members`, with a forced command that names each key's member; `sshd` admits for `pumpkin` only the keys in that file | who may reach the controller, and which member each job belongs to; an apply changes the list within a minute |
-
-`ami.tf`, `controller.tf` and the other files say more of each. What the `ec2` provider requires
-of its envelope is that crate's module doc, "The envelope".
-
 ## Once per account
 
 The state bucket, versioned so a bad write can be undone. A team that lists `modal_workspaces`
@@ -46,50 +26,12 @@ module is this directory. A root of the admin's own calls it, pinned by a Pumpki
 a release's `pumpkin-admin install` and its module agree. The root holds what is the deployment's:
 the provider's configuration with its region and tags, the backend, and the lock file that
 `terraform init` writes. The provider's region is the module's. In a directory of its own, such as
-a repository, write `main.tf` (`variables.tf` says each of the module's values and its default):
-
-```hcl
-terraform {
-  required_version = ">= 1.15.9"
-  required_providers {
-    aws = { source = "hashicorp/aws", version = "6.72.0" }
-  }
-  backend "s3" { use_lockfile = true }
-}
-
-locals {
-  name = "research"
-}
-
-provider "aws" {
-  region = "us-west-1"
-  # Every resource names its team, so that teams' envelopes in one account stay apart.
-  default_tags {
-    tags = { "pumpkin:envelope" = local.name }
-  }
-}
-
-module "pumpkin" {
-  source = "git::https://github.com/FrontierCS/Pumpkin.git//deploy/aws?ref=<tag>"
-
-  name             = local.name
-  vpc_id           = "vpc-…"
-  subnet_id        = "subnet-…"
-  modal_workspaces = ["ac-…", "ac-…"] # alice's and bob's, who run roles on Modal
-  members = {
-    alice = ["ssh-ed25519 AAAA… alice-laptop", "ssh-ed25519 AAAA… alice-desk"]
-    bob   = ["ssh-ed25519 AAAA… bob"]
-  }
-  pumpkin_release = "<tag> <commit> <sha256>" # the same release's `pumpkinversion` line
-}
-
-output "client_config" {
-  value = module.pumpkin.client_config
-}
-```
-
-Give an `output` likewise for each other output that "What the outputs feed" or "Versions" names
-and the admin reads. `pumpkin` reaches the controller at its private address. Machines in the
+a repository, copy [`examples/team/main.tf`](examples/team/main.tf) and set its `source` as its
+comment says (`variables.tf` says each of the module's values and its default). Give its
+`pumpkin_release`, the release's `pumpkinversion` line, in a `terraform.tfvars` beside it, or write
+the line in place of the variable: `terraform plan` refuses to run without it. Give an `output`, as
+the example does, for each other output that "What the outputs feed" or "Versions" names and the
+admin reads. `pumpkin` reaches the controller at its private address. Machines in the
 controller's VPC reach its port 22, and `sshd` admits for `pumpkin` only the keys that `members`
 lists. A machine elsewhere needs a route into the VPC that gives its traffic one of the VPC's
 addresses, such as a VPN that translates its addresses into the VPC's. A team of one lists its own
@@ -182,22 +124,6 @@ an `output` of its own.
 - `[gateway] private`, the address the sandboxes dial, is `"<private ip>:0"`, as each job sets it
   on the controller: the groups admit only the ephemeral ports that `gateway_ports.json` holds,
   where the kernel's pick for port 0 falls.
-
-## Policies
-
-The permission policies of the controller's, the timer's, the sandboxes' and the Modal pull roles,
-the client's and the contributor's, are `policies/<principal>.json.tftpl`. This release's `pumpkin-admin policy
-<principal>` prints each from what its code's calls on AWS need. The module fills them with
-`templatefile`, as the GitHub runner module fills its policies
-([policies-runner.tf](https://github.com/github-aws-runners/terraform-aws-github-runner/blob/f975153d6749b2ea2ddebc8d8cf5911196a1973a/modules/runners/policies-runner.tf#L31-L36)).
-The files are generated and committed, as Kubebuilder's projects commit the RBAC that
-`controller-gen` writes from the code
-([makefile.go](https://github.com/kubernetes-sigs/kubebuilder/blob/4d01fcdf146e4d832fc973ef95684a00bcf0f0c0/pkg/plugins/golang/v4/scaffolds/internal/templates/makefile.go#L121-L123)).
-`pumpkin`'s tests fail while a file differs from the code's, and `cargo xtask refill --package
-pumpkin policy` writes them again. So a change to a call is a change to the code that makes it,
-never to these files. The roles' trust policies say who may assume each role. No call states them,
-so they are the module's own. So are the AWS-managed policies of the AMI's build, under which no
-Pumpkin call is made.
 
 ## Changes
 

@@ -1,4 +1,4 @@
-# What `terraform init -backend=false` and `validate` leave here, which check this module alone.
-# The root that calls the module holds its own lock file.
+# What `terraform init -backend=false` and `validate` leave in this module and its example, which
+# only check them. The root that calls the module holds its own lock file.
 .terraform/
 .terraform.lock.hcl

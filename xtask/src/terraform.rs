@@ -1,5 +1,5 @@
-//! `ci`'s check of the Terraform module `deploy/aws`. The pinned Terraform
-//! ([`tools::TERRAFORM`]) checks that the module is formatted. Then it validates the module with
+//! `ci`'s check of the Terraform module `deploy/aws` and the example root that calls it. The pinned
+//! Terraform ([`tools::TERRAFORM`]) checks that both are formatted. Then it validates each with
 //! the pinned AWS provider, without a backend, a registry or the user's configuration.
 
 use std::path::Path;
@@ -13,8 +13,12 @@ use crate::{Result, ran, root, step, tools};
 /// The module, from the workspace's root.
 const MODULE: &str = "deploy/aws";
 
-/// Fails unless the module is formatted and valid. `terraform fmt` prints the diff of each file
-/// that isn't formatted, and `terraform validate` prints each error.
+/// An example team's root, which the module's README points to. It lies below [`MODULE`], so that
+/// `terraform fmt -recursive` reaches it.
+const EXAMPLE: &str = "deploy/aws/examples/team";
+
+/// Fails unless the module and the example are formatted and valid. `terraform fmt` prints the
+/// diff of each file that isn't formatted, and `terraform validate` prints each error.
 pub(crate) fn check() -> Result<()> {
     let terraform = tools::fetched(tools::TERRAFORM)?;
     let plugins = tools::terraform_plugins()?;
@@ -32,11 +36,20 @@ pub(crate) fn check() -> Result<()> {
         }
         Err(failure) => return Err(failure.to_string().into()),
     }
-    let chdir = format!("-chdir={MODULE}");
-    let mut init = command(&terraform);
+    for directory in [MODULE, EXAMPLE] {
+        validate(&terraform, &plugins, directory)?;
+    }
+    Ok(())
+}
+
+/// Fails unless `directory`, from the workspace's root, initializes without a backend and
+/// validates.
+fn validate(terraform: &Path, plugins: &Path, directory: &str) -> Result<()> {
+    let chdir = format!("-chdir={directory}");
+    let mut init = command(terraform);
     init.args([&chdir, "init", "-backend=false", "-input=false"])
         .arg(format!("-plugin-dir={}", plugins.display()))
-        // A lock file that an `init` from the registry left in the module may select a newer
+        // A lock file that an `init` from the registry left in the directory may select a newer
         // provider, which the plugin directory lacks.
         .arg("-upgrade");
     // `init` prints its progress and warnings on its standard output, and its errors on its
@@ -44,19 +57,17 @@ pub(crate) fn check() -> Result<()> {
     // shows init's output:
     // https://github.com/antonbabenko/pre-commit-terraform/blob/b9e409b0fee34ee0eee7e6f6a407061f15032926/hooks/_common.sh#L859-L881
     let quiet = step(STEP_TIMEOUT).stdout(Stream::Captured);
-    if let Err(failure) = process::run(&mut init, quiet.named("terraform init")) {
+    let name = format!("terraform init {directory}");
+    if let Err(failure) = process::run(&mut init, quiet.named(&name)) {
         if let Failure::Exited { output, .. } = &failure {
             print!("{}", String::from_utf8_lossy(&output.stdout));
         }
         return Err(failure.to_string().into());
     }
-    let mut validate = command(&terraform);
+    let mut validate = command(terraform);
     validate.args([&chdir, "validate"]);
-    ran(
-        &mut validate,
-        step(STEP_TIMEOUT).named("terraform validate"),
-    )
-    .map(drop)
+    let name = format!("terraform validate {directory}");
+    ran(&mut validate, step(STEP_TIMEOUT).named(&name)).map(drop)
 }
 
 /// A `terraform`, at the workspace's root.

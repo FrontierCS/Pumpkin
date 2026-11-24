@@ -1,18 +1,15 @@
 # The team's controller. It builds the tasks' images and runs the drivers, and it runs no role.
 # Its members reach it over ssh from its VPC, each with a key that `members` lists. It stops
-# itself when idle, by a unit that `pumpkin-admin install` sets up, so it costs only its volume
-# between runs.
+# itself when it has no job and no SSH session, by a unit that `pumpkin-admin install` sets up, so
+# it costs only its volume between runs.
 
 resource "aws_iam_role" "controller" {
-  name        = "${local.prefix}-controller"
-  description = "Pumpkin's controller: run sandboxes in the envelope, and push their images"
-  assume_role_policy = jsonencode({
-    Version   = "2012-10-17"
-    Statement = [{ Effect = "Allow", Principal = { Service = "ec2.amazonaws.com" }, Action = "sts:AssumeRole" }]
-  })
+  name               = "${local.prefix}-controller"
+  description        = "Pumpkin's controller: run sandboxes in the envelope, and push their images"
+  assume_role_policy = local.ec2_assume_role_policy
 }
 
-# What its jobs and its host call on AWS, as README.md's "Policies" says.
+# What its jobs and its host call on AWS.
 resource "aws_iam_role_policy" "controller" {
   name = "run"
   role = aws_iam_role.controller.id
