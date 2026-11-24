@@ -4,6 +4,7 @@
 //! The module also holds the topics that `pumpkin help` prints.
 
 use std::ffi::OsString;
+use std::iter;
 
 use super::{Exit, HEADER, LITERAL, Program};
 
@@ -13,7 +14,7 @@ pub(super) struct Notes {
     pub(super) command: &'static [&'static str],
     examples: &'static [Example],
     statuses: &'static [Status],
-    /// Prose that ends the help, or nothing.
+    /// The paragraphs that end the help, as [`paragraphs`] reads them, or nothing.
     more: &'static str,
 }
 
@@ -81,8 +82,8 @@ pub(super) const NOTES: &[Notes] = &[
                 about: "An outcome short of success, which the command's help says.",
             },
         ],
-        more: "`pumpkin help <command>` prints a command's help, and `pumpkin help <topic>`\n\
-               prints a topic. The guide to running workflows is docs/running.md:\n\
+        more: "`pumpkin help <command>` prints a command's help, and `pumpkin help <topic>` \
+               prints a topic. The guide to running workflows is docs/running.md: \
                https://github.com/FrontierCS/Pumpkin/blob/main/docs/running.md",
     },
     Notes {
@@ -100,7 +101,7 @@ pub(super) const NOTES: &[Notes] = &[
             },
         ],
         statuses: &[],
-        more: "The lint's rules:\n\
+        more: "The lint's rules: \
                https://github.com/FrontierCS/Pumpkin/blob/main/docs/language.md#formatting-and-the-lint",
     },
     Notes {
@@ -136,7 +137,7 @@ pub(super) const NOTES: &[Notes] = &[
             },
         ],
         statuses: &[],
-        more: "How a run is placed and how it outlives a logout:\n\
+        more: "How a run is placed and how it outlives a logout: \
                https://github.com/FrontierCS/Pumpkin/blob/main/docs/running.md#running",
     },
     Notes {
@@ -200,7 +201,7 @@ pub(super) const NOTES: &[Notes] = &[
             },
         ],
         statuses: &[],
-        more: "The phases and states:\n\
+        more: "The phases and states: \
                https://github.com/FrontierCS/Pumpkin/blob/main/docs/running.md#following-and-listing-runs",
     },
     Notes {
@@ -239,7 +240,7 @@ pub(super) const NOTES: &[Notes] = &[
         ],
         statuses: &[],
         more: "`view` serves until a signal stops it, so it never exits 0.\n\n\
-               What the page shows:\n\
+               What the page shows: \
                https://github.com/FrontierCS/Pumpkin/blob/main/docs/record.md#the-page",
     },
     Notes {
@@ -347,11 +348,11 @@ pub(super) const ADMIN: &[Notes] = &[
         command: &["install"],
         examples: &[INSTALL, INSTALL_DOCKER],
         statuses: &[],
-        more: "The settings name the members' list in their `[deployment] members`: an SSM\n\
-               parameter's ARN, or a file's absolute path. The list holds a line\n\
-               `<member> <key>` for each key. A member's name is 1 to 32 of a-z, 0-9 and `-`,\n\
-               and starts with a letter. The key is the line of the member's\n\
-               ~/.config/pumpkin/ssh/key.pub. A list with any other line, or a key twice, is\n\
+        more: "The settings name the members' list in their `[deployment] members`: an SSM \
+               parameter's ARN, or a file's absolute path. The list holds a line \
+               `<member> <key>` for each key. A member's name is 1 to 32 of a-z, 0-9 and `-`, \
+               and starts with a letter. The key is the line of the member's \
+               ~/.config/pumpkin/ssh/key.pub. A list with any other line, or a key twice, is \
                refused whole.",
     },
     Notes {
@@ -407,7 +408,7 @@ impl Notes {
         let sections = [
             section("Examples", &examples, Layout::NextLine),
             statuses_section(statuses),
-            (*more).to_owned(),
+            paragraphs(more),
         ];
         let sections: Vec<String> = (sections.into_iter())
             .filter(|section| !section.is_empty())
@@ -518,21 +519,11 @@ pub(super) fn section(heading: &str, rows: &[(&str, &str)], layout: Layout) -> S
     };
     let rows: Vec<String> = (rows.iter())
         .map(|(literal, about)| match layout {
-            Layout::Columns => {
-                // The padding is unstyled, as in clap's list.
-                let pad = " ".repeat(longest - width(literal));
-                let indent = " ".repeat(TAB.len() + longest + TAB.len());
-                let about = wrapped(about, WIDTH - indent.len()).join(&format!("\n{indent}"));
-                format!("{TAB}{LITERAL}{literal}{LITERAL:#}{pad}{TAB}{about}")
-            }
+            Layout::Columns => aligned(TAB, literal, longest, about),
             Layout::NextLine => {
                 let lines: Vec<String> = (literal.lines())
                     .map(|line| {
-                        let room = WIDTH - TAB.len() * 2 - " \\".len();
-                        assert!(
-                            width(line) <= room,
-                            "the line `{line}` is over {room} columns"
-                        );
+                        assert_fits(line, WIDTH - TAB.len() * 2 - " \\".len());
                         format!("{LITERAL}{line}{LITERAL:#}")
                     })
                     .collect();
@@ -550,6 +541,52 @@ pub(super) fn section(heading: &str, rows: &[(&str, &str)], layout: Layout) -> S
         Layout::NextLine => "\n\n",
     };
     format!("{HEADER}{heading}:{HEADER:#}\n{}", rows.join(between))
+}
+
+/// The row of `literal` at `indent`, as [`Layout::Columns`] lays it out. `about` starts a tab past
+/// the end of a literal `longest` columns wide.
+fn aligned(indent: &str, literal: &str, longest: usize, about: &str) -> String {
+    // The padding is unstyled, as in clap's list.
+    let pad = " ".repeat(longest - width(literal));
+    let column = " ".repeat(indent.len() + longest + TAB.len());
+    let about = wrapped(about, WIDTH - column.len()).join(&format!("\n{column}"));
+    format!("{indent}{LITERAL}{literal}{LITERAL:#}{pad}{TAB}{about}")
+}
+
+/// The paragraphs of `text`, apart by a blank line. Blank lines separate them in `text`. A
+/// paragraph whose every line starts with four spaces is literal, such as code. It keeps its lines,
+/// and each starts with a tab in place of the four spaces. Any other paragraph is wrapped to 80
+/// columns, but for a word that is longer.
+fn paragraphs(text: &str) -> String {
+    // As ripgrep lays out a flag's long help:
+    // https://github.com/BurntSushi/ripgrep/blob/91f5d22ef48bde459d90a8c7dbeab416e97d0f2b/crates/core/flags/doc/help.rs#L186-L207
+    let lines: Vec<&str> = text.lines().collect();
+    let paragraphs: Vec<String> = (lines.split(|line| line.trim().is_empty()))
+        .filter(|paragraph| !paragraph.is_empty())
+        .map(|paragraph| {
+            let literal: Option<Vec<&str>> = (paragraph.iter())
+                .map(|line| line.strip_prefix("    "))
+                .collect();
+            let lines = match literal {
+                Some(lines) => (lines.into_iter())
+                    .map(|line| {
+                        assert_fits(line, WIDTH - TAB.len());
+                        format!("{TAB}{line}")
+                    })
+                    .collect(),
+                None => wrapped(&paragraph.join("\n"), WIDTH),
+            };
+            lines.join("\n")
+        })
+        .collect();
+    paragraphs.join("\n\n")
+}
+
+fn assert_fits(line: &str, room: usize) {
+    assert!(
+        width(line) <= room,
+        "the line `{line}` is over {room} columns"
+    );
 }
 
 /// The words of `text` in lines of at most `width` columns, each longer word on a line of its own.
@@ -571,7 +608,50 @@ fn width(text: &str) -> usize {
     text.chars().count()
 }
 
-pub(super) const CONFIG: &str = "\
+/// A part of a topic: the paragraphs of `text`, then the `rows` that its last paragraph introduces.
+pub(super) struct Part {
+    text: &'static str,
+    rows: &'static [Row],
+}
+
+struct Row {
+    literal: &'static str,
+    about: &'static str,
+    keys: &'static [(&'static str, &'static str)],
+}
+
+/// The text of the topic that `parts` make. Each row is laid out as a row of [`Layout::Columns`],
+/// and its keys a tab further in. Each row's text starts a tab past the end of the topic's longest
+/// literal, counted from where the row's own literal starts.
+pub(super) fn topic(parts: &[Part]) -> String {
+    let literals = (parts.iter().flat_map(|part| part.rows)).flat_map(|row| {
+        let keys = row.keys.iter().map(|(key, _)| key);
+        iter::once(&row.literal).chain(keys)
+    });
+    let longest = literals.map(|literal| width(literal)).max().unwrap_or(0);
+    let further = format!("{TAB}{TAB}");
+    let parts: Vec<String> = (parts.iter())
+        .map(|Part { text, rows }| {
+            let mut lines = vec![paragraphs(text)];
+            for Row {
+                literal,
+                about,
+                keys,
+            } in *rows
+            {
+                lines.push(aligned(TAB, literal, longest, about));
+                let keys = keys.iter();
+                lines.extend(keys.map(|(key, about)| aligned(&further, key, longest, about)));
+            }
+            lines.join("\n")
+        })
+        .collect();
+    format!("{}\n", parts.join("\n\n"))
+}
+
+pub(super) const CONFIG: &[Part] = &[
+    Part {
+        text: "\
 pumpkin.toml is the machine's configuration, which `pumpkin run` reads, and
 `pumpkin check` too, for the model routes. It is
 the file that --config names, by default $HOME/.config/pumpkin/pumpkin.toml. It
@@ -582,165 +662,221 @@ other key is refused. On a machine whose runs go to the person's controllers,
 and [gateway].
 
 Example, of a machine whose runs go to EC2 and Modal:
-  [docker]
-  context = \"default\"
 
-  [providers.aws.ec2]
-  region = \"us-west-1\"
-  repositories = { roles = \"pumpkin/roles\", sandboxd = \"pumpkin/sandboxd\" }
+    [docker]
+    context = \"default\"
 
-  [providers.aws.ec2.timer]
-  group = \"pumpkin\"
-  role_arn = \"arn:aws:iam::123456789012:role/pumpkin-timer\"
+    [providers.aws.ec2]
+    region = \"us-west-1\"
+    repositories = { roles = \"pumpkin/roles\", sandboxd = \"pumpkin/sandboxd\" }
 
-  [providers.aws.ec2.classes.cpu]
-  template = \"lt-0123456789abcdef0\"
-  version = 1
-  vcpus = 8
-  memory_mib = 16384
-  cpu_features = [\"avx2\"]
+    [providers.aws.ec2.timer]
+    group = \"pumpkin\"
+    role_arn = \"arn:aws:iam::123456789012:role/pumpkin-timer\"
 
-  [providers.gpus.modal]
-  profile = \"pumpkin\"
-  dials_from = \"203.0.113.7\"
+    [providers.aws.ec2.classes.cpu]
+    template = \"lt-0123456789abcdef0\"
+    version = 1
+    vcpus = 8
+    memory_mib = 16384
+    cpu_features = [\"avx2\"]
 
-  [providers.gpus.modal.images]
-  region = \"us-west-1\"
-  repository = \"pumpkin/roles\"
-  role_arn = \"arn:aws:iam::123456789012:role/pumpkin-modal-pull\"
+    [providers.gpus.modal]
+    profile = \"pumpkin\"
+    dials_from = \"203.0.113.7\"
 
-  [providers.gpus.modal.classes.a100]
-  gpu = \"A100-80GB\"
-  gpu_model = \"NVIDIA A100-SXM4-80GB\"
-  cpu_millis = 8000
-  memory_bytes = 68719476736
-  startup_seconds = 1800
+    [providers.gpus.modal.images]
+    region = \"us-west-1\"
+    repository = \"pumpkin/roles\"
+    role_arn = \"arn:aws:iam::123456789012:role/pumpkin-modal-pull\"
 
-  [gateway]
-  private = \"172.31.0.10:7433\"
+    [providers.gpus.modal.classes.a100]
+    gpu = \"A100-80GB\"
+    gpu_model = \"NVIDIA A100-SXM4-80GB\"
+    cpu_millis = 8000
+    memory_bytes = 68719476736
+    startup_seconds = 1800
 
-  [upstreams.gateway]
-  url = \"https://gateway.example/v1\"
-  key_file = \"gateway-key\"
+    [gateway]
+    private = \"172.31.0.10:7433\"
 
-  [[upstreams.gateway.models]]
-  name = \"model-a\"
-  upstream_name = \"provider/model-a\"
-  usd_per_mtok = { input = 1.25, cached = 0.125, output = 10 }
+    [upstreams.gateway]
+    url = \"https://gateway.example/v1\"
+    key_file = \"gateway-key\"
+
+    [[upstreams.gateway.models]]
+    name = \"model-a\"
+    upstream_name = \"provider/model-a\"
+    usd_per_mtok = { input = 1.25, cached = 0.125, output = 10 }
 
 Example, of a machine whose runs go to the person's controllers, one with Modal:
-  [controllers.alice]
-  region = \"us-west-1\"
 
-  [controllers.alice.modal]
-  profile = \"pumpkin\"
+    [controllers.alice]
+    region = \"us-west-1\"
 
-  [controllers.alice.modal.classes.a100]
-  gpu = \"A100-80GB\"
-  gpu_model = \"NVIDIA A100-SXM4-80GB\"
-  cpu_millis = 8000
-  memory_bytes = 68719476736
-  startup_seconds = 1800
+    [controllers.alice.modal]
+    profile = \"pumpkin\"
 
-  [controllers.lab]
-  address = \"lab.example.org:2222\"
+    [controllers.alice.modal.classes.a100]
+    gpu = \"A100-80GB\"
+    gpu_model = \"NVIDIA A100-SXM4-80GB\"
+    cpu_millis = 8000
+    memory_bytes = 68719476736
+    startup_seconds = 1800
 
-[docker] is the machine's Docker engine:
-  context       The context that reaches it, as `docker context ls` lists it.
+    [controllers.lab]
+    address = \"lab.example.org:2222\"
 
-[providers.<name>.<kind>] is a provider that the machine's runs may place roles
-on. <name> names it, and <kind> is its kind. Its table holds the kind's
-settings:
-  docker        Sandboxes on the engine of [docker]. This kind takes no
-                settings. A docker provider must be the configuration's only
-                provider: a machine runs its roles either on its own engine or
-                on providers of kind ec2 and modal. Its one class,
-                `container`, offers the machine's online CPUs and its
-                memory. It offers the CPU flags that /proc/cpuinfo
-                lists for every CPU, no CPU model and no GPU.
-  ec2           Sandboxes on EC2 instances of their own, in the envelope that
-                its settings name. The instances pull their images from the
-                envelope, which the engine of [docker] pushes them to. They
-                dial the private address of [gateway]. The provider runs AWS
-                CLI v2 as `aws` from PATH. It uses the credentials that `aws`
-                finds, such as the instance's role. Its settings:
-    region        The envelope's AWS region, which every call names.
-    classes       The classes of sandbox, by name. There is at least one. Each
-                  class has these keys:
-                  `template` is the ID of its launch template, and `version`
-                  the template's version that its instances launch from.
-                  `vcpus` and `memory_mib` are its instance type's CPUs and
-                  memory in MiB. A role gets all the CPUs, and all the memory
-                  but a share that the instance keeps.
-                  `cpu_features` are its CPU's flags, and `cpu_model` is its
-                  CPU's model, as /proc/cpuinfo names them. Without
-                  `cpu_features`, the class states no flag. Without
-                  `cpu_model`, it states no model. A class that states a model
-                  is offered only to roles that need it.
-                  `usd_per_hour` is what an instance costs an hour. With it,
-                  `ls` and a run's summary price the class's sandboxes.
-                  `startup_seconds` is the most seconds that an instance's
-                  start may take, its images' pulls included. Without it, the
-                  start may take 1740 seconds.
-    repositories  The envelope's ECR repositories: `roles` holds the roles'
-                  images, and `sandboxd` the images that hold sandboxd.
-    timer         The sandboxes' timer, which terminates each instance at its
-                  run's hard end. `group` is its EventBridge Scheduler schedule
-                  group. `role_arn` is the ARN of the role that its schedules
-                  terminate instances with.
-  modal         Sandboxes in a Modal workspace. Modal imports their images from
-                an ECR repository, which the engine of [docker] pushes them to.
-                Each sandbox listens behind Modal's TLS tunnel, which the run
-                dials. The provider runs Modal's helper, pumpkin-modal.py,
-                beside `pumpkin`, with `uv` from PATH. It runs `aws`, AWS CLI
-                v2, as ec2 does. Its settings:
-    profile       The profile of Modal's configuration whose token reaches the
-                  workspace.
-    config        The absolute path of Modal's configuration file that holds
-                  the profile. Without it, the file is ~/.modal.toml.
-    dials_from    This machine's public IPv4 address. The sandboxes' tunnels
-                  take connections from it alone.
-    images        Where Modal imports images from. `region` is an AWS region,
-                  and `repository` an ECR repository there. `role_arn` is the
-                  ARN of the AWS role that Modal pulls with, which trusts
-                  Modal's identity.
-    classes       The classes of sandbox, by name. There is at least one. Each
-                  class has `cpu_millis`, `memory_bytes` in whole MiB and
-                  `startup_seconds`. A class with a GPU has `gpu`, as Modal
-                  names one, such as \"H100!\", or \"A100-80GB:2\" for two. It
-                  then has `gpu_model`, the model as nvidia-smi names it, such
-                  as \"NVIDIA H100 80GB HBM3\". A class with a GPU is offered
-                  only to roles that need its GPUs. `usd_per_hour` is what a
-                  sandbox costs an hour. With it, `ls` and a run's summary
-                  price the class's sandboxes.
-
-[gateway] is where the gateway meets the sandboxes that dial it over a network:
-  private       The address, ip:port, that the sandboxes of an ec2 provider
-                dial. It is one of this machine's addresses on the envelope's
-                network, at a port that the envelope's security group admits.
-                A run listens there while it places a role on such a provider,
-                so only one such run can go at a time.
-
-[upstreams.<name>] is an upstream that a workflow's model route may reach:
-  url           The base URL of its API. It is https, or http to a loopback IP
-                address, such as 127.0.0.1 but not localhost. The route
-                reaches each API's endpoint below it: /responses,
-                /chat/completions, or /messages, which an Anthropic Messages
-                API serves, such as https://api.anthropic.com/v1.
-  key_file      The file that holds its key, below this file's directory unless
-                the path is absolute. The route sends the key as
-                `authorization: Bearer <key>`, and to /messages as
-                `x-api-key: <key>`.
-  models        The models it serves. Each has the `name` that a route allows
-                and the `upstream_name` that the upstream takes for it.
-                `usd_per_mtok` is optional. It says what the model's tokens
-                cost in US dollars a million: `input` and `output`, and
-                `cached` and `cache_write`, the input that the upstream read
-                from its cache and wrote to it. Reasoning counts as output. A
-                model without `usd_per_mtok` has no cost. Neither has a model
-                whose responses report a kind of token that its prices lack.
-                No model is listed twice, under one upstream or two.
-
+[docker] is the machine's Docker engine:",
+        rows: &[Row {
+            literal: "context",
+            about: "The context that reaches it, as `docker context ls` lists it.",
+            keys: &[],
+        }],
+    },
+    Part {
+        text: "[providers.<name>.<kind>] is a provider that the machine's runs may place roles \
+               on. <name> names it, and <kind> is its kind. Its table holds the kind's settings:",
+        rows: &[
+            Row {
+                literal: "docker",
+                about: "Sandboxes on the engine of [docker]. This kind takes no settings. A \
+                        docker provider must be the configuration's only provider: a machine \
+                        runs its roles either on its own engine or on providers of kind ec2 and \
+                        modal. Its one class, `container`, offers the machine's online CPUs and \
+                        its memory. It offers the CPU flags that /proc/cpuinfo lists for every \
+                        CPU, no CPU model and no GPU.",
+                keys: &[],
+            },
+            Row {
+                literal: "ec2",
+                about: "Sandboxes on EC2 instances of their own, in the envelope that its \
+                        settings name. The instances pull their images from the envelope, which \
+                        the engine of [docker] pushes them to. They dial the private address of \
+                        [gateway]. The provider runs AWS CLI v2 as `aws` from PATH. It uses the \
+                        credentials that `aws` finds, such as the instance's role. Its settings:",
+                keys: &[
+                    (
+                        "region",
+                        "The envelope's AWS region, which every call names.",
+                    ),
+                    (
+                        "classes",
+                        "The classes of sandbox, by name. There is at least one. Each class has \
+                         these keys: `template` is the ID of its launch template, and `version` \
+                         the template's version that its instances launch from. `vcpus` and \
+                         `memory_mib` are its instance type's CPUs and memory in MiB. A role gets \
+                         all the CPUs, and all the memory but a share that the instance keeps. \
+                         `cpu_features` are its CPU's flags, and `cpu_model` is its CPU's model, \
+                         as /proc/cpuinfo names them. Without `cpu_features`, the class states no \
+                         flag. Without `cpu_model`, it states no model. A class that states a \
+                         model is offered only to roles that need it. `usd_per_hour` is what an \
+                         instance costs an hour. With it, `ls` and a run's summary price the \
+                         class's sandboxes. `startup_seconds` is the most seconds that an \
+                         instance's start may take, its images' pulls included. Without it, the \
+                         start may take 1740 seconds.",
+                    ),
+                    (
+                        "repositories",
+                        "The envelope's ECR repositories: `roles` holds the roles' images, and \
+                         `sandboxd` the images that hold sandboxd.",
+                    ),
+                    (
+                        "timer",
+                        "The sandboxes' timer, which terminates each instance at its run's hard \
+                         end. `group` is its EventBridge Scheduler schedule group. `role_arn` is \
+                         the ARN of the role that its schedules terminate instances with.",
+                    ),
+                ],
+            },
+            Row {
+                literal: "modal",
+                about: "Sandboxes in a Modal workspace. Modal imports their images from an ECR \
+                        repository, which the engine of [docker] pushes them to. Each sandbox \
+                        listens behind Modal's TLS tunnel, which the run dials. The provider runs \
+                        Modal's helper, pumpkin-modal.py, beside `pumpkin`, with `uv` from PATH. \
+                        It runs `aws`, AWS CLI v2, as ec2 does. Its settings:",
+                keys: &[
+                    (
+                        "profile",
+                        "The profile of Modal's configuration whose token reaches the workspace.",
+                    ),
+                    (
+                        "config",
+                        "The absolute path of Modal's configuration file that holds the profile. \
+                         Without it, the file is ~/.modal.toml.",
+                    ),
+                    (
+                        "dials_from",
+                        "This machine's public IPv4 address. The sandboxes' tunnels take \
+                         connections from it alone.",
+                    ),
+                    (
+                        "images",
+                        "Where Modal imports images from. `region` is an AWS region, and \
+                         `repository` an ECR repository there. `role_arn` is the ARN of the AWS \
+                         role that Modal pulls with, which trusts Modal's identity.",
+                    ),
+                    (
+                        "classes",
+                        "The classes of sandbox, by name. There is at least one. Each class has \
+                         `cpu_millis`, `memory_bytes` in whole MiB and `startup_seconds`. A class \
+                         with a GPU has `gpu`, as Modal names one, such as \"H100!\", or \
+                         \"A100-80GB:2\" for two. It then has `gpu_model`, the model as nvidia-smi \
+                         names it, such as \"NVIDIA H100 80GB HBM3\". A class with a GPU is \
+                         offered only to roles that need its GPUs. `usd_per_hour` is what a \
+                         sandbox costs an hour. With it, `ls` and a run's summary price the \
+                         class's sandboxes.",
+                    ),
+                ],
+            },
+        ],
+    },
+    Part {
+        text: "[gateway] is where the gateway meets the sandboxes that dial it over a network:",
+        rows: &[Row {
+            literal: "private",
+            about: "The address, ip:port, that the sandboxes of an ec2 provider dial. It is one \
+                    of this machine's addresses on the envelope's network, at a port that the \
+                    envelope's security group admits. A run listens there while it places a role \
+                    on such a provider, so only one such run can go at a time.",
+            keys: &[],
+        }],
+    },
+    Part {
+        text: "[upstreams.<name>] is an upstream that a workflow's model route may reach:",
+        rows: &[
+            Row {
+                literal: "url",
+                about: "The base URL of its API. It is https, or http to a loopback IP address, \
+                        such as 127.0.0.1 but not localhost. The route reaches each API's \
+                        endpoint below it: /responses, /chat/completions, or /messages, which an \
+                        Anthropic Messages API serves, such as https://api.anthropic.com/v1.",
+                keys: &[],
+            },
+            Row {
+                literal: "key_file",
+                about: "The file that holds its key, below this file's directory unless the path \
+                        is absolute. The route sends the key as `authorization: Bearer <key>`, \
+                        and to /messages as `x-api-key: <key>`.",
+                keys: &[],
+            },
+            Row {
+                literal: "models",
+                about: "The models it serves. Each has the `name` that a route allows and the \
+                        `upstream_name` that the upstream takes for it. `usd_per_mtok` is \
+                        optional. It says what the model's tokens cost in US dollars a million: \
+                        `input` and `output`, and `cached` and `cache_write`, the input that the \
+                        upstream read from its cache and wrote to it. Reasoning counts as output. \
+                        A model without `usd_per_mtok` has no cost. Neither has a model whose \
+                        responses report a kind of token that its prices lack. No model is \
+                        listed twice, under one upstream or two.",
+                keys: &[],
+            },
+        ],
+    },
+    Part {
+        text: "\
 Each entry of a workflow's model route reaches the one upstream that serves
 every model it allows.
 
@@ -769,24 +905,44 @@ connections for large task uploads. The first command creates a key. The
 controller admits the key once its admin lists it under the person's name in
 the controller's members' list. Until then, each command is refused with the
 line to send the admin. The client keeps that key and the pinned host key in
-$HOME/.config/pumpkin/ssh/.
-  region        The region that deploy/aws was applied in, for a controller
-                that deploy/aws made. The client finds it there by its tag,
-                starts it if it is stopped, and reaches it at its private
-                address. The machine is in the controller's VPC, or reaches it
-                through a VPN that translates its addresses into the VPC's.
-  address       The host and port, host:port, of a controller's sshd at a fixed
-                address, such as the port that deploy/docker publishes. The
-                client never starts it. A configuration names `region` or
-                `address`, not both.
-
-[controllers.<name>.modal] is the Modal provider that the controller's runs may
-place roles on, if any, on a controller that deploy/aws made. It takes the settings
-of a provider of kind modal, but `images`, which the module's settings give,
-and `dials_from`, which each run sets:
-  profile       As modal's. The profile is in Modal's configuration file,
-                ~/.modal.toml. Each run is sent that file if it is there.
-                Its workspace is one that deploy/aws's `modal_workspaces`
-                lists.
-  classes       As modal's.
-";
+$HOME/.config/pumpkin/ssh/.",
+        rows: &[
+            Row {
+                literal: "region",
+                about: "The region that deploy/aws was applied in, for a controller that \
+                        deploy/aws made. The client finds it there by its tag, starts it if it \
+                        is stopped, and reaches it at its private address. The machine is in the \
+                        controller's VPC, or reaches it through a VPN that translates its \
+                        addresses into the VPC's.",
+                keys: &[],
+            },
+            Row {
+                literal: "address",
+                about: "The host and port, host:port, of a controller's sshd at a fixed \
+                        address, such as the port that deploy/docker publishes. The client \
+                        never starts it. A configuration names `region` or `address`, not both.",
+                keys: &[],
+            },
+        ],
+    },
+    Part {
+        text: "[controllers.<name>.modal] is the Modal provider that the controller's runs may \
+               place roles on, if any, on a controller that deploy/aws made. It takes the \
+               settings of a provider of kind modal, but `images`, which the module's settings \
+               give, and `dials_from`, which each run sets:",
+        rows: &[
+            Row {
+                literal: "profile",
+                about: "As modal's. The profile is in Modal's configuration file, ~/.modal.toml. \
+                        Each run is sent that file if it is there. Its workspace is one that \
+                        deploy/aws's `modal_workspaces` lists.",
+                keys: &[],
+            },
+            Row {
+                literal: "classes",
+                about: "As modal's.",
+                keys: &[],
+            },
+        ],
+    },
+];

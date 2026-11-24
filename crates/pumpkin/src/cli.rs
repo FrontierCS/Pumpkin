@@ -759,7 +759,7 @@ fn help_of(cli: &mut clap::Command, topic: Option<&str>) -> Result<Command, clap
         }));
     };
     if topic == "config" {
-        return Ok(Command::Print(CONFIG.into()));
+        return Ok(Command::Print(notes::topic(CONFIG).into()));
     }
     let names: Vec<String> = (cli.get_subcommands())
         .filter(|command| listed(command))

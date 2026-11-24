@@ -98,11 +98,11 @@
 </tspan>
     <tspan x="10px" y="712px"><tspan>The settings name the members' list in their `[deployment] members`: an SSM</tspan>
 </tspan>
-    <tspan x="10px" y="730px"><tspan>parameter's ARN, or a file's absolute path. The list holds a line</tspan>
+    <tspan x="10px" y="730px"><tspan>parameter's ARN, or a file's absolute path. The list holds a line `&lt;member&gt;</tspan>
 </tspan>
-    <tspan x="10px" y="748px"><tspan>`&lt;member&gt; &lt;key&gt;` for each key. A member's name is 1 to 32 of a-z, 0-9 and `-`,</tspan>
+    <tspan x="10px" y="748px"><tspan>&lt;key&gt;` for each key. A member's name is 1 to 32 of a-z, 0-9 and `-`, and starts</tspan>
 </tspan>
-    <tspan x="10px" y="766px"><tspan>and starts with a letter. The key is the line of the member's</tspan>
+    <tspan x="10px" y="766px"><tspan>with a letter. The key is the line of the member's</tspan>
 </tspan>
     <tspan x="10px" y="784px"><tspan>~/.config/pumpkin/ssh/key.pub. A list with any other line, or a key twice, is</tspan>
 </tspan>
