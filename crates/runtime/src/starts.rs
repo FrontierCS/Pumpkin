@@ -1,49 +1,25 @@
 //! Every sandbox's start, delete and disposal, on the driver's loop. A provider's call runs on a
 //! thread of its own, which completes into the loop as an [`Input`]; the record of each sandbox
 //! lasts through the loop's [`Disk`]; and the session opens on the loop. What waits on each is the
-//! agent's own steps, or a child's thread, which a channel of its own answers.
+//! sandbox's own part of the run, which its [`Which`] names.
 
 use std::fs;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::SyncSender;
 use std::time::{Duration, SystemTime};
 
-use gateway::{Answer, Arrival, Elsewhere, Met, Registration, SessionId, Sessions, Takes};
+use decision::Event;
+use gateway::{Answer, Elsewhere, Met, Registration, SessionId, Sessions, Takes};
 use provider::{Create, Created, SandboxId, Undeleted, UnixTime};
 use schema::ir::Name;
-use schema::sandbox::OpPayloadLimit;
 use stdx::{Context, Deadline};
 
+use crate::child::End;
 use crate::disk::{Disk, Job};
 use crate::host::Host;
 use crate::log::Entry;
-use crate::sandbox::{Made, Meets, Started, Unstarted, Which, provider_role};
+use crate::sandbox::{Made, Meets, Unstarted, Which, provider_role};
 use crate::{Input, Io, Runtime, disk, interruption, record};
-
-/// A thread's ask for a sandbox's start.
-pub(crate) struct Asked {
-    pub(crate) which: Which,
-    pub(crate) ops: Option<OpPayloadLimit>,
-    pub(crate) by: Duration,
-    pub(crate) arrivals: Box<dyn Fn(Arrival) + Send>,
-    pub(crate) reply: SyncSender<Result<Started, Unstarted>>,
-}
-
-/// A thread's ask for the delete of its sandbox.
-pub(crate) struct Delete {
-    pub(crate) which: Which,
-    pub(crate) id: SandboxId,
-    pub(crate) reply: SyncSender<(Result<(), String>, stdx::io::Edge<Input>)>,
-}
-
-/// A thread's ask for the disposal of a sandbox that didn't start.
-pub(crate) struct Dispose {
-    pub(crate) which: Which,
-    pub(crate) id: SandboxId,
-    pub(crate) reason: String,
-    pub(crate) reply: SyncSender<Result<String, String>>,
-}
 
 /// What a provider's thread completes into the loop with.
 pub(crate) enum Edge {
@@ -84,19 +60,11 @@ fn stopped(socket: Option<&std::path::Path>) -> String {
 const ENDED: &str =
     "it ended before it met the gateway: expected its `sandboxd` to run until it connects";
 
-pub(crate) fn loop_gone() -> ! {
-    unreachable!(
-        "the loop dropped a thread's ask unanswered, though the loop runs until every thread of the \
-         run has ended, answering each ask"
-    )
-}
-
 /// A start under way.
 pub(crate) struct Starting {
     which: Which,
     by: Duration,
     takes: Takes,
-    waiter: StartWaiter,
     step: Step,
     id: Option<SandboxId>,
     session: Option<SessionId>,
@@ -118,14 +86,6 @@ struct Looks {
     ended: bool,
     // The failure of the last look, if no look has succeeded since.
     failed: Option<String>,
-}
-
-pub(crate) enum StartWaiter {
-    Agent(schema::workflow::AgentId),
-    Thread(
-        Box<dyn Fn(Arrival) + Send>,
-        SyncSender<Result<Started, Unstarted>>,
-    ),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -151,40 +111,30 @@ pub(crate) struct Deleting {
 }
 
 pub(crate) enum DeleteWaiter {
-    Agent(schema::workflow::AgentId, Option<SessionId>),
-    // A thread, which reports what follows the delete through the edge it is given, as the loop
-    // waits for it.
-    Thread(SyncSender<(Result<(), String>, stdx::io::Edge<Input>)>),
-    Disposal(Box<Disposing>),
-}
-
-/// A disposal under way: the parts of its message, and who waits on it.
-pub(crate) struct Disposing {
-    parts: Vec<String>,
-    waiter: DisposeWaiter,
-}
-
-pub(crate) enum DisposeWaiter {
-    Agent(schema::workflow::AgentId),
-    Thread(SyncSender<Result<String, String>>),
+    /// A sandbox's part of the run, whose end `after` the delete reports, and the session that it
+    /// drops once the delete is done, if it holds one.
+    Sandbox {
+        after: Event,
+        session: Option<SessionId>,
+    },
+    /// A disposal of a sandbox that didn't start: the parts of its message.
+    Disposal(Vec<String>),
 }
 
 impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
     /// Starts `which`'s sandbox, which takes what `takes` says, by `by`, a time since the run
-    /// started, and sets it up; `waiter` hears how it went.
+    /// started, and sets it up; `which`'s part of the run hears how it went.
     pub(crate) fn begin_start(
         &mut self,
         io: &mut Io<'r, 's, H>,
         which: Which,
         (by, takes): (Duration, Takes),
-        waiter: StartWaiter,
     ) {
         let token = self.new_token();
         let starting = Starting {
             which,
             by,
             takes,
-            waiter,
             step: Step::Creating,
             id: None,
             session: None,
@@ -614,20 +564,18 @@ impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
         };
         // The work's start waits on a shared role's set-up, which the loop sees end here.
         if let Which::Shared(target) = start.which {
-            self.shared_ready(target, self.at, Ok(()));
+            self.shared_ready(io, target, self.at, Ok(()));
         }
-        match start.waiter {
-            StartWaiter::Agent(agent) => self.agent_ready(io, agent, (id, session)),
-            StartWaiter::Thread(arrivals, reply) => {
-                let remote = self.sessions.remote(session, arrivals);
-                let started = Started {
-                    which: start.which,
-                    id,
-                    session: remote,
-                };
-                // A thread that has ended has nothing left to start.
-                let _ = reply.send(Ok(started));
+        match start.which {
+            Which::Agent(agent) => self.agent_ready(io, agent, (id, session)),
+            Which::Shared(target) => self.resident_ready(io, target, (id, session)),
+            Which::Call(job, ..) => {
+                if let Some(called) = self.jobs.get_mut(&job) {
+                    called.child.started = Some((id, session));
+                }
+                self.work(io, job, session);
             }
+            Which::Lease(lease, ..) => self.lease_ready(io, lease, (id, session)),
         }
     }
 
@@ -648,13 +596,76 @@ impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
             given_up.store(true, Ordering::Relaxed);
         }
         if let Which::Shared(target) = start.which {
-            self.shared_ready(target, self.at, Err(unstarted.reason().to_owned()));
+            self.shared_ready(io, target, self.at, Err(unstarted.reason().to_owned()));
         }
-        match start.waiter {
-            StartWaiter::Agent(agent) => self.agent_unstarted(io, agent, unstarted),
-            StartWaiter::Thread(_, reply) => {
-                let _ = reply.send(Err(unstarted));
+        match (start.which, unstarted) {
+            (Which::Agent(agent), unstarted) => self.agent_unstarted(io, agent, unstarted),
+            (which, Unstarted::Uncreated(reason)) => self.disposed(io, which, Ok(reason)),
+            (_, Unstarted::Created { which, id, reason }) => {
+                self.dispose(io, (which, id), &reason);
             }
+        }
+    }
+
+    /// Takes how the disposal of `which`'s sandbox, which didn't start, went: why it didn't, or
+    /// why what it made wasn't deleted, which fails the run.
+    pub(crate) fn disposed(
+        &mut self,
+        io: &mut Io<'r, 's, H>,
+        which: Which,
+        disposed: Result<String, String>,
+    ) {
+        if let Which::Agent(agent) = which {
+            return self.agent_disposed(agent, disposed);
+        }
+        let reason = match disposed {
+            Ok(reason) => format!("{} sandbox didn't start: {reason}", which.noun()),
+            Err(reason) => {
+                self.input(Input::Undeleted(reason));
+                if let Which::Shared(target) = which {
+                    self.resident_unstarted(io, target);
+                }
+                return;
+            }
+        };
+        self.child_unstarted(io, which, reason);
+    }
+
+    /// Starts the sandbox of a child, `which`, which takes ops with `ops` as their payload limit,
+    /// if given, by `startup`, unless that has passed, which ends the child at once, with nothing
+    /// created.
+    pub(crate) fn start_child(
+        &mut self,
+        io: &mut Io<'r, 's, H>,
+        which: Which,
+        (startup, ops): (Duration, Option<schema::sandbox::OpPayloadLimit>),
+    ) {
+        // The loop can be held past a child's start, by a sync of the run log, and a sandbox
+        // created for a start already due would only be deleted, at or past the hard end at
+        // worst.
+        if self.at >= startup {
+            let reason = format!(
+                "{} sandbox wasn't created: its start was due by a time that had passed",
+                which.noun()
+            );
+            return self.child_unstarted(io, which, reason);
+        }
+        let takes = Takes {
+            ops,
+            models: self.workflow().model(which.role()).is_some(),
+        };
+        self.begin_start(io, which, (startup, takes));
+    }
+
+    // Ends `which`'s child, whose sandbox didn't start, for `reason`.
+    fn child_unstarted(&mut self, io: &mut Io<'r, 's, H>, which: Which, reason: String) {
+        match which {
+            Which::Lease(lease, ..) => self.lease_unstarted(io, lease, reason),
+            Which::Call(job, ..) => {
+                self.end_unworked(io, job, End::failed(which, reason));
+            }
+            Which::Shared(target) => self.resident_unstarted(io, target),
+            Which::Agent(_) => unreachable!("an agent's sandbox that didn't start is the agent's"),
         }
     }
 
@@ -683,7 +694,7 @@ impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
         let edge = io.edge();
         let disposing = matches!(
             self.deletes.get(&token).map(|delete| &delete.waiter),
-            Some(DeleteWaiter::Disposal(_))
+            Some(DeleteWaiter::Disposal(..))
         );
         let undeleted = id.clone();
         let spawned = self.spawn((&format!("delete-{}", which.name()), None), move || {
@@ -726,17 +737,16 @@ impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
         delete.deleted = Some(match &mut delete.waiter {
             // A disposal's message says why its delete failed.
             DeleteWaiter::Disposal(disposing) => {
-                disposing.parts.extend(parts.into_iter().flatten());
+                disposing.extend(parts.into_iter().flatten());
                 if let Err(error) = &failed {
-                    disposing.parts.push(format!("deleting it failed: {error}"));
+                    disposing.push(format!("deleting it failed: {error}"));
                 }
                 failed
             }
-            DeleteWaiter::Agent(_, held) => {
+            DeleteWaiter::Sandbox { session: held, .. } => {
                 session = held.take();
                 failed.context("deleting the sandbox failed")
             }
-            DeleteWaiter::Thread(_) => failed.context("deleting the sandbox failed"),
         });
         let (which, id) = (delete.which, delete.id.clone());
         if let Some(session) = session {
@@ -894,24 +904,21 @@ impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
         let recorded = delete.failure.map_or(Ok(()), Err);
         let deleted = delete.deleted.unwrap_or(Ok(()));
         match delete.waiter {
-            DeleteWaiter::Agent(agent, _) => {
-                self.agent_deleted(agent, crate::failed_also(deleted, recorded));
+            DeleteWaiter::Sandbox { after, .. } => {
+                if let Which::Agent(agent) = delete.which {
+                    self.agents.remove(&agent);
+                }
+                self.input(match crate::failed_also(deleted, recorded) {
+                    Ok(()) => Input::Core(after),
+                    Err(error) => Input::Undeleted(error),
+                });
             }
-            DeleteWaiter::Thread(reply) => {
-                let _ = reply.send((crate::failed_also(deleted, recorded), io.edge()));
-            }
-            DeleteWaiter::Disposal(disposing) => {
-                let Disposing { mut parts, waiter } = *disposing;
+            DeleteWaiter::Disposal(mut parts) => {
                 let disposed = deleted.is_ok() && recorded.is_ok();
                 parts.extend(recorded.err());
                 let reason = parts.join("; ");
                 let result = if disposed { Ok(reason) } else { Err(reason) };
-                match waiter {
-                    DisposeWaiter::Agent(agent) => self.agent_disposed(agent, result),
-                    DisposeWaiter::Thread(reply) => {
-                        let _ = reply.send(result);
-                    }
-                }
+                self.disposed(io, delete.which, result);
             }
         }
     }
@@ -923,11 +930,9 @@ impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
         io: &mut Io<'r, 's, H>,
         (which, id): (Which, SandboxId),
         reason: &str,
-        waiter: DisposeWaiter,
     ) {
         let parts = vec![format!("sandbox {}: {reason}", id.as_str())];
-        let disposing = Box::new(Disposing { parts, waiter });
-        self.begin_delete(io, which, id, DeleteWaiter::Disposal(disposing));
+        self.begin_delete(io, which, id, DeleteWaiter::Disposal(parts));
     }
 }
 

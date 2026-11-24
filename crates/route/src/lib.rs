@@ -24,6 +24,21 @@ mod usage;
 pub use closure::{Headers, MAX_DROPPED_HEADERS, Route};
 pub use upstream::{Admission, Answer, Bar, Key, Serving, Upstream, UpstreamUrl, serve};
 
+/// Where [`serve`] sends a model request's response, by the response's deadline.
+///
+/// The head goes first, then the body a part at a time, then the end, once. Each fails once the
+/// response can't reach its client, as once its session has ended.
+pub trait Respond {
+    fn head(&mut self, status: u16, headers: Vec<(String, String)>) -> std::io::Result<()>;
+
+    /// Sends the next bytes of the body, at most a frame's
+    /// ([`MAX_BODY_BYTES`](schema::frame::MAX_BODY_BYTES)).
+    fn data(&mut self, bytes: &[u8]) -> std::io::Result<()>;
+
+    /// Ends the response: whole, or cut short, which its client must not take for a whole one.
+    fn end(&mut self, cut: bool) -> std::io::Result<()>;
+}
+
 /// Where [`serve`] keeps a model exchange as it passes, for the run's record.
 pub trait Keep {
     /// The names of the request headers that the route left behind as the request went

@@ -7,9 +7,7 @@ use schema::sandbox::{
 };
 
 use super::Session;
-use crate::{
-    Arrival, IncomingModelRequest, IncomingOp, ModelRequest, RefusedOp, Told, broke, op, remote,
-};
+use crate::{Arrival, IncomingModelRequest, IncomingOp, ModelRequest, RefusedOp, Told, broke, op};
 
 pub(super) struct Assembly {
     call: OpCall,
@@ -112,7 +110,7 @@ impl Session {
                 payload_limit: limit,
             }),
         };
-        told.arrived(&self.sink, arrival);
+        self.arrived(arrival, told);
     }
 
     pub(super) fn open_model(
@@ -205,10 +203,13 @@ impl Session {
     }
 
     fn pass_on_model(&self, number: u32, request: ModelRequest, told: &mut Told<'_>) {
-        let responder =
-            remote::Responder::new(self.id, number, std::sync::Arc::clone(&self.remote));
-        let incoming = IncomingModelRequest { request, responder };
-        told.arrived(&self.sink, Arrival::ModelRequest(incoming));
+        let session = self.id;
+        let incoming = IncomingModelRequest {
+            request,
+            session,
+            number,
+        };
+        self.arrived(Arrival::ModelRequest(incoming), told);
     }
 }
 

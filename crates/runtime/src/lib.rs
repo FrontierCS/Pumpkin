@@ -1,25 +1,27 @@
 //! A run's driver: it turns what happens in a run into events for the decision core, and the
-//! core's actions into acts on the run's providers. A role's model requests are answered on
-//! threads of their own, until the core stops allowing their caller's.
+//! core's actions into acts on the run's providers. A role's model requests are answered upstream
+//! on threads of their own, until the core stops allowing their caller's.
 //!
 //! The driver runs on one loop ([`stdx::io`]), which holds every sandbox's session, the record's
-//! syncs, and the agent's start and teardown. What the run's threads observe reaches the loop as
-//! an `Input`, which the loop times as it takes it; what the agent's session says comes in the
-//! loop's own batches. The loop gives each to the core as an [`Event`], records the event with
-//! the actions the core returned, and only then performs them. The core reads no clock, so each
-//! event carries the time since the run started, and a [`Event::Tick`] comes once the core's next
-//! act is due. The record's layout belongs to `record` and `log`, and the start of every sandbox
-//! to `starts`.
+//! syncs, the agent, and every call, lease and shared role. A body runs on a worker of its own,
+//! which asks the loop for what it asks of its target. What the run's other threads observe
+//! reaches the loop as an `Input`, which the loop times as it takes it; what a session says comes
+//! in the loop's own batches. The loop gives each to the core as an [`Event`], records the event
+//! with the actions the core returned, and only then performs them. The core reads no clock, so
+//! each event carries the time since the run started, and a [`Event::Tick`] comes once the core's
+//! next act is due. The record's layout belongs to `record` and `log`, and the start of every
+//! sandbox to `starts`.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::mpsc::Sender;
 use std::thread::{self, Scope};
 use std::time::Duration;
 
-use decision::{Action, Caller, Core, Event, JobId, LeaseId, OpId, Outcome, Request, lasts};
-use gateway::{Answer, Arrival, Ask, Dialer, Listener, RefusedOp, SessionId, Sessions, Trees};
+use decision::{
+    Action, CallResult, Caller, Core, Event, JobId, LeaseId, OpId, Outcome, Request, lasts,
+};
+use gateway::{Answer, Arrival, Ask, Dialer, IncomingOp, Listener, RefusedOp, SessionId, Sessions};
 use provider::{Provider, Reservation, RunTag, UnixTime};
 use route::Serving;
 use schema::ir::{Label, ModelName};
@@ -44,7 +46,6 @@ mod op;
 mod price;
 mod read_error;
 mod record;
-mod relay;
 mod removal;
 mod routes;
 mod sandbox;
@@ -59,9 +60,9 @@ use agent::Agent;
 pub use body::{Bodies, RunState, Target};
 use budget::Budget;
 pub use budget::{Budgets, budgets};
-use child::{Message, Report};
+use call::job::Called;
 use disk::Disk;
-pub use host::{Clock, Host, Inbox, System};
+pub use host::{Clock, Host, System};
 pub use interruption::{Signal, Stopped};
 pub use log::{
     AgentEnd, AgentSpan, CallEnd, CallOf, CallSpan, CallStart, CallerName, Closed, Cost, Direction,
@@ -226,10 +227,6 @@ impl<'r, H: Host> Run<'r, H> {
         failed_also(outcome, written)
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "most of it sets each of the runtime's fields"
-    )]
     fn run_on(
         &self,
         sandboxd: &Path,
@@ -256,25 +253,16 @@ impl<'r, H: Host> Run<'r, H> {
         let unix = UnixTime::of(clock.realtime())?;
         let mut backend = host.backend().context("the run's loop can't be made")?;
         let start = backend.now();
-        let (events, inbox) = stdx::io::Inbox::new(&*backend);
-        let sandboxes = Sandboxes::new(
-            published,
-            (self.id.clone(), &self.placed, &self.capacity),
-            events,
-        );
+        let sandboxes = Sandboxes::new(published, (self.id.clone(), &self.placed, &self.capacity));
         let log = Log::create(host, &self.dir)?;
         let payloads = Payloads::create(host, &self.dir)?;
-        // The threads of the run's children borrow the run's workflow and sandboxes, and the scope
-        // ends once each has, so that no sandbox starts after the run's end. The loop runs until
-        // every one of them has ended, as each of them reaches its session through it.
+        // The run's threads, of its edge workers, bodies and model requests, borrow the run's
+        // workflow and providers, and the scope ends once each has. The loop runs until every one
+        // of them has ended, as each of them completes into it.
         thread::scope(|scope| {
-            let mut io: Io<'_, '_, H> = Io::new(backend, self.capacity.operations(), inbox);
+            let mut io: Io<'_, '_, H> = Io::new(backend, self.capacity.operations());
             let events = io.events();
-            let remote = io.events();
-            let sessions = Sessions::new(
-                start,
-                Arc::new(move |request| remote.send(Input::Session(request))),
-            );
+            let sessions = Sessions::new(start);
             let mut runtime = Runtime {
                 placed: &self.placed,
                 routes: &self.routes,
@@ -311,6 +299,7 @@ impl<'r, H: Host> Run<'r, H> {
                 held_at_lock: BTreeSet::new(),
                 jobs: BTreeMap::new(),
                 leases: BTreeMap::new(),
+                responding: BTreeMap::new(),
                 pending: VecDeque::new(),
             };
             let outcome = runtime.drive(&mut io, unix);
@@ -346,25 +335,9 @@ impl Failure for Stopped {
     }
 }
 
-// A call: its thread's orders, and what the run knows of the role that runs it.
-struct Called {
-    orders: Sender<Message<crate::relay::Order>>,
-    // By when what the call left is collected, as a time since the run started; its leases' too.
-    collect: Duration,
-    // The trees of the call's sandbox that its last op came with; a transfer takes them.
-    trees: Option<Trees>,
-    // The role that runs the call, whose model route serves once the call's command or body
-    // starts.
-    target: TargetId,
-    instance: u32,
-    owner: Option<AgentId>,
-    // How many of the call's model requests its route has barred for a spent model budget.
-    model_requests_over_budget: u64,
-}
-
 enum Asked {
     Agent(AgentId, Unanswered),
-    Job(JobId),
+    Job(JobId, IncomingOp),
     Body(JobId, scoped::Waiting),
 }
 
@@ -373,6 +346,14 @@ enum Asked {
 #[derive(Clone, Copy, Debug)]
 enum Purpose {
     Agent(AgentId, agent::Step),
+    Lease(LeaseId, lease::Step),
+    Shared(TargetId, shared::Step),
+    // A request of a call's body's.
+    Body(JobId),
+    // The answer to an op of a call's target, its reply or its refusal.
+    Reply(JobId, &'static str),
+    // A frame of a model request's response, its end if the flag says so.
+    Respond(u64, bool),
     // The sync of the run log's lines so far, which the loop waits for.
     Logged,
 }
@@ -395,6 +376,8 @@ struct Runtime<'r, 's, H: Host> {
     unix_hard_end: UnixTime,
     log: Log,
     payloads: Payloads,
+    // The run's threads, of its edge workers, bodies and model requests, borrow the run's
+    // workflow and providers, and the scope ends once each has.
     scope: &'s Scope<'s, 'r>,
     sessions: Sessions,
     disk: Disk,
@@ -413,7 +396,7 @@ struct Runtime<'r, 's, H: Host> {
     agents: BTreeMap<AgentId, Agent>,
     // The start of the work, which waits for every agent and shared role to set up.
     gate: Option<agent::Gate>,
-    residents: BTreeMap<TargetId, shared::Resident<'r, H>>,
+    residents: BTreeMap<TargetId, shared::Resident>,
     // The ops given to the core that it hasn't replied to: at most one of each sandbox's, whose
     // session hands out an op only once the one before it has been answered.
     unanswered: BTreeMap<OpId, Asked>,
@@ -422,22 +405,30 @@ struct Runtime<'r, 's, H: Host> {
     next_model_request: u64,
     // The callers whose routes had no key refused when a submission was accepted for good.
     held_at_lock: BTreeSet<Caller>,
-    jobs: BTreeMap<JobId, Called>,
-    leases: BTreeMap<LeaseId, Sender<Message<lease::Order>>>,
+    jobs: BTreeMap<JobId, Called<'r>>,
+    leases: BTreeMap<LeaseId, lease::Lease<'r>>,
+    // The model responses that the loop sends, by their requests' numbers.
+    responding: BTreeMap<u64, routes::Responding>,
     // Events known already, which the loop gives the core before it takes another input.
     pending: VecDeque<(Duration, Event)>,
 }
 
-/// What the run's threads send the loop.
+/// What the loop takes: from the run's threads, or from itself, for the core to take in order.
 enum Input {
     Agent(AgentId, Arrival),
-    Shared(TargetId, Arrival),
-    Child(Report),
+    // What a call's target handed over for the core: an op, or its refusal, or a model request.
+    Call(JobId, Arrival),
+    // What a call's body asks of the loop.
+    Body(JobId, call::job::Asked),
+    // A runner op of a call's body's.
+    Runner(JobId, Request, scoped::Waiting),
+    // A call's end: what its body returned, or why the call failed. Its teardown follows.
+    CallEnded(JobId, Result<CallResult, String>),
+    // Why a sandbox couldn't be deleted, which fails the run.
+    Undeleted(String),
+    // The next frame of a model request's response, which its thread handed over.
+    Respond(u64),
     Logged(Entry),
-    Session(gateway::Request),
-    Start(starts::Asked),
-    Delete(starts::Delete),
-    Dispose(starts::Dispose),
     Edge(starts::Edge),
     // One of the run's threads has ended.
     Exited,
@@ -454,27 +445,15 @@ impl<'r, 's, H: Host + 'r> stdx::io::Loop for Runtime<'r, 's, H> {
     fn event(&mut self, io: &mut Io<'r, 's, H>, input: Input) {
         self.read_clock(io);
         match input {
-            Input::Session(request) => Sessions::serve(self, io, request),
-            Input::Start(asked) => self.asked(io, asked),
-            Input::Delete(starts::Delete { which, id, reply }) => {
-                self.begin_delete(io, which, id, starts::DeleteWaiter::Thread(reply));
-            }
-            Input::Dispose(starts::Dispose {
-                which,
-                id,
-                reason,
-                reply,
-            }) => self.dispose(
-                io,
-                (which, id),
-                &reason,
-                starts::DisposeWaiter::Thread(reply),
-            ),
+            Input::Body(job, asked) => self.body_asked(io, job, asked),
+            Input::Respond(number) => self.respond_next(io, number),
             Input::Edge(edge) => self.edge(io, edge),
             Input::Exited => self.threads -= 1,
             input @ (Input::Agent(..)
-            | Input::Shared(..)
-            | Input::Child(_)
+            | Input::Call(..)
+            | Input::Runner(..)
+            | Input::CallEnded(..)
+            | Input::Undeleted(_)
             | Input::Core(_)
             | Input::Unstarted(..)
             | Input::Logged(_)) => self.inputs.push_back((self.at, input)),
@@ -491,17 +470,40 @@ impl<'r, 's, H: Host + 'r> gateway::Owner for Runtime<'r, 's, H> {
         self.read_clock(io);
         let agent = (self.agents.iter()).find(|(_, agent)| agent.session == Some(session));
         if let Some((&id, _)) = agent {
-            self.inputs.push_back((self.at, Input::Agent(id, arrival)));
+            return self.inputs.push_back((self.at, Input::Agent(id, arrival)));
+        }
+        let started =
+            |child: &child::Child| matches!(child.started, Some((_, of)) if of == session);
+        if let Some((&job, _)) = self.jobs.iter().find(|(_, called)| started(&called.child)) {
+            return self.call_arrived(io, job, arrival);
+        }
+        if let Some((&lease, _)) = self.leases.iter().find(|(_, lease)| lease.holds(session)) {
+            return self.lease_arrived(io, lease, arrival);
+        }
+        let shared = (self.residents.iter()).find(|(_, resident)| resident.holds(session));
+        if let Some((&target, _)) = shared {
+            self.resident_arrived(io, target, arrival);
         }
     }
 
     fn answered(&mut self, io: &mut Io<'r, 's, H>, token: u64, answer: Answer) {
         self.read_clock(io);
-        if let Some(&Purpose::Agent(agent, step)) = self.purposes.get(&token) {
-            self.purposes.remove(&token);
-            return self.agent_answered(io, (agent, step, token), answer);
+        let Some(purpose) = self.purposes.remove(&token) else {
+            return self.start_answered(io, token, answer);
+        };
+        match purpose {
+            Purpose::Agent(agent, step) => self.agent_answered(io, (agent, step, token), answer),
+            Purpose::Lease(lease, step) => self.lease_answered(io, (lease, step), answer),
+            Purpose::Shared(target, step) => self.resident_answered(io, (target, step), answer),
+            Purpose::Body(job) => self.body_answered(io, job, answer),
+            Purpose::Respond(number, end) => self.responded(io, (number, end), answer),
+            Purpose::Reply(job, what) => {
+                if let Answer::Done(Err(error)) = answer {
+                    self.note(&format!("job {}'s op's {what} failed: {error}", job.0));
+                }
+            }
+            Purpose::Logged => unreachable!("the run log's sync is no session's request"),
         }
-        self.start_answered(io, token, answer);
     }
 }
 
@@ -573,8 +575,9 @@ impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
         }
     }
 
-    /// Runs `run` on a thread of the run's, named `name`, with a stack of `stack_bytes` if given,
-    /// which the loop waits for at the run's end. Fails if the kernel gives no thread.
+    /// Runs `run` on a thread of the run's, an edge worker's, a body's or a model request's,
+    /// named `name`, with a stack of `stack_bytes` if given, which the loop waits for at the run's
+    /// end. Fails if the kernel gives no thread.
     fn spawn(
         &mut self,
         (name, stack_bytes): (&str, Option<usize>),
@@ -608,7 +611,7 @@ impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
             }
             end => end,
         };
-        self.stop_children();
+        self.stop_children(io);
         // Each route is ended once the core stops allowing its model requests, unless the run
         // ended first: this ends them then. The run's end still waits on their exchanges, within
         // the upstreams' bounds and the responses' deadlines.
@@ -628,13 +631,18 @@ impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
         }
     }
 
-    // Runs the loop until every thread of the run has ended, and nothing of the agent's is under
-    // way: its start, and its teardown, which collects what the record keeps of it.
+    // Runs the loop until every thread of the run has ended, and nothing of the agent's or a
+    // child's is under way: a start, a teardown, which collects what the record keeps, and a
+    // delete.
     fn settle_threads(&mut self, io: &mut Io<'r, 's, H>) {
         while self.threads > 0
             || !self.starts.is_empty()
             || !self.deletes.is_empty()
             || self.agents.values().any(Agent::tearing_down)
+            || self.leases.values().any(lease::Lease::busy)
+            || self.jobs.values().any(Called::busy)
+            || self.residents.values().any(shared::Resident::busy)
+            || !self.responding.is_empty()
         {
             self.run(io, Duration::MAX);
         }
@@ -647,11 +655,16 @@ impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
             Some(due) => until.min(due.saturating_sub(self.start)),
             None => until,
         };
-        let until = self.looks_due().map_or(until, |due| until.min(due));
+        let until = [self.looks_due(), self.kills_due(), self.bodies_due()]
+            .into_iter()
+            .flatten()
+            .fold(until, Duration::min);
         io.run_until(self, self.start.saturating_add(until));
         self.read_clock(io);
         Sessions::tick(self, io);
         self.look(io);
+        self.kill_due(io);
+        self.time_out_bodies(io);
         if interruption::signal().is_some() {
             self.stop_meetings(io);
         }
@@ -729,7 +742,7 @@ impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
         self.next_op += 1;
         let caller = match asked {
             Asked::Agent(id, _) => Caller::Agent(id),
-            Asked::Job(job) | Asked::Body(job, _) => Caller::Job(job),
+            Asked::Job(job, _) | Asked::Body(job, _) => Caller::Job(job),
         };
         self.unanswered.insert(op, asked);
         Event::OpArrived {
@@ -762,7 +775,7 @@ impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
         let mut end = None;
         for action in actions {
             match action {
-                Action::StartAgents => self.start_agents(io)?,
+                Action::StartAgents => self.start_agents(io),
                 Action::Reply { op, reply } => self.reply(io, op, reply, core)?,
                 Action::StartFinalCall {
                     job,
@@ -777,9 +790,9 @@ impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
                     timeout,
                 } => {
                     let call = (&payload, arguments);
-                    self.start_call(core, job, function, call, timeout)?;
+                    self.start_call(io, core, job, function, call, timeout)?;
                 }
-                Action::StopCall { job } => self.stop_job(job),
+                Action::StopCall { job } => self.stop_call(io, job),
                 Action::StartLease {
                     lease,
                     holder,
@@ -788,7 +801,7 @@ impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
                     start_by,
                 } => {
                     let start = (lease, instance, start_by);
-                    self.start_lease(core, start, (holder, grant))?;
+                    self.start_lease(io, core, start, (holder, grant))?;
                 }
                 Action::RunCommand {
                     lease,
@@ -802,7 +815,7 @@ impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
                         timeout,
                         required_output: self.waiting.contains_key(&lease),
                     };
-                    self.send_lease(lease, Message::Order(lease::Order::Run(run)));
+                    self.lease_order(io, lease, lease::Order::Run(run));
                 }
                 Action::Transfer {
                     lease,
@@ -811,27 +824,18 @@ impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
                     direction,
                     max_bytes,
                 } => {
-                    let holder = self.holder_trees(lease, holder).in_group(lease.0);
+                    let holder = self.holder_session(lease, holder);
                     let transfer = lease::Transfer {
                         number,
                         direction,
                         max_bytes,
                         holder,
                     };
-                    let order = lease::Order::Transfer(transfer);
-                    self.send_lease(lease, Message::Order(order));
+                    self.lease_order(io, lease, lease::Order::Transfer(transfer));
                 }
-                Action::CloseLease { lease } => {
-                    self.send_lease(lease, Message::Stop);
-                    // The lease's transfer ends with it, as the stop reaches its thread.
-                    Sessions::cancel(self, io, lease.0);
-                }
+                Action::CloseLease { lease } => self.close_lease(io, lease),
                 Action::TearDownAgent { agent } => self.tear_down_agent(io, agent),
-                Action::TearDownShared { target } => {
-                    if let Some(resident) = self.residents.get_mut(&target) {
-                        resident.close();
-                    }
-                }
+                Action::TearDownShared { target } => self.close_resident(io, target),
                 // Only a reply can follow `Finish` or `Abandon` in its batch: the refusal of an op
                 // taken at the hard end, by which its answer was due, so `answer` notes it unsent,
                 // and the op ends with the agent's sandbox, which the run's end deletes.
@@ -868,13 +872,9 @@ impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
         };
         let (id, unanswered) = match asked {
             Asked::Agent(id, unanswered) => (id, unanswered),
-            Asked::Body(job, waiting) => return self.watch(core, job, waiting, reply),
-            Asked::Job(job) => {
-                // A call whose thread has ended has no op left to answer.
-                let _ = self
-                    .call(job)
-                    .orders
-                    .send(Message::Order(relay::Order::Sandbox(reply)));
+            Asked::Body(job, waiting) => return self.watch(io, core, job, waiting, reply),
+            Asked::Job(job, incoming) => {
+                self.answer_call(io, job, Ask::Reply(incoming, reply), "reply");
                 return Ok(());
             }
         };
@@ -933,70 +933,61 @@ impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
         }
     }
 
-    fn stop_job(&mut self, job: JobId) {
-        // A call whose thread has ended has nothing left to stop.
-        let _ = self.call(job).orders.send(Message::Stop);
+    // Answers an op of call `job`'s target with `answer`, `what` it is, by when what the call left
+    // is collected.
+    fn answer_call(&mut self, io: &mut Io<'r, 's, H>, job: JobId, answer: Ask, what: &'static str) {
+        let called = self.call(job);
+        let (session, by) = (called.session, called.child.deadlines.collect);
+        let Some(session) = session else {
+            unreachable!("an op of a call's target came on its session")
+        };
+        let token = self.token(Purpose::Reply(job, what));
+        Sessions::ask(self, io, session, answer, (by, token));
     }
 
-    fn call(&mut self, job: JobId) -> &mut Called {
-        // A type tying the job to its start would carry the runtime's sender through the core,
-        // which holds no runtime state.
+    fn call(&mut self, job: JobId) -> &mut Called<'r> {
+        // A type tying the job to its start would carry the runtime's state through the core,
+        // which holds none.
         let Some(call) = self.jobs.get_mut(&job) else {
             unreachable!(
                 "job {} was stopped, answered or leased for, but never started, though the core \
-                 acts only on a job it has started, and the `StartFinalCall` or `StartCall` that started it, \
-                 performed before, kept a sender into its call's inbox, even if the call then \
-                 failed as it started",
+                 acts only on a job it has started, and the `StartFinalCall` or `StartCall` that \
+                 started it, performed before, made its call, which the run keeps",
                 job.0
             )
         };
         call
     }
 
-    fn holder_trees(&mut self, lease: LeaseId, holder: Caller) -> Trees {
-        let trees = match holder {
+    fn holder_session(&mut self, lease: LeaseId, holder: Caller) -> SessionId {
+        let session = match holder {
             // The core takes the agent's ops only while the agent works, its sandbox started.
-            Caller::Agent(id) => (self.agents.get(&id))
-                .and_then(|agent| agent.session)
-                .map(|session| self.sessions.trees(session)),
-            // The op came with them.
-            Caller::Job(job) => self.call(job).trees.take(),
+            Caller::Agent(id) => (self.agents.get(&id)).and_then(|agent| agent.session),
+            // The op came on it.
+            Caller::Job(job) => self.call(job).session,
         };
-        let Some(trees) = trees else {
+        let Some(session) = session else {
             unreachable!(
-                "lease {} was ordered a transfer with no trees of its holder's, though the core \
-                 orders one only for an op of the holder's, taken while its sandbox runs, and a \
-                 call relays each op with its sandbox's trees",
+                "lease {} was ordered a transfer with no session of its holder's, though the core \
+                 orders one only for an op of the holder's, taken while its sandbox runs",
                 lease.0
             )
         };
-        trees
+        session
     }
 
-    fn send_lease(&self, lease: LeaseId, message: Message<lease::Order>) {
-        // A type tying the order to the open would carry the runtime's sender through the core,
-        // which holds no runtime state.
-        let Some(orders) = self.leases.get(&lease) else {
-            unreachable!(
-                "lease {} was given an order, but never opened, though the core orders only a \
-                 lease it has opened, and the `StartLease` that opened it, performed before, kept \
-                 a sender into its inbox, even if the lease then failed as it started",
-                lease.0
-            )
-        };
-        // A lease whose thread has ended has run its last command, and the core hears of its end.
-        let _ = orders.send(message);
-    }
-
-    fn stop_children(&mut self) {
-        for resident in self.residents.values_mut() {
-            resident.close();
+    fn stop_children(&mut self, io: &mut Io<'r, 's, H>) {
+        let residents: Vec<TargetId> = self.residents.keys().copied().collect();
+        for target in residents {
+            self.close_resident(io, target);
         }
-        for call in self.jobs.values() {
-            let _ = call.orders.send(Message::Stop);
+        let jobs: Vec<JobId> = self.jobs.keys().copied().collect();
+        for job in jobs {
+            self.stop_call(io, job);
         }
-        for stop in self.leases.values() {
-            let _ = stop.send(Message::Stop);
+        let leases: Vec<LeaseId> = self.leases.keys().copied().collect();
+        for lease in leases {
+            self.close_lease(io, lease);
         }
     }
 }

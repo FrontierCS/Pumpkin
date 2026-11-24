@@ -4,10 +4,9 @@
 //! [`Registration`] meets one sandbox and opens its session there. The loop's owner drives a
 //! session by [`Sessions::ask`], whose [`Answer`] it hears with the token it gave
 //! ([`Owner::answered`]), and hears what the sandbox sends as [`Arrival`]s ([`Owner::arrived`]).
-//! Another thread drives one through a [`Remote`]. What an op or a model request means is the
-//! owner's to decide: the gateway authorizes nothing, but bounds what they cost the host. The
-//! owner answers an op with [`Ask::Reply`] or [`Ask::Refuse`], and a model request through
-//! [`IncomingModelRequest::respond`], from any thread.
+//! What an op or a model request means is the owner's to decide: the gateway authorizes nothing,
+//! but bounds what they cost the host. The owner answers an op with [`Ask::Reply`] or
+//! [`Ask::Refuse`], and a model request with [`Ask::Respond`], a frame of its response at a time.
 //!
 //! A sandbox, however buggy, can't harm the host through its session: a message that fails to
 //! parse or comes out of turn, more replies than a waiting request takes, and a malformed tree
@@ -25,18 +24,16 @@
 //! however late it looks. A frame may also wait behind another's, until that one's deadline.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::sync::Arc;
-use std::sync::mpsc::SyncSender;
+use std::io;
+use std::path::PathBuf;
 use std::time::Duration;
-use std::{fs, io};
 
-pub use ask::Ask;
+pub use ask::{Ask, Response};
 pub use meeting::{
     Dialer, Elsewhere, GatewayAddress, Listener, Met, Registration, SocketMeeting, Sockets,
     Unattested, Unreached,
 };
 pub use op::Op;
-pub use remote::{ModelResponse, Remote, Request, Trees};
 use schema::ir::{GpuModel, Mode};
 use schema::sandbox::op::OpCall;
 use schema::sandbox::{Entry, ExitStatus, OpPayloadLimit, RelativePath, pumpkin_dir};
@@ -47,7 +44,6 @@ mod bound;
 mod frames;
 mod meeting;
 mod op;
-mod remote;
 mod session;
 mod trees;
 
@@ -115,9 +111,10 @@ pub struct Process {
 pub enum Put {
     Dir(RelativePath, Mode),
     File(RelativePath, Mode, Vec<u8>),
-    /// A file of the host's, read as it is sent, whose size is its size as the put reaches it: one
-    /// that then reads short, or fails to be read, fails the put, and the session lives on.
-    Read(RelativePath, Mode, fs::File),
+    /// The host's file at the path, opened as the put reaches it and read as it is sent, whose
+    /// size is its size then: one that can't be opened, or then reads short, fails the put, and
+    /// the session lives on.
+    Read(RelativePath, Mode, PathBuf),
 }
 
 #[derive(Debug)]
@@ -186,12 +183,16 @@ impl RefusedOp {
     }
 }
 
+/// A model request that arrived whole, in flight until its response ends ([`Ask::Respond`]), on
+/// the session that handed it out.
 #[derive(Debug)]
-#[must_use = "a model request dropped unanswered holds its client, and its place in the flight, \
-              until the session ends: answer it with `IncomingModelRequest::respond`"]
+#[must_use = "a model request left unanswered holds its client, and its place in the flight, \
+              until the session ends: answer it with `Ask::Respond`, ending with `Response::End`"]
 pub struct IncomingModelRequest {
     pub request: ModelRequest,
-    responder: remote::Responder,
+    /// The session that it came on, which [`Ask::Respond`] answers it on, with its `number`.
+    pub session: SessionId,
+    pub number: u32,
 }
 
 /// An HTTP request to a sandbox's model endpoint, as its client sent it, whole.
@@ -206,20 +207,20 @@ pub struct ModelRequest {
     pub body: Vec<u8>,
 }
 
-/// Where a session's arrivals go: to the loop's owner, or through a function to another thread.
-enum Sink {
-    Owner,
-    Thread(Box<dyn Fn(Arrival) + Send>),
-}
-
-/// Where a request's answer goes: to the loop's owner with its token, or to the thread that
-/// waits on it.
+/// Where a request's answer goes: to the loop's owner, with its token.
+#[derive(Clone, Copy)]
 enum Answerer {
     Owner(u64),
     // The owner's set-up of the sandbox ([`Sessions::set_up`]), whose failure says what failed.
     SetUp(u64),
-    // With the group of its handle.
-    Thread(SyncSender<remote::ToThread>, Option<u64>),
+}
+
+impl Answerer {
+    fn token(&self) -> u64 {
+        match self {
+            Self::Owner(token) | Self::SetUp(token) => *token,
+        }
+    }
 }
 
 /// The sessions of a loop, which its owner holds.
@@ -231,8 +232,6 @@ pub struct Sessions {
     // Whether a `next_tick` that hands `heard` over is in flight.
     flushing: bool,
     origin: Duration,
-    // How another thread sends this loop a request ([`Remote`]).
-    remote: Arc<dyn Fn(Request) + Send + Sync>,
 }
 
 struct SessionSlot {
@@ -241,17 +240,14 @@ struct SessionSlot {
 }
 
 impl Sessions {
-    /// Sessions whose deadlines are times since `origin` on the loop's clock, and which another
-    /// thread reaches by `remote`, which sends the loop the request it is given, for the owner to
-    /// hand [`Sessions::serve`].
-    pub fn new(origin: Duration, remote: Arc<dyn Fn(Request) + Send + Sync>) -> Self {
+    /// Sessions whose deadlines are times since `origin` on the loop's clock.
+    pub fn new(origin: Duration) -> Self {
         Self {
             slots: Vec::new(),
             free: Vec::new(),
             heard: VecDeque::new(),
             flushing: false,
             origin,
-            remote,
         }
     }
 
@@ -277,15 +273,6 @@ impl Sessions {
         let slot =
             (self.slots.get(id.index as usize)).filter(|slot| slot.generation == id.generation)?;
         slot.session.as_ref()?.gpus()
-    }
-
-    /// A handle that drives the session from another thread, whose arrivals go to `arrivals`.
-    /// Dropping the handle drops the session.
-    pub fn remote(&mut self, id: SessionId, arrivals: Box<dyn Fn(Arrival) + Send>) -> Remote {
-        if let Some(session) = self.held(id).0 {
-            session.sink = Sink::Thread(arrivals);
-        }
-        Remote::new(id, Arc::clone(&self.remote))
     }
 
     /// Ends the session, if it hasn't ended, and forgets it once nothing is in flight on it.
@@ -362,14 +349,7 @@ impl Sessions {
             index,
             generation: slot.generation,
         };
-        let Takes { ops, models } = takes;
-        let opening = session::Opening {
-            limit: ops,
-            takes_models: models,
-            sink: Sink::Owner,
-        };
-        let remote = Arc::clone(&self.remote);
-        let session = session::Session::new(id, self.origin, phase(id), opening, remote);
+        let session = session::Session::new(id, self.origin, phase(id), takes);
         slot.session = Some(session);
         id
     }
@@ -415,7 +395,7 @@ impl Sessions {
     }
 }
 
-// Where a session tells what it heard: to the owner's queue, or for a thread's sink, at once.
+// Where a session tells what it heard: to the owner's queue.
 struct Told<'a> {
     id: SessionId,
     heard: &'a mut VecDeque<Heard>,
@@ -438,18 +418,11 @@ impl Told<'_> {
                 };
                 self.heard.push_back(Heard::Answer(token, answer));
             }
-            // A thread that has given up waiting has nothing left to hear.
-            Answerer::Thread(sender, _) => {
-                let _ = sender.try_send(remote::ToThread::Answer(answer));
-            }
         }
     }
 
-    fn arrived(&mut self, sink: &Sink, arrival: Arrival) {
-        match sink {
-            Sink::Owner => self.heard.push_back(Heard::Arrival(self.id, arrival)),
-            Sink::Thread(send) => send(arrival),
-        }
+    fn arrived(&mut self, arrival: Arrival) {
+        self.heard.push_back(Heard::Arrival(self.id, arrival));
     }
 }
 
@@ -557,18 +530,15 @@ impl Sessions {
         id
     }
 
-    /// A handle that moves trees through the session from another thread.
-    pub fn trees(&self, id: SessionId) -> Trees {
-        Trees::of(id, Arc::clone(&self.remote))
-    }
-
-    /// Gives up each collect that a [`Trees`] in `group` ([`Trees::in_group`]) waits for, on every
-    /// session: it fails as interrupted, and its session stays open.
-    pub fn cancel<C: Owner>(owner: &mut C, io: &mut Io<C>, group: u64) {
+    /// Gives up the collect or the put that the owner asked of the session with `token`, if it
+    /// is under way: either fails as interrupted, the put once it has ended its tree with the
+    /// entries sent so far, unless it had sent them all. The session stays open. The owner hears
+    /// the answer once this call has returned, never in it.
+    pub fn cancel<C: Owner>(owner: &mut C, io: &mut Io<C>, id: SessionId, token: u64) {
         owner
             .sessions()
-            .each(|session, told| session.cancel_group(Some(group), told));
-        Self::hand_over(owner, io);
+            .with(id, |session, told| session.cancel(io, token, told));
+        owner.sessions().flush_later(io);
     }
 
     /// Whether it still holds a session: one that its owner hasn't dropped, or that something is

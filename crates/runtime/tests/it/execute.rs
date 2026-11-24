@@ -925,6 +925,16 @@ fn answer(mut connection: TcpStream, time: Option<&SimTime>) -> (Vec<u8>, Option
         connection.write_all(answer.as_bytes()).unwrap();
         return (received, None);
     }
+    // A head over a frame's 64 KiB, as a frame's JSON escapes the quotes of a header it returns.
+    if said == Some("tall") {
+        let tall = "\"".repeat(40 << 10);
+        let answer = format!(
+            "HTTP/1.1 200 OK\r\nretry-after: {tall}\r\ncontent-length: 2\r\n\
+             connection: close\r\n\r\nok"
+        );
+        connection.write_all(answer.as_bytes()).unwrap();
+        return (received, None);
+    }
     if let Some((status, id)) = refused {
         let refused = format!(
             "HTTP/1.1 {status}\r\ncontent-type: text/plain\r\n{id}content-length: 7\r\n\
@@ -1443,12 +1453,8 @@ fn interrupted_agent_start() {
 fn interrupted_call_start() {
     let mut judged = ops_workflow(&["ops", "call train 6", "await 0 completed"], WAITED);
     judged["roles"][1]["image"] = json!(sim::image(HUNG).as_str());
-    // The sweep's delete of the agent's sandbox is recorded once the call's start has deleted
-    // its own, which the two threads would otherwise log in either order.
-    let deleted = Synced::Holding(AGENT_SANDBOX, DELETED);
-    let host = SimHost::new().held_sync(deleted, r#""sandbox":"job-0""#);
     let shown = executed(
-        &host,
+        &SimHost::new(),
         "interrupted-call-start",
         &[(PROVIDER, &Sim::with_startup(WAITED))],
         &judged,
@@ -2677,6 +2683,43 @@ fn model_provider_down() {
         the model endpoint at each create: [true, false]
         a stalled stream's client hung up before the agent's teardown was to end"#]]
     .assert_eq(&shown);
+}
+
+// A response whose head is too long for a frame is cut short at once, and recorded so.
+#[test]
+fn model_head_too_long() {
+    let argv = ["ops", "model m-large tall", "exit"];
+    let shown = executed(
+        &SimHost::new(),
+        "model-head-too-long",
+        &[(PROVIDER, &Sim::new())],
+        &routed(ops_workflow(&argv, 30)),
+        SANDBOXD,
+        &[Also::Exchanges],
+    );
+    expect![[r#"
+        finished, showing [score=0]
+        provider.json routes: {"agent":[{"api":"responses","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"}]}
+        outcome.json: {"agents":[{"role":"agent","route_failure":"the upstream `stand-in` failed the agent's last model request, 0 (200, cut short; failing since request 0), and the agent exited: a deployment fault, not the agent's result; run it again","submission":null,"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
+        log.jsonl:
+        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+        {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
+        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
+        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"model_request_started","request":0},"observed_ns":"0","seq":3}
+        {"actions":[],"at_ns":"0","event":{"answer":{"kind":"cut"},"api":"responses","caller":"agent-0","kept":{"request":{"body_bytes":172,"body_sha256":"97cc748b7b6346908d6191344df721cfa8e31941b1548a344bc2b9aa4c9a3e1f","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}}},"kind":"model_answered","model":"m-large","request":0,"upstream":"stand-in","upstream_status":200},"observed_ns":"0","seq":4}
+        {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"0","seq":5}
+        {"at_ns":"0","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":6}
+        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_collected"},"seq":7}
+        {"actions":[],"at_ns":"0","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":8}
+        {"actions":[{"job":0,"kind":"start_final_call","selections":[{"role":"agent","selection":null}],"timeout_ns":"120000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"0","seq":9}
+        {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_started"},"observed_ns":"0","seq":10}
+        {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_returned","returned":[{"name":"score","value":0}]},"observed_ns":"0","seq":11}
+        {"actions":[],"at_ns":"0","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":12}
+        {"actions":[{"kind":"finish"}],"at_ns":"0","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"0","seq":13}
+        its last record came before the agent's teardown was to end
+        model exchange 0 kept: request {"input":["sha256:7299370c4d7aceb2a25f8c7cd9960c3999397e6f89a015f536d8c1e0a73388a8","sha256:b603e2141cf053ea97e280a192d6ad0d562fc5c008899e06c04804f6e7df9f86"],"model":"vendor/m-large","store":false}; response 
+        model items kept: 2
+        the model endpoint at each create: [true, false]"#]].assert_eq(&shown);
 }
 
 #[test]

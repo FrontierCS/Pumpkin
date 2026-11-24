@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 use std::{fmt, fs};
 
-use gateway::{IncomingModelRequest, ModelRequest, ModelResponse};
+use gateway::ModelRequest;
 use schema::frame;
 use schema::ir::{Api, ModelBudget, ModelName, Name};
 use serde_json::{Map, Value};
@@ -16,9 +16,9 @@ use stdx::time::{self, Clock};
 use ureq::http::header::{AUTHORIZATION, CONTENT_ENCODING};
 use ureq::http::{HeaderMap, HeaderName, HeaderValue, Uri};
 
-use super::Keep;
 use super::closure::{Closed, Headers, Refusal, Route, Status, parsed, refusal};
 use super::usage::{Failure, Scan, Usage};
+use super::{Keep, Respond};
 
 /// How long the upstream may take to resolve the provider's host name.
 // Resolving the name and connecting to it (`CONNECT_TIMEOUT`) are the waits that `IDLE_TIMEOUT`
@@ -281,8 +281,8 @@ impl Upstream {
     /// once the upstream stalls. The client hears 504 if it gives up before the head, the route's
     /// end if shut down by then ([`Refusal::ended`]), 502 for no answer or a coded body, 400 if
     /// the key or the request is refused, and else the response, cut short if it breaks off.
-    /// It calls `forwarding` just before it sends the request. Fails if the head is too long for
-    /// a frame or the deadline passes.
+    /// It calls `forwarding` just before it sends the request. Fails if the client stops taking
+    /// the response.
     pub(crate) fn forward(
         &self,
         closed: &Closed<'_>,
@@ -320,23 +320,20 @@ impl Upstream {
             return replaced(refusal, upstream, closed, &mut body, client, answered);
         }
         let headers = returned(response.headers(), closed);
-        let Client { request, by, keep } = client;
-        let mut client = match request.respond(status, headers, by.1) {
-            Ok(client) => client,
-            Err(error) => {
-                answered(Answer::Cut {
-                    model: closed.model().clone(),
-                    status,
-                    request_id,
-                    usage: None,
-                    failed: None,
-                });
-                return Err(error);
-            }
-        };
+        let Client { respond, keep, .. } = client;
+        if let Err(error) = respond.head(status, headers) {
+            answered(Answer::Cut {
+                model: closed.model().clone(),
+                status,
+                request_id,
+                usage: None,
+                failed: None,
+            });
+            return Err(error);
+        }
         let mut scan = closed.scan();
         let mut body = response.into_body().into_reader();
-        let relayed = relay(&mut body, &mut client, &mut scan, keep);
+        let relayed = relay(&mut body, respond, &mut scan, keep);
         let (usage, failed) = scan.finish();
         let model = closed.model().clone();
         answered(match relayed {
@@ -356,8 +353,8 @@ impl Upstream {
             },
         });
         match relayed {
-            Relayed::Whole => client.end(),
-            Relayed::BrokeOff => client.cut(),
+            Relayed::Whole => respond.end(false),
+            Relayed::BrokeOff => respond.end(true),
             Relayed::Unsent(error) => Err(error),
         }
     }
@@ -425,7 +422,7 @@ impl Upstream {
     ) {
         let taken = match admission {
             Admission::Ended => Err((Bar::Ended, Refusal::ended())),
-            Admission::Open => self.close(route, &client.request.request, body),
+            Admission::Open => self.close(route, client.request, body),
             Admission::Spent { .. } if self.was_shut_down() => Err((Bar::Ended, Refusal::ended())),
             Admission::Spent { budget } => Err((Bar::Budget, Refusal::spent(budget, route))),
         };
@@ -483,7 +480,7 @@ pub enum Admission<'b> {
     },
 }
 
-/// Answers `request` for its sandbox by `by`, a time on `clock`, through an entry of `entries`.
+/// Answers `request` through `client`, by `by`, a time on `clock`, through an entry of `entries`.
 ///
 /// Each is a route's entry and its upstream. The one whose endpoint the request names takes it,
 /// and of several, the one that allows the model it names; else it is refused with a 404 or a 400
@@ -496,7 +493,7 @@ pub enum Admission<'b> {
 // too long for a frame, or as the sandbox's session ends, which the run log shows.
 pub fn serve<'b, C: Clock>(
     entries: &[(Route, Upstream)],
-    request: IncomingModelRequest,
+    (request, client): (&ModelRequest, &mut dyn Respond),
     admission: impl FnOnce(usize) -> Admission<'b>,
     (clock, by): (&C, Duration),
     keep: &dyn Keep,
@@ -505,10 +502,10 @@ pub fn serve<'b, C: Clock>(
 ) {
     let client = Client {
         request,
+        respond: client,
         by: (clock, by),
         keep,
     };
-    let request = &client.request.request;
     let taking = || (entries.iter().enumerate()).filter(|(_, (route, _))| route.takes(request));
     let Some((first, _)) = taking().next() else {
         let routes = || entries.iter().map(|(route, _)| route);
@@ -555,7 +552,8 @@ pub fn serve<'b, C: Clock>(
 }
 
 pub(crate) struct Client<'k, C> {
-    request: IncomingModelRequest,
+    request: &'k ModelRequest,
+    respond: &'k mut dyn Respond,
     // The deadline, as a time on the clock.
     by: (&'k C, Duration),
     keep: &'k dyn Keep,
@@ -570,11 +568,16 @@ fn barred(
     client: Client<'_, impl Clock>,
     answered: impl FnOnce(Answer),
 ) -> io::Result<()> {
-    let Client { request, by, keep } = client;
-    keep.request(&request.request.body, None);
+    let Client {
+        request,
+        respond,
+        keep,
+        ..
+    } = client;
+    keep.request(&request.body, None);
     keep.response(refusal.body(api).as_bytes());
     answered(refusal.barred(bar));
-    refusal.answer(api, request, by.1)
+    refusal.answer(api, respond)
 }
 
 /// The time that `until`, a time on its clock, leaves the exchange: none once it has passed, and
@@ -596,11 +599,11 @@ fn refuse(
     client: Client<'_, impl Clock>,
     answered: impl FnOnce(Answer),
 ) -> io::Result<()> {
-    let Client { request, by, keep } = client;
+    let Client { respond, keep, .. } = client;
     let api = closed.route().api();
     keep.response(refusal.body(api).as_bytes());
     answered(answer);
-    refusal.answer(api, request, by.1)
+    refusal.answer(api, respond)
 }
 
 /// Answers `client`'s request with `refusal` in place of the upstream's response with the status
@@ -614,14 +617,14 @@ fn replaced(
     client: Client<'_, impl Clock>,
     answered: impl FnOnce(Answer),
 ) -> io::Result<()> {
-    let Client { request, by, keep } = client;
+    let Client { respond, keep, .. } = client;
     let mut buffer = vec![0; frame::MAX_BODY_BYTES];
     // A body that breaks off, or is given up on, is kept as far as it came.
     while let Ok(read @ 1..) = body.read(&mut buffer) {
         keep.response(&buffer[..read]);
     }
     answered(refusal.answered(Some(status), request_id));
-    refusal.answer(closed.route().api(), request, by.1)
+    refusal.answer(closed.route().api(), respond)
 }
 
 enum Relayed {
@@ -637,7 +640,7 @@ enum Relayed {
 /// how it went.
 fn relay(
     body: &mut impl Read,
-    client: &mut ModelResponse,
+    client: &mut dyn Respond,
     scan: &mut Scan,
     keep: &dyn Keep,
 ) -> Relayed {
@@ -653,7 +656,7 @@ fn relay(
                 if began {
                     keep.first_output();
                 }
-                if let Err(error) = client.send(&buffer[..read]) {
+                if let Err(error) = client.data(&buffer[..read]) {
                     return Relayed::Unsent(error);
                 }
             }

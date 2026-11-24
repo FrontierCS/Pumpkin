@@ -15,10 +15,9 @@ use schema::sandbox::{
 };
 use schema::workflow::{self, AgentId, TargetId, Workflow};
 
-use crate::child::Report;
 use crate::log::Entry;
 use crate::sandbox::{PUMPKIN, Which, launch};
-use crate::starts::{DeleteWaiter, DisposeWaiter, StartWaiter};
+use crate::starts::DeleteWaiter;
 use crate::{Host, Input, Io, Purpose, Runtime, interruption, record};
 
 /// The agent's sandbox, from when its start begins until it is deleted.
@@ -105,9 +104,9 @@ impl Agent {
 }
 
 impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
-    pub(super) fn start_agents(&mut self, io: &mut Io<'r, 's, H>) -> Result<(), String> {
+    pub(super) fn start_agents(&mut self, io: &mut Io<'r, 's, H>) {
         let workflow = self.workflow();
-        self.start_residents()?;
+        self.start_residents(io);
         let mut startup = self
             .residents
             .keys()
@@ -143,12 +142,11 @@ impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
                 ops: Some(op_payload_limit(workflow, id)),
                 models: workflow.model(id.role()).is_some(),
             };
-            self.begin_start(io, Which::Agent(id), (bound, takes), StartWaiter::Agent(id));
+            self.begin_start(io, Which::Agent(id), (bound, takes));
         }
         gate.startup = startup;
         self.gate = Some(gate);
         self.release_agents(io);
-        Ok(())
     }
 
     // Waits for each agent's and shared role's set-up, until the startup, then starts the work.
@@ -190,9 +188,7 @@ impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
             failures.push(Event::AgentFailed { agent, reason });
         }
         for target in residents {
-            if let Some(resident) = self.residents.get_mut(&target) {
-                failures.extend(resident.fail(target, SHARED_EXPIRED.to_owned()));
-            }
+            failures.extend(self.resident_fail(io, target, SHARED_EXPIRED.to_owned()));
         }
         self.pending
             .extend(failures.into_iter().map(|event| (at, event)));
@@ -207,6 +203,7 @@ impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
 
     pub(super) fn shared_ready(
         &mut self,
+        io: &mut Io<'r, 's, H>,
         target: TargetId,
         at: Duration,
         ready: Result<(), String>,
@@ -215,14 +212,13 @@ impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
             return;
         };
         gate.residents.remove(&target);
-        if let Some(resident) = self.residents.get_mut(&target) {
-            match ready {
-                Ok(()) if at <= self.placed.startup(target.role()) => {}
-                Ok(()) => gate
-                    .failures
-                    .extend(resident.fail(target, SHARED_EXPIRED.to_owned())),
-                Err(reason) => gate.failures.extend(resident.fail(target, reason)),
-            }
+        let failed = match ready {
+            Ok(()) if at <= self.placed.startup(target.role()) => return,
+            Ok(()) => self.resident_fail(io, target, SHARED_EXPIRED.to_owned()),
+            Err(reason) => self.resident_fail(io, target, reason),
+        };
+        if let Some(gate) = &mut self.gate {
+            gate.failures.extend(failed);
         }
     }
 
@@ -340,7 +336,7 @@ impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
                 id: made,
                 reason,
             } => {
-                self.dispose(io, (which, made), &reason, DisposeWaiter::Agent(id));
+                self.dispose(io, (which, made), &reason);
             }
         }
     }
@@ -350,15 +346,14 @@ impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
         let torn = self.agents.remove(&id).is_some_and(|agent| agent.torn);
         match disposed {
             Ok(detail) => self.input(Input::Unstarted(id, detail, torn)),
-            Err(reason) => self.input(Input::Child(Report::Undeleted(reason))),
+            Err(reason) => self.input(Input::Undeleted(reason)),
         }
     }
 
     pub(super) fn tear_down_agent(&mut self, io: &mut Io<'r, 's, H>, id: AgentId) {
         let Some(agent) = self.agents.get_mut(&id) else {
-            let at = self.at;
             let torn_down = Event::AgentTornDown { agent: id };
-            self.input(Input::Child(Report::Event(at, torn_down)));
+            self.input(Input::Core(torn_down));
             return self.note("the agent's sandbox never started: nothing was collected");
         };
         match agent.step {
@@ -491,17 +486,11 @@ impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
         let Some(sandbox) = agent.sandbox.clone() else {
             unreachable!("an agent that holds its session holds its sandbox")
         };
-        self.begin_delete(io, which, sandbox, DeleteWaiter::Agent(id, Some(session)));
-    }
-
-    /// Takes how the delete of the agent's sandbox went.
-    pub(super) fn agent_deleted(&mut self, id: AgentId, deleted: Result<(), String>) {
-        self.agents.remove(&id);
-        let report = match deleted {
-            Ok(()) => Report::Event(self.at, Event::AgentTornDown { agent: id }),
-            Err(error) => Report::Undeleted(error),
+        let waiter = DeleteWaiter::Sandbox {
+            after: Event::AgentTornDown { agent: id },
+            session: Some(session),
         };
-        self.input(Input::Child(report));
+        self.begin_delete(io, which, sandbox, waiter);
     }
 
     /// Queues `input`, which reached the loop now.
@@ -513,22 +502,6 @@ impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
         if let Err(error) = self.log.note(note) {
             self.fail(error);
         }
-    }
-
-    /// Takes a thread's ask for a sandbox's start.
-    pub(super) fn asked(&mut self, io: &mut Io<'r, 's, H>, asked: crate::starts::Asked) {
-        let crate::starts::Asked {
-            which,
-            ops,
-            by,
-            arrivals,
-            reply,
-        } = asked;
-        let takes = Takes {
-            ops,
-            models: self.workflow().model(which.role()).is_some(),
-        };
-        self.begin_start(io, which, (by, takes), StartWaiter::Thread(arrivals, reply));
     }
 }
 

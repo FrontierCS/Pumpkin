@@ -9,7 +9,7 @@ use schema::sandbox::{HelloReply, RegistrationGrant};
 use stdx::io::{self as sio, Io};
 
 use super::{Phase, Session, Then};
-use crate::{Answer, By, Owner, Sink, Told, frames};
+use crate::{Answer, By, Owner, Told, frames};
 
 impl Session {
     pub(crate) fn fail_accept<C: Owner>(
@@ -27,7 +27,7 @@ impl Session {
         }
         // Nothing waits on a session that never opened.
         self.dropped = true;
-        self.sink = Sink::Thread(Box::new(drop));
+        self.heard = false;
         self.end(io, "the session never opened".to_owned(), told);
     }
 

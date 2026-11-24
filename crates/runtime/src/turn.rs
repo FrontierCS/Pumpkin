@@ -1,12 +1,13 @@
 //! The core's turns: each input the loop took becomes the core's event, in the order the inputs
 //! reached the loop, and a tick comes once the core's next act is due.
 
+use std::num::NonZeroU64;
 use std::time::Duration;
 
 use decision::{Action, Caller, Core, Event, Outcome};
-use gateway::{Arrival, Sessions};
+use gateway::{Arrival, Ask, Sessions};
+use schema::ir::TargetLifetime;
 
-use crate::child::Report;
 use crate::{Asked, Host, Input, Io, Runtime, Stopped, call, failed_also, interruption, request};
 
 impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
@@ -56,7 +57,7 @@ impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
                 self.synced(io)?;
             }
             if let Some((job, reply)) = receipt {
-                self.answer_body(job, reply);
+                self.answer_body(io, job, reply);
             }
             // A route ends as the core stops allowing its model requests, the agent's at the work
             // phase's end, a call's at its timeout or its report, before the core's actions are
@@ -124,11 +125,17 @@ impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
                 }
                 (id, arrival)
             }
-            Input::Shared(target, arrival) => {
-                let event = self
-                    .residents
-                    .get_mut(&target)
-                    .and_then(|resident| resident.arrival(target, arrival));
+            Input::Call(job, arrival) => {
+                return self.call_input(io, core, (at, job), arrival, live);
+            }
+            Input::Runner(job, request, waiting) => {
+                return Ok(Some((at, self.op(Asked::Body(job, waiting), request))));
+            }
+            Input::CallEnded(job, end) => return Ok(Some((at, self.call_ended(job, end)))),
+            Input::Undeleted(reason) => return Err(reason),
+            // The shared role fails once, which its call that runs then hears.
+            Input::Core(Event::SharedFailed { target, reason }) => {
+                let event = self.resident_fail(io, target, reason);
                 return Ok(event.map(|event| (at, event)));
             }
             Input::Core(event) => return Ok(Some((at, event))),
@@ -141,17 +148,11 @@ impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
                 }
                 return Ok(None);
             }
-            Input::Child(report) => return self.report(core, report, live),
             Input::Logged(entry) => {
                 self.count(&entry);
                 return self.log.entry(entry).map(|()| None);
             }
-            Input::Session(_)
-            | Input::Start(_)
-            | Input::Delete(_)
-            | Input::Dispose(_)
-            | Input::Edge(_)
-            | Input::Exited => unreachable!(
+            Input::Body(..) | Input::Respond(_) | Input::Edge(_) | Input::Exited => unreachable!(
                 "the loop queued an input for the core that it serves itself, as it takes it"
             ),
         };
@@ -251,23 +252,17 @@ impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
         while let Some((_, input)) = self.inputs.pop_front() {
             let logged = match input {
                 Input::Logged(entry) => self.log.entry(entry),
-                Input::Child(Report::Undeleted(reason)) => Err(reason),
+                Input::Undeleted(reason) => Err(reason),
                 Input::Agent(..)
-                | Input::Shared(..)
+                | Input::Call(..)
+                | Input::Body(..)
+                | Input::Respond(_)
+                | Input::Runner(..)
+                | Input::CallEnded(..)
                 | Input::Unstarted(..)
                 | Input::Core(_)
-                | Input::Session(_)
-                | Input::Start(_)
-                | Input::Delete(_)
-                | Input::Dispose(_)
                 | Input::Edge(_)
-                | Input::Exited
-                | Input::Child(
-                    Report::Event(..)
-                    | Report::CallEnded { .. }
-                    | Report::Op { .. }
-                    | Report::Model { .. },
-                ) => Ok(()),
+                | Input::Exited => Ok(()),
             };
             failures.extend(logged.err());
         }
@@ -276,6 +271,68 @@ impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
             Ok(())
         } else {
             Err(failures.join("; "))
+        }
+    }
+
+    // The core's event for what call `job`'s target handed over at `at`, if it brings one.
+    fn call_input(
+        &mut self,
+        io: &mut Io<'r, 's, H>,
+        core: &Core<'_>,
+        (at, job): (std::time::Duration, decision::JobId),
+        arrival: Arrival,
+        live: bool,
+    ) -> Result<Option<(std::time::Duration, Event)>, String> {
+        match arrival {
+            Arrival::Op(incoming) => {
+                // A call's target holds no now function.
+                let (request, unanswered) = request(incoming, |_, _| None);
+                let asked = Asked::Job(job, unanswered.into_incoming());
+                Ok(Some((at, self.op(asked, request))))
+            }
+            Arrival::Refused(refused) => {
+                let message = refused.message();
+                self.answer_call(io, job, Ask::Refuse(refused), "refusal");
+                self.log
+                    .note(&format!("job {}'s op was refused: {message}", job.0))?;
+                Ok(None)
+            }
+            Arrival::ModelRequest(incoming) => {
+                let caller = Caller::Job(job);
+                self.model_request(live, core, (caller, at), incoming)
+                    .map(|()| None)
+            }
+            Arrival::Exited { .. } | Arrival::Ended { .. } => {
+                unreachable!("the loop queues only what the core takes of a call's target")
+            }
+        }
+    }
+
+    // The core's event of call `job`'s end, whose body returned or failed as `end` says.
+    fn call_ended(
+        &mut self,
+        job: decision::JobId,
+        mut end: Result<decision::CallResult, String>,
+    ) -> Event {
+        let target = self.call(job).target;
+        if self.workflow().target(target).lifetime == TargetLifetime::Work {
+            self.resident_end(target, &mut end);
+        }
+        // Whole for every bar the target heard: the route reports a bar before its client hears
+        // it, so before the call can end on it, into the inputs, which keep order.
+        let count = self.call(job).model_requests_over_budget;
+        let model_requests_over_budget = NonZeroU64::new(count);
+        match end {
+            Ok(result) => Event::CallReturned {
+                job,
+                result,
+                model_requests_over_budget,
+            },
+            Err(reason) => Event::CallFailed {
+                job,
+                reason,
+                model_requests_over_budget,
+            },
         }
     }
 

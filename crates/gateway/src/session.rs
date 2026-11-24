@@ -10,8 +10,8 @@ use schema::sandbox::{FromSandbox, OpPayloadLimit, ToSandbox};
 use stdx::io::{self as sio, Io};
 
 use crate::{
-    Answer, Answerer, Arrival, By, Flight, ModelRequest, Owner, SANDBOX_ENDED, SessionId, Sink,
-    SocketMeeting, Told, frames, remote,
+    Answer, Answerer, Arrival, By, Flight, ModelRequest, Owner, SANDBOX_ENDED, SessionId,
+    SocketMeeting, Takes, Told, frames,
 };
 
 mod arrivals;
@@ -29,7 +29,8 @@ const RECEIVE_BYTES: usize = 256 * 1024;
 #[expect(
     clippy::struct_excessive_bools,
     reason = "each is a fact of its own: whether it takes model requests, whether its owner \
-              dropped it, and whether a receive, a send or an accept is in flight"
+              hears of it, whether its owner dropped it, and whether a receive, a send or an \
+              accept is in flight"
 )]
 pub(crate) struct Session {
     pub(crate) id: SessionId,
@@ -40,9 +41,10 @@ pub(crate) struct Session {
     pub(crate) kept: Option<tls::Stream>,
     pub(crate) phase: Phase,
     gpus: Option<Vec<GpuModel>>,
-    pub(crate) sink: Sink,
     limit: Option<OpPayloadLimit>,
     takes_models: bool,
+    // Whether its arrivals go to the owner: not once it fails before it opens.
+    heard: bool,
     // Whether a receive, a send or an accept is in flight.
     receiving: bool,
     sending: bool,
@@ -60,7 +62,6 @@ pub(crate) struct Session {
     // The time by which the requests whose deadline passed as the session ended were due.
     late: Option<Duration>,
     dropped: bool,
-    pub(crate) remote: std::sync::Arc<dyn Fn(remote::Request) + Send + Sync>,
 }
 
 pub(crate) enum Phase {
@@ -98,25 +99,12 @@ enum Then {
     PutFrame(u32),
 }
 
-pub(crate) struct Opening {
-    pub(crate) limit: Option<OpPayloadLimit>,
-    pub(crate) takes_models: bool,
-    pub(crate) sink: Sink,
-}
-
 impl Session {
-    pub(crate) fn new(
-        id: SessionId,
-        origin: Duration,
-        phase: Phase,
-        opening: Opening,
-        remote: std::sync::Arc<dyn Fn(remote::Request) + Send + Sync>,
-    ) -> Self {
-        let Opening {
-            limit,
-            takes_models,
-            sink,
-        } = opening;
+    pub(crate) fn new(id: SessionId, origin: Duration, phase: Phase, takes: Takes) -> Self {
+        let Takes {
+            ops: limit,
+            models: takes_models,
+        } = takes;
         Self {
             id,
             origin,
@@ -126,9 +114,9 @@ impl Session {
             accepting: matches!(phase, Phase::Accepting { .. }),
             phase,
             gpus: None,
-            sink,
             limit,
             takes_models,
+            heard: true,
             receiving: false,
             sending: false,
             receive_buffer: Vec::new(),
@@ -141,7 +129,6 @@ impl Session {
             ended: None,
             late: None,
             dropped: false,
-            remote,
         }
     }
 
@@ -278,8 +265,15 @@ impl Session {
                 told.answer(answer, Answer::Done(Err(failed(out.by.at))));
             }
         }
-        told.arrived(&self.sink, Arrival::Ended { reason });
+        self.arrived(Arrival::Ended { reason }, told);
         self.close_when_idle(io);
+    }
+
+    // Hands the owner `arrival`, unless the session never opened.
+    pub(crate) fn arrived(&self, arrival: Arrival, told: &mut Told<'_>) {
+        if self.heard {
+            told.arrived(arrival);
+        }
     }
 
     fn ended_error(&self) -> io::Error {

@@ -115,11 +115,11 @@ runtime, the core and the providers never see the language. Only `library` knows
 ### `crates/gateway`, `crates/tls`, `crates/sandboxd`
 
 The two ends of a session. The `gateway` is the host's end: a process's sessions live on its
-loop, in its owner's `Sessions`, through which the owner moves trees, runs commands, and hears of
-each op, model request and exit as an `Arrival`; another thread drives a session through a
-`Remote`, whose calls the loop serves. `sandboxd` serves the sandbox's end, carries ops from
-`sandboxctl` and model requests from its model endpoint, and freezes the sandbox. `tls` carries a
-session that crosses the Internet, below the session's protocol.
+loop, in its owner's `Sessions`, through which the owner moves trees, runs commands, answers ops
+and model requests, and hears of each op, model request and exit as an `Arrival`. `sandboxd`
+serves the sandbox's end, carries ops from `sandboxctl` and model requests from its model
+endpoint, and freezes the sandbox. `tls` carries a session that crosses the Internet, below the
+session's protocol.
 
 **Architecture Invariant:** a sandbox can't harm the host through its session. Anything out of
 protocol ends the session, and a session costs the host only bounded memory and bounded waits.
@@ -176,11 +176,11 @@ each as a sandbox in a Modal workspace, under gVisor, through its helper, `pumpk
 
 The host side. `Run::prepare` reserves on each provider and begins the record, and `Run::execute`
 drives the `Core` on the run's providers to its outcome, or until a signal stops it. One loop
-drives the core: it holds every session, the agent's start and teardown, every sandbox's start and
-delete, and the record's syncs. Each call and lease is a child on a thread of its own, which
-reaches the loop through its events. A sandbox's start and delete call its provider on a thread
-of their own, which completes into the loop. `record` and `log` lay out the record, and `Record`
-reads it back.
+drives the core: it holds every session, the agent, every call, lease and shared role, every
+sandbox's start and delete, and the record's syncs. A provider's call runs on an edge worker,
+which completes into the loop. A model request's exchange upstream runs on a thread of its own,
+which hands the loop its response a frame at a time. A call's body runs on a worker of its own,
+which asks the loop for each request of its target's and waits for the answer. `record` and `log` lay out the record, and `Record` reads it back.
 
 **Architecture Invariant:** the runtime is written once, against `Provider`. It depends on no
 provider's crate, not even in its tests, which run on a simulated provider.

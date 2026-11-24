@@ -120,7 +120,7 @@ impl Session {
                     session: self.id,
                     stream,
                 };
-                told.arrived(&self.sink, Arrival::Exited { process, status });
+                self.arrived(Arrival::Exited { process, status }, told);
             }
             (Route::Running, _) => return Err(more()),
             (Route::Put { answer, by, put }, reply @ (Reply::Done | Reply::Failed(_))) => {

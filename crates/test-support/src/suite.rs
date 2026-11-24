@@ -22,7 +22,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use expect_test::expect;
-use gateway::{Arrival, Dialer, Put, Registration, Remote, Sockets};
+use gateway::{Arrival, Dialer, Put, Registration, Sockets};
 use provider::{
     Console, Create, ImageRef, Listed, Meeting, Provider, Reservation, Role, RunTag, SandboxId,
     SandboxdRef, UnixTime,
@@ -33,6 +33,7 @@ use stdx::time::{Clock as _, Machine};
 use stdx::{Context, Deadline};
 
 use crate::TestDir;
+use crate::gateway::Session;
 
 /// A provider under the suite: the platform it reaches, how that platform makes a sandbox's
 /// `sandboxd` misbehave, and what the platform holds.
@@ -74,7 +75,7 @@ pub struct Locals {
 }
 
 // A started sandbox's session and what it hands over, or why it didn't start.
-type Started = Result<(Remote, Receiver<Arrival>), String>;
+type Started = Result<(Session, Receiver<Arrival>), String>;
 
 // A wait that nothing can end sooner, such as a put to a `sandboxd` that has stopped reading, no
 // longer than any provider's startup, so that no outcome rests on its length.
@@ -254,7 +255,7 @@ fn lifecycle(
 
 fn kills(suite: &mut Suite<'_>, image: &ImageRef, sandboxd: &SandboxdRef) -> Vec<String> {
     let (id, started) = suite.start("killed", image, sandboxd);
-    let (mut session, arrivals) = started.unwrap();
+    let (session, arrivals) = started.unwrap();
     let by = || Machine.now() + suite.startup();
     let process = session.start(sleep(), by()).unwrap();
     session.kill(process, by()).unwrap();
@@ -306,7 +307,7 @@ fn stalls(suite: &mut Suite<'_>, image: &ImageRef, sandboxd: &SandboxdRef) -> Ve
     suite.subject.stall(&id);
     vec![
         started,
-        format!("then a put: {}", put(session.unwrap().0)),
+        format!("then a put: {}", put(&session.unwrap().0)),
         suite.listed(),
         format!("deleting it: {}", suite.delete_ours(&[id])),
         suite.listed(),
@@ -358,7 +359,7 @@ fn outcome<T>(session: &Result<T, String>) -> String {
     }
 }
 
-fn put(mut session: Remote) -> String {
+fn put(session: &Session) -> String {
     // Many times what a Unix socket holds unread with the default buffers
     // (`net.core.wmem_default`), which the suite assumes of its host: buffers that held it all
     // would let the put succeed.
@@ -520,7 +521,7 @@ impl<'a> Suite<'a> {
         let (sender, arrivals) = mpsc::channel();
         let accepted = (self.gateway).accept(registration, by, crate::gateway::passive(), sender);
         let accepted = accepted.map_err(|error| error.to_string());
-        let session = accepted.and_then(|mut session| {
+        let session = accepted.and_then(|session| {
             session
                 .set_up(by)
                 .context(format_args!("sandbox {}", id.as_str()))?;

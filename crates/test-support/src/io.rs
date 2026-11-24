@@ -18,7 +18,7 @@ use std::path::Path;
 use std::time::Duration;
 use std::{fs, mem, thread};
 
-use stdx::io::{Backend, Durable, File, Inbox, Io, Listener, Loop, Stream};
+use stdx::io::{Backend, Durable, File, Io, Listener, Loop, Stream};
 
 use crate::TestDir;
 use crate::world::{Script, Synced, World};
@@ -534,9 +534,8 @@ struct Case {
 
 impl Case {
     fn new(backend: Box<dyn Backend>) -> Self {
-        let (_, inbox) = Inbox::new(&*backend);
         Self {
-            io: Io::new(backend, CAPACITY, inbox),
+            io: Io::new(backend, CAPACITY),
             owner: Owner::default(),
             names: BTreeMap::new(),
         }

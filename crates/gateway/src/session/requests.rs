@@ -3,7 +3,6 @@
 
 use std::io;
 use std::path::PathBuf;
-use std::sync::mpsc::SyncSender;
 use std::time::Duration;
 
 use schema::sandbox::op::OpReply;
@@ -13,29 +12,42 @@ use stdx::io::Io;
 
 use super::replies::Route;
 use super::{Session, Then};
-use crate::remote::ToThread;
 use crate::trees::PutState;
 use crate::{Answer, Answerer, By, Due, IncomingOp, Owner, Process, Put, RefusedOp, Told, frames};
 
 impl Session {
-    /// Gives up each collect that a handle in `group` waits for, which fails as interrupted, and
-    /// leaves the session open; none is the group of every handle outside one.
-    pub(crate) fn cancel_group(&mut self, group: Option<u64>, told: &mut Told<'_>) {
-        let streams: Vec<u32> = (self.routes.iter())
-            .filter_map(|(stream, route)| match route {
-                Route::Tree {
-                    answer: Answerer::Thread(_, of),
-                    ..
-                } if *of == group => Some(*stream),
-                _ => None,
-            })
-            .collect();
-        for stream in streams {
-            if let Some(Route::Tree { answer, .. }) = self.routes.remove(&stream) {
+    /// Gives up the collect or the put that the owner asked for with `token`, if it is under way:
+    /// the collect fails as interrupted, and so does the put, which ends its tree with the entries
+    /// sent so far, unless it had sent them all.
+    pub(crate) fn cancel<C: Owner>(&mut self, io: &mut Io<C>, token: u64, told: &mut Told<'_>) {
+        let asked = |route: &Route| match route {
+            Route::Tree { answer, .. } | Route::Put { answer, .. } => answer.token() == token,
+            Route::Reply { .. } | Route::Start { .. } | Route::Running => false,
+        };
+        let Some(stream) =
+            (self.routes.iter()).find_map(|(stream, route)| asked(route).then_some(*stream))
+        else {
+            return;
+        };
+        match self.routes.remove(&stream) {
+            Some(Route::Tree { answer, .. }) => {
                 let cut = "stopped before the tree was whole";
                 let error = io::Error::new(io::ErrorKind::Interrupted, cut);
                 told.answer(answer, Answer::Collected(Err(error)));
             }
+            Some(Route::Put {
+                answer,
+                by,
+                mut put,
+            }) => {
+                put.cancel();
+                self.routes.insert(stream, Route::Put { answer, by, put });
+                self.pump_put(io, stream, told);
+            }
+            Some(route) => {
+                self.routes.insert(stream, route);
+            }
+            None => {}
         }
     }
 
@@ -157,42 +169,21 @@ impl Session {
         }
     }
 
-    /// Puts `entries` below `dir`, made as `root` says. Where `more` is given, the put asks there
-    /// for its next entries once it has sent these, and takes them by [`Session::put_more`].
+    /// Puts `entries` below `dir`, made as `root` says.
     pub(crate) fn put<C: Owner>(
         &mut self,
         io: &mut Io<C>,
-        (dir, root, entries, more): (
-            schema::ir::AbsolutePath,
-            schema::sandbox::Root,
-            Vec<Put>,
-            Option<SyncSender<ToThread>>,
-        ),
+        (dir, root, entries): (schema::ir::AbsolutePath, schema::sandbox::Root, Vec<Put>),
         (answer, by): (Answerer, Duration),
         told: &mut Told<'_>,
     ) {
         let message = |stream| ToSandbox::Put { stream, dir, root };
         match self.open_request(io, message, (by, Then::PutFrame), told) {
             Ok(stream) => {
-                let put = PutState::new(entries, more);
+                let put = PutState::new(entries);
                 self.routes.insert(stream, Route::Put { answer, by, put });
             }
             Err(error) => told.answer(answer, Answer::Done(Err(error))),
-        }
-    }
-
-    /// Hands the put on `stream` the next entries that it asked for, after which more follow if
-    /// `more`. A put already answered drops them.
-    pub(crate) fn put_more<C: Owner>(
-        &mut self,
-        io: &mut Io<C>,
-        stream: u32,
-        (entries, more): (Vec<Put>, bool),
-        told: &mut Told<'_>,
-    ) {
-        if let Some(Route::Put { put, .. }) = self.routes.get_mut(&stream) {
-            put.hand(entries, more);
-            self.pump_put(io, stream, told);
         }
     }
 

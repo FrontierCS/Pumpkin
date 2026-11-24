@@ -1,194 +1,293 @@
-//! A work phase owns one sandbox per work-lifetime target. Its worker lends the
-//! session to each admitted body in turn, then collects and deletes the sandbox on closure.
+//! A work phase owns one sandbox per work-lifetime target, on the loop. It lends the session to
+//! each call's body in turn, then collects and deletes the sandbox once the phase closes it and
+//! its last call has ended.
 
-use std::path::Path;
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::Duration;
+use std::collections::VecDeque;
+use std::path::PathBuf;
 
 use decision::{CallResult, Event, JobId};
-use gateway::Arrival;
+use gateway::{Answer, Arrival, SessionId, Sessions, Takes};
+use provider::SandboxId;
 use schema::sandbox::{log_dir, out_dir};
 use schema::workflow::TargetId;
-use stdx::Context;
-use stdx::io::Events;
-use stdx::time::Clock as _;
 
-use crate::call::job;
-use crate::child::{Child, End, Message, Report};
-use crate::sandbox::{Sandboxes, Started, Which, collect};
-use crate::{Entry, Host, Inbox, Input, Runtime};
+use crate::body::Stdin;
+use crate::child::{End, collect, uncollected};
+use crate::log::Entry;
+use crate::sandbox::Which;
+use crate::{Host, Input, Io, Purpose, Runtime};
 
-type Call<'r, H> = (job::Call<'r>, Child<'r, H, crate::relay::Order>);
-
-pub(super) struct Resident<'r, H: Host> {
-    orders: Option<Sender<Call<'r, H>>>,
+pub(super) struct Resident {
+    dir: PathBuf,
+    started: Option<(SandboxId, SessionId)>,
+    step: Step,
+    // The calls that wait for their turn, behind the one whose body runs.
+    calls: VecDeque<JobId>,
+    active: Option<JobId>,
+    /// The standard input that the calls' bodies share, but while one runs.
+    pub(super) stdin: Option<Stdin>,
     failed: Option<String>,
-    active: Option<(JobId, Sender<Message<crate::relay::Order>>)>,
+    closed: bool,
+    // Why its sandbox's session ended, which a call's body on it asks.
+    pub(super) session_end: Option<String>,
 }
 
-impl<'r, H: Host> Resident<'r, H> {
-    fn open() -> (Self, Receiver<Call<'r, H>>) {
-        let (tx, rx) = mpsc::channel();
-        let resident = Self {
-            orders: Some(tx),
-            failed: None,
-            active: None,
-        };
-        (resident, rx)
+/// A shared role's step under way, which names its ask's answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Step {
+    Starting,
+    Serving,
+    Freezing,
+    // Its `out`, then its `log`.
+    Collecting(u8),
+    Deleting,
+}
+
+impl Resident {
+    /// Whether its sandbox's session is `session`.
+    pub(super) fn holds(&self, session: SessionId) -> bool {
+        matches!(self.started, Some((_, of)) if of == session)
     }
 
-    pub(super) fn call(
-        &mut self,
-        call: job::Call<'r>,
-        child: Child<'r, H, crate::relay::Order>,
-    ) -> Result<(), String> {
-        let active = (call.job, child.inbox.sender());
-        let sender = self.orders.as_ref().ok_or("the shared worker is closed")?;
-        sender
-            .send((call, child))
-            .context("sending a call to its shared worker")?;
-        self.active = Some(active);
-        Ok(())
+    /// Whether it is under way: until its sandbox's delete begins.
+    pub(super) fn busy(&self) -> bool {
+        self.step != Step::Deleting
     }
+}
 
-    pub(super) fn finish(&mut self, job: JobId, end: &mut Result<CallResult, String>) {
-        if self.active.as_ref().is_some_and(|(id, _)| *id == job) {
-            self.active = None;
-            if let Some(reason) = &self.failed {
-                *end = Err(reason.clone());
-            }
+impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
+    pub(super) fn start_residents(&mut self, io: &mut Io<'r, 's, H>) {
+        for target in self.workflow().work_targets() {
+            let which = Which::Shared(target);
+            let resident = Resident {
+                dir: self.dir.join(which.record_dir(self.workflow())),
+                started: None,
+                step: Step::Starting,
+                calls: VecDeque::new(),
+                active: None,
+                stdin: Some(Stdin::default()),
+                failed: None,
+                closed: false,
+                session_end: None,
+            };
+            self.residents.insert(target, resident);
+            let takes = Takes {
+                ops: None,
+                models: self.workflow().model(target.role()).is_some(),
+            };
+            let by = self.placed.startup(target.role());
+            self.begin_start(io, which, (by, takes));
         }
     }
 
-    pub(super) fn arrival(&mut self, target: TargetId, arrival: Arrival) -> Option<Event> {
-        // Deleting the sandbox ends its session.
-        self.orders.as_ref()?;
-        let reason = match arrival {
-            Arrival::Ended { reason } => format!("the shared role's session ended: {reason}"),
-            arrival @ Arrival::Exited { .. } => {
-                if let Some((_, sender)) = &self.active {
-                    let _ = sender.send(Message::Session(arrival));
+    // The shared role of `target`, which the run keeps until its end.
+    fn resident(&mut self, target: TargetId) -> &mut Resident {
+        let Some(resident) = self.residents.get_mut(&target) else {
+            unreachable!("a work-lifetime target's shared role was acted on before the work began")
+        };
+        resident
+    }
+
+    /// Takes the shared role's sandbox, started and set up, whose calls run next.
+    pub(super) fn resident_ready(
+        &mut self,
+        io: &mut Io<'r, 's, H>,
+        target: TargetId,
+        started: (SandboxId, SessionId),
+    ) {
+        let resident = self.resident(target);
+        resident.started = Some(started);
+        resident.step = Step::Serving;
+        let at = self.at;
+        self.logged(Entry::SharedStarted { target, at });
+        self.resident_next(io, target);
+    }
+
+    /// Takes the end of the shared role's start that failed, whose calls fail from now on.
+    pub(super) fn resident_unstarted(&mut self, io: &mut Io<'r, 's, H>, target: TargetId) {
+        self.resident(target).step = Step::Serving;
+        self.resident_next(io, target);
+    }
+
+    /// Queues call `job` on the shared role, which runs it in its turn.
+    pub(super) fn resident_call(&mut self, io: &mut Io<'r, 's, H>, target: TargetId, job: JobId) {
+        let resident = self.resident(target);
+        resident.calls.push_back(job);
+        self.resident_next(io, target);
+    }
+
+    /// Takes the end of the call on the shared role, with the standard input as it left it.
+    pub(super) fn resident_done(
+        &mut self,
+        io: &mut Io<'r, 's, H>,
+        target: TargetId,
+        stdin: Option<Stdin>,
+    ) {
+        let resident = self.resident(target);
+        resident.active = None;
+        if stdin.is_some() {
+            resident.stdin = stdin;
+        }
+        self.resident_next(io, target);
+    }
+
+    /// The end of a call that ran on `target`'s shared role, which its failure, if it has failed,
+    /// makes its own.
+    pub(super) fn resident_end(&self, target: TargetId, end: &mut Result<CallResult, String>) {
+        if let Some(failed) =
+            (self.residents.get(&target)).and_then(|resident| resident.failed.as_ref())
+        {
+            *end = Err(failed.clone());
+        }
+    }
+
+    // Runs the next call in its turn, once the shared role serves and no call's body runs; ends
+    // the shared role once the phase has closed it and no call is left.
+    fn resident_next(&mut self, io: &mut Io<'r, 's, H>, target: TargetId) {
+        loop {
+            let Some(resident) = self.residents.get_mut(&target) else {
+                return;
+            };
+            if resident.step != Step::Serving || resident.active.is_some() {
+                return;
+            }
+            let Some(job) = resident.calls.pop_front() else {
+                if resident.closed {
+                    self.tear_down_resident(io, target);
                 }
-                return None;
+                return;
+            };
+            if let Some((_, session)) = resident.started {
+                resident.active = Some(job);
+                return self.work(io, job, session);
+            }
+            let unstarted = Err("the shared sandbox never started".to_owned());
+            self.end_unworked(io, job, End::Call(job, unstarted));
+        }
+    }
+
+    /// Takes what the shared role's session handed over.
+    pub(super) fn resident_arrived(
+        &mut self,
+        io: &mut Io<'r, 's, H>,
+        target: TargetId,
+        arrival: Arrival,
+    ) {
+        let resident = self.resident(target);
+        // Deleting the sandbox ends its session.
+        let closed = resident.closed;
+        let reason = match arrival {
+            Arrival::Ended { reason } => {
+                resident.session_end = Some(reason.clone());
+                let reason = format!("the shared role's session ended: {reason}");
+                if let Some(active) = resident.active {
+                    self.call_ends(io, active, reason.clone());
+                }
+                reason
+            }
+            arrival @ Arrival::Exited { .. } => {
+                if let Some(active) = resident.active.filter(|_| !closed) {
+                    self.call_arrived(io, active, arrival);
+                }
+                return;
             }
             // The gateway refuses these messages on a session with neither ops nor a model.
             Arrival::Op(_) | Arrival::ModelRequest(_) | Arrival::Refused(_) => {
                 "the shared role's session sent an unauthorized request".to_owned()
             }
         };
-        self.fail(target, reason)
+        if !closed {
+            self.input(Input::Core(Event::SharedFailed { target, reason }));
+        }
     }
 
-    pub(super) fn fail(&mut self, target: TargetId, reason: String) -> Option<Event> {
-        if self.failed.is_some() {
+    /// The event of the shared role's failure for `reason`, the first time it fails: its call
+    /// that runs, if one does, fails with it.
+    pub(super) fn resident_fail(
+        &mut self,
+        io: &mut Io<'r, 's, H>,
+        target: TargetId,
+        reason: String,
+    ) -> Option<Event> {
+        let resident = self.residents.get_mut(&target)?;
+        if resident.failed.is_some() {
             return None;
         }
-        if let Some((_, sender)) = &self.active {
-            let _ = sender.send(Message::Session(Arrival::Ended {
-                reason: reason.clone(),
-            }));
+        resident.failed = Some(reason.clone());
+        if let Some(active) = resident.active {
+            self.call_ends(io, active, reason.clone());
         }
-        self.failed = Some(reason.clone());
         Some(Event::SharedFailed { target, reason })
     }
 
-    pub(super) fn close(&mut self) {
-        self.orders.take();
-        if let Some((_, sender)) = &self.active {
-            // The driver can stop forwarding command exits while the body awaits a killed client.
-            let _ = sender.send(Message::Session(Arrival::Ended {
-                reason: "the work phase ended".to_owned(),
-            }));
+    /// Takes the end of the work phase, which ends the shared role once its calls have ended.
+    pub(super) fn close_resident(&mut self, io: &mut Io<'r, 's, H>, target: TargetId) {
+        let resident = self.resident(target);
+        if resident.closed {
+            return;
         }
-    }
-}
-
-impl<'r, H: Host + 'r> Runtime<'r, '_, H> {
-    pub(super) fn start_residents(&mut self) -> Result<(), String> {
-        for target in self.workflow().work_targets() {
-            let which = Which::Shared(target);
-            let by = self.placed.startup(target.role());
-            let (resident, rx) = Resident::open();
-            self.residents.insert(target, resident);
-            let inbox = self.events.clone();
-            let clock = self.clock.clone();
-            let sandboxes = self.sandboxes;
-            let bodies = self.bodies;
-            let dir = self.dir.join(which.record_dir(self.workflow()));
-            let collect_end = self.teardown_end();
-            let to_loop = self.events.clone();
-            let arrivals = Box::new(move |arrival| to_loop.send(Input::Shared(target, arrival)));
-            let thread = (&*which.name().to_string(), Some(bodies.stack_bytes()));
-            self.spawn(thread, move || {
-                let started = sandboxes.start(which, None, by, arrivals);
-                let mut sandbox = match started {
-                    Ok(sandbox) => {
-                        let at = clock.now();
-                        inbox.send(Input::Logged(Entry::SharedStarted { target, at }));
-                        Some(sandbox)
-                    }
-                    Err(failure) => {
-                        if let Err(reason) = failure.dispose(sandboxes) {
-                            inbox.send(Input::Child(Report::Undeleted(reason)));
-                        }
-                        None
-                    }
-                };
-                serve(rx, bodies, sandbox.as_mut());
-                let torn_down = Report::Event(clock.now(), Event::SharedTornDown { target });
-                match sandbox {
-                    Some(sandbox) => {
-                        let by = collect_end;
-                        let (deleted, edge) = tear_down(sandbox, sandboxes, &dir, by, &inbox);
-                        let report = match deleted {
-                            Ok(()) => torn_down,
-                            Err(reason) => Report::Undeleted(reason),
-                        };
-                        edge.send(Input::Child(report));
-                    }
-                    None => inbox.send(Input::Child(torn_down)),
-                }
-            })?;
+        resident.closed = true;
+        // The body's driver stops forwarding command exits while it awaits a killed client.
+        if let Some(active) = resident.active {
+            self.call_ends(io, active, "the work phase ended".to_owned());
         }
-        Ok(())
+        self.resident_next(io, target);
     }
-}
 
-fn serve<H: Host>(
-    orders: Receiver<Call<'_, H>>,
-    bodies: &dyn crate::Bodies,
-    mut sandbox: Option<&mut Started>,
-) {
-    let mut stdin = crate::body::Stdin::default();
-    for (call, mut child) in orders {
-        let end = match sandbox.as_deref_mut() {
-            Some(started) => {
-                job::evaluate(call, bodies, &mut child, &mut started.session, &mut stdin)
-            }
-            None => End::Call(call.job, Err("the shared sandbox never started".to_owned())),
+    // Freezes the shared role's sandbox, then collects it, then deletes it.
+    fn tear_down_resident(&mut self, io: &mut Io<'r, 's, H>, target: TargetId) {
+        let resident = self.resident(target);
+        let Some((_, session)) = resident.started else {
+            resident.step = Step::Deleting;
+            let after = End::Event(Event::SharedTornDown { target });
+            return self.close_child(io, (Which::Shared(target), None), after);
         };
-        // The shared sandbox outlives the call, which holds none of its own.
-        child.close(end, || (Ok(()), None));
+        resident.step = Step::Freezing;
+        let token = self.token(Purpose::Shared(target, Step::Freezing));
+        let by = self.teardown_end();
+        Sessions::ask(self, io, session, gateway::Ask::Freeze, (by, token));
     }
-}
 
-fn tear_down(
-    mut sandbox: Started,
-    sandboxes: &Sandboxes<'_>,
-    dir: &Path,
-    by: Duration,
-    inbox: &Events<Input>,
-) -> (Result<(), String>, stdx::io::Edge<Input>) {
-    let note = |text| inbox.send(Input::Logged(Entry::Note(text)));
-    if let Err(error) = sandbox.session.freeze(by) {
-        note(format!("freezing the shared sandbox failed: {error}"));
-    }
-    for part in [out_dir(), log_dir()] {
-        if let Err(error) = collect(&mut sandbox.session, &part, dir, by) {
-            note(format!(
-                "the shared sandbox's {part} is incomplete: {error}"
-            ));
+    /// Takes the answer to the shared role's step.
+    pub(super) fn resident_answered(
+        &mut self,
+        io: &mut Io<'r, 's, H>,
+        (target, step): (TargetId, Step),
+        answer: Answer,
+    ) {
+        let part = match (step, answer) {
+            (Step::Freezing, Answer::Done(frozen)) => {
+                if let Err(error) = frozen {
+                    self.note(&format!("freezing the shared sandbox failed: {error}"));
+                }
+                0
+            }
+            (Step::Collecting(part), Answer::Collected(collected)) => {
+                if let Err(error) = collected {
+                    let dir = [out_dir(), log_dir()][usize::from(part)].clone();
+                    let error = uncollected(&dir, &error);
+                    self.note(&format!(
+                        "the shared sandbox's {dir} is incomplete: {error}"
+                    ));
+                }
+                part + 1
+            }
+            (step, answer) => unreachable!("{answer:?} answered a shared role's {step:?}"),
+        };
+        let resident = self.resident(target);
+        let Some((_, session)) = resident.started else {
+            unreachable!("a shared role collects only from its sandbox")
+        };
+        if let Some(dir) = [out_dir(), log_dir()].get(usize::from(part)) {
+            resident.step = Step::Collecting(part);
+            let ask = collect(dir, &resident.dir.join(dir.as_str()));
+            let token = self.token(Purpose::Shared(target, Step::Collecting(part)));
+            let by = self.teardown_end();
+            Sessions::ask(self, io, session, ask, (by, token));
+            return;
         }
+        resident.step = Step::Deleting;
+        let child = (Which::Shared(target), resident.started.take());
+        self.close_child(io, child, End::Event(Event::SharedTornDown { target }));
     }
-    sandboxes.delete(sandbox)
 }

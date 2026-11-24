@@ -176,7 +176,10 @@ pub struct Io<C: Loop> {
     // The callbacks for the next batch, which runs without waiting.
     ticks: Vec<(u64, OnTick<C>)>,
     now: Duration,
-    events: Inbox<C::Event>,
+    // What other threads send the loop, and its own sender, kept so that the loop can hand out
+    // senders, and its receiver never disconnects.
+    received: Receiver<Envelope<C::Event>>,
+    events: Events<C::Event>,
     // How many events the loop's edge workers owe it ([`Io::edge`]).
     owed: usize,
 }
@@ -185,34 +188,6 @@ pub struct Io<C: Loop> {
 struct Envelope<E> {
     event: Option<E>,
     edge: bool,
-}
-
-/// What other threads send a loop, before the loop that takes it exists ([`Io::new`]).
-pub struct Inbox<E> {
-    receiver: Receiver<Envelope<E>>,
-    // Kept, so that the loop can hand out senders, and the inbox never disconnects.
-    sender: Sender<Envelope<E>>,
-    wake: Arc<dyn Fn() + Send + Sync>,
-}
-
-impl<E> Inbox<E> {
-    /// An inbox that `backend`'s loop takes from, and its senders.
-    pub fn new(backend: &dyn Backend) -> (Events<E>, Self) {
-        let (sender, receiver) = mpsc::channel();
-        let wake = backend.waker();
-        let events = Events {
-            sender: sender.clone(),
-            wake: Arc::clone(&wake),
-        };
-        (
-            events,
-            Self {
-                receiver,
-                sender,
-                wake,
-            },
-        )
-    }
 }
 
 /// The machine's backend, on epoll.
@@ -280,13 +255,15 @@ impl<E> Drop for Edge<E> {
 }
 
 impl<C: Loop> Io<C> {
-    /// A loop on `backend`, with at most `capacity` operations in flight, which takes what is sent
-    /// to `events`, an inbox of `backend`'s.
-    pub fn new(mut backend: Box<dyn Backend>, capacity: usize, events: Inbox<C::Event>) -> Self {
+    /// A loop on `backend`, with at most `capacity` operations in flight.
+    pub fn new(mut backend: Box<dyn Backend>, capacity: usize) -> Self {
         let Ok(top) = u32::try_from(capacity) else {
             unreachable!("a loop's capacity of {capacity} operations passes a u32's")
         };
         let now = backend.now();
+        let (sender, received) = mpsc::channel();
+        let wake = backend.waker();
+        let events = Events { sender, wake };
         Self {
             backend,
             pending: (0..capacity).map(|_| None).collect(),
@@ -295,6 +272,7 @@ impl<C: Loop> Io<C> {
             ways: BTreeSet::new(),
             ticks: Vec::new(),
             now,
+            received,
             events,
             owed: 0,
         }
@@ -319,10 +297,7 @@ impl<C: Loop> Io<C> {
     }
 
     pub fn events(&self) -> Events<C::Event> {
-        Events {
-            sender: self.events.sender.clone(),
-            wake: Arc::clone(&self.events.wake),
-        }
+        self.events.clone()
     }
 
     /// Waits for the next batch, until `until`, a time on [`Io::now`], at most, and runs it.
@@ -371,7 +346,7 @@ impl<C: Loop> Io<C> {
         self.done = done;
         // Only what was sent by now, so that an owner that sends to its own loop as it takes an
         // event can't hold the batch.
-        let envelopes: Vec<Envelope<C::Event>> = self.events.receiver.try_iter().collect();
+        let envelopes: Vec<Envelope<C::Event>> = self.received.try_iter().collect();
         for Envelope { event, edge } in envelopes {
             if edge {
                 self.owed -= 1;

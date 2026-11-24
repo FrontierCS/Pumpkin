@@ -11,11 +11,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::num::NonZeroU32;
 use std::path::Path;
-use std::sync::mpsc;
 use std::time::Duration;
 
 use decision::{JobId, LeaseId};
-use gateway::{Arrival, Dialer, Listener, Remote, Sockets};
+use gateway::{Dialer, Listener, Sockets};
 use provider::{
     Admits, Created, Creator, ImageRef, Listed, Meeting, Provider, Role, RunTag, SandboxId,
     SandboxdRef, Sweep, Undeleted,
@@ -23,7 +22,7 @@ use provider::{
 use schema::ir::{Command, GpuModel, Image, Name};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
-    Endpoint, Launch, Listening, PUMPKIN_BYTES, PrivateDial, RelativePath, SocketDial, command_env,
+    Endpoint, Launch, Listening, PUMPKIN_BYTES, PrivateDial, SocketDial, command_env,
     command_stderr, command_stdout, pumpkin_dir,
 };
 use schema::workflow::{
@@ -32,9 +31,8 @@ use schema::workflow::{
 };
 use serde::{Deserialize, Deserializer, de};
 use stdx::Context;
-use stdx::io::{Edge, Events};
 
-use super::{Input, Stopped, interruption, record};
+use super::{Stopped, interruption, record};
 
 /// The most entries, files and directories, that the host collects from a sandbox in one tree.
 pub(super) const ENTRIES: u64 = 100_000;
@@ -173,7 +171,6 @@ pub(super) struct Sandboxes<'p> {
     pub(super) providers: ByProvider<Hosting<'p>>,
     pub(super) images: ByRole<ImageRef>,
     pub(super) sockets: Sockets,
-    pub(super) events: Events<Input>,
     pub(super) between_looks: Duration,
 }
 
@@ -336,35 +333,6 @@ impl Unstarted {
             Self::Uncreated(reason) | Self::Created { reason, .. } => reason,
         }
     }
-
-    /// Deletes what the start made, on the loop, and returns why it didn't start, with its
-    /// console's end; fails if the delete or its record does.
-    pub(super) fn dispose(self, sandboxes: &Sandboxes<'_>) -> Result<String, String> {
-        match self {
-            Self::Uncreated(reason) => Ok(reason),
-            Self::Created { which, id, reason } => {
-                let (reply, replied) = mpsc::sync_channel(1);
-                sandboxes
-                    .events
-                    .send(Input::Dispose(super::starts::Dispose {
-                        which,
-                        id,
-                        reason,
-                        reply,
-                    }));
-                replied
-                    .recv()
-                    .unwrap_or_else(|_| super::starts::loop_gone())
-            }
-        }
-    }
-}
-
-/// A sandbox started for a thread, which drives its session through the loop.
-pub(super) struct Started {
-    pub(super) which: Which,
-    pub(super) id: SandboxId,
-    pub(super) session: Remote,
 }
 
 impl<'p> Published<'p> {
@@ -445,7 +413,6 @@ impl<'p> Sandboxes<'p> {
     pub(super) fn new(
         published: Published<'p>,
         (run, placed, capacity): (RunTag, &'p Placed, &'p Capacity),
-        events: Events<Input>,
     ) -> Self {
         let Published {
             providers,
@@ -465,51 +432,12 @@ impl<'p> Sandboxes<'p> {
             providers,
             images,
             sockets,
-            events,
             between_looks,
         }
     }
 
     pub(super) fn workflow(&self) -> &'p Workflow {
         self.placed.workflow()
-    }
-
-    /// Starts a sandbox for this thread, by `by`, its startup bound as a time since the run
-    /// started: the loop creates it, meets it and sets it up, and its session's arrivals go to
-    /// `arrivals`. On failure the caller owns disposal.
-    pub(super) fn start(
-        &self,
-        which: Which,
-        ops: Option<schema::sandbox::OpPayloadLimit>,
-        by: Duration,
-        arrivals: Box<dyn Fn(Arrival) + Send>,
-    ) -> Result<Started, Unstarted> {
-        let (reply, replied) = mpsc::sync_channel(1);
-        self.events.send(Input::Start(super::starts::Asked {
-            which,
-            ops,
-            by,
-            arrivals,
-            reply,
-        }));
-        replied
-            .recv()
-            .unwrap_or_else(|_| super::starts::loop_gone())
-    }
-
-    /// Deletes the sandbox, on the loop, and returns any failure of the delete or its record, with
-    /// the edge that the thread's next report goes through, which the loop waits for.
-    pub(super) fn delete(&self, started: Started) -> (Result<(), String>, Edge<Input>) {
-        let Started { which, id, session } = started;
-        let (reply, replied) = mpsc::sync_channel(1);
-        self.events
-            .send(Input::Delete(super::starts::Delete { which, id, reply }));
-        let deleted = replied
-            .recv()
-            .unwrap_or_else(|_| super::starts::loop_gone());
-        // Dropped once the provider has deleted the sandbox, as its end then is the delete's.
-        drop(session);
-        deleted
     }
 }
 
@@ -584,28 +512,4 @@ pub(super) fn launch(command: &Command) -> Launch {
         stdout: pumpkin_dir().join(&command_stdout()),
         stderr: pumpkin_dir().join(&command_stderr()),
     }
-}
-
-/// Collects `dir` of the sandbox's `.pumpkin` directory into the same path under `record`, a new
-/// directory there, within the `PUMPKIN` limits, by `by`. After a failure it holds what arrived
-/// before.
-pub(super) fn collect(
-    session: &mut Remote,
-    dir: &RelativePath,
-    record: &Path,
-    by: Duration,
-) -> Result<(), String> {
-    collect_as(session, dir, &record.join(dir.as_str()), by)
-}
-
-pub(super) fn collect_as(
-    session: &mut Remote,
-    dir: &RelativePath,
-    into: &Path,
-    by: Duration,
-) -> Result<(), String> {
-    let from = pumpkin_dir().join(dir);
-    session
-        .collect(&from, into, PUMPKIN, by)
-        .context(format_args!("collecting {from} failed"))
 }

@@ -4,12 +4,10 @@
 use std::collections::VecDeque;
 use std::fs;
 use std::io::{self, Read as _};
-use std::sync::mpsc::SyncSender;
 
 use schema::frame;
 use schema::sandbox::{Entry, RelativePath, ToSandbox};
 
-use crate::remote::ToThread;
 use crate::{Put, context};
 
 // How many of a put's frames wait to be sent at most: one in flight, one behind it, so that a put
@@ -18,9 +16,6 @@ const PUT_FRAMES: usize = 2;
 
 pub(crate) struct PutState {
     entries: VecDeque<Put>,
-    // Where the put asks for its next entries while the thread that hands them holds more, and
-    // whether it has asked.
-    more: Option<(SyncSender<ToThread>, bool)>,
     // The file whose bytes go next, with how many are left.
     file: Option<(RelativePath, Source, u64)>,
     ended: bool,
@@ -45,12 +40,10 @@ pub(crate) enum Step {
 }
 
 impl PutState {
-    /// A put of `entries`, then of those that `more` hands it, if given, whose request is queued
-    /// as the first of its frames.
-    pub(crate) fn new(entries: Vec<Put>, more: Option<SyncSender<ToThread>>) -> Self {
+    /// A put of `entries`, whose request is queued as the first of its frames.
+    pub(crate) fn new(entries: Vec<Put>) -> Self {
         Self {
             entries: entries.into(),
-            more: more.map(|more| (more, false)),
             file: None,
             ended: false,
             failed: None,
@@ -68,24 +61,20 @@ impl PutState {
 
     pub(crate) fn stop(&mut self) {
         self.entries.clear();
-        self.more = None;
         self.file = None;
         self.ended = true;
     }
 
-    /// Takes the next entries that it asked for, after which more follow if `more`.
-    pub(crate) fn hand(&mut self, entries: Vec<Put>, more: bool) {
-        let Some((_, asked)) = self.more.as_mut().filter(|(_, asked)| *asked) else {
-            unreachable!(
-                "a put was handed entries that it hadn't asked for, though its caller hands them \
-                 only as asked"
-            )
-        };
-        *asked = false;
-        if !more {
-            self.more = None;
+    /// Sends none of its entries more, if any is left, after which it fails as interrupted: its
+    /// next frame, unless its end has gone, is its end.
+    pub(crate) fn cancel(&mut self) {
+        if self.entries.is_empty() && self.file.is_none() {
+            return;
         }
-        self.entries.extend(entries);
+        self.entries.clear();
+        self.file = None;
+        let cut = "stopped before the tree was whole";
+        (self.failed).get_or_insert_with(|| io::Error::new(io::ErrorKind::Interrupted, cut));
     }
 
     /// Takes the send of one of its frames.
@@ -98,17 +87,16 @@ impl PutState {
     }
 
     /// The put's next frame on `stream`, to queue: none while it holds [`PUT_FRAMES`] queued, or
-    /// waits for the entries that it asked for, or once its end has gone.
+    /// once its end has gone.
     pub(crate) fn next(&mut self, stream: u32) -> Option<(ToSandbox, Vec<u8>)> {
         if self.ended || self.queued >= PUT_FRAMES {
             return None;
         }
-        let frame = self.frame(stream)?;
         self.queued += 1;
-        Some(frame)
+        Some(self.frame(stream))
     }
 
-    fn frame(&mut self, stream: u32) -> Option<(ToSandbox, Vec<u8>)> {
+    fn frame(&mut self, stream: u32) -> (ToSandbox, Vec<u8>) {
         if let Some((path, source, left)) = &mut self.file {
             let chunk = frame::MAX_BODY_BYTES.min(usize::try_from(*left).unwrap_or(usize::MAX));
             let read = match source {
@@ -125,33 +113,20 @@ impl PutState {
                     if *left == 0 {
                         self.file = None;
                     }
-                    return Some((ToSandbox::Data { stream }, bytes));
+                    return (ToSandbox::Data { stream }, bytes);
                 }
                 // The tree ends with the file short, which `sandboxd` fails; the file's error is
                 // the one to report.
                 Err(error) => {
                     self.failed = Some(context(&*path, &error));
                     self.stop();
-                    return Some((ToSandbox::End { stream }, Vec::new()));
+                    return (ToSandbox::End { stream }, Vec::new());
                 }
             }
         }
         let Some(put) = self.entries.pop_front() else {
-            if let Some((thread, asked)) = &mut self.more {
-                if !*asked {
-                    *asked = true;
-                    if let Err(error) = thread.try_send(ToThread::More(stream)) {
-                        unreachable!(
-                            "the put on stream {stream} can't ask for its next entries: {error}, \
-                             though its caller waits until the put's answer, and holds room for \
-                             one ask besides it"
-                        )
-                    }
-                }
-                return None;
-            }
             self.ended = true;
-            return Some((ToSandbox::End { stream }, Vec::new()));
+            return (ToSandbox::End { stream }, Vec::new());
         };
         let entry = match put {
             Put::Dir(path, mode) => Entry::Dir { path, mode },
@@ -162,13 +137,14 @@ impl PutState {
                 }
                 Entry::File { path, size, mode }
             }
-            Put::Read(path, mode, file) => {
-                let size = match file.metadata() {
-                    Ok(metadata) => metadata.len(),
+            Put::Read(path, mode, host) => {
+                let opened = fs::File::open(&host).and_then(|file| Ok((file.metadata()?, file)));
+                let (size, file) = match opened {
+                    Ok((metadata, file)) => (metadata.len(), file),
                     Err(error) => {
                         self.failed = Some(context(&path, &error));
                         self.stop();
-                        return Some((ToSandbox::End { stream }, Vec::new()));
+                        return (ToSandbox::End { stream }, Vec::new());
                     }
                 };
                 if size > 0 {
@@ -177,7 +153,7 @@ impl PutState {
                 Entry::File { path, size, mode }
             }
         };
-        Some((ToSandbox::Entry { stream, entry }, Vec::new()))
+        (ToSandbox::Entry { stream, entry }, Vec::new())
     }
 }
 

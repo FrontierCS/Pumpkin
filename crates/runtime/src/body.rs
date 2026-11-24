@@ -9,12 +9,12 @@
 use core::num::NonZeroU64;
 use std::collections::BTreeMap;
 use std::io::Read as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::{fs, io};
 
 use decision::{Event, JobId, PayloadRef};
-use gateway::{Process, Put, Remote};
+use gateway::{Ask, Process, Put};
 use schema::ir::{self, AbsolutePath, Argv, Name, TargetLifetime};
 use schema::sandbox::op::{
     CommandEnd, CommandStatus, Last, LeaseStatusReply, RunnerOutput, SessionOp, TransferEnd,
@@ -25,21 +25,18 @@ use schema::sandbox::{
     ExitStatus, Launch, RESULT_MAX_BYTES, RelativePath, Root, command_env, dir_mode, file_mode,
     log_dir, out_dir, pumpkin_dir,
 };
-use schema::workflow::{self, Final, JobFunction, TargetId};
+use schema::workflow::{self, Final, JobFunction, TargetId, Workflow};
 use serde_json::{Map, Value};
 use stdx::Context;
-use stdx::time::Clock as _;
 
-use crate::child::{Child, Report};
+use crate::Targeted;
+use crate::call::job::{OnLoop, Waited};
 use crate::lease::command_dir;
 use crate::record::{Stored, reference};
-use crate::relay::{Relay, Waited};
-use crate::sandbox::{collect, collect_as};
 use crate::scoped::Waiting;
-use crate::{Entry, Host, Targeted};
 
 /// The evaluator of the workflow's bodies, which the driver gives the run. The run calls it on
-/// the threads of its children, so it is shared between them.
+/// a worker of each call's, so it is shared between them.
 pub trait Bodies: Sync {
     /// The stack that a thread calling a body needs.
     fn stack_bytes(&self) -> usize;
@@ -162,6 +159,7 @@ pub(crate) struct Call<'c> {
     pub(crate) job: JobId,
     /// The target, whose `cwd` and `env` its commands run with.
     pub(crate) target: &'c workflow::Target,
+    pub(crate) workflow: &'c Workflow,
     pub(crate) of: &'c Of<'c>,
     pub(crate) inputs: Vec<Stored>,
     /// The longest the body may drive the target, from its start.
@@ -202,31 +200,31 @@ pub(crate) enum Ended {
     Stopped,
 }
 
-/// Calls `call`'s body through `bodies`, with a handle on the target that `session` reaches,
-/// on the thread of `child`, and reports the body's start. Everything the body asks of the target
-/// is to be done by the call's timeout, from the body's start; a stop of the core's, and the
-/// timeout's passing, cut the call short at the body's next ask of the target, or while a command
-/// it ran runs. Meanwhile relays the target's ops and model requests to the loop.
-pub(crate) fn evaluate<H: Host>(
+/// Calls `call`'s body through `bodies`, with a handle on the target that `on` reaches, whose
+/// record is `dir` and whose collects are due by `collect_by`, and reports the body's start.
+/// Everything the body asks of the target is to be done by the call's timeout, from the body's
+/// start; a stop of the core's, and the timeout's passing, cut the call short at the body's next
+/// ask of the target, or while a command it ran runs.
+pub(crate) fn evaluate(
     bodies: &dyn Bodies,
     call: &Call<'_>,
-    child: &mut Child<'_, H, crate::relay::Order>,
-    session: &mut Remote,
+    on: &mut OnLoop,
+    (dir, collect_by): (&Path, Duration),
     stdin: &mut Stdin,
 ) -> Ended {
     let resident = call.target.lifetime == TargetLifetime::Work;
-    if !resident && child.stopped() {
+    if !resident && on.going() == Ok(true) {
         return Ended::Stopped;
     }
     // The timeout runs from the start's reported time.
-    let at = child.clock.now();
-    child.report(Report::Event(at, Event::CallStarted { job: call.job }));
+    let at = on.now();
+    on.event(Event::CallStarted { job: call.job });
     let mut target = OnTarget {
         call,
-        child,
-        session,
+        on,
+        dir,
+        collect_by,
         timeout: at.saturating_add(call.timeout),
-        relay: Relay::default(),
         cut: None,
         running: None,
         stdin,
@@ -260,7 +258,7 @@ pub(crate) fn evaluate<H: Host>(
     };
     if resident {
         if let Err(reason) = target.release() {
-            child.event(Event::SharedFailed {
+            target.on.event(Event::SharedFailed {
                 target: call.of.target(),
                 reason: reason.clone(),
             });
@@ -306,17 +304,10 @@ pub(crate) enum Stdin {
 impl Stdin {
     const DIR: AbsolutePath = AbsolutePath::from_static("/pumpkin/.stdin");
 
-    fn put(
-        &mut self,
-        session: &Remote,
-        bytes: &[u8],
-        by: Duration,
-    ) -> Result<AbsolutePath, String> {
-        let mut trees = session.trees();
+    fn put(&mut self, on: &mut OnLoop, bytes: &[u8], by: Duration) -> Result<AbsolutePath, String> {
         let dir = Self::DIR;
         if matches!(self, Self::Unused) {
-            trees
-                .put(&dir, Root::New, [], by)
+            on.done(Ask::Put(dir.clone(), Root::New, Vec::new()), by)
                 .context("reserving the command's stdin directory failed")?;
             *self = Self::Empty;
         }
@@ -329,22 +320,15 @@ impl Stdin {
         let path = dir.join(&name);
         // Even a failed put can leave a partial file.
         *self = Self::Staged;
-        trees
-            .put(
-                &dir,
-                root,
-                [Put::File(name, file_mode(), bytes.to_vec())],
-                by,
-            )
+        let file = vec![Put::File(name, file_mode(), bytes.to_vec())];
+        on.done(Ask::Put(dir.clone(), root, file), by)
             .context("staging the command's stdin failed")?;
         Ok(path)
     }
 
-    fn clear(&mut self, session: &Remote, by: Duration) -> Result<(), String> {
+    fn clear(&mut self, on: &mut OnLoop, by: Duration) -> Result<(), String> {
         if matches!(self, Self::Staged) {
-            session
-                .trees()
-                .put(&Self::DIR, Root::Replaced, [], by)
+            on.done(Ask::Put(Self::DIR, Root::Replaced, Vec::new()), by)
                 .context("clearing the shared call's stdin failed")?;
             *self = Self::Empty;
         }
@@ -352,14 +336,16 @@ impl Stdin {
     }
 }
 
-/// The target of a body's call, on its child's session.
-struct OnTarget<'a, 'c, 'r, H: Host> {
+/// The target of a body's call, which the loop reaches.
+struct OnTarget<'a, 'c> {
     call: &'a Call<'c>,
-    child: &'a mut Child<'r, H, crate::relay::Order>,
-    session: &'a mut Remote,
+    on: &'a mut OnLoop,
+    /// The call's directory in the record.
+    dir: &'a Path,
+    /// By when the call's collects are done.
+    collect_by: Duration,
     /// When the call's timeout passes, as a time since the run started.
     timeout: Duration,
-    relay: Relay,
     /// What cut the call short, after which every method fails.
     cut: Option<Cut>,
     running: Option<(u64, Process)>,
@@ -370,22 +356,20 @@ struct OnTarget<'a, 'c, 'r, H: Host> {
     gets_count: u64,
 }
 
-impl<H: Host> OnTarget<'_, '_, '_, H> {
-    /// The deadline of the body's next ask of the target, if the call goes on: relays what the
-    /// target's session handed over since the last, and fails once the core has stopped the call,
-    /// or its timeout has passed.
+impl OnTarget<'_, '_> {
+    /// The deadline of the body's next ask of the target, if the call goes on: fails once the
+    /// core has stopped the call, its target has ended, or its timeout has passed.
     fn going(&mut self) -> Result<Duration, String> {
         if let Some(cut) = self.cut {
             return Err(cut.reason());
         }
         let by = self.timeout;
-        let idle = (self.relay).idle(self.child, self.call.job, (self.session, by));
-        match idle {
+        match self.on.going() {
             Ok(true) => return Err(self.cut_short(Cut::Stopped)),
             Ok(false) => {}
             Err(reason) => return Err(format!("the target's session ended: {reason}")),
         }
-        if self.child.clock.now() >= self.timeout {
+        if self.on.now() >= self.timeout {
             return Err(self.cut_short(Cut::TimedOut));
         }
         Ok(by)
@@ -398,14 +382,7 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
         op: SessionOp,
     ) -> Result<LeaseStatusReply, String> {
         self.going()?;
-        let waited = self.relay.runner(
-            self.child,
-            self.call.job,
-            self.timeout,
-            self.session,
-            grant,
-            (waiting, op),
-        );
+        let waited = self.on.runner((grant, op), waiting, self.timeout);
         match self.timely(waited)? {
             // A queued receipt can wake the body after its deadline, including the final close.
             Waited::Finished(status) => self.going().map(|_| status),
@@ -417,7 +394,7 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
     /// Reports the timeout, if any, and returns why the method fails.
     fn cut_short(&mut self, cut: Cut) -> String {
         if let Cut::TimedOut = cut {
-            self.child.event(Event::CallTimedOut { job: self.call.job });
+            self.on.event(Event::CallTimedOut { job: self.call.job });
         }
         self.cut = Some(cut);
         cut.reason()
@@ -427,28 +404,27 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
     /// deadline, has passed is the timeout's.
     fn timely<T>(&mut self, done: Result<T, String>) -> Result<T, String> {
         match done {
-            Err(_) if self.child.clock.now() >= self.timeout => Err(self.cut_short(Cut::TimedOut)),
+            Err(_) if self.on.now() >= self.timeout => Err(self.cut_short(Cut::TimedOut)),
             done => done,
         }
     }
 
     /// Logs what the body asked of the target, now.
     fn log(&self, targeted: Targeted) {
-        let at = self.child.clock.now();
-        self.child.log(Entry::Target(self.call.job, targeted, at));
+        self.on.log(targeted);
     }
 
     /// The recorded output directory, only once the whole command log has arrived.
     fn collect_output(&mut self, command: u64, by: Duration) -> Result<PathBuf, String> {
         let dir = self.output_dir(command);
-        let logs = self.child.dir.join(log_dir().as_str());
-        let into = self.child.dir.join(command_dir(command).as_str());
+        let logs = self.dir.join(log_dir().as_str());
+        let into = self.dir.join(command_dir(command).as_str());
         let collected = fs::create_dir_all(&logs)
             .context(logs.display())
-            .and_then(|()| collect_as(self.session, &dir, &into, by));
+            .and_then(|()| self.on.collect_dir(&dir, &into, by));
         if let Err(error) = &collected {
             let job = self.call.job.0;
-            self.child
+            self.on
                 .note(format!("job {job}'s {dir} is incomplete: {error}"));
         }
         collected.map(|()| into)
@@ -457,12 +433,9 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
     /// Stops and accounts for the active client before releasing this shared sandbox to another
     /// job. An unconfirmed stop or closed session makes the target unavailable.
     fn release(&mut self) -> Result<(), String> {
-        let until = self
-            .child
-            .clock
-            .now()
+        let until = (self.on.now())
             .saturating_add(self.call.timeout)
-            .min(self.child.deadlines.collect);
+            .min(self.collect_by);
         if let Some((command, process)) = self.running {
             let stopped = self.stop_client(process, until);
             let _ = self.collect_output(command, until);
@@ -474,22 +447,18 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
             };
             self.log(Targeted::Ended { command, end });
         }
-        self.stdin.clear(self.session, until)?;
-        match self.session.ended() {
+        self.stdin.clear(self.on, until)?;
+        match self.on.ended() {
             Some(reason) => Err(format!("the shared role's session ended: {reason}")),
             None => Ok(()),
         }
     }
 
     fn stop_client(&mut self, process: Process, until: Duration) -> Result<ExitStatus, String> {
-        self.session
-            .kill(process, until)
+        (self.on.done(Ask::Kill(process), until))
             .context("stopping the shared call's command failed")?;
         loop {
-            match self
-                .relay
-                .wait(self.child, self.call.job, until, process, self.session)?
-            {
+            match self.on.exit(process, until)? {
                 Waited::Finished(status) => return Ok(status),
                 Waited::Stopped => {}
                 Waited::TimedOut => {
@@ -501,14 +470,14 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
 
     fn collect_fresh(&mut self) {
         let job = self.call.job.0;
-        let by = self.child.deadlines.collect;
-        match self.session.freeze(by) {
+        let by = self.collect_by;
+        match self.on.done(Ask::Freeze, by) {
             Ok(()) => {}
             // Every ask of an ended session fails at once, with the reason it ended: collecting
             // would only repeat it.
             Err(error) if error.kind() == io::ErrorKind::ConnectionAborted => return,
             Err(error) => {
-                (self.child).note(format!("freezing job {job}'s target failed: {error}"));
+                (self.on).note(format!("freezing job {job}'s target failed: {error}"));
             }
         }
         if self.cut.is_some()
@@ -516,8 +485,9 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
         {
             let _ = self.collect_output(command, by);
         }
-        if let Err(error) = collect(self.session, &out_dir(), &self.child.dir, by) {
-            (self.child).note(format!("job {job}'s out is incomplete: {error}"));
+        let into = self.dir.join(out_dir().as_str());
+        if let Err(error) = self.on.collect_dir(&out_dir(), &into, by) {
+            (self.on).note(format!("job {job}'s out is incomplete: {error}"));
         }
     }
 
@@ -536,7 +506,7 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
         let input = self.input(slot)?;
         let bytes = input.read()?;
         let supplied = input.reference.clone();
-        let put = self.stdin.put(self.session, &bytes, by);
+        let put = self.stdin.put(self.on, &bytes, by);
         Ok((self.timely(put)?, supplied))
     }
 
@@ -558,10 +528,11 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
         let dir = self.output_dir(command);
         self.runs_count += 1;
         let put = if target.lifetime == TargetLifetime::Work {
-            self.session.put(&pumpkin_dir().join(&dir), [], by)
+            let made = pumpkin_dir().join(&dir);
+            (self.on).done(Ask::Put(made, Root::Kept, Vec::new()), by)
         } else {
-            self.session
-                .put(&pumpkin_dir(), [Put::Dir(dir.clone(), dir_mode())], by)
+            let made = vec![Put::Dir(dir.clone(), dir_mode())];
+            (self.on).done(Ask::Put(pumpkin_dir(), Root::Kept, made), by)
         };
         self.timely(put.context(format_args!("making {dir} failed")))?;
         let output = |name: RelativePath| pumpkin_dir().join(&dir.join(&name));
@@ -577,7 +548,7 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
             stdout: output(const { RelativePath::from_static("command.stdout") }),
             stderr: output(const { RelativePath::from_static("command.stderr") }),
         };
-        let started = self.session.start(launch, by);
+        let started = self.on.start(launch, by);
         let process = self.timely(started.context("the command didn't start"))?;
         self.running = Some((command, process));
         let argv = argv.clone();
@@ -586,8 +557,7 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
             argv,
             stdin: supplied,
         });
-        let job = self.call.job;
-        let waited = (self.relay).wait(self.child, job, self.timeout, process, self.session);
+        let waited = self.on.exit(process, self.timeout);
         match waited {
             Ok(Waited::Finished(status)) => {
                 self.running = None;
@@ -613,7 +583,7 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
     }
 }
 
-impl<H: Host> Target for OnTarget<'_, '_, '_, H> {
+impl Target for OnTarget<'_, '_> {
     fn runner_open(&mut self, grant: &Name) -> Result<u64, String> {
         let op = SessionOp::Open {
             instance_seconds: None,
@@ -692,9 +662,8 @@ impl<H: Host> Target for OnTarget<'_, '_, '_, H> {
         };
         let payload = self.input(input_slot)?.read()?;
         let reference = reference(&payload);
-        let put = self
-            .session
-            .put(&dir, [Put::File(name, file_mode(), payload)], by);
+        let file = vec![Put::File(name, file_mode(), payload)];
+        let put = self.on.done(Ask::Put(dir, Root::Kept, file), by);
         let put = put.context(format_args!("putting the payload at {path} failed"));
         self.timely(put)?;
         let put = reference;
@@ -708,9 +677,8 @@ impl<H: Host> Target for OnTarget<'_, '_, '_, H> {
     fn caller(&self) -> Option<&str> {
         match self.call.of {
             Of::Function { function, .. } => Some(
-                self.child
-                    .sandboxes
-                    .workflow()
+                self.call
+                    .workflow
                     .sandbox(function.holder.role())
                     .name
                     .as_str(),
@@ -760,10 +728,10 @@ impl<H: Host> Target for OnTarget<'_, '_, '_, H> {
             return Err("`/` is the sandbox's root: name a file's path".to_owned());
         };
         self.gets_count += 1;
-        let gets = self.child.dir.join("got");
+        let gets = self.dir.join("got");
         fs::create_dir_all(&gets).context(gets.display())?;
         let into = gets.join(self.gets_count.to_string());
-        let collected = self.session.collect(path, &into, GOT, by);
+        let collected = self.on.collect((path, &into), GOT, by);
         self.timely(collected.context(format_args!("getting {path} failed")))?;
         let got = into.join(name.as_str());
         let bytes = fs::read(&got).context(format_args!("getting {path} failed"))?;

@@ -8,17 +8,15 @@ use std::fs::{self, File};
 use std::io;
 use std::os::fd::AsRawFd;
 use std::path::Path;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use runtime::{Clock, Durable, Host, Inbox};
+use runtime::{Clock, Durable, Host};
 use stdx::io::Backend;
 use test_support::world::{Peer, Script, Synced as WorldSynced, World};
 
 use crate::sim::Journal;
 
-// How long a wait of a run's thread on the clock blocks between its looks at it: the threads of
-// calls, leases and shared roles, which wait on their own inboxes.
+// How long a wait on the machine's timers blocks between its looks at the simulated clock.
 const LOOK: Duration = Duration::from_millis(10);
 
 /// A host whose clock reads 0 from the run's start and never moves by itself: a [`SlowSync`], a
@@ -233,56 +231,4 @@ impl stdx::time::Clock for SimClock {
     }
 }
 
-impl Clock for SimClock {
-    type Inbox<T: Send + 'static> = SimInbox<T>;
-
-    fn inbox<T: Send + 'static>(&self) -> SimInbox<T> {
-        let (sender, receiver) = mpsc::channel();
-        SimInbox {
-            world: self.world.clone(),
-            receiver,
-            sender,
-        }
-    }
-}
-
-pub(crate) struct SimInbox<T> {
-    world: World,
-    receiver: Receiver<T>,
-    // Kept, so that the inbox never disconnects, whoever else holds a sender.
-    sender: Sender<T>,
-}
-
-impl<T: Send> Inbox<T> for SimInbox<T> {
-    fn sender(&self) -> Sender<T> {
-        self.sender.clone()
-    }
-
-    fn wait(&mut self, until: Duration) -> Option<T> {
-        loop {
-            if self.world.now() >= until {
-                return self.take();
-            }
-            match self.receiver.recv_timeout(LOOK) {
-                Ok(input) => return Some(input),
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => disconnected(),
-            }
-        }
-    }
-
-    fn take(&mut self) -> Option<T> {
-        match self.receiver.try_recv() {
-            Ok(input) => Some(input),
-            Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Disconnected) => disconnected(),
-        }
-    }
-}
-
-fn disconnected() -> ! {
-    unreachable!(
-        "an inbox disconnected, though it holds a sender of its own, so its channel can't \
-         disconnect"
-    )
-}
+impl Clock for SimClock {}
