@@ -15,7 +15,8 @@ use super::{Argument, JobFunction, Label, Name, NowFunction, Session};
 pub struct Grant {
     /// Unique among the role's grants.
     pub name: Name,
-    /// The public description of the call, its payload and its result, shown to its caller.
+    /// The public description of the call, its payload and its result, shown to its caller. The
+    /// body's source, its docstring and its keywords stay on the host.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub help: String,
     #[serde(flatten)]

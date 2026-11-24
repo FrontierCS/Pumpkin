@@ -479,7 +479,8 @@ pub enum CommandEnd {
     Unstarted,
 }
 
-/// A body callback's result for a started runner command with both recorded output streams.
+/// What `runner.run` returns to a body: how the command ended, and the end of each of its output
+/// streams, as [`output_tail`] cuts it. The record keeps the streams whole.
 #[derive(Debug, Serialize)]
 pub struct RunnerOutput {
     pub end: CommandEnd,

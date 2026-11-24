@@ -11,7 +11,8 @@ use super::Body;
 /// caller's arguments, and whose return the call replies with.
 ///
 /// The body only proposes effects on the run's state, `run.set_submission(payload)` and
-/// `run.end_work()`. The call applies them all, or, if one is refused, none.
+/// `run.end_work()`, which must be the last effect, and may end a caller that has submitted
+/// nothing. The call applies them all, or, if one is refused, none.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NowFunction {

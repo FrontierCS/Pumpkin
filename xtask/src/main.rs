@@ -131,7 +131,11 @@ mod flags {
             }
 
             /// Builds and checks the Linux x86-64 archive, launcher and pin from this checkout
-            /// in `target/release-assets/<tag>/`.
+            /// in `target/release-assets/<tag>/`. Without `--publish`, it builds `HEAD`, under any
+            /// tag, such as `preview`. Pushing a tag runs the release workflow, which builds its
+            /// assets and publishes them with `--publish`. If the workflow leaves a draft, check
+            /// its assets against those that this command builds in a checkout of the tag, attach
+            /// any missing file, and publish the draft as the latest release.
             cmd release {
                 /// The tag to put in the archive's name.
                 required tag: String

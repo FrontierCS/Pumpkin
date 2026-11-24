@@ -8,18 +8,17 @@
 [words]
 "AGENTS.md" = 391
 "ARCHITECTURE.md" = 2693
-"README.md" = 2974
+"README.md" = 683
 "deploy/aws/README.md" = 2061
 "docs/dev/style.md" = 518
 "docs/dev/testing.md" = 970
 "docs/dev/writing.md" = 871
-"docs/ideas.md" = 242
 "docs/language.md" = 1534
 "docs/models.md" = 625
 "docs/providers.md" = 1261
-"docs/record.md" = 1126
-"docs/running.md" = 2055
-"docs/workflows.md" = 3925
+"docs/record.md" = 1170
+"docs/running.md" = 823
+"docs/workflows.md" = 1238
 "examples/README.md" = 382
 "examples/hypergraph-benchmark/README.md" = 541
 "examples/hypergraph-benchmark/base/repo/README.md" = 1080
