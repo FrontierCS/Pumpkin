@@ -1,3 +1,4 @@
+# nextest runs each test in a process of its own, so tests share no per-process state.
 [profile.default]
 # A test still running at 5 s is killed and fails ci: a test that hangs, or one far slower than
 # it was. Every test not named below ends within about 3 s, as a bound it waits for on the real

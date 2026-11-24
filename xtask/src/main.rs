@@ -149,7 +149,10 @@ mod flags {
             /// changes leave as they are, it mutates their source whole. It then names the missed
             /// mutants that the tests of the merge base catch.
             cmd mutants {
-                /// The paths whose changes alone are taken, if any are given.
+                /// The paths whose changes alone are taken. By default, they are the crates whose
+                /// tests guard the most: `decision`, `schema` and `route` guard the operator's key,
+                /// `retention` decides what the controller's prune removes, and `members` guards
+                /// the controller's forced command.
                 repeated paths: PathBuf
                 /// The revision since whose merge base with `HEAD` the changes are taken,
                 /// `origin/main` by default.
@@ -526,6 +529,15 @@ fn refill(package: &str, filter: Option<&str>) -> Result<()> {
     tested.map(drop)
 }
 
+/// The paths that `mutants` takes when it is given none, as its help says.
+const GUARDED: [&str; 5] = [
+    "crates/decision",
+    "crates/schema",
+    "crates/route",
+    "crates/retention",
+    "crates/members",
+];
+
 fn mutants(paths: &[PathBuf], rev: Option<&str>) -> Result<()> {
     let buildifier = star::link()?;
     let mut again = "cargo xtask mutants".to_owned();
@@ -535,6 +547,12 @@ fn mutants(paths: &[PathBuf], rev: Option<&str>) -> Result<()> {
     if let Some(rev) = rev {
         again = format!("{again} --in-diff {rev}");
     }
+    let guarded = GUARDED.map(PathBuf::from);
+    let paths = if paths.is_empty() {
+        &guarded[..]
+    } else {
+        paths
+    };
     let repo = Repo { root: root() };
     let base = repo.git(["merge-base", rev.unwrap_or("origin/main"), "HEAD"])?;
     let diff = diff::since(&repo, &base, paths, &again)?;

@@ -360,7 +360,12 @@ fn fetch(release: Release, to: &Path) -> Result<()> {
         .args(["--proto", "=https", "--tlsv1.2", "--output"])
         .arg(to)
         .arg(url);
-    ran(&mut curl, step(STEP_TIMEOUT))?;
+    ran(&mut curl, step(STEP_TIMEOUT)).map_err(|error| {
+        format!(
+            "{error}: fetch {name} once online, or fetch every tool before going offline with \
+             `cargo xtask install-tools`"
+        )
+    })?;
     let bytes =
         fs::read(to).map_err(|error| format!("reading {} failed: {error}", to.display()))?;
     let found = self::sha256(&bytes);
