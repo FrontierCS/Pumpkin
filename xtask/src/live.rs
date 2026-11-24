@@ -29,9 +29,9 @@ const PUMPKIN_TIMEOUT: Duration = Duration::from_hours(1);
 /// How many lines the smoke's probe prints for each sandbox, each of which must say `ok`.
 const CHECKS_PER_SANDBOX: usize = 6;
 
-/// The Modal SDK that the check of a run's sandboxes there uses: the one the provider's helper
-/// pins (`providers/modal/helper/pumpkin-modal.py`).
-const MODAL_SDK: &str = "modal==1.6.3";
+/// The Modal provider's helper, from the repository's root. Its header, inline script metadata,
+/// pins the Modal SDK that the check of a run's sandboxes there uses too.
+const MODAL_HELPER: &str = "providers/modal/helper/pumpkin-modal.py";
 
 /// Prints the id of each sandbox on Modal that carries the tag of run `sys.argv[1]` in Pumpkin's
 /// app, as the provider's helper finds a run's sandboxes, and nothing if there is no app.
@@ -365,9 +365,11 @@ fn reached(settings: &Settings) -> Result<()> {
     schedules(settings, "no-such-run", Some(policy))?;
     if let Some(modal) = &settings.modal {
         let token = format!(
-            "give Modal's profile `{}` a token, as `uvx --from {MODAL_SDK} modal token new \
-             --profile {}` does, and run this again",
-            modal.profile, modal.profile
+            "give Modal's profile `{}` a token, as `uv run --no-project --with-requirements {} \
+             modal token new --profile {}` does, and run this again",
+            modal.profile,
+            root().join(MODAL_HELPER).display(),
+            modal.profile
         );
         modal_python(modal, MODAL_LIST, &["no-such-run"], Some(&token))?;
     }
@@ -696,8 +698,12 @@ fn modal_python(
     expected: Option<&str>,
 ) -> Result<String> {
     let mut python = process::command("uv", Environment::Inherited);
+    // `uv` takes the packages from the helper's inline script metadata, as it does for a
+    // requirements file:
+    // https://github.com/astral-sh/uv/blob/f8bec5eac866c5dd3794b4420e21e5dbd44045c6/crates/uv-cli/src/lib.rs#L3343-L3347
     python
-        .args(["run", "--quiet", "--no-project", "--with", MODAL_SDK])
+        .args(["run", "--quiet", "--no-project", "--with-requirements"])
+        .arg(root().join(MODAL_HELPER))
         .args(["python", "-I", "-c", script])
         .args(args)
         .env("MODAL_PROFILE", &modal.profile);
