@@ -70,8 +70,7 @@ pub struct Reply {
     /// The byte at which each event of a stream begins, in order: its `data:` line's first.
     pub events: Vec<usize>,
     /// Where the stream's output begins, if it has: the byte after the end of the line of its
-    /// first event that its API counts as output, which is where the route's write path tells
-    /// [`Keep::first_output`](crate::Keep::first_output).
+    /// first event that its API counts as output.
     pub first_output: Option<usize>,
     /// Whether the answer ended as its API ends one: a body that is one JSON value, or a stream
     /// that reached its last event.
@@ -97,13 +96,10 @@ pub struct Config {
 
 /// What one API's reader knows of its forms.
 pub(crate) struct Dialect {
-    /// Whether an event of its stream is the model's output: the first that is marks the
-    /// stream's first token, for the route as it passes and for the reader alike.
     // As deepseek-harness's `isTokenDelta` takes a chunk for the first token: a delta of text,
     // reasoning or a call's arguments that is not empty, or a call's delta that names it,
     // https://github.com/deepseek-ai/deepseek-harness/blob/39163dd30f703a79079e2d2446545cff3c453738/packages/llm/llm/src/assistant-stream.ts#L242-L258
     pub(crate) output: usage::Output,
-    /// The entries of one item of a body's conversation.
     item: fn(&Value) -> Vec<Item>,
     unmarked: fn(&Value) -> Value,
     /// The entries of a request's body, its conversation's and those of the fields that the

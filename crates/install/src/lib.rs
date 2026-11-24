@@ -72,3 +72,6 @@ files! {
     /// The lock of the helper's packages.
     ModalLock = "pumpkin-modal.py.lock", data;
 }
+
+// A link to `pumpkin` can be made only once `pumpkin` is there, so it comes first.
+const _: () = assert!(matches!(File::ALL[0], File::Pumpkin));

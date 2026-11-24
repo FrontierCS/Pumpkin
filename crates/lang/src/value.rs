@@ -6,9 +6,10 @@
 //! so they are shared, not copied, and the specification's freezing (spec.md, "Freezing a value")
 //! can't be observed.
 //!
-//! A string, list, tuple, dict or function is made only through a constructor that charges the
-//! `Budget` and checks its nesting against `MAX_NESTING`, so that no value outgrows the budget,
-//! and no walk over a value, its drop included, can overflow the stack.
+//! A list, tuple, dict or function is made only through a constructor that charges the `Budget`
+//! and checks its nesting against `MAX_NESTING`, and a string only through one that charges the
+//! `Budget`, but for a literal, whose text the file's size bounds. So no value outgrows the
+//! budget, and no walk over a value, its drop included, can overflow the stack.
 
 use alloc::borrow::Cow;
 use alloc::collections::BTreeMap;

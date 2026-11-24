@@ -115,7 +115,6 @@ pub struct Simulation {
     context: Context,
 }
 
-/// The context entries of a simulation, by key.
 type Context = BTreeMap<String, Entry>;
 
 /// A context entry: its values and their type, as the simulator names the type.
@@ -128,9 +127,9 @@ struct Entry {
 impl Simulation {
     /// Builds the simulations that must allow every statement of `allows`, filled with
     /// `filling`. A statement gives one simulation for each value of each list that its
-    /// conditions name, such as each of the envelope's launch templates. A `*` in a resource
-    /// becomes a stand-in, and each condition's key gets a value that the condition holds for. A
-    /// statement on every resource but some is simulated on `*`. Statements with the same
+    /// conditions name. A `*` in a resource becomes a stand-in, and each condition's key gets a
+    /// value that the condition holds for, or none where a `Null` test holds only without the
+    /// key. A statement on every resource but some is simulated on `*`. Statements with the same
     /// resources and context share a simulation, with each of their actions. A statement with a
     /// placeholder that has no value is left out, and the second set returned names the
     /// placeholder.

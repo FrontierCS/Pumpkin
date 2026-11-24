@@ -65,7 +65,6 @@ pub(super) struct Jobs(Vec<Job>);
 
 #[derive(Debug)]
 pub(super) struct Job {
-    /// What the call was made under.
     pub(super) call: JobOf,
     pub(super) timeout: Duration,
     pub(super) state: State,
@@ -102,9 +101,9 @@ pub(super) enum End {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct Usage {
-    /// The calls charged: those accepted, less those that failed before their command started.
+    /// The calls charged: those accepted, less those that failed before their body started.
     pub(super) calls: u64,
-    /// The time the commands that have ended ran.
+    /// The time the bodies that have ended ran.
     pub(super) used: Duration,
     /// Whether one of the function's calls isn't torn down.
     pub(super) busy: bool,
@@ -201,8 +200,8 @@ impl Jobs {
         Some(&mut self.0.get_mut(usize::try_from(job.0).ok()?)?.state)
     }
 
-    /// Stops every job that is queued or running at `now`, and returns them. A job whose
-    /// command has already ended is left to finish collecting.
+    /// Stops each job that `owns` selects and that is queued or running at `now`, and returns
+    /// them. A job whose body has already ended is left to finish collecting.
     pub(super) fn stop_unfinished(
         &mut self,
         now: Duration,

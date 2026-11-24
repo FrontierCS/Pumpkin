@@ -15,15 +15,7 @@ use serde_json::{Map, Value, json};
 
 use crate::sim;
 
-/// The tests' bodies, each by its `def`'s name: `check` puts the payload at `/work/payload`, runs
-/// `list <its keyword dir>`, and returns what it printed and its caller's `label`; `train` puts it
-/// there, runs `judge` on it, and returns its result's `raw_score`; `run` puts the payload at
-/// `/pumpkin/in/payload/raw` and runs its keyword `argv`; `slow` runs `slow`, which runs until it
-/// is killed. `again` runs a command of two seconds, then `print two`, and returns what it printed;
-/// `holds` and `waits` run `print one`, then get `/work/held`, which the simulated sandbox holds,
-/// or wait for the record to show the agent's sandbox deleted, then run `print two`; `missing`
-/// gets a missing file; what `deep` returns nests, its dict included, its keyword `depth` deep;
-/// `large` returns [`large()`].
+/// The tests' bodies, each by its `def`'s name.
 pub(crate) struct Bodies<'r> {
     /// The run's record.
     pub(crate) record: &'r Path,
@@ -33,9 +25,13 @@ pub(crate) struct Bodies<'r> {
 /// than [`Bodies`]'s `stack_bytes`, so that a now function's body runs only on a stack that big.
 const DEEP_BYTES: usize = 8 << 20;
 
+const STACK_BYTES: usize = 16 << 20;
+
+const _: () = assert!(DEEP_BYTES < STACK_BYTES);
+
 impl runtime::Bodies for Bodies<'_> {
     fn stack_bytes(&self) -> usize {
-        16 << 20
+        STACK_BYTES
     }
 
     fn job(
@@ -119,9 +115,6 @@ impl runtime::Bodies for Bodies<'_> {
         }
     }
 
-    /// `final_call` puts the payload at `/pumpkin/in/payload/raw`, runs `judge` on it, and returns
-    /// its result's `raw_score` as `score`; `routed` runs its keyword `argv`, and returns the
-    /// `raw_score` of the result that it wrote as `score` and `raw`; `large` returns [`large()`].
     fn final_call(
         &self,
         body: &ir::FinalBody,

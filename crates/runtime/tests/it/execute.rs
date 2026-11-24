@@ -31,7 +31,7 @@ use schema::workflow::{ByRole, Placed, Workflow};
 use serde_json::{Value, json};
 use stdx::Deadline;
 use test_support::http::{read_request, write_chunk};
-use test_support::{TestDir, WORKFLOW, files, sandboxes, standard_outputs};
+use test_support::{TestDir, files, sandboxes, standard_outputs};
 
 use crate::body::Bodies;
 use crate::host::{LateTake, SimHost, SimTime, SlowSync, Synced};
@@ -207,15 +207,8 @@ fn interrupted_at(run: Run<'_, impl Host>, sandboxd: &str, also: &[Also]) -> Vec
 }
 
 fn interrupt_once_started(record: &Path) {
-    for _ in 0..6000 {
-        let log = fs::read_to_string(record.join("log.jsonl")).unwrap_or_default();
-        if log.contains(r#""kind":"agent_started""#) {
-            interrupt();
-            return;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    panic!("the agent didn't start in a minute");
+    sim::logged(record, r#""kind":"agent_started""#);
+    interrupt();
 }
 
 fn shown(sim: &Sim) -> Vec<String> {
@@ -1238,10 +1231,8 @@ fn when(placed: &Placed, last: Duration) -> &'static str {
 }
 
 fn workflow(argv: &[&str]) -> Value {
-    let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
-    let agent = &mut ir["roles"][0]["runtime"]["agent"];
-    agent.as_object_mut().unwrap().remove("egress");
-    agent["command"]["argv"] = json!(argv);
+    let mut ir = test_support::unrouted();
+    ir["roles"][0]["runtime"]["agent"]["command"]["argv"] = json!(argv);
     ir
 }
 
@@ -2308,7 +2299,6 @@ fn taken_past_the_deadline() {
     let late = LateTake {
         behind: 1,
         at: Duration::from_millis(30_500),
-        then: 0,
     };
     let ir = short_workflow(
         &[
@@ -2406,7 +2396,6 @@ fn started_late() {
     let late = LateTake {
         behind: 0,
         at: Duration::from_secs(55),
-        then: 0,
     };
     check(
         &SimHost::new().slow_sync(slow).late_take(late),
@@ -4447,7 +4436,6 @@ fn releases_agents_and_a_shared_target_ready_before_the_driver_takes_their_notic
     let wait = LateTake {
         behind: 2,
         at: Duration::from_secs(3),
-        then: 0,
     };
     let host = SimHost::new().during_setup(wait, || {});
     let dir = TestDir::new();
@@ -4469,7 +4457,6 @@ fn set_up_past_the_startup() {
     let both = LateTake {
         behind: 1,
         at: past,
-        then: 0,
     };
     let host = SimHost::new().during_setup(both, || {});
     let sim = Sim::new().holding_set_ups(2, host.moving_to(past));
@@ -4516,7 +4503,6 @@ fn interrupt_during_peer_setup_keeps_ready_commands_unlaunched() {
     let wait = LateTake {
         behind: 0,
         at: Duration::ZERO,
-        then: 0,
     };
     let host = SimHost::new().during_setup(wait, interrupt);
     let dir = TestDir::new();
@@ -4816,7 +4802,7 @@ fn work_target_calls_share_files_and_collect_each_call_once() {
             .unwrap();
     assert_eq!(sandbox["delete"]["state"], "deleted");
 
-    // A record written with a service declaration still identifies the same physical sandbox.
+    // A record that declares the role `shared` identifies the same physical sandbox.
     let path = record.join("ir.json");
     let mut old: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     old["roles"][1]["runtime"] =

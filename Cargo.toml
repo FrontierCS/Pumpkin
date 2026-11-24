@@ -31,7 +31,8 @@ webpki-roots = "1.0.11"
 xflags = "0.3.2"
 
 [workspace.lints.rust]
-# Denied, not forbidden, so that `stdx`'s one signal helper can expect it.
+# Denied, not forbidden, so that `stdx`'s one signal helper can expect it. A system call that `std`
+# lacks goes through `rustix`, which needs no `unsafe` of its caller.
 unsafe_code = "deny"
 unreachable_pub = "warn"
 

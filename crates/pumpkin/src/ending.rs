@@ -71,8 +71,8 @@ impl Polls {
         Self(FIRST_FOLLOW_POLL)
     }
 
-    /// The pause before the next poll: 10 ms at first and after a restart, then twice the last,
-    /// up to a second.
+    /// The pause before the next poll: `FIRST_FOLLOW_POLL` at first and after a restart, then
+    /// twice the last, up to `LAST_FOLLOW_POLL`.
     pub(crate) fn pause(&mut self) -> Duration {
         let pause = self.0;
         self.0 = (pause * 2).min(LAST_FOLLOW_POLL);

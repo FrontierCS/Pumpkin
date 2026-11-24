@@ -13,10 +13,7 @@ use test_support::BUSYBOX;
 
 use super::{Scratch, Step, check, copy_tree, ran};
 
-/// A neutral library, which writes a task's workflow from the task's own values: Codex works
-/// as the agent, on the image that the package's agent recipe builds, and a trainer and the final
-/// call's target, on the image of its judge recipe, judge the agent's train calls and its final
-/// submission.
+/// `lib/bench.star`, which the entry that [`task`] writes loads.
 const LIBRARY: &str = r##""""A neutral library: `bench_task` writes the workflow of the task in the entry's package,
 `tasks/<id>`, from its own values."""
 
@@ -293,6 +290,7 @@ fn tasks() {
     let mut not_utf8 = scratch.pumpkin(&["check"]);
     not_utf8.arg(OsStr::from_bytes(b"tasks/\xff/task.star"));
     not_utf8.arg("--arg").arg(OsStr::from_bytes(b"model=\xff"));
+    // One problem more than a check shows.
     let unused: Vec<String> = ('a'..='u').map(|name| format!("--arg={name}=1")).collect();
     let mut many = vec!["--arg", "model=model-a"];
     many.extend(unused.iter().map(String::as_str));
@@ -890,6 +888,12 @@ fn examples() {
         "hypergraph-benchmark/replay/task.star".into(),
     ]);
     names.sort();
+    for (example, _) in EXAMPLE_ARGS {
+        assert!(
+            names.iter().any(|name| name == example),
+            "{example} is no example"
+        );
+    }
     let steps = names.iter().map(|name| {
         let args = EXAMPLE_ARGS.iter().find(|(example, _)| example == name);
         let mut command = scratch.pumpkin(&["check", name]);

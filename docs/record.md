@@ -73,7 +73,14 @@ bodies read under `jobs/<n>/`. Usage counts the shared sandbox once across all i
 allocation whose role is unknown, `usage.unplaced_sandbox` marks the cost as partial. The
 allocation contributes no estimate to a class’s count, time or price.
 The `start_final_call` action lists the selection for each agent by role.
-[Workflows](workflows.md) describes what the log keeps of each call.
+
+For each call, the log keeps:
+
+- the op and its reply, and the call's start
+- each `put`, with its path and the payload's digest
+- each `run`, with its argv and how it ended
+- each `get`, with its path and the digest of what it got
+- what the body returned, or why it failed
 
 
 ## Model exchanges

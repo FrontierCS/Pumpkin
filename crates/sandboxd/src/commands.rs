@@ -237,13 +237,6 @@ fn ops_path(env: &Env) -> OsString {
 
 /// Reaps children forever, reporting the exits of started commands. With no children, it
 /// waits until a command starts.
-///
-/// A child may also stop. The kernel reports the stops of a child that made `sandboxd` its
-/// tracer, as any command may with `ptrace(PTRACE_TRACEME)`, to `sandboxd`'s waits, though they
-/// ask only for exits. A stopped child is still running, so the reaper reports nothing for it,
-/// and [`sys::reap`] consumes the report of its stop, so that it doesn't come back. `sandboxd`
-/// never resumes the child, which stays stopped until freezing or the end of the session kills
-/// it.
 fn reaper(shared: &Shared) -> Result<Infallible, String> {
     loop {
         let mut state = shared.lock();
@@ -263,6 +256,9 @@ fn reaper(shared: &Shared) -> Result<Infallible, String> {
             continue;
         };
         let status = std::process::ExitStatus::from_raw(raw);
+        // A stop of a child that made `sandboxd` its tracer, as any command may with
+        // `ptrace(PTRACE_TRACEME)`: it still runs, so nothing is reported. `sandboxd` never
+        // resumes it; freezing or the session's end kills it.
         if status.stopped_signal().is_some() {
             continue;
         }

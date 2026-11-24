@@ -327,7 +327,7 @@ pub(crate) fn fetched(release: Release) -> Result<PathBuf> {
 }
 
 /// Where the fetched releases are: `pumpkin/tools` in the user's cache directory, as the XDG Base
-/// Directory Specification places it. The launcher `deploy/pumpkin` caches Pumpkin's releases in
+/// Directory Specification places it. The launcher `dist/pumpkin` caches Pumpkin's releases in
 /// that cache directory too.
 fn cache() -> Result<PathBuf> {
     // The specification says to ignore a relative path.
@@ -360,7 +360,12 @@ fn fetch(release: Release, to: &Path) -> Result<()> {
         .args(["--proto", "=https", "--tlsv1.2", "--output"])
         .arg(to)
         .arg(url);
-    ran(&mut curl, step(STEP_TIMEOUT))?;
+    ran(&mut curl, step(STEP_TIMEOUT)).map_err(|error| {
+        format!(
+            "{error}: fetch {name} once online, or fetch every tool before going offline with \
+             `cargo xtask install-tools`"
+        )
+    })?;
     let bytes =
         fs::read(to).map_err(|error| format!("reading {} failed: {error}", to.display()))?;
     let found = self::sha256(&bytes);

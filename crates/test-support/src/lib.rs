@@ -19,6 +19,7 @@ use std::time::Duration;
 use std::{fs, io};
 
 use schema::sandbox::{command_stdout, log_dir};
+use serde_json::Value;
 use stdx::process::Environment;
 use stdx::time::{Clock as _, Machine};
 
@@ -34,7 +35,19 @@ pub use test_dir::TestDir;
 /// Its roles are an agent with a model route, the target of its job function `train`, and the
 /// target of its final call, in that order. Their images' digests, commands, files, standard
 /// input and environment are placeholders, and so are the bodies' files.
-pub const WORKFLOW: &str = include_str!("workflow.json");
+pub fn workflow() -> Value {
+    serde_json::from_str(include_str!("workflow.json")).unwrap()
+}
+
+/// [`workflow`] with its agent's model route removed, so that a run of it needs no upstream.
+pub fn unrouted() -> Value {
+    let mut ir = workflow();
+    ir["roles"][0]["runtime"]["agent"]
+        .as_object_mut()
+        .unwrap()
+        .remove("egress");
+    ir
+}
 
 /// How long a test waits for what only a test that hangs never sees, so no outcome rests on it.
 pub const HUNG: Duration = Duration::from_secs(60);
@@ -142,15 +155,15 @@ pub fn sandboxd() -> PathBuf {
     PathBuf::from(sandboxd).canonicalize().unwrap()
 }
 
-/// The standard outputs that `record`, a run's record, holds, each after a line that says whose
-/// it is.
+/// The standard outputs that `record`, a run's record, holds, each after a line naming whose it is.
 ///
 /// The agent's command's, then each call's commands', in the order of the jobs' numbers and then
-/// of the commands'; not a lease's commands', whose log entries hold their ends.
+/// of the commands'; not a lease's commands', whose log entries hold their ends. An output that
+/// can't be read as UTF-8 is left out, and ends its call's list.
 ///
 /// # Panics
 ///
-/// Panics if a job's directory isn't named by its number, or an output can't be read as UTF-8.
+/// Panics if a job's directory isn't named by its number.
 pub fn standard_outputs(record: &Path) -> Vec<String> {
     let mut lines = Vec::new();
     let mut shown = |whose: String, stdout: PathBuf| {
@@ -209,7 +222,7 @@ pub fn sandboxes(record: &Path) -> Vec<String> {
         let sandbox = fs::read(record.join(&dir).join("sandbox.json"));
         match sandbox {
             Ok(sandbox) => {
-                let sandbox: serde_json::Value = serde_json::from_slice(&sandbox).unwrap();
+                let sandbox: Value = serde_json::from_slice(&sandbox).unwrap();
                 lines.push(format!("{whose} sandbox, {dir}/sandbox.json: {sandbox}"));
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}

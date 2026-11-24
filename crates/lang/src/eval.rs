@@ -50,7 +50,6 @@ const MAX_CALLS: usize = 48;
 pub(crate) struct Evaluation<'l, 'h, L> {
     loader: &'l mut L,
     purpose: Purpose<'h>,
-    /// Each file read so far.
     pub(crate) sources: Sources,
     pub(crate) planned: Planned<'l>,
     modules: BTreeMap<Label, State>,

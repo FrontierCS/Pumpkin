@@ -10,6 +10,8 @@ mod templates;
 
 use templates::{Data, named};
 
+use super::check;
+
 /// A template, as deploy/aws makes one, of `instance_type`.
 fn template(instance_type: &str) -> Value {
     json!({
@@ -44,9 +46,12 @@ fn templates() {
             .collect();
         format!("{case}: {:?}", named(&data))
     });
-    expect![[r#"
+    check(
+        lines,
+        &expect![[r#"
         as deploy/aws makes them: Named { instance_types: {"c6a.2xlarge", "c6a.4xlarge"}, profiles: {"pumpkin-sandbox"} }
         a profile by its name: Named { instance_types: {"c6a.2xlarge", "c6a.4xlarge"}, profiles: {"pumpkin-sandbox"} }
         another profile: Named { instance_types: {"c6a.2xlarge", "c6a.4xlarge"}, profiles: {"pumpkin-other", "pumpkin-sandbox"} }
-        no instance type or profile: Named { instance_types: {"c6a.2xlarge"}, profiles: {"pumpkin-sandbox"} }"#]].assert_eq(&lines.join("\n"));
+        no instance type or profile: Named { instance_types: {"c6a.2xlarge"}, profiles: {"pumpkin-sandbox"} }"#]],
+    );
 }

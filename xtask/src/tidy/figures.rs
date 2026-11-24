@@ -47,7 +47,6 @@ pub(super) fn check(
     Ok(problems)
 }
 
-/// Whether `path` names an SVG.
 fn svg(path: &str) -> bool {
     Path::new(path).extension() == Some("svg".as_ref())
 }

@@ -17,7 +17,7 @@ use super::{Address, Name, locked};
 /// How long commands share a failed repair before trying again, the first nonzero retry pause.
 // As git's automatic gc shares the recent error through gc.log and tries again when it expires:
 // https://github.com/git/git/blob/fb255012acbcbe81189cb8014da0280b09c66ecc/builtin/gc.c#L494-L530
-const FAILURE_KEPT: Duration = Duration::from_secs(5);
+const FAILURE_KEPT: Duration = super::AGAIN[1];
 
 /// Where a controller was found.
 // Untagged, so that an EC2 controller's is the object `{instance, address}` that a workspace's

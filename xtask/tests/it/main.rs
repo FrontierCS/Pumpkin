@@ -459,6 +459,79 @@ fn figures() {
 }
 
 #[test]
+fn links() {
+    use Standing::Tracked;
+    // Each link is made here, so that tidy doesn't find it in this file.
+    let at = |rest: &str| format!("https://github.com/o/r/{rest}");
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    let code = [
+        format!("// {}\n", at(&format!("blob/{sha}/src/a.rs#L1-L2"))),
+        format!("// {}\n", at("blob/main/src/a.rs")),
+        format!("// <{}>, a directory at a tag\n", at("tree/v1.0/src")),
+        format!("// ({}), at a short SHA\n", at("blob/0123456/a.zig")),
+        format!("// {}, a document\n", at("blob/main/docs/a.md#part")),
+        format!("// {}, {}, {}\n", at(""), at("tree/main"), at("tree/main/")),
+        format!("// {}\n", at("releases/download/v1/a.tgz")),
+        format!("const S: &str = \"{}\";\n", at("blob/main/a.rs")),
+    ];
+    let text = |line: String| line + "\n";
+    check(
+        &[
+            ("a.rs", code.concat(), Tracked),
+            (
+                "b.md",
+                text(format!("[B]({})", at("blob/master/b.py"))),
+                Tracked,
+            ),
+            (
+                "c.toml",
+                text(format!("# {}", at("blob/HEAD/c.rs"))),
+                Tracked,
+            ),
+            ("d.txt", text(at("blob/main/d.rs")), Tracked),
+            (
+                "crates/lang/tests/conformance/suite/e.star",
+                text(format!("# {}", at("blob/main/e.star"))),
+                Tracked,
+            ),
+        ],
+        tidy,
+        &expect![[r#"
+            a.rs:2:4: a link to code at `main`, which can move: link it at the full SHA of the commit that was read
+            a.rs:3:5: a link to code at `v1.0`, which can move: link it at the full SHA of the commit that was read
+            a.rs:4:5: a link to code at `0123456`, which can move: link it at the full SHA of the commit that was read
+            a.rs:8:18: a link to code at `main`, which can move: link it at the full SHA of the commit that was read
+            b.md:1:5: a link to code at `master`, which can move: link it at the full SHA of the commit that was read
+            c.toml:1:3: a link to code at `HEAD`, which can move: link it at the full SHA of the commit that was read"#]],
+    );
+}
+
+#[test]
+fn test_binaries() {
+    use Standing::Tracked;
+    let file = |path, text: &str| (path, text.to_owned(), Tracked);
+    let package = |name: &str| format!("[package]\nname = \"{name}\"\n");
+    check(
+        &[
+            file("Cargo.toml", "[workspace]\n"),
+            file("held/Cargo.toml", &package("held")),
+            file("held/tests/it/main.rs", ""),
+            file("held/tests/it/part.rs", ""),
+            file("held/tests/it/part/main.rs", ""),
+            file("held/inner/Cargo.toml", &package("inner")),
+            file("held/inner/tests/it.rs", ""),
+            file("loose/Cargo.toml", &package("loose")),
+            file("loose/tests/a.rs", ""),
+            file("loose/tests/b/main.rs", ""),
+        ],
+        tidy,
+        &expect![
+            "loose/Cargo.toml: the package has 2 integration test binaries, `tests/a.rs`, `tests/b/main.rs`: make each a module of one, as each links the package and its dependencies again"
+        ],
+    );
+}
+
+#[test]
 fn test_data() {
     use Standing::{Deleted, Ignored, Tracked, Untracked};
     let file = |path| (path, "data\n".to_owned(), Tracked);
@@ -496,15 +569,22 @@ fn test_data() {
 }
 
 #[test]
-fn long_files() {
-    use Standing::Tracked;
+fn ceilings() {
+    use Standing::{Deleted, Tracked, Untracked};
     let rust = |count| lines("fn f() {}", count);
+    let words = |count: usize| lines("A\tword.", count / 2) + &"More.\n".repeat(count % 2);
     let ceilings = "[long_files]\n\
                     \"src/grown.rs\" = 1001\n\
                     \"src/held.rs\" = 1001\n\
                     \"src/shrunk.rs\" = 1002\n\
                     \"src/split.rs\" = 1001\n\
-                    \"src/gone.rs\" = 1001\n";
+                    \"src/gone.rs\" = 1001\n\
+                    [words]\n\
+                    \"docs/grown.md\" = 1501\n\
+                    \"docs/held.md\" = 1501\n\
+                    \"docs/shrunk.md\" = 1502\n\
+                    \"docs/split.md\" = 1501\n\
+                    \"docs/deleted.md\" = 1501\n";
     check(
         &[
             (".config/tidy.toml", ceilings.to_owned(), Tracked),
@@ -512,20 +592,108 @@ fn long_files() {
             ("src/long.rs", rust(1001), Tracked),
             ("src/page/long.js", lines("f();", 1001), Tracked),
             ("crates/a/tests/it/long.rs", rust(1001), Tracked),
-            ("docs/long.md", lines("A line.", 1001), Tracked),
+            ("docs/lines.md", lines("Line.", 1001), Tracked),
             ("src/grown.rs", rust(1002), Tracked),
             ("src/held.rs", rust(1001), Tracked),
             ("src/shrunk.rs", rust(1001), Tracked),
             ("src/split.rs", rust(1000), Tracked),
+            ("docs/at_cap.md", words(1500), Tracked),
+            ("docs/long.md", words(1501), Tracked),
+            ("docs/grown.md", words(1502), Tracked),
+            ("docs/held.md", words(1501), Tracked),
+            ("docs/shrunk.md", words(1501), Tracked),
+            ("docs/split.md", words(1500), Tracked),
+            ("docs/deleted.md", words(1501), Deleted),
+            ("notes.md", words(1501), Untracked),
+            (
+                "crates/lang/tests/conformance/suite/README.md",
+                words(1501),
+                Tracked,
+            ),
         ],
         tidy,
         &expect![[r#"
-            src/grown.rs: the file is 1002 lines, over the cap of 1000 and its ceiling of 1001 in .config/tidy.toml, which only goes down: put what is new in a module of its own, or split the file into modules that each hold one thing, in a pull request that only moves code
-            src/long.rs: the file is 1001 lines, over the cap of 1000: put what is new in a module of its own, or split the file into modules that each hold one thing, in a pull request that only moves code
-            src/page/long.js: the file is 1001 lines, over the cap of 1000: put what is new in a module of its own, or split the file into modules that each hold one thing, in a pull request that only moves code
-            src/shrunk.rs: the file is 1001 lines, under its ceiling of 1002 in .config/tidy.toml: lower the ceiling to 1001
-            src/split.rs: the file is 1000 lines, within the cap of 1000: take it off .config/tidy.toml
-            .config/tidy.toml: `src/gone.rs` isn't a source file of the repository: take it off the list"#]],
+            src/grown.rs: the file has 1002 lines, over the cap of 1000 and its ceiling of 1001 in .config/tidy.toml, which only goes down: put what is new in a module of its own, or split the file into modules that each hold one thing, in a pull request that only moves code
+            src/long.rs: the file has 1001 lines, over the cap of 1000: put what is new in a module of its own, or split the file into modules that each hold one thing, in a pull request that only moves code
+            src/page/long.js: the file has 1001 lines, over the cap of 1000: put what is new in a module of its own, or split the file into modules that each hold one thing, in a pull request that only moves code
+            src/shrunk.rs: the file has 1001 lines, under its ceiling of 1002 in .config/tidy.toml: lower the ceiling to 1001
+            src/split.rs: the file has 1000 lines, within the cap of 1000: take it off .config/tidy.toml
+            .config/tidy.toml: `src/gone.rs` isn't a source file of the repository: take it off the list
+            docs/grown.md: the file has 1502 words, over the cap of 1500 and its ceiling of 1501 in .config/tidy.toml, which only goes down: shorten it, moving each fact to the help or the code it describes
+            docs/long.md: the file has 1501 words, over the cap of 1500: shorten it, moving each fact to the help or the code it describes
+            docs/shrunk.md: the file has 1501 words, under its ceiling of 1502 in .config/tidy.toml: lower the ceiling to 1501
+            docs/split.md: the file has 1500 words, within the cap of 1500: take it off .config/tidy.toml
+            .config/tidy.toml: `docs/deleted.md` isn't a Markdown document of the repository: take it off the list"#]],
+    );
+}
+
+#[test]
+fn sentences() {
+    use Standing::Tracked;
+    // A sentence of `count` words.
+    let long = |count: usize| format!("A{}.", " word".repeat(count - 1));
+    let guide = [
+        format!("# {}", long(30)),
+        String::new(),
+        format!("{} {}", long(25), long(26)),
+        "Wrapped across".to_owned(),
+        format!("lines, {}", long(23)),
+        format!(
+            "Stops in 1.6.3, docs/dev/a.md, e.g. a word, end nothing: {}",
+            long(17)
+        ),
+        format!("(An aside.) **Bold.** #2, `a code span` and {}", long(23)),
+        format!(
+            "[Two words](https://example.com/a) and ![alt text](figures/a.svg) {}",
+            long(23)
+        ),
+        "A `;` in code is none, and so is [a link](https://example.com/a;b).".to_owned(),
+        "One; in prose.".to_owned(),
+        "Before a list, a paragraph ends in one;".to_owned(),
+        "- an item that ends in a semicolon;".to_owned(),
+        format!("- An item ends the sentence{}", " word".repeat(21)),
+        "1. a numbered item; with one inside".to_owned(),
+        String::new(),
+        format!("> {}", long(25)),
+        format!("> {}", long(26)),
+        String::new(),
+        format!("| {} |", long(30)),
+        "```text".to_owned(),
+        long(30),
+        "```".to_owned(),
+        String::new(),
+        format!("    {}", long(30)),
+        String::new(),
+        format!("<p>\n{}\n</p>", long(30)),
+    ];
+    let ceilings = "[sentences]\n\"docs/over.md\" = 1\n\"docs/under.md\" = 2\n";
+    let svg = "<svg><title>A</title><desc>A.</desc></svg>\n".to_owned();
+    let file = |path, text| (path, text, Tracked);
+    check(
+        &[
+            file(".config/tidy.toml", ceilings.to_owned()),
+            file("docs/guide.md", guide.join("\n")),
+            file("docs/figures/a.svg", svg),
+            file("docs/over.md", format!("{}\n{}\n", long(26), long(27))),
+            file("docs/under.md", format!("{}\n", long(26))),
+        ],
+        tidy,
+        &expect![[r#"
+            docs/guide.md: the file has 10 sentences to split, over the cap of 0: split each that a line below names
+            docs/guide.md:3: a sentence of 26 words, over the cap of 25: split it
+            docs/guide.md:4: a sentence of 26 words, over the cap of 25: split it
+            docs/guide.md:6: a sentence of 26 words, over the cap of 25: split it
+            docs/guide.md:7: a sentence of 26 words, over the cap of 25: split it
+            docs/guide.md:8: a sentence of 26 words, over the cap of 25: split it
+            docs/guide.md:10: a sentence chains clauses with a semicolon: make each a sentence, or each part an item of a list
+            docs/guide.md:11: a sentence chains clauses with a semicolon: make each a sentence, or each part an item of a list
+            docs/guide.md:13: a sentence of 26 words, over the cap of 25: split it
+            docs/guide.md:14: a sentence chains clauses with a semicolon: make each a sentence, or each part an item of a list
+            docs/guide.md:17: a sentence of 26 words, over the cap of 25: split it
+            docs/over.md: the file has 2 sentences to split, over the cap of 0 and its ceiling of 1 in .config/tidy.toml, which only goes down: split each that a line below names
+            docs/over.md:1: a sentence of 26 words, over the cap of 25: split it
+            docs/over.md:2: a sentence of 27 words, over the cap of 25: split it
+            docs/under.md: the file has 1 sentence to split, under its ceiling of 2 in .config/tidy.toml: lower the ceiling to 1"#]],
     );
 }
 

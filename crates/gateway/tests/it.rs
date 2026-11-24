@@ -61,6 +61,10 @@ const PAUSE: Duration = Duration::from_millis(30);
 // that peer's only outcome.
 const HELLO_BOUND: Duration = Duration::from_millis(50);
 
+// The most hellos the listener reads at once: `crowd` holds that many silent, and `turns` sends one
+// more than that, each once the one before has been answered.
+const HELLOS_AT_ONCE: usize = 100;
+
 // What a case writes in its directory at its event, which a `Still` of the case reads: the fake
 // sandbox's stall, or what the case's action marks.
 const STALLED: &str = "stalled";
@@ -124,7 +128,21 @@ impl Clock for Still {
 fn check(scenario: impl FnOnce(&Path) -> Vec<String>, expect: &Expect) {
     let dir = TestDir::new();
     let lines = scenario(dir.path());
-    expect.assert_eq(&lines.join("\n"));
+    // The protocol's version, which a change to the protocol moves, and the next one.
+    let text = (lines.join("\n"))
+        .replace(
+            &format!("protocol {}: expected", PROTOCOL_VERSION + 1),
+            "protocol <later version>: expected",
+        )
+        .replace(
+            &format!("expected {PROTOCOL_VERSION}, which"),
+            "expected <version>, which",
+        )
+        .replace(
+            &format!("protocol {PROTOCOL_VERSION}'s form"),
+            "protocol <version>'s form",
+        );
+    expect.assert_eq(&text);
 }
 
 fn fakes(
@@ -1446,10 +1464,10 @@ fn hellos() {
         },
         &expect![[r#"
             this version: heard {"type":"accepted"}; ok
-            a v0 sandboxd: heard {"message":"sandboxd speaks sandbox protocol 0: expected 3, which this gateway speaks, as a sandboxd built from the same Pumpkin does","type":"refused"}; InvalidData: the gateway refused the session: sandboxd speaks sandbox protocol 0: expected 3, which this gateway speaks, as a sandboxd built from the same Pumpkin does
-            a later version, with a field this one lacks: heard {"message":"sandboxd speaks sandbox protocol 4: expected 3, which this gateway speaks, as a sandboxd built from the same Pumpkin does","type":"refused"}; InvalidData: the gateway refused the session: sandboxd speaks sandbox protocol 4: expected 3, which this gateway speaks, as a sandboxd built from the same Pumpkin does
-            this version, with a field it lacks: heard {"message":"the hello isn't of sandbox protocol 3's form: unknown field `later`, expected `version` or `gpus`","type":"refused"}; InvalidData: the gateway refused the session: the hello isn't of sandbox protocol 3's form: unknown field `later`, expected `version` or `gpus`
-            a later version, as long as a hello may be: heard {"message":"sandboxd speaks sandbox protocol 4: expected 3, which this gateway speaks, as a sandboxd built from the same Pumpkin does","type":"refused"}; InvalidData: the gateway refused the session: sandboxd speaks sandbox protocol 4: expected 3, which this gateway speaks, as a sandboxd built from the same Pumpkin does
+            a v0 sandboxd: heard {"message":"sandboxd speaks sandbox protocol 0: expected <version>, which this gateway speaks, as a sandboxd built from the same Pumpkin does","type":"refused"}; InvalidData: the gateway refused the session: sandboxd speaks sandbox protocol 0: expected <version>, which this gateway speaks, as a sandboxd built from the same Pumpkin does
+            a later version, with a field this one lacks: heard {"message":"sandboxd speaks sandbox protocol <later version>: expected <version>, which this gateway speaks, as a sandboxd built from the same Pumpkin does","type":"refused"}; InvalidData: the gateway refused the session: sandboxd speaks sandbox protocol <later version>: expected <version>, which this gateway speaks, as a sandboxd built from the same Pumpkin does
+            this version, with a field it lacks: heard {"message":"the hello isn't of sandbox protocol <version>'s form: unknown field `later`, expected `version` or `gpus`","type":"refused"}; InvalidData: the gateway refused the session: the hello isn't of sandbox protocol <version>'s form: unknown field `later`, expected `version` or `gpus`
+            a later version, as long as a hello may be: heard {"message":"sandboxd speaks sandbox protocol <later version>: expected <version>, which this gateway speaks, as a sandboxd built from the same Pumpkin does","type":"refused"}; InvalidData: the gateway refused the session: sandboxd speaks sandbox protocol <later version>: expected <version>, which this gateway speaks, as a sandboxd built from the same Pumpkin does
             a length a byte over a hello's, and nothing more: heard {"message":"the hello is 1025 bytes: a hello holds at most 1024","type":"refused"}; InvalidData: the gateway refused the session: the hello is 1025 bytes: a hello holds at most 1024
             this version, with an attestation: heard {"message":"the hello presents an attestation on a socket of the sandbox's own, which identifies it: expected none there","type":"refused"}; InvalidData: the gateway refused the session: the hello presents an attestation on a socket of the sandbox's own, which identifies it: expected none there
             a reply, not a hello: heard {"message":"the session's first frame is no hello: missing field `version`: open the session with one","type":"refused"}; InvalidData: the gateway refused the session: the session's first frame is no hello: missing field `version`: open the session with one
@@ -1484,10 +1502,8 @@ fn answered(connection: &mut TcpStream) -> String {
     }
 }
 
-/// A hello's message and its body.
 type Said = (Value, Vec<u8>);
 
-/// A hello of this version that presents `attestation`.
 fn attesting(attestation: &str) -> Said {
     let hello = serde_json::to_value(hello()).unwrap();
     (hello, attestation.as_bytes().to_vec())
@@ -1739,8 +1755,7 @@ fn meet(address: SocketAddr, attestation: &str, waiting: JoinHandle<String>) -> 
 
 fn crowd() -> String {
     let (_listener, address) = listen(HELLO_TIMEOUT);
-    // The most hellos the listener reads at once.
-    let silent: Vec<TcpStream> = (0..100).map(|_| dial(address)).collect();
+    let silent: Vec<TcpStream> = (0..HELLOS_AT_ONCE).map(|_| dial(address)).collect();
     let heard = answered(&mut dial(address));
     drop(silent);
     format!("one past the hellos read at once: heard {heard}")
@@ -1749,9 +1764,10 @@ fn crowd() -> String {
 fn turns() -> String {
     let (_listener, address) = listen(HELLO_TIMEOUT);
     let hello = (json!({ "version": PROTOCOL_VERSION }), Vec::new());
-    let mut heard: Vec<String> = (0..=100).map(|_| present(address, &hello)).collect();
+    let hellos = HELLOS_AT_ONCE + 1;
+    let mut heard: Vec<String> = (0..hellos).map(|_| present(address, &hello)).collect();
     heard.dedup();
-    format!("101 hellos, each in turn: {}", heard.join("; "))
+    format!("{hellos} hellos, each in turn: {}", heard.join("; "))
 }
 
 #[test]
@@ -1808,8 +1824,8 @@ fn registrations() {
         },
         &expect![[r#"
             no attestation: {"message":"the hello presents no attestation: expected the sandbox's, at an address that several sandboxes share","type":"refused"}
-            a later version: {"message":"sandboxd speaks sandbox protocol 4: expected 3, which this gateway speaks, as a sandboxd built from the same Pumpkin does","type":"refused"}
-            a field this version lacks: {"message":"the hello isn't of sandbox protocol 3's form: unknown field `later`, expected `version` or `gpus`","type":"refused"}
+            a later version: {"message":"sandboxd speaks sandbox protocol <later version>: expected <version>, which this gateway speaks, as a sandboxd built from the same Pumpkin does","type":"refused"}
+            a field this version lacks: {"message":"the hello isn't of sandbox protocol <version>'s form: unknown field `later`, expected `version` or `gpus`","type":"refused"}
             an attestation that no check admits: {"message":"the attestation opens no session: it attests another sandbox: expected the attestation of a sandbox whose start waits, presented once","type":"refused"}
             an attestation from where its check admits none: {"message":"the attestation opens no session: it attests another sandbox; it comes from 127.0.0.1, where its sandbox isn't: expected the attestation of a sandbox whose start waits, presented once","type":"refused"}
             an accept by a passed deadline: TimedOut: no hello that the sandbox's check admits came by the deadline: expected the sandbox to say it while the deadline lasts
@@ -1901,7 +1917,7 @@ fn dials() {
         &expect![[r#"
             a sandbox that listens once a dial has failed: Ok(()); it heard its grant: true
             a hello with an attestation: Err("InvalidData: the gateway refused the session: the hello presents an attestation where the gateway dialed the sandbox, which its endpoint identifies: expected none there"); it heard Some(Refused { message: "the hello presents an attestation where the gateway dialed the sandbox, which its endpoint identifies: expected none there" })
-            a hello later: Err("InvalidData: the gateway refused the session: sandboxd speaks sandbox protocol 4: expected 3, which this gateway speaks, as a sandboxd built from the same Pumpkin does"); it heard Some(Refused { message: "sandboxd speaks sandbox protocol 4: expected 3, which this gateway speaks, as a sandboxd built from the same Pumpkin does" })
+            a hello later: Err("InvalidData: the gateway refused the session: sandboxd speaks sandbox protocol <later version>: expected <version>, which this gateway speaks, as a sandboxd built from the same Pumpkin does"); it heard Some(Refused { message: "sandboxd speaks sandbox protocol <later version>: expected <version>, which this gateway speaks, as a sandboxd built from the same Pumpkin does" })
             nothing listening: Err("TimedOut: the gateway didn't reach the sandbox at localhost:$PORT by the deadline: its last dial failed: dialing localhost:$PORT failed: Connection refused (os error 111): expected its sandboxd to listen there while the deadline lasts")
             a certificate the dialer doesn't trust: Err("InvalidData: the gateway can't trust the sandbox's endpoint localhost:$PORT: the TLS handshake failed: invalid peer certificate: UnknownIssuer: expected TLS 1.3 from `localhost`, with a certificate trusted for it"); Err(InvalidData)
             stopped: Err("Other: the accept was stopped before the gateway reached the sandbox at localhost:$PORT: expected its sandboxd to listen there before the stop")"#]],

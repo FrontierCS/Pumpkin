@@ -93,7 +93,7 @@ fn check(user_data: &str, expect: &Expect) {
 /// The cloud-config of the user data, which the boot doesn't read.
 const CLOUD_CONFIG: &str = "#cloud-config\n{}\n";
 
-/// A start of a role that makes ops and has a model route, whose deadlines are far off, as JSON.
+/// A start of a role that makes ops and has a model route, whose deadlines are far off.
 fn start() -> Start {
     Start {
         hard_end_unix_seconds: LATER,

@@ -11,7 +11,7 @@ use schema::ir::Name;
 use serde_json::{Value, json};
 use test_support::TestDir;
 
-use crate::run::{PROVIDER, compact};
+use crate::run::{PROVIDER, begin_record, compact};
 use crate::sim::Sim;
 
 /// A lost run, whose agent's sandbox and a lease's ended by themselves.
@@ -58,9 +58,7 @@ fn reaps_ended() {
     ];
     for (id, outcome, sandboxes) in records {
         let dir = runs.path().join(id);
-        fs::create_dir_all(&dir).unwrap();
-        let record = json!({ "record_version": "pumpkin.record/v1", "args": [] });
-        fs::write(dir.join("record.json"), record.to_string()).unwrap();
+        begin_record(&dir);
         fs::write(dir.join("driver.pid"), "4242\n").unwrap();
         if let Some(outcome) = outcome {
             fs::write(dir.join("outcome.json"), outcome.to_string()).unwrap();

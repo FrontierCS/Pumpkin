@@ -1,410 +1,120 @@
 # Writing workflows
 
-This page says what each key of a workflow means, what bounds it, and how a wrong value is refused;
-what a role's code sees when it calls a function; and what the record keeps of a call. The
-README's [workflow](../README.md#a-workflow) introduces the parts with `examples/hello`, which this
-page quotes; [the language](language.md) says how the files themselves are written.
-
-The IR's types in the `schema` crate's `ir` module are the reference for every key: a key that the
-IR doesn't take is refused, and an absent key means what its doc there says, never a default
-chosen elsewhere.
-
-## The entry file
-
-A task is an entry file below a root, the nearest directory at or above it that holds a
-`PUMPKIN.star`. The entry file makes one `workflow()` call, with these keyword arguments:
-
-| Key | What it is |
-| --- | --- |
-| `name` | what `pumpkin ls` and the page show: 1 to 128 characters from A-Z, a-z, 0-9, `.`, `_`, `-` and `/` |
-| `roles` | the run's roles in declaration order, including at least one agent |
-| `deadline_seconds` | how long all agents may work, from their start or, at the latest, when the longest agent startup bound has passed since the run started |
-| `final` | the final call, which gives the run its result |
-
-`workflow()` is called once, while the entry file's own statements run; the files it loads give it
-values and bodies. A missing key is refused at the call:
-
-```text
-text.star:1:1: `workflow` lacks `roles`, `final`, `deadline_seconds`: give them
-    1 | workflow(name = "")
-      | ^^^^^^^^^^^^^^^^^^^
-```
+A workflow is data: the workflow IR. A task's entry file makes it with one `workflow()` call.
+The IR's types in the `schema` crate are the reference for every key. They live in
+[`ir.rs`](../crates/schema/src/ir.rs) and [`ir/`](../crates/schema/src/ir/), and say what each
+key means, what bounds it, and what an absent one means. This page says how the parts fit.
+[`examples/hello`](../examples/hello/task.star) shows them in a workflow that needs no model.
+[The language](language.md) says how the files are written.
 
 ## Roles
 
-Every role has these keys:
+A role is a template of sandboxes: an image, a user that isn't root, and what each sandbox needs.
+The run places the role by those needs ([providers](providers.md#placing-a-run)). The role's
+`runtime` gives its kind:
 
-| Key | What it is |
-| --- | --- |
-| `name` | unique among the roles: 1 to 64 characters from a-z, 0-9, `_` and `-`, starting with a letter |
-| `image` | what `image()` returns, which `pumpkin run` builds |
-| `user` | `{"uid": …, "gid": …}`, the user its commands run as, neither of them 0 |
-| `needs` | what each of its sandboxes needs, from which the run picks its class of sandbox |
-| `runtime` | its kind and what the kind holds: `{"agent": {…}}`, `{"target": {…}}` or `{"runner": {…}}` |
+- An **agent** works on the task. Its command runs once. It runs until it exits, until its work
+  ends and its grace runs out, or until the work deadline passes. The workflow's
+  `deadline_seconds` sets that deadline. The agents share the deadline, and each ends on its own.
+  An agent holds `grants`, the functions that it may call. It also holds `egress`, its model
+  route ([models](models.md)).
+- A **target** runs the commands that a call's body sends. With the `call` lifetime, which is the
+  default, each call gets a fresh sandbox that ends with the call. With the `work` lifetime, one
+  sandbox serves every call of the work phase. It serves one whole body at a time. A work
+  target's commands make no ops and no model requests. A process there can outlive its call, so
+  nothing could tell its requests apart by job.
+- A **runner** is a sandbox that a session leases. The lease's holder drives it. A runner holds no
+  egress and no grants.
 
-`needs` holds `cpu_millis`, thousandths of a CPU, and `memory_bytes`, both required; `gpu`,
-`{"count": …, "model": …}` with the model as `nvidia-smi` names it; `cpu_features`, flags as
-`/proc/cpuinfo` names them; and `cpu_model`. The run places each role in the smallest class of
-sandbox, of every provider's, that offers them, and refuses one that fits none, saying why of each
-class, before anything starts ([providers](providers.md)).
+Every sandbox has `/pumpkin`, which holds Pumpkin's own files. The `schema` crate's
+[`sandbox`](../crates/schema/src/sandbox.rs) module lays them out:
 
-A value that the IR's type refuses is said at the place in the source that made it, with its place
-in the IR:
-
-```text
-bad/zero/task.star:3:14: `cpu_millis` can't be `0`: expected a positive int
-    3 | CPU_MILLIS = 0
-      |              ^
-    the IR's /roles/1/needs/cpu_millis
-```
-
-### Agents
-
-Each agent works in its own sandbox and runs its command once. Agents may differ in resources,
-command, model route and grants. They work under one deadline.
-
-| Key | What it is |
-| --- | --- |
-| `command` | `{"argv": [...], "cwd": …, "env": [...]}`: the whole command line, as the image's entrypoint is not used; the directory it starts in; and `NAME=value` entries added to the image's environment, which may be left out |
-| `finalize_grace_seconds` | how long the agent may keep running once a call has ended its work, its ops refused meanwhile; 0 ends the work in that call's step |
-| `dirs`, `files` | directories (`{"path", "mode"}`) and text files (`{"path", "mode", "content"}`) made before the command starts, as the role's user, with modes written as `"0644"` |
-| `prepend_grant_help` | when true, put the role’s generated grant guide, a separator and a task heading before the original `stdin` bytes. The Codex harness enables this for its first prompt. Defaults to false. |
-| `stdin` | the task text, empty when absent. The command reads these bytes verbatim unless its harness enables `prepend_grant_help`. |
-| `egress` | its routes out: `{"model": [...]}`, a model route ([models](models.md)) |
-| `grants` | the functions it may call |
-
-Each agent ends when its command exits, when its grace after an `end_work()` runs out, or at
-the shared deadline, whichever comes first. Its peers can keep working. Like every sandbox, the agent's has `/pumpkin`, which holds
-Pumpkin's own files: `in/`, which holds its `stdin`, `out/`, which is collected into the record
-when the agent ends, `home/`, its commands' `HOME`, and `log/`, their output. A path of `dirs` or
-`files` below `/pumpkin` or `/.pumpkin` is refused.
-
-### Targets
-
-A target runs the commands sent by a call's body. Its `lifetime` determines which calls share
-a sandbox. Every target must be reached. The final call has an exclusive call-lifetime target.
-
-| Key | What it is |
-| --- | --- |
-| `lifetime` | `"call"` (also when omitted) starts a sandbox for each call. `"work"` keeps one sandbox for the work phase. |
-| `cwd` | the directory each command of the body's starts in |
-| `env` | `NAME=value` entries added to each command's environment |
-| `egress` | a call-lifetime sandbox's model route, open while its body runs |
-| `sessions` | the body's runner grants, each with fresh limits per call. Commands in a call-lifetime sandbox can also use these grants through `sandboxctl`. |
-
-Each agent may name a given call-lifetime target from one job function. Different agents may
-run independent calls of the same target concurrently.
-
-A work-lifetime target starts alongside the agents. Its sandbox keeps files between calls.
-Multiple grants can name it. The driver admits one complete body at a time. A competing call
-receives a busy refusal and keeps its quota. A failed body can leave files behind. If the
-sandbox's session ends, further calls fail and agents can still submit. After active calls
-end, the driver collects the sandbox's output and deletes it before starting the final call.
-
-The driver authenticates the calling agent and carries the body's inputs, commands and results.
-A process in a work-lifetime sandbox can outlive its call, so the driver cannot attribute
-requests from that sandbox to a particular job. Sandbox-issued sessions and model egress
-require a call-lifetime target. The trusted body can use `target.with_runner` on either
-lifetime. Its job holds the runner until deletion, and a work target stays busy until then.
-
-### Runners
-
-A sandbox that a session leases for its holder, which sends it commands and copies. Distinct
-agents may lease the same runner role. Every lease starts its own sandbox. A target's session
-names a runner no other session names. It holds `cwd` and `env`, as a target does, and neither egress nor grants. A
-runner of an agent's session has an image that no target has, so that the agent never runs what a
-target's image holds.
+- `in/` holds the agent's standard input.
+- `out/` holds what the record collects.
+- `home/` is the commands' `HOME`.
+- `log/` holds the commands' output.
 
 ## Grants
 
-A grant is `{"name": …, <kind>: {…}}`: a name, unique among the role's grants, which the role calls
-it by, and one function under its kind's key, `job`, `now` or `session`. A second key after the kind
-is refused, and so is a grant with none.
+A grant is a name and one function, under its kind's key: `{"name": "count", "job": {…}}`. Its
+holder calls it by name. The run checks each call against the grant before anything runs.
 
-A grant may include a public `"help"` string beside its name to describe its purpose, payload
-and return value. Pumpkin combines that description with the role’s actual grant name,
-caller arguments and limits. The body’s source, its docstring and the task’s private keywords
-stay with the host. Target sessions may likewise declare a public `help` string beside
-the session name. The target sees it through its own `sandboxctl ops`.
+- A **job function** runs its body on a sandbox of its `target`, one call at a time. The call
+  answers at once with the job's number. `sandboxctl status` follows the job to what the body
+  returned. The agent never reaches the target. It learns only the job's state, what the grant has
+  left, and what the body returned.
+- A **now function** answers in the call's reply, with no sandbox. Its body proposes changes to
+  the run's state. `run.set_submission(payload)` replaces the caller's submission.
+  `run.end_work()` locks the submission and ends the caller's work. The caller may keep running
+  for its `finalize_grace_seconds`, with its ops refused. The run applies the changes once the body returns, all of them
+  or none.
+- A **session** leases runners. Its holder opens a lease, runs commands and copies trees in it one
+  at a time, then closes the lease. A target's body holds the target's sessions, and each call gets
+  them afresh. A call target's commands hold them too.
 
-### A job function
-
-| Key | What it is |
-| --- | --- |
-| `target` | the role whose fresh or shared sandbox runs the body |
-| `body` | a `def` of a loaded file, which drives the target ([bodies](#bodies)) |
-| `keywords` | the values of the body's keyword-only parameters, as JSON; may be left out |
-| `payload_max_bytes` | the most bytes a call's payload may hold, at most 64 MiB |
-| `calls` | the most calls the agent may make; left out, no bound |
-| `cumulative_seconds` | the most time its calls may take in all, each counting once it has ended; left out, no bound |
-| `call_timeout_seconds` | each call's timeout, counted from its body's start |
-
-An agent's job grant runs one call at a time. Each agent has its own call and time limits. A call ends with its timeout, with the function's
-cumulative time, or with the work phase, whichever comes first. Its caller may hear how it ended
-while its sandbox is still being deleted. The grant takes its next call once that sandbox is gone
-and the call's leases have ended.
-
-### A now function
-
-| Key | What it is |
-| --- | --- |
-| `body` | a `def` of a loaded file, which answers on the run's state ([bodies](#bodies)) |
-| `payload_max_bytes` | the most bytes a call's payload may hold, at most 64 MiB |
-
-Its call is answered at once, with what the body returned, after the run has applied what the body
-asked of it.
-
-### A session
-
-| Key | What it is |
-| --- | --- |
-| `runner` | the runner that each lease starts afresh |
-| `instances` | the most leases open at once |
-| `instance_seconds` | the most time each lease may last, from when its runner is ready |
-| `cumulative_seconds` | the most time its leases may last in all, each open lease counting; left out, no bound |
-| `commands` | the most commands its leases may run in all, each copy counting as one; left out, no bound |
-| `transfer_bytes` | the most bytes of files each copy may move, at most 1 GiB |
-
-A lease runs one command or copy at a time, until its holder closes it, its time runs out, or its
-holder's work ends: the work phase, for the agent; its call, for a target. A target's session
-bounds each call afresh.
+The parts name each other by role. An agent may name a call target in at most one of its job
+functions. Other agents may name the same target too. The final call's target is a call target
+that no job function names. A target's session names a runner that no other session names. An
+agent's runner has an image that no target has, so the agent never runs what a target's image
+holds. Another part names each target and each runner.
 
 ## The final call
 
-`final` holds `target`, which no job function names, `body`, `keywords`, as a job function's, which
-may be left out, `payload_max_bytes`, at most 64 MiB, and `timeout_seconds`, counted from its
-target's start. The body drives a fresh sandbox once all agents and calls are torn down, each
-sandbox's delete confirmed, and all leases have ended.
-The dict it returns is the run's result. Each entry is a value the run shows in the body's order,
-as `pumpkin wait`, `pumpkin ls` and the page show `score=6 lines=1`.
-
-The final body's second parameter, conventionally named `submissions`, is a dictionary in agent
-declaration order. Each role name maps to its last submitted opaque `Payload`, or to `None`
-if it submitted nothing. A submitted zero-byte file is still a `Payload`. The body runs even
-when every value is `None`. It chooses which submissions to send to files or commands in the target
-and what result to return.
-For example, a task with a scoring function for the role named `agent` can write:
-
-```python
-def final_score(target: Target, submissions):
-    payload = submissions["agent"]
-    if payload == None:
-        return {"score": 0}
-    return score(target, payload)
-```
+The final call waits until every agent's work has ended, and every call, lease and work sandbox is
+gone. Then it runs its body on a fresh sandbox of its `target`. The body gets each agent role's
+last submission, as a `Payload` or `None`. What the body returns is the run's result. The run
+shows the result's entries in order, as `score=6 lines=1`. A failed final call leaves the run
+without a result.
 
 ## Bodies
 
-A body is a top-level `def` of a file that the entry loads; an entry file defines no function. The
-IR names a body by its file's label and its name, and each call evaluates that file afresh, from
-the text the record keeps. Its parameters, in order:
+A body is a top-level `def` of a file that the entry file loads. The record keeps the text of each
+file that the evaluation read. Each call evaluates its body from that text. So a call runs the
+body that was checked as the run started. A body's parameters, in order:
 
-1. The handle, which only the host makes: a `Target` for a job function's body and the final
-   call's, a `Run` for a now function's.
-2. A job or now function receives the caller’s bytes as an opaque `Payload`. A final body receives
-   the dictionary of submissions described above. Leave that parameter unannotated.
-3. The caller's parameters, if any: each annotated `str`, `int` or `bool`, with or without a
-   default. The final call's body has none, as no caller gives it an argument.
-4. After `*`, the keyword-only parameters, which a job function's `keywords` or the final call's
-   give, each a JSON value that must fit its annotation. One that they don't give needs a default.
-
-Methods available to a body and its runner callbacks follow.
+1. The handle: a `Target` for a job's body or the final call's body, and a `Run` for a now
+   function's body.
+2. The caller's bytes, as a `Payload`. In the final call's body, this parameter holds the
+   submissions by role and has no annotation.
+3. The caller's parameters, each annotated `str`, `int` or `bool`. The caller gives each as
+   `--arg <name>=<value>`. Each is read as its type before the body runs. The final call has none.
+4. After `*`, the keyword-only parameters. The `keywords` of the grant or of the final call give
+   them.
 
 | Method | What it does |
 | --- | --- |
-| `target.caller()` | returns the issuing agent's role name, authenticated by its session; available in a job body |
-| `target.put(path, payload)` | writes the payload as one file at `path`, an absolute path, its parents made |
-| `target.run(argv)` | runs `argv`, a list of strings, in the target's `cwd`, and waits for it to end, whatever its exit status |
-| `target.capture(argv, stdin = payload)` | runs the command with the payload as standard input. Omit `stdin` or pass `None` for no input. Returns complete UTF-8 stdout, at most 1 MiB, on exit code zero. The record keeps stdout and stderr |
-| `target.with_runner(session, callback, ...)` | opens a fresh runner under the target's named session grant, calls `callback(runner, ...)` with the remaining positional arguments, then closes the runner and waits for deletion before returning the callback's value |
-| `runner.put(tree, to)` | copies the directory `tree` on the target into the runner at `to`, which must be new. Both paths are absolute. The copy counts as one grant operation |
-| `runner.get(from, to)` | copies a file or directory from the runner into a new directory on the target. A file keeps its basename. Both paths are absolute. The copy counts as one grant operation and uses the session's per-copy byte limit |
-| `runner.run(argv, timeout_seconds = seconds)` | runs a command in that runner and waits for its recorded output. Its optional timeout is a positive number of seconds. The result holds `end`, `stdout_tail` and `stderr_tail` |
-| `target.get(path)` | the text of the file at `path`, which must be UTF-8 and at most 1 MiB |
-| `run.set_submission(payload)` | sets or replaces the caller’s submission |
-| `run.end_work()` | locks the caller’s submission immediately and ends its work once its grace has run out |
+| `target.put(path, payload)` | writes the payload as a file at `path`, its parents made |
+| `target.run(argv)` | runs `argv` in the target's `cwd`, and waits for it, whatever its exit status |
+| `target.capture(argv, stdin = payload)` | runs `argv`, and returns its standard output if it exits 0 |
+| `target.get(path)` | returns the text of the file at `path` |
+| `target.caller()` | returns the calling agent's role, in a job's body |
+| `target.with_runner(session, callback, ...)` | opens a lease of the target's session, calls `callback(runner, ...)`, closes the lease even if the callback fails, and returns what the callback returned once the runner is deleted |
+| `runner.put(tree, to)` | copies the target's tree to a new path in the runner |
+| `runner.get(from, to)` | copies the runner's file or tree into a new directory on the target, where a file keeps its name |
+| `runner.run(argv, timeout_seconds = seconds)` | runs `argv` in the runner, and returns a [`RunnerOutput`](../crates/schema/src/sandbox/op.rs) |
+| `run.set_submission(payload)`, `run.end_work()` | propose a now function's changes, as above |
 
-A runner handle works only during its callback. A callback error also closes the runner.
-A runner command reports its own timeout as `"timed_out"` and an exit as
-`{"exited": {"code": n}}` or `{"exited": {"signal": n}}`. Its output fields hold at most
-21 KiB each, with invalid UTF-8 replaced. The record keeps the raw streams.
-A refused operation, failed copy, unstarted command, incomplete output collection or expired
-lease fails the body. A runner that cannot be deleted fails the run.
+`get` and `capture` return at most 1 MiB of UTF-8 text. A runner handle works only in its
+callback. Any of these fails the body: a refused op, a failed copy, a command that doesn't start
+or whose output isn't collected whole, or a lease that runs out. A runner that can't be deleted
+fails the run.
 
-A body can call `target.with_runner("judge", _grade, target, argv)` when its judge command
-writes `/work/result.json`. The destination directory `/work/feedback` must be new on the target.
-
-```python
-def _grade(runner, target, argv):
-    result = runner.run(argv)
-    if result["end"] != {"exited": {"code": 0}}:
-        fail("judge failed")
-    runner.get("/work/result.json", "/work/feedback")
-    return json.decode(target.get("/work/feedback/result.json"))
-```
-
-A now function's body proposes these operations. When the body returns, the run applies them
-in order if they all pass validation. A refused operation leaves the state unchanged.
-`end_work()` can end a caller that submitted nothing and must come last.
-
-A body returns a dict whose keys are names, as a role's are, and whose values JSON can hold; it is
-encoded as `json.encode` would, and takes at most 1 MiB as JSON. Within a body, annotations are checked on entry and on return of
-every function it calls, and its evaluation is bounded as every evaluation is
-([the language](language.md#bounds)).
-
-A body fails if its evaluation fails, as on `fail()` or a method that fails, such as a `get` of a
-file that is not there, or if it returns anything but such a dict, or one over that size. The
-record keeps the reason; the caller hears only `the call's body failed: the run's record says why`.
-
-### The caller's arguments
-
-A parameter after the payload is given by the caller as `--arg <name>=<value>`, and read as its
-type before the body runs: a `str` as it is, an `int` in decimal digits, a `bool` as `true` or
-`false`. One with no default must be given. A call whose arguments don't read is refused, with the
-body unrun, as `examples/hello`'s `final` answers:
-
-```json
-{"kind":"refused","message":"`--arg finalize` is `\"yes\"`, which is no bool: give it `true` or `false`"}
-{"kind":"refused","message":"`--arg mode` is given, and `final` takes no such argument: give only those that `ops` lists"}
-```
+A body returns a dict of at most 1 MiB of JSON. Its keys are names, and JSON can hold its values.
+The body fails if its evaluation fails, as on `fail()` or a `get` of a missing file. It also fails
+if it returns anything else. The record keeps why it failed. The caller hears only that it failed.
 
 ## From inside a sandbox
 
-An agent, or a call-lifetime target that holds sessions, makes ops with `sandboxctl`. Pumpkin puts its
-directory first on each command's `PATH`, ahead of the path the role or image sets.
-`sandboxctl` prints the reply as one line of JSON, whose `kind` names it. It exits 0 on success,
-1 for a refused op, 2 for the status of a job that gave no result, or 124 when its own wait
-expires. `sandboxctl --help` gives each command's arguments, and the `schema` crate's
-`sandbox::op` module each reply's fields.
-The replies below come from `examples/hello` with its agent changed to try each, and its `count`
-grant given `"calls": 2` and `"cumulative_seconds": 120`.
-
-`sandboxctl ops --text` prints shell usage for this role.
-`sandboxctl ops` gives the role name, the time left to work, the sandbox's resources, and each grant with its
-bounds and its caller's parameters:
-
-```json
-{"kind":"ops","role":"agent","remaining_seconds":299,"resources":{"cpu_millis":500,"memory_bytes":268435456},"grants":[{"kind":"job","name":"count","payload_max_bytes":1024,"calls":2,"cumulative_seconds":120,"call_timeout_seconds":60},{"kind":"now","name":"final","payload_max_bytes":1024,"arguments":{"finalize":{"type":"bool","default":false}}}]}
-```
-
-`sandboxctl call <function> [<file>] [--arg <name>=<value>]...` calls a function with the file's
-bytes as the payload. Omitting the file sends zero bytes. A job function's call answers at once with the job's number and what the
-function has left, `null` for a bound it doesn't set:
-
-```json
-{"kind":"call","job":0,"remaining":{"calls":1,"seconds":120}}
-```
-
-`sandboxctl status <job>` follows the job: its `state` is `queued`, `running`, `completed`, with
-what the body `returned`, or `errored`, with a `failure` whose `code` is `call_timeout` or
-`call_error`:
-
-```json
-{"kind":"status","job":0,"state":"completed","returned":{"bytes":6,"lines":1},"remaining":{"calls":1,"seconds":119}}
-```
-
-`sandboxctl call <function> <file> --wait <seconds>` waits for the result. Give a positive
-number of seconds for admission and completion together. The command retries an uncharged
-busy refusal, then polls the admitted job and prints its terminal status. A now function
-returns its usual reply. On timeout the command exits with 124 and reports the job number
-if it received one. An admitted job continues to run. If the connection fails before the
-admission reply arrives, the call may already have started.
-
-Once a job has ended, `model_requests_over_budget` says how many of its target's model requests a
-spent model budget barred, if any. `hello`'s target makes none; a job whose target's budget ran out
-shows:
-
-```json
-{"kind":"status","job":1,"state":"errored","failure":{"code":"call_error","message":"the call's body failed: the run's record says why"},"model_requests_over_budget":3,"remaining":{"calls":0,"seconds":80}}
-```
-
-A now function's call answers with what the body returned and the time left to work, which, once
-the call has ended the work, is at most the grace:
-
-```json
-{"kind":"call","returned":{"state":"stored"},"remaining_seconds":298}
-{"kind":"call","returned":{"state":"accepted"},"remaining_seconds":30}
-```
-
-A session's functions are called as `<session>.<op>`: `open [--seconds <n>]` answers with the
-lease's number; `run <lease> [--timeout <seconds>] -- <program> [<arg>...]`, `put <lease> <tree>
-<to> [--replace]` and `get <lease> <from> <to>` start a command or a copy of a directory tree and
-answer at once; `status <lease>` says how the lease and its last command or copy are doing, with
-the ends of the command's output; and `close <lease>` ends it.
-
-A refusal says why, and what to do instead. Each of these is a real reply:
-
-```json
-{"kind":"refused","message":"`count` runs one call at a time, and already has one queued, running or releasing its sandbox: call again once it has finished; this call is not charged","busy":true}
-{"kind":"refused","message":"you have no job 7: ask about a job that one of your calls returned"}
-{"kind":"refused","message":"the work was ended: make no more ops"}
-```
-
-## How a call is bounded
-
-A job or now function's payload may be empty and must fit its `payload_max_bytes`. A saved
-submission must also fit the final call's payload limit. A job function's `calls` and
-`cumulative_seconds` bound the jobs it can start. A job's body may
-drive its target until `call_timeout_seconds` have passed since the target started, or less if the
-function's cumulative time or the work phase ends first; then the command the body runs is ended,
-or its next method fails, and the job is `errored` with `call_timeout`. Each file a body gets
-holds at most 1 MiB, and each evaluation of a body is bounded in steps and bytes, as every
-evaluation is. The final call is bounded so by `timeout_seconds`.
+An agent and a call target's commands make ops with `sandboxctl`, which comes first on `PATH`.
+`sandboxctl --help` gives each command's arguments and exit statuses. The `schema` crate's
+[`sandbox::op`](../crates/schema/src/sandbox/op.rs) module gives each reply's fields.
+`sandboxctl ops` lists the role's grants with their `help`, limits and parameters.
+`sandboxctl ops --text` prints their usage for a shell.
 
 ![One job function's call, end to end: in the agent's sandbox, sandboxctl call sends the payload over the session; the driver's core checks it against the grant and answers with the job's number; the runtime starts a fresh sandbox of the target and evaluates the body, from the sources the record keeps, whose put, run and get drive the target; the target ends, and the dict the body returned goes to the agent's sandboxctl status and to the record.](figures/call.svg)
 
-## What the record keeps of a call
-
-A call's payload is kept once, in the record's `payloads/`, by the SHA-256 of its bytes. The run
-log keeps the op that made the call and the reply, then the call's start, each `put` with the
-path and the payload's digest, each `run` with its argv and how it ended, each `get` with the path
-and the digest of what it got, and what the body returned, or why it failed. Each call's target,
-the final call's included, keeps in a directory of its own, `jobs/<n>/`, the output of its commands
-(`log/`), the files its body got (`got/`) and, as the call ends, what the target holds in
-`/pumpkin/out` (`out/`); [records](record.md) lays out the rest of the record.
-
 ## What `pumpkin check` refuses
 
-`pumpkin check` evaluates the files, reads the workflow into the IR, checks how its parts fit, and
-reads every body against its kind, without calling it. It says each problem at its file, line and
-column; a problem in how the parts fit is said with its place in the IR. Among them:
-
-- a key the IR doesn't take, or a value its type refuses, as above, a kind that holds what it
-  can't among them;
-- a function defined in the entry file;
-- a workflow with no agent;
-- a name that names no role, or a role of another kind than its place takes;
-- a target that two grants of one agent name or that a job and the final call both name;
-- a runner that two sessions name unless their holders are distinct agents;
-- a target or a runner that nothing names;
-- an agent's runner whose image a target has;
-- a payload or transfer bound past the protocol's.
-
-Each in the words `check` says it:
-
-```text
-`egress` is no field of `runner`: expected one of `cwd`, `env`
-a function defined in an entry file is not in Pumpkin's Starlark: define it in a library, and load it
-`agent` is an agent: name a target as the final call's target
-`final_judge` is the final call's target and `check`'s: give the final call a role no job names
-`gpu` is a runner that no session names: name it from one
-`gpu` runs target `trainer`'s image, sha256:…: give the runner an image no target has
-the final call's `payload_max_bytes` is 68157440, over the op payload limit of 67108864: give at most that
-```
-
-It also reads each body against its kind: a body that is no `def` of its file, or whose
-parameters don't fit its kind, is refused at the parameter:
-
-```text
-lib/submit.star:1:12: `submit`'s first parameter is a `Target`, and a now function's body takes its `Run`: write `def submit(target: Run, …)`
-lib/submit.star:1:47: `submit`'s `finalize` follows the payload, so its caller gives it: annotate it `str`, `int` or `bool`
-lib/final.star:1:38: `final_call`'s `level` follows the submissions, and the final call has no caller to give it: remove it
-lib/final.star:1:65: `final_call` takes the keyword `metric`, which the final call's `keywords` does not give: give it, or a default
-```
-
-A body's own statements run only when it is called, so a misspelt method fails the call that
-reaches it, not the check:
-
-```text
-lib/verify.star:2:19: `pt` is no method of a `Target`: call one of `caller`, `capture`, `get`, `put`, `run`
-```
+`pumpkin check` checks how the parts fit. It reads each body against its kind without calling
+it. A body's own statements run only when it is called, so a misspelt method fails the call that
+reaches it, not the check.

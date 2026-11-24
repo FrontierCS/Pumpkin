@@ -26,7 +26,7 @@ pub enum Writer {
     This,
     /// Another build, shown as a [`Build`](super::Build) is.
     Other(String),
-    /// A build from before records named theirs.
+    /// The record names no build.
     Older,
 }
 

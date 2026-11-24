@@ -27,6 +27,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use members::Member;
 use schema::frame::{self, MAX_BODY_BYTES};
 use schema::ir::Sha256Digest;
+use schema::sandbox::MAX_MODEL_REQUEST_BYTES;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -35,10 +36,11 @@ use crate::reaping::{Reaping, RunReaped};
 use crate::{config, manifest, workspace};
 
 // Well past the largest answer: a listing of a few thousand runs is a few MiB, and a body that a
-// record keeps is at most the 64 MiB that the gateway takes of a request.
+// record keeps is at most what the gateway takes of a request.
 const MAX_ANSWER_BODY_BYTES: u64 = 256 * 1024 * 1024;
+const _: () = assert!(MAX_ANSWER_BODY_BYTES > MAX_MODEL_REQUEST_BYTES);
 
-// Room for a job's keys and configuration. Copy uses the same budget for its optional file stamps.
+// Room for a job's keys and configuration.
 pub(crate) const MAX_REQUEST_BODY_BYTES: usize = 16 << 20;
 
 /// What `serve` says first, in a frame with no body.
@@ -610,7 +612,6 @@ pub(crate) struct Viewed {
     /// The status line's code and reason.
     pub(crate) status: String,
     pub(crate) content_type: String,
-    /// Whether `body` is deflated.
     pub(crate) deflated: bool,
     pub(crate) body: Vec<u8>,
 }

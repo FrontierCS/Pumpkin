@@ -26,6 +26,7 @@ use super::kept::{
 use super::read::CHAT_CUSTOM;
 use super::{
     Request, chat, fake_sandbox, listed, meeting, messages, models, next_model_request, post,
+    shown_received,
 };
 
 const KEY: &str = "sk-test-0123\n";
@@ -348,6 +349,7 @@ fn serve_one(
 
 #[derive(Default)]
 struct Kept {
+    dropped_headers: Cell<bool>,
     request: RefCell<Vec<u8>>,
     response: RefCell<Vec<u8>>,
     first_output: Cell<Option<usize>>,
@@ -365,7 +367,10 @@ impl Kept {
 }
 
 impl Keep for Kept {
-    fn dropped_headers(&self, _: &[String]) {}
+    fn dropped_headers(&self, _: &[String]) {
+        assert!(self.request.borrow().is_empty(), "told after the request");
+        assert!(!self.dropped_headers.replace(true), "told twice");
+    }
 
     fn request(&self, body: &[u8], _: Option<Apart>) {
         self.request.borrow_mut().extend_from_slice(body);
@@ -402,18 +407,8 @@ fn upstream(case: &Case, key: &Path, address: &str) -> Result<(Route, Upstream),
 }
 
 fn got((head, body): (String, Vec<u8>), sent: &[u8], first: &mut Option<String>) -> String {
-    let head = if first.is_none() {
-        first.insert(head).clone()
-    } else if first.as_ref() == Some(&head) {
-        "the same head".to_owned()
-    } else {
-        head
-    };
-    if body == sent {
-        format!("{head} with the body as sent")
-    } else {
-        format!("{head} with the body {}", String::from_utf8_lossy(&body))
-    }
+    let (head, body) = shown_received(head, &body, sent, first);
+    format!("{head} with {body}")
 }
 
 #[expect(

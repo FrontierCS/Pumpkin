@@ -17,10 +17,8 @@ use stdx::Context as _;
 
 use crate::job::Source;
 
-/// The directory of [`FILE`].
 const DIR: &str = "/etc/pumpkin";
 
-/// Where the host file is.
 const FILE: &str = "/etc/pumpkin/controller.toml";
 
 /// What the controller runs on, and where its settings are.

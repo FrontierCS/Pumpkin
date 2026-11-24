@@ -9,8 +9,8 @@ use expect_test::expect;
 use serde_json::json;
 
 use super::{
-    EC2, LOCAL, Scratch, Step, check, docker_table, invocation, poll, ran, report, returned,
-    write_docker_record, write_record,
+    EC2, LOCAL, Scratch, Step, check, docker_table, invocation, lock_driver, poll, ran, report,
+    returned, write_docker_record, write_record,
 };
 
 /// A lost run, whose turn the test holds as the first reap begins.
@@ -31,7 +31,7 @@ const DAMAGED: &str = "20261108-120210-0a00000e";
 /// A live run, whose lock the test holds.
 const LIVE: &str = "20261108-120300-0a000004";
 
-/// A record made before records were locked.
+/// A record that holds no `driver.pid`.
 const UNLOCKED: &str = "20261108-120400-0a000005";
 
 /// A failed run whose Docker provider cannot be reached.
@@ -58,8 +58,7 @@ fn reaps() {
     write_record(&scratch, DAMAGED, true, None);
     scratch.write(&format!("runs/{DAMAGED}/outcome.json"), "{");
     write_record(&scratch, LIVE, true, None);
-    let live = File::open(scratch.0.join(format!("runs/{LIVE}/driver.pid"))).unwrap();
-    live.lock().unwrap();
+    let live = lock_driver(&scratch.0.join(format!("runs/{LIVE}")));
     write_record(&scratch, UNLOCKED, false, None);
     let failed = json!({ "state": "failed", "reason": "r" });
     write_docker_record(&scratch, UNREACHED, "recorded", Some(failed));
@@ -238,9 +237,8 @@ fn reaps_providers() {
     );
 }
 
-/// The locks that the process `pid` holds on `path`, or waits for, as `/proc/locks` lists them,
-/// each by its process and its file's device and inode: for each, whether it waits, as one
-/// listed after `->` does.
+/// For each lock that process `pid` holds or waits for on the file `path`, as `/proc/locks` lists
+/// it, whether it waits.
 fn locks(pid: u32, path: &Path) -> Vec<bool> {
     let inode = format!(":{}", fs::metadata(path).unwrap().ino());
     let locks = fs::read_to_string("/proc/locks").unwrap();

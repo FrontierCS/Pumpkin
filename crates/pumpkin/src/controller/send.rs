@@ -2,7 +2,7 @@
 //! store, and a command starts the job from them.
 //!
 //! The controller says which blobs of the task's manifest its store lacks, and only those are
-//! sent, each from its held offset. Large task uploads can use up to four links.
+//! sent, each from its held offset. Large task uploads can use several links.
 //! After a cut, the next store query finds which complete frames arrived.
 //!
 //! The start request sends this machine's settings and keys on the link's standard input. The

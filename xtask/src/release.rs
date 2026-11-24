@@ -264,7 +264,6 @@ fn publish_assets(dir: &Path, release: &Release<'_>) -> Result<()> {
     Ok(())
 }
 
-/// `program`, run in `dir`.
 fn program(program: impl AsRef<OsStr>, dir: &Path) -> Command {
     let mut command = process::command(program, Environment::Inherited);
     command.current_dir(dir);

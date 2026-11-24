@@ -113,8 +113,8 @@ fn check(
     expect.assert_eq(&shown.join("\n"));
 }
 
-/// 8 MiB of a pattern.
-// Four times what the sockets between the ends hold of a session that reads nothing.
+// 8 MiB of a pattern: twice the 4 MiB under which `backpressure` expects a write to stall when
+// the other end reads nothing.
 fn pattern() -> Vec<u8> {
     (0..8u32 << 20).map(|i| (i % 251) as u8).collect()
 }
@@ -232,9 +232,12 @@ fn broken_connections() {
     }
 }
 
+fn unreached(_: Stream, _: Stream, _: &dyn Fn()) -> Vec<String> {
+    unreachable!("the handshake was to fail")
+}
+
 #[test]
 fn refused_servers() {
-    let unreached = |_, _, _: &dyn Fn()| unreachable!("the handshake was to fail");
     let within = HUNG;
     check(
         (&edge::client(), "edge.example"),
@@ -266,7 +269,6 @@ fn refused_servers() {
 
 #[test]
 fn refused_peers() {
-    let unreached = |_, _, _: &dyn Fn()| unreachable!("the handshake was to fail");
     check(
         (&edge::client(), edge::NAME),
         Peer::Sends(b"{\"version\":1}\n"),

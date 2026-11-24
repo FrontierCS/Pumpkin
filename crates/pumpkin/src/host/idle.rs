@@ -17,7 +17,6 @@ use crate::job::UNIT_PREFIX;
 /// How long the controller has been idle before it stops.
 const IDLE: Duration = Duration::from_mins(30);
 
-/// The directory of [`BUSY`].
 const DIR: &str = "/var/lib/pumpkin";
 
 /// The file whose time is that of the last check that found the controller busy.

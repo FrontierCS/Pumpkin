@@ -305,7 +305,7 @@ fn missing_pin() {
 }
 
 #[test]
-fn legacy_pin() {
+fn pin_without_checksum() {
     check(
         Release::None,
         Some(&format!("v1 {COMMIT}\n")),

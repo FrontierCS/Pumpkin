@@ -180,8 +180,9 @@ pub(crate) fn ir_in(dir: &Path) -> Result<Option<ir::Workflow>, ReadError> {
     Ok(Some(ir))
 }
 
-/// Recorded service roles used the same physical sandbox and job records as work-lifetime
-/// targets. Only record readers accept their old declaration.
+/// `bytes` read as an IR whose roles declare a `shared` runtime, which a record may hold: each
+/// reads as a work-lifetime target. `None` if none does, or the result isn't an IR. Only record
+/// readers accept it.
 fn legacy_ir(bytes: &[u8]) -> Option<ir::Workflow> {
     let mut ir: Value = serde_json::from_slice(bytes).ok()?;
     let mut converted = false;

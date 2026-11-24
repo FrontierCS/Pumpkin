@@ -7,7 +7,7 @@ configuration and keys. This page says what each is, what it needs, and where ea
 `pumpkin help config` holds every key of the machine's configuration, and
 [`deploy/aws`](../deploy/aws/README.md) the AWS side.
 
-![On the operator's machine, pumpkin builds images on the Docker engine, where the Docker provider's containers also run; a machine with a controller sends its runs over ssh to the controller, which builds the images on its own engine, pushes them to ECR, launches EC2 instances that pull them, and creates Modal sandboxes, which Modal imports from the same repositories.](figures/providers.svg)
+![On the operator's machine, pumpkin builds images on the Docker engine, where the Docker provider's containers also run. A machine with a controller sends its runs over ssh to the controller. The controller is an EC2 instance or a privileged container on a Docker host. An EC2 controller builds the images on its own engine and pushes them to ECR. It launches EC2 instances that pull the images, and creates Modal sandboxes, which Modal imports from the same repositories. A Docker controller builds the images on an engine inside its own container, never on the host's. The Docker provider's containers also run on that engine.](figures/providers.svg)
 
 ## Placing a run
 
@@ -89,8 +89,6 @@ before, up to a minute. When an EC2 controller has stopped, as an idle one does,
 "Start it" button (`aws ec2 start-instances`). Until the controller answers, each request asks EC2
 whether it runs (`aws ec2 describe-instances`), or probes the `address` of one on Docker.
 `view --runs .pumpkin/runs/<name>` serves the copies that `wait` made.
-
-![The data between a machine and its controller, over ssh: the task's tree to the controller's store, the job's start, what the run says as it is followed, what ls reads of each run, and an ended run's record, each as the controller modules of pumpkin carry it, and the view's requests for the runs' data and their replies, over one ssh to the view on the controller.](figures/controller-data.svg)
 
 An EC2 controller starts when a command needs it and stops itself once it has been idle a while,
 with no job and no ssh session. At boot, each controller reaps what lost runs left. A machine's

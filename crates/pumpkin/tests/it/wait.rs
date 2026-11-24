@@ -9,8 +9,9 @@ use schema::sandbox::RESULT_MAX_DEPTH;
 use serde_json::{Value, json};
 
 use super::{
-    Prices, Scratch, Step, asked, check, cut, invocation, lease_places, lease_task, logged,
-    older_finished, payload, ran, report, returned, submission, whole_log, write_record, write_run,
+    Prices, Scratch, Step, agent_answer, answered_log, asked, check, cut, invocation, lease_places,
+    lease_task, lock_driver, logged, older_finished, payload, ran, report, returned, started_work,
+    submission, whole_log, write_record, write_run,
 };
 
 #[test]
@@ -221,8 +222,7 @@ fn follows() {
     let scratch = Scratch::new();
     let id = "20261107-120000-1b8a6389";
     write_record(&scratch, id, true, None);
-    let driver = File::open(scratch.0.join(format!("runs/{id}/driver.pid"))).unwrap();
-    driver.lock().unwrap();
+    let driver = lock_driver(&scratch.0.join(format!("runs/{id}")));
     let mut command = scratch.pumpkin(&["wait", "1b8a", "--runs", "runs"]);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let invoked = invocation(&command);
@@ -300,8 +300,7 @@ fn states() {
                     fs::write(dir.join("driver.pid"), "4242\n").unwrap();
                 }
                 if pid == "locked" {
-                    held.push(File::open(dir.join("driver.pid")).unwrap());
-                    held.last().unwrap().lock().unwrap();
+                    held.push(lock_driver(&dir));
                 }
                 if let Some(contents) = contents {
                     fs::write(dir.join("outcome.json"), contents).unwrap();
@@ -579,16 +578,7 @@ fn summarizes() {
     // a rate limit, one giving no code; its requests left behind more header names than the
     // summary holds.
     let late = "20261110-110000-0000000b";
-    let answer = |more: Value| {
-        let mut answer = json!({
-            "kind": "model_answered", "caller": "agent-0",
-            "answer": { "kind": "forwarded" }, "upstream_status": 200,
-        });
-        for (field, value) in more.as_object().unwrap() {
-            answer[field] = value.clone();
-        }
-        answer
-    };
+    let answer = |more: Value| agent_answer(200, more);
     let limited = || answer(json!({ "failed": { "code": "rate_limit_exceeded" } }));
     let refused = json!({
         "answer": { "kind": "refused", "status": 502, "message": "m" }, "upstream_status": null,
@@ -603,18 +593,7 @@ fn summarizes() {
         answer(json!({ "failed": {} })),
         limited(),
     ];
-    let mut log = vec![
-        logged(5, json!({"kind":"work_started"}), json!([])),
-        logged(
-            5,
-            json!({"kind":"agent_started","caller":"agent-0"}),
-            json!([]),
-        ),
-    ];
-    for (request, (seconds, mut answer)) in (0_u64..).zip((10..).step_by(10).zip(answers)) {
-        answer["request"] = json!(request);
-        log.push(logged(seconds, answer, json!([])));
-    }
+    let mut log = answered_log(answers);
     log.extend([
         logged(
             1805,
@@ -703,15 +682,7 @@ fn summarizes() {
         { "api": "chat", "models": ["model-a"] },
     ]);
     scratch.write(&format!("runs/{}/ir.json", others[0].0), &budgeted);
-    // What it said, as these runs' times are their records'.
-    let wait = |id: &str| {
-        let mut wait = scratch.pumpkin(&["wait", "--runs", "runs", id]);
-        let invoked = invocation(&wait);
-        let output = wait.output().unwrap();
-        let said = String::from_utf8(output.stderr).unwrap();
-        let status = output.status.code();
-        format!("{invoked}\nexit status: {status:?}\n{}", said.trim_end())
-    };
+    let wait = |id: &str| waited(&scratch, id);
     let mut steps: Vec<Step> = [whole, late].map(|id| Step::Ran(wait(id))).into();
     // Of those, the command and the lines that say a cost or a budget.
     for (id, _) in others {
@@ -781,9 +752,21 @@ fn summarizes() {
     );
 }
 
+/// Runs `wait` on run `id` of `scratch`'s `runs` and shows its invocation, its exit status and
+/// what it said, without the outcome it printed.
+///
+/// Unlike [`ran`], it leaves each time as said, as the times of a record are fixed.
+fn waited(scratch: &Scratch, id: &str) -> String {
+    let mut wait = scratch.pumpkin(&["wait", "--runs", "runs", id]);
+    let invoked = invocation(&wait);
+    let output = wait.output().unwrap();
+    let said = String::from_utf8(output.stderr).unwrap();
+    let status = output.status.code();
+    format!("{invoked}\nexit status: {status:?}\n{}", said.trim_end())
+}
+
 fn followed(scratch: &Scratch, id: &str, last: &str) -> Step {
-    let driver = File::open(scratch.0.join("runs").join(id).join("driver.pid")).unwrap();
-    driver.lock().unwrap();
+    let driver = lock_driver(&scratch.0.join("runs").join(id));
     let mut command = scratch.pumpkin(&["wait", id, "--runs", "runs"]);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let invoked = invocation(&command);
@@ -811,14 +794,7 @@ fn followed(scratch: &Scratch, id: &str, last: &str) -> Step {
 fn follows_an_agent_that_asks_at_startup() {
     let scratch = Scratch::new();
     let id = "20261110-100000-0000000a";
-    let mut log = vec![
-        logged(2, json!({"kind":"work_started"}), json!([])),
-        logged(
-            2,
-            json!({"kind":"agent_started","caller":"agent-0"}),
-            json!([]),
-        ),
-    ];
+    let mut log = Vec::from(started_work(2));
     let call = json!({
         "kind": "start_call", "caller": "agent-0", "job": 0, "grant": "train", "payload": payload(), "timeout_ns": "600000000000",
     });
@@ -1023,7 +999,7 @@ fn reads_a_deep_result_and_a_log_cut_short() {
     let final_call = json!([{
         "kind": "start_final_call", "job": 1, "selections": [{"role":"solver","selection":payload()}], "timeout_ns": "60000000000",
     }]);
-    let mut log = Vec::from(super::started_work(0));
+    let mut log = Vec::from(started_work(0));
     log.extend(deep_call(depth));
     log.extend([
         super::agent_exited(1),
@@ -1049,16 +1025,7 @@ fn reads_a_deep_result_and_a_log_cut_short() {
     log.write_all(br#"{"at_ns":"14"#).unwrap();
     let ls = scratch.pumpkin(&["ls", "--runs", "runs", id]);
     steps.push(Step::Ran(ran(ls, &scratch.0, false)));
-    // What it said, without the outcome it printed, which holds the result.
-    let mut wait = scratch.pumpkin(&["wait", "--runs", "runs", id]);
-    let invoked = invocation(&wait);
-    let output = wait.output().unwrap();
-    let said = String::from_utf8(output.stderr).unwrap();
-    let status = output.status.code();
-    steps.push(Step::Ran(format!(
-        "{invoked}\nexit status: {status:?}\n{}",
-        said.trim_end()
-    )));
+    steps.push(Step::Ran(waited(&scratch, id)));
     check(
         &scratch,
         steps,
@@ -1130,15 +1097,7 @@ fn summarizes_an_interrupted_run() {
     let outcome = json!({ "signal": "SIGTERM", "state": "interrupted" });
     let priced = lease_places(Prices::Both);
     write_run(&scratch, id, asked(id, 0), &log, Some(outcome), &priced);
-    let mut wait = scratch.pumpkin(&["wait", "--runs", "runs", id]);
-    let invoked = invocation(&wait);
-    let output = wait.output().unwrap();
-    let said = String::from_utf8(output.stderr).unwrap();
-    let status = output.status.code();
-    let step = Step::Ran(format!(
-        "{invoked}\nexit status: {status:?}\n{}",
-        said.trim_end()
-    ));
+    let step = Step::Ran(waited(&scratch, id));
     check(
         &scratch,
         [step],
@@ -1175,15 +1134,7 @@ fn summarizes_a_record_in_the_old_order() {
         Some(returned(49.36)),
         &priced,
     );
-    let mut wait = scratch.pumpkin(&["wait", "--runs", "runs", id]);
-    let invoked = invocation(&wait);
-    let output = wait.output().unwrap();
-    let said = String::from_utf8(output.stderr).unwrap();
-    let status = output.status.code();
-    let step = Step::Ran(format!(
-        "{invoked}\nexit status: {status:?}\n{}",
-        said.trim_end()
-    ));
+    let step = Step::Ran(waited(&scratch, id));
     check(
         &scratch,
         [step],

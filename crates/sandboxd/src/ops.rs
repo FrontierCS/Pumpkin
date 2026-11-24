@@ -41,8 +41,6 @@ use crate::sys;
 pub(crate) struct Ops(Arc<Shared>);
 
 #[derive(Default)]
-// The threads that carry callers' ops wait their turns on `turn_ended`, and the session's
-// thread takes the op in flight out of `flight` to hand over its reply.
 struct Shared {
     flight: Mutex<Flight>,
     turn_ended: Condvar,
@@ -109,7 +107,6 @@ impl Ops {
         let listener = UnixListener::bind(socket).context(CONTROL_SOCKET)?;
         let ops = self.clone();
         thread::Builder::new()
-            // Accepts callers while the session's thread serves the gateway.
             .name("ops".to_owned())
             .spawn(move || ops.accept(&listener, &sender))
             .context("the thread that accepts callers didn't start")?;

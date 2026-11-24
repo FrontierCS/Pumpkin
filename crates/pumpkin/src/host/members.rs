@@ -11,7 +11,6 @@ use crate::cli::Exit;
 use crate::iam::HOST;
 use crate::job::{Deployment, Source};
 
-/// The directory of [`MEMBERS`].
 const DIR: &str = "/etc/ssh/pumpkin";
 
 /// The file of the members' keys, which `sshd` reads.

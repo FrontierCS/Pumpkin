@@ -55,7 +55,6 @@ impl Principal {
 
 /// The calls of a job of its own.
 pub(crate) struct Job {
-    /// Its read of its settings.
     pub(crate) settings: Call,
 }
 

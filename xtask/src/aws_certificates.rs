@@ -19,7 +19,6 @@ const PATH: &str = "providers/ec2/src/identity/certificates.rs";
 /// in.
 const FETCH_SECONDS: u64 = 60;
 
-/// The most that the fetch may download.
 const FETCH_MAX_BYTES: u64 = 4 << 20;
 
 /// Rewrites the table at [`PATH`] from AWS's page.

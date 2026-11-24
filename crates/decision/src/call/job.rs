@@ -106,7 +106,6 @@ impl Core<'_> {
                 .any(|lease| self.workflow.session(lease.grant).holder == Holder::Target(target))
     }
 
-    /// What job function `id` has left of its quotas.
     pub(crate) fn remaining(&self, id: JobFunctionId) -> Remaining {
         let function = self.workflow.job_function(id);
         let usage = self.jobs.usage(JobOf::Function(id));

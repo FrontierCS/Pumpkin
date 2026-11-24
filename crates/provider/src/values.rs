@@ -102,7 +102,6 @@ impl UnixTime {
         Ok(Self(since?))
     }
 
-    /// The time `since` after the Unix epoch.
     pub const fn after_epoch(since: Duration) -> Self {
         Self(since)
     }

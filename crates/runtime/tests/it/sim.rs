@@ -4,7 +4,7 @@
 //! A sandbox says hello to the gateway as `sandboxd` does, dialing its socket at once, and keeps
 //! its files in memory. The program of a command that a run starts in it scripts the command:
 //! - `exit <code>`; `stall [<seconds>]` (the sandbox stops answering, and moves the clock there
-//!   as it takes its next request); `crash` (its connection ends);
+//!   as it takes its next request);
 //! - `print <words>` and `fill <n> <words>` (`n` `x`es first) leave their text as the command's
 //!   stdout, and `list <dir>` leaves a listing of what was put under `dir`;
 //! - `worker <code>` decodes its stdin's JSON byte array to stdout, or prints `absent` for no
@@ -1060,12 +1060,10 @@ fn open(connection: &mut UnixStream, hello: &Value) -> bool {
 }
 
 enum Step {
-    /// An op, whose payload follows it, and which `less` bounds the remaining seconds of, made
-    /// again while it is refused as busy if `retried`.
+    /// An op, whose payload follows it, made again while it is refused as busy if `retried`.
     Op {
         call: OpCall,
         payload: Vec<u8>,
-        less: Option<u64>,
         retried: bool,
     },
     /// A `status` or a session's `status` made until its reply gives `state`.
@@ -1120,8 +1118,6 @@ struct Caller {
     stream: u32,
     steps: VecDeque<Step>,
     op: u32,
-    less: Option<u64>,
-    left: Option<u64>,
     awaiting: Option<(OpCall, String, Option<String>)>,
     /// The call made last, with its payload, until its reply other than a busy refusal comes.
     calling: Option<(OpCall, Vec<u8>)>,
@@ -1153,8 +1149,6 @@ impl Caller {
             stream,
             steps,
             op: 0,
-            less: None,
-            left: None,
             awaiting: None,
             calling: None,
             exited: false,
@@ -1181,30 +1175,18 @@ impl Caller {
         {
             self.read.clone_from(&command.stdout);
         }
-        if let OpReply::Ops(ops) = reply {
-            let left = ops.remaining_seconds;
-            if let Some(less) = self.less
-                && self
-                    .left
-                    .is_none_or(|last| left.saturating_add(less) > last)
-            {
-                self.steps.clear();
-                self.exit(1, replies);
-            }
-            self.left = Some(left);
-        }
         if let Some((call, payload)) = self.calling.take()
             && matches!(reply, OpReply::Refused { busy: true, .. })
         {
             thread::sleep(AWAIT_POLL);
-            self.make(call.clone(), payload.clone(), None, replies);
+            self.make(call.clone(), payload.clone(), replies);
             self.calling = Some((call, payload));
             return false;
         }
         if let Some((call, state, then)) = self.awaiting.take() {
             if !reached(reply, &state) {
                 thread::sleep(AWAIT_POLL);
-                self.make(call.clone(), Vec::new(), None, replies);
+                self.make(call.clone(), Vec::new(), replies);
                 self.awaiting = Some((call, state, then));
                 return false;
             }
@@ -1218,17 +1200,16 @@ impl Caller {
     #[expect(clippy::too_many_lines, reason = "one arm per kind of step")]
     fn next(&mut self, replies: &mut Vec<(FromSandbox, Vec<u8>)>) -> bool {
         loop {
-            let (call, payload, less) = match self.steps.pop_front() {
+            let (call, payload) = match self.steps.pop_front() {
                 Some(Step::Op {
                     call,
                     payload,
-                    less,
                     retried,
                 }) => {
                     if retried {
                         self.calling = Some((call.clone(), payload.clone()));
                     }
-                    (call, payload, less)
+                    (call, payload)
                 }
                 Some(Step::Model {
                     model,
@@ -1245,7 +1226,7 @@ impl Caller {
                 }
                 Some(Step::Await { call, state, then }) => {
                     self.awaiting = Some((call.clone(), state, then));
-                    (call, Vec::new(), None)
+                    (call, Vec::new())
                 }
                 Some(Step::Sleep(seconds)) => {
                     // On a simulated host, as Kubernetes' fake `Sleep` steps its clock:
@@ -1297,7 +1278,7 @@ impl Caller {
                     return false;
                 }
             };
-            self.make(call, payload, less, replies);
+            self.make(call, payload, replies);
             if let Some(&Step::End(end)) = self.steps.front() {
                 self.end = Some(end);
             }
@@ -1305,14 +1286,8 @@ impl Caller {
         }
     }
 
-    fn make(
-        &mut self,
-        call: OpCall,
-        payload: Vec<u8>,
-        less: Option<u64>,
-        replies: &mut Vec<(FromSandbox, Vec<u8>)>,
-    ) {
-        (self.op, self.less) = (self.op + 1, less);
+    fn make(&mut self, call: OpCall, payload: Vec<u8>, replies: &mut Vec<(FromSandbox, Vec<u8>)>) {
+        self.op += 1;
         let (op, size) = (self.op, u64::try_from(payload.len()).unwrap());
         replies.push((FromSandbox::Op { op, call, size }, Vec::new()));
         if size > 0 {
@@ -1458,15 +1433,13 @@ fn state_name(reply: &OpReply) -> String {
     }
 }
 
-// A step is an op, `ops`, which `ops at least <seconds> less` bounds, `status <job>` or `call
-// <function> <payload> [<name>=<value>]...`, where a payload that is a number is that many bytes
-// of `x`, and any other is its own bytes; `<session>.open [<seconds>]`, `<session>.run <lease>
-// <seconds>|- <argv>...`, without a timeout for `-`, `<session>.status <lease>` or
-// `<session>.close <lease>`; `<session>.put <lease> <tree> <to> [replace]` or `<session>.get
-// <lease> <from> <to>`. An op is made once the one before it is answered. `ops at least <seconds>
-// less` exits 1 unless the reply's remaining seconds fell by `seconds` since an earlier ops reply.
-// A call refused as busy is made again, as `sandboxctl call --wait` makes it; `try_call`, alike,
-// takes that refusal as its answer, as `sandboxctl call` does.
+// A step is an op, `ops`, `status <job>` or `call <function> <payload> [<name>=<value>]...`, where
+// a payload that is a number is that many bytes of `x`, and any other is its own bytes;
+// `<session>.open [<seconds>]`, `<session>.run <lease> <seconds>|- <argv>...`, without a timeout
+// for `-`, `<session>.status <lease>` or `<session>.close <lease>`; `<session>.put <lease> <tree>
+// <to> [replace]` or `<session>.get <lease> <from> <to>`. An op is made once the one before it is
+// answered. A call refused as busy is made again, as `sandboxctl call --wait` makes it;
+// `try_call`, alike, takes that refusal as its answer, as `sandboxctl call` does.
 //
 // `await <job> <state>` makes `status <job>` until its reply's state is `state`, then waits until
 // the run log holds the job's teardown, if `Sim::records` named the record, so that the log orders
@@ -1497,14 +1470,11 @@ fn step(arg: &str) -> Step {
         Err(_) if words[2] == "binary" => vec![0, 255, 1],
         Err(_) => words[2].as_bytes().to_vec(),
     };
-    let (call, payload, less) = match words[..] {
-        ["ops"] => (OpCall::Ops, Vec::new(), None),
-        ["ops", "at", "least", seconds, "less"] => {
-            (OpCall::Ops, Vec::new(), Some(seconds.parse().unwrap()))
-        }
+    let (call, payload) = match words[..] {
+        ["ops"] => (OpCall::Ops, Vec::new()),
         ["status", job] => {
             let job = job.parse().unwrap();
-            (OpCall::Status { job }, Vec::new(), None)
+            (OpCall::Status { job }, Vec::new())
         }
         [kind @ ("call" | "try_call"), _, _, ref given @ ..] => {
             let arguments = arguments(given);
@@ -1516,11 +1486,10 @@ fn step(arg: &str) -> Step {
                 return Step::Op {
                     call,
                     payload: payload(),
-                    less: None,
                     retried: false,
                 };
             }
-            (call, payload(), None)
+            (call, payload())
         }
         [kind @ ("await" | "await_result"), job, state] => {
             let job: u64 = job.parse().unwrap();
@@ -1529,7 +1498,7 @@ fn step(arg: &str) -> Step {
             let (call, state) = (OpCall::Status { job }, state.to_owned());
             return Step::Await { call, state, then };
         }
-        [function, ..] if function.contains('.') => (session_call(&words), Vec::new(), None),
+        [function, ..] if function.contains('.') => (session_call(&words), Vec::new()),
         ["await_lease", grant, lease, state] => {
             let call = lease_status(grant, lease);
             return Step::Await {
@@ -1573,7 +1542,6 @@ fn step(arg: &str) -> Step {
     Step::Op {
         call,
         payload,
-        less,
         retried,
     }
 }
@@ -1925,7 +1893,6 @@ impl Served {
                 return launch.argv.program() == "exit-close";
             }
             "stall" => stall(launch, shared),
-            "crash" => return true,
             "mark" => {
                 fs::write(status(shared).record.as_ref().unwrap().join("launched"), "").unwrap();
             }

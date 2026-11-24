@@ -42,7 +42,6 @@ impl<C: Clock> Bound<'_, C> {
 }
 
 impl<C> Session<C> {
-    // The deadline `by`, a time on the session's clock.
     pub(crate) fn by(&self, by: Duration) -> Bound<'_, C> {
         Bound {
             clock: &self.clock,

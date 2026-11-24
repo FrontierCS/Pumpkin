@@ -42,8 +42,16 @@ enum Caller<'a> {
     /// Echoed, by a deadline that has passed, in a directory that doesn't exist, where the
     /// stand-in can't start.
     Late,
-    /// As this says, once.
     Runs(Run<'a>),
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "`test_support::TestDir` depends on stdx, so stdx's tests make their scratch with \
+              `tempfile`"
+)]
+fn scratch() -> tempfile::TempDir {
+    tempfile::tempdir().unwrap()
 }
 
 /// Runs `script` with `sh`, from `caller`, in a directory of its own, and checks how it ended,
@@ -54,7 +62,7 @@ enum Caller<'a> {
 fn check(script: &str, caller: Caller<'_>, expect: &Expect) {
     // Adopted, a process the script left can be waited for.
     rustix::process::set_child_subreaper(Some(rustix::process::getpid())).unwrap();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scratch();
     let pids = || fs::read_to_string(dir.path().join("pids")).unwrap_or_default();
     let printing = Printing::start();
     let ended = match caller {
@@ -124,7 +132,7 @@ struct Printing {
 
 impl Printing {
     fn start() -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = scratch();
         let stdout = saved(rustix::stdio::stdout());
         let stderr = saved(rustix::stdio::stderr());
         rustix::stdio::dup2_stdout(File::create(dir.path().join("stdout")).unwrap()).unwrap();
@@ -167,6 +175,7 @@ fn reaped(pid: i32) -> String {
     ExitStatus::from_raw(status.as_raw()).to_string()
 }
 
+// Each stream is more than the 64 KiB that a pipe holds, so the run reads both as it goes.
 #[test]
 fn captures() {
     check(
@@ -298,6 +307,8 @@ fn capped() {
     );
 }
 
+// The input and the output are each more than the 64 KiB that a pipe holds, so the run writes
+// and reads as it goes.
 #[test]
 fn fed() {
     let input = vec![b'x'; 300_000];
@@ -311,6 +322,7 @@ fn fed() {
     );
 }
 
+// More than the 64 KiB that a pipe holds, so the write is cut short when the command exits.
 #[test]
 fn fed_unread() {
     let input = vec![b'x'; 300_000];
@@ -453,7 +465,7 @@ fn reported() {
 
 #[test]
 fn unstarted() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scratch();
     let only = Environment::Only(&["PATH"]);
     let run = |command: &mut std::process::Command| {
         let failure = stdx::process::run(command, Run::new(LONG_BOUND, Echo::Silent));
@@ -503,7 +515,7 @@ fn unstarted() {
 // https://github.com/git/git/blob/fb255012acbcbe81189cb8014da0280b09c66ecc/t/test-lib.sh#L1876-L1905
 #[test]
 fn unenterable() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scratch();
     let unsearchable = dir.path().join("unsearchable");
     fs::create_dir(&unsearchable).unwrap();
     fs::set_permissions(&unsearchable, fs::Permissions::from_mode(0o600)).unwrap();
@@ -592,7 +604,6 @@ fn first_exited() {
 
 #[test]
 fn tcp_options() {
-    // What the gateway and `sandboxd` each set at their end of a session over TCP.
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
     stdx::net::set_options(&stream).unwrap();
@@ -611,7 +622,7 @@ fn tcp_options() {
 // first let go; with each held again, a take whose `waiting` fails fails with its error.
 #[test]
 fn slots() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scratch();
     let count = NonZeroUsize::new(2).unwrap();
     let free = |_: &[String]| Err("waited, though a slot was free".to_owned());
     let first = stdx::slots::take(dir.path(), count, "first", free).unwrap();

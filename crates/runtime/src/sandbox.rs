@@ -234,7 +234,8 @@ impl Meets<'_> {
     }
 }
 
-/// Whose sandbox: the agent's, a call's target, or an instance of a lease's runner.
+/// Whose sandbox: the agent's, a work-lifetime target's, a call's target, or an instance of a
+/// lease's runner.
 #[derive(Clone, Copy)]
 pub(super) enum Which {
     Agent(AgentId),

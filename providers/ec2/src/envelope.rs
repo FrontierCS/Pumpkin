@@ -97,7 +97,6 @@ pub fn fill(settings: &Settings, filling: &mut Filling) -> Vec<Problem> {
     problems
 }
 
-/// What `cli` describes of the launch template of `class`, at the version that it names.
 fn template(cli: &Cli, class: &InstanceClass) -> Result<Data, String> {
     let version = class.version.to_string();
     let args = [

@@ -58,12 +58,10 @@ struct State {
 
 /// A take comes late, after setup or the agent's initial ops query: once `behind`
 /// more inputs are queued behind it, and at `at`, as if the loop had been busy until then. During
-/// setup, it waits for its input whatever the time. Then each of the next `then` takes from that
-/// inbox waits for an input, whatever the time, as if the loop had been busy until one came.
+/// setup, it waits for its input whatever the time.
 pub(crate) struct LateTake {
     pub(crate) behind: usize,
     pub(crate) at: Duration,
-    pub(crate) then: usize,
 }
 
 /// The first sync that makes `record` last, of the run log or another file of the record, lasts
@@ -363,7 +361,6 @@ impl Clock for SimClock {
             clock: self.clone(),
             queue,
             sender,
-            then: 0,
         }
     }
 }
@@ -373,7 +370,6 @@ pub(crate) struct SimInbox<T> {
     queue: Arc<Mutex<Queue<T>>>,
     // Kept, so that the inbox never disconnects, whoever else holds a sender.
     sender: Sender<T>,
-    then: usize,
 }
 
 struct Queue<T> {
@@ -419,8 +415,7 @@ impl<T: Send> SimInbox<T> {
     // ends the wait, as Kubernetes' `FakeClock` fires each waiter whose time has passed:
     // https://github.com/kubernetes/utils/blob/ca04ba58ecab621c984998618739fbafa14398ad/clock/testing/fake_clock.go#L175-L222
     fn next(&mut self, until: Option<Duration>) -> Option<T> {
-        let held = self.then > 0 || self.during_setup();
-        self.then = self.then.saturating_sub(1);
+        let held = self.during_setup();
         let mut queue = stdx::unpoisoned(self.queue.lock());
         let input = match queue.behind.pop_front() {
             Some(input) => input,
@@ -462,10 +457,9 @@ impl<T: Send> SimInbox<T> {
         let late = state.late.take();
         let after = state.after_take.take();
         drop(state);
-        let Some(LateTake { behind, at, then }) = late else {
+        let Some(LateTake { behind, at }) = late else {
             return input;
         };
-        self.then = then;
         // Without the clock's lock, so that the run's other threads read the clock as they wait.
         self.queue.fill(behind, SCRIPTED);
         stdx::unpoisoned(self.clock.state.lock()).move_to(at);

@@ -60,10 +60,6 @@ pub(crate) struct Viewing {
 impl Viewing {
     /// Reaches the controller that `client` names ([`Reached::reach`]), which starts it if it is
     /// stopped.
-    ///
-    /// # Errors
-    ///
-    /// Fails if this executable can't be read, or the controller can't be reached.
     pub(crate) fn reach(client: &config::Client) -> Result<Self, String> {
         let expected = "expected to send it to the controller, to read the runs there";
         let build = Build::of_this(expected)?;

@@ -59,13 +59,6 @@ impl<L: Loader> Evaluation<'_, '_, L> {
 
     /// What `call` of `function` gives: what its body returns, or `None`, the body run as deep
     /// as the call's arguments nest, `depth` deep, in the calls that run.
-    ///
-    /// # Errors
-    ///
-    /// The function runs already, `MAX_CALLS` run, the body would nest deeper than
-    /// `MAX_NESTING` there, the arguments bind no parameters or don't fit their annotations, or
-    /// the body's error, or a returned value that doesn't fit the type after `->`, with a note
-    /// that names the call.
     pub(super) fn function(
         &mut self,
         function: &Function,

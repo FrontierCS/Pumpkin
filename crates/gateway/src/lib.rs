@@ -1084,7 +1084,7 @@ impl Assembler {
             )));
         }
         // The session's model requests in its owner's inbox are all in flight, so this bounds how
-        // many it leaves there, as `Registration::accept` counts on.
+        // many it leaves there.
         if flight.models.len() >= MAX_MODEL_REQUESTS_IN_FLIGHT {
             return Err(broke(&format!(
                 "it opened model request {number} while {MAX_MODEL_REQUESTS_IN_FLIGHT} are in \

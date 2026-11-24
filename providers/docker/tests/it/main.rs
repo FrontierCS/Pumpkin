@@ -24,12 +24,11 @@ use engine::{BuildContext, ContextName, Engine, Recipe, Security};
 use expect_test::{Expect, expect};
 use gateway::{Arrival, IncomingModelRequest, Op, Process, Put, Registration, Session, Sockets};
 use provider::{
-    Create, Created, Creator, Listed, Provider, Reservation, Role, RunTag, SandboxId, Sweep,
-    UnixTime,
+    Create, Created, Creator, Provider, Reservation, Role, RunTag, SandboxId, Sweep, UnixTime,
 };
 use recipe::Given;
 use schema::frame::MAX_MESSAGE_BYTES;
-use schema::ir::{AbsolutePath, Argv, Env, EnvVar, Image, Mode, Name, Resources, User};
+use schema::ir::{AbsolutePath, Argv, Env, EnvVar, Image, Mode, Name, Resources};
 use schema::sandbox::op::{
     CallReply, CommandEnd, CommandStatus, Failure, FailureCode, JobReply, JobState, Last,
     LeaseRemaining, LeaseReply, LeaseState, LeaseStatusReply, NowReply, OpReply, OpsReply,
@@ -44,7 +43,7 @@ use schema::sandbox::{
 use stdx::process::Environment;
 use stdx::time::{Clock as _, Machine};
 use stdx::{Context, Deadline};
-use test_support::suite::{Locals, Subject, reserve_with_room};
+use test_support::suite::{Locals, Subject, asked, from_now, ids, reserve_with_room, suite_role};
 use test_support::{BUSYBOX, TestDir, docker, hung};
 
 // The directory, in this variable, in which this binary, run again by `hung_create`, makes a create
@@ -71,7 +70,7 @@ impl Fixture {
         let tag = |suffix: &str| format!("pk-{}-{name}{suffix}", std::process::id());
         let tag = |suffix: &str| RunTag::try_from(tag(suffix)).unwrap();
         let run = tag("");
-        let phases: Vec<Vec<Role>> = ROLES.iter().map(|&name| vec![role(name)]).collect();
+        let phases: Vec<Vec<Role>> = ROLES.iter().map(|&name| vec![suite_role(name)]).collect();
         let held = reserve_with_room(provider(), &run, &phases);
         Self {
             sandboxd: test_support::sandboxd(),
@@ -150,39 +149,17 @@ impl Fixture {
     ) -> Result<(Create, SocketDial, Registration), String> {
         let name = Name::try_from(role.to_owned()).unwrap();
         let (dial, registration) = self.sockets.issue(&name).unwrap();
-        let role = self::role(role);
         let image = provider().publish_image(image)?;
         let sandboxd = provider().publish_sandboxd(sandboxd)?;
-        let now = UnixTime::of(SystemTime::now()).unwrap();
+        // The provider's one class.
+        let class = provider().ready().classes.keys().next().unwrap().clone();
+        let by = from_now(declared_startup());
         let create = Create {
-            run: run.clone(),
-            name,
-            role,
-            instance: 0,
-            // The provider's one class.
-            class: provider().ready().classes.keys().next().unwrap().clone(),
-            image,
-            sandboxd,
             ops,
             model,
-            // Far past the test's end, which comes within minutes.
-            hard_end: now.saturating_add(Duration::from_hours(1)),
-            by: now.saturating_add(declared_startup()),
+            ..asked(run, role, class, (&image, &sandboxd), by)
         };
         Ok((create, dial, registration))
-    }
-}
-
-fn role(name: &str) -> Role {
-    Role {
-        name: Name::try_from(name.to_owned()).unwrap(),
-        user: serde_json::from_str::<User>(r#"{"uid": 4242, "gid": 4243}"#).unwrap(),
-        resources: serde_json::from_value::<Resources>(serde_json::json!({
-            "cpu_millis": 500,
-            "memory_bytes": 256 << 20,
-        }))
-        .unwrap(),
-        instances: NonZeroU32::MIN,
     }
 }
 
@@ -262,12 +239,6 @@ fn startup() -> Duration {
 fn declared_startup() -> Duration {
     let class = provider().ready().classes.values().next().unwrap();
     Duration::from_secs(class.startup_seconds.get())
-}
-
-fn ids(listed: Vec<Listed>) -> Vec<SandboxId> {
-    (listed.into_iter())
-        .map(|Listed { id, ended: _ }| id)
-        .collect()
 }
 
 fn containers(run: &RunTag, format: &str) -> Result<Vec<String>, String> {
@@ -582,9 +553,9 @@ fn cpus() {
             let sized = |name: &str, cpus: u64| Role {
                 resources: Resources {
                     cpu_millis: NonZeroU64::new(cpus * 1000).unwrap(),
-                    ..role(name).resources
+                    ..suite_role(name).resources
                 },
-                ..role(name)
+                ..suite_role(name)
             };
             let first = &fixture.other_run;
             let runners = || Role {
@@ -609,7 +580,7 @@ fn cpus() {
                 ("another runner", start(first, "runner-1", runners(), 1)),
                 (
                     "another run's role",
-                    start(&fixture.run, "leaver", role("leaver"), 0),
+                    start(&fixture.run, "leaver", suite_role("leaver"), 0),
                 ),
             ];
             let mut lines = Vec::new();
@@ -710,7 +681,8 @@ fn volumes() {
     check(
         "volumes",
         |fixture| {
-            let _other = reserve_with_room(provider(), &fixture.other_run, &[vec![role("other")]]);
+            let _other =
+                reserve_with_room(provider(), &fixture.other_run, &[vec![suite_role("other")]]);
             let started = [("first", &fixture.run), ("other", &fixture.other_run)];
             let started = started.map(|(role, run)| (role, fixture.start(run, role)));
             let volumes = started.each_ref().map(|(_, sandbox)| volume(sandbox));
