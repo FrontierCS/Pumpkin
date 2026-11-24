@@ -30,7 +30,7 @@ use std::num::NonZeroUsize;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 use std::{fs, io, thread};
 
 use engine::Engine;
@@ -40,6 +40,7 @@ use runtime::Record;
 use schema::ir::{Image, Sha256Digest};
 use stdx::Context as _;
 use stdx::process::{Bound, Echo, Environment, Failure, Run};
+use stdx::slots::Slots;
 
 use crate::cli::Exit;
 use crate::iam::JOB;
@@ -94,8 +95,9 @@ pub(crate) const SENT_MODAL: &str = "modal.toml";
 // no prune removes while the job runs.
 const HELD: &str = "held";
 
-// The file of a job's tmpfs directory that exists while the job holds a build slot, so may build
-// an image that no tag names yet, which no prune then removes.
+// The file of a job's tmpfs directory that exists while the job may build an image that no tag
+// names yet, which no prune then removes: from when it takes a build slot until it holds what it
+// built by its IDs.
 const BUILDING: &str = "building";
 
 // The file of a job's tmpfs directory that exists while the job waits for a build slot, so that
@@ -620,12 +622,13 @@ fn jobs_named(jobs: &Path) -> String {
 }
 
 /// Builds the images of the task whose entry and args `task` gives, for job `id`. It builds on the
-/// engine of the configuration at `config`. The job's `Admission` admits each build. The job's
-/// command then finds each image by its tag. If the job built one, it lets go of the build slot
-/// that the admission took, and prunes. The job holds what it holds until it ends. Gives the
-/// task's problems, or each build that failed, said. Fails before the first build, naming the
-/// controller by the client's name for it, `controller`, if the task's roles never fit the
-/// configuration's providers.
+/// engine of the configuration at `config`, once it holds one of the controller's build slots, as
+/// many as `slots_count` gives, which it takes as the first build starts and lets go of once the
+/// builds have ended. The job's `Admission` admits each build. The job's command then finds each
+/// image by its tag. If the job built one, it prunes. The job holds what it holds until it ends.
+/// Gives the task's problems, or each build that failed, said. Fails before the first build,
+/// naming the controller by the client's name for it, `controller`, if the task's roles never fit
+/// the configuration's providers.
 fn build_first(
     id: &RunTag,
     home: &Path,
@@ -635,19 +638,25 @@ fn build_first(
     controller: &crate::controller::Name,
 ) -> Result<(), String> {
     let (entry, args) = task;
-    let mut admission = Admission {
-        id,
-        controller,
-        home,
-        jobs,
-        slots: Workspace::find()?.slots(),
-        slot: None,
+    let slots = Slots {
+        dir: Workspace::find()?.slots(),
+        count: slots_count(),
     };
     let built = star::checked(entry, args, |task| {
         let engine = engine(config)?;
         // Before a build slot is waited for and anything is built.
         crate::run::never_fits_controller(task.workflow(), config, &engine, controller)?;
-        let tags = match task.build(&engine, &mut admission) {
+        let mut admission = Admission {
+            id,
+            controller,
+            home,
+            jobs,
+            engine: &engine,
+            slots_count: slots.count,
+            building: None,
+        };
+        let holder = id.as_str().to_owned();
+        let tags = match task.build(&engine, &mut admission, Some((slots, holder)))? {
             Ok((_, tags, _)) => tags,
             Err(problems) => return Ok(Err(problems)),
         };
@@ -655,10 +664,10 @@ fn build_first(
         // to: their tags are held already, but another build of the same inputs may move a tag to
         // an image of its own.
         admission.held(tags.keys().map(Image::as_str))?;
-        // A job that built took a slot, which goes before the prune, as a job that waits for it
-        // needn't wait for that.
-        if admission.slot.take().is_some() {
-            admission.prune(&engine);
+        // A job that built let go of its slot as its builds ended, before the prune, as a job that
+        // waits for it needn't wait for that.
+        if admission.building.take().is_some() {
+            admission.prune();
         }
         Ok(Ok(()))
     })?;
@@ -667,21 +676,22 @@ fn build_first(
 
 /// What admits the builds of job `id` (`star::Admission`).
 ///
-/// It holds each image that the builds look up by its tag. The tag goes in the job's `HELD`, in
-/// its directory in `jobs`, under the shared lock of `jobs` (`open_jobs`). Once the builds have
-/// ended, it holds each image they found or built by its ID too. It takes one of the controller's
-/// build slots (`take_slot`) as the first build starts, and keeps the slot until its holder lets
-/// go. It prunes (`collect`) as each build starts, and as each ends while others run. Then it
-/// refuses to start a build while more than `REFUSED_PERCENT` of the volume is used. The refusal
-/// names the records that their members haven't copied, which no prune removes.
+/// It holds each image that the builds look up by its tag, in the job's `HELD` in `jobs`, under
+/// the shared lock of `jobs` (`open_jobs`), and by its ID once the builds have ended. While each
+/// build slot is held, it says which jobs hold them, with `WAITING` beside `sent`, then how long it
+/// waited, and marks `BUILDING` there once its builds hold one. It prunes (`collect`) as each build
+/// starts, and as each ends while others run. Then it refuses to start a build while more than
+/// `REFUSED_PERCENT` of the volume is used, naming the records that their members haven't copied,
+/// which no prune removes.
 struct Admission<'j> {
     id: &'j RunTag,
     /// The client's name for the controller, which the commands that a refusal names name.
     controller: &'j crate::controller::Name,
     home: &'j Path,
     jobs: &'j Path,
-    slots: PathBuf,
-    slot: Option<Slot>,
+    engine: &'j Engine,
+    slots_count: NonZeroUsize,
+    building: Option<Building>,
 }
 
 impl Admission<'_> {
@@ -689,12 +699,12 @@ impl Admission<'_> {
         self.jobs.join(self.id.as_str())
     }
 
-    /// Prunes the images and the build cache of `engine`, once the volume is full, saying why the
-    /// prune failed, if it did, as the build goes on.
-    fn prune(&self, engine: &Engine) {
+    /// Prunes the images and the build cache of the engine, once the volume is full, saying why
+    /// the prune failed, if it did, as the build goes on.
+    fn prune(&self) {
         let pruned = disk(self.home).and_then(|disk| {
             if disk.full() {
-                collect(self.home, engine, self.jobs)
+                collect(self.home, self.engine, self.jobs)
             } else {
                 Ok(())
             }
@@ -729,11 +739,32 @@ impl engine::Admit for Admission<'_> {
         self.held([tag].into_iter())
     }
 
-    fn admit(&mut self, engine: &Engine) -> Result<(), String> {
-        if self.slot.is_none() {
-            self.slot = Some(take_slot(&self.slots, self.id, &self.sent())?);
+    fn waiting(&mut self, holders: &[String]) -> Result<(), String> {
+        let marked = self.sent().join(WAITING);
+        File::create(&marked).context(marked.display())?;
+        say(format_args!(
+            "waiting for a build slot: all {} held, by jobs {}",
+            self.slots_count,
+            holders.join(", ")
+        ));
+        Ok(())
+    }
+
+    fn took(&mut self, waited: Option<Duration>) -> Result<(), String> {
+        if let Some(waited) = waited {
+            let marked = self.sent().join(WAITING);
+            fs::remove_file(&marked).context(marked.display())?;
+            let waited = waited.as_secs();
+            say(format_args!("took a build slot after waiting {waited} s"));
         }
-        self.prune(engine);
+        let building = self.sent().join(BUILDING);
+        File::create(&building).context(building.display())?;
+        self.building = Some(Building(building));
+        Ok(())
+    }
+
+    fn admit(&mut self) -> Result<(), String> {
+        self.prune();
         let disk = disk(self.home)?;
         if disk.refused() {
             let used_bytes = disk.size_bytes.saturating_sub(disk.free_bytes);
@@ -752,57 +783,25 @@ impl engine::Admit for Admission<'_> {
 }
 
 impl star::Admission for Admission<'_> {
-    fn ended(&mut self, engine: &Engine) {
-        self.prune(engine);
+    fn ended(&mut self) {
+        self.prune();
     }
 }
 
-/// A build slot that a job holds, until it is dropped, with the job's `BUILDING`, which goes with
-/// it.
-struct Slot {
-    _locked: File,
-    building: PathBuf,
-}
+/// The job's `BUILDING`, while its builds may build an image that no tag names yet, which goes as
+/// this drops.
+struct Building(PathBuf);
 
-impl Drop for Slot {
+impl Drop for Building {
     fn drop(&mut self) {
         // One left by a failure here goes with the job's directory as the job ends; until then, it
         // only spares untagged images, which no job may need.
-        let _ = fs::remove_file(&self.building);
+        let _ = fs::remove_file(&self.0);
     }
 }
 
-/// Takes one of the controller's build slots, files of `dir`, as many as `slots_count` gives, as
-/// `stdx::slots::take` says, named by job `id`: while each is held, it says which jobs hold them,
-/// with `WAITING` beside `sent`, then how long it waited; then it marks `BUILDING` beside `sent`.
-fn take_slot(dir: &Path, id: &RunTag, sent: &Path) -> Result<Slot, String> {
-    let count = slots_count();
-    let marked = sent.join(WAITING);
-    let mut waiting = None;
-    let slot = stdx::slots::take(dir, count, id.as_str(), |holders| {
-        waiting = Some(Instant::now());
-        File::create(&marked).context(marked.display())?;
-        say(format_args!(
-            "waiting for a build slot: all {count} held, by jobs {}",
-            holders.join(", ")
-        ));
-        Ok(())
-    })?;
-    if let Some(since) = waiting {
-        fs::remove_file(&marked).context(marked.display())?;
-        let waited = since.elapsed().as_secs();
-        say(format_args!("took a build slot after waiting {waited} s"));
-    }
-    let building = sent.join(BUILDING);
-    File::create(&building).context(building.display())?;
-    Ok(Slot {
-        _locked: slot,
-        building,
-    })
-}
-
-/// How many jobs build at once (`take_slot`): one for every two CPUs that this process may run on,
-/// and one at least.
+/// How many jobs build at once: one for every two CPUs that this process may run on, and one at
+/// least.
 // Not one for each: a build runs its recipe's independent stages at once, and a step may itself
 // use every CPU; and every build's cache takes from the one volume.
 fn slots_count() -> NonZeroUsize {

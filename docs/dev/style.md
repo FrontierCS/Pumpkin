@@ -14,6 +14,10 @@ assertions, lints and errors.
 - PREFER flags for per-run choices, `pumpkin.toml` for per-machine facts, and the environment
   only for where the system keeps things, such as `HOME`, and for secrets that must stay out of
   `argv`
+- FOLLOW [Tiger Style](https://github.com/tigerbeetle/tigerbeetle/blob/68958eb757747d0fc96a79d1f9c2fa6766b67b48/docs/TIGER_STYLE.md)
+  in code on a `stdx::io` loop: a callback runs only in the loop's batch and goes last in its
+  signature, the operations in flight have a fixed limit, and each deadline is a time on the
+  loop's clock; allocate statically only what has a fixed size, such as the slab of operations
 - PREFER moving branches up to the caller and loops down into functions that take a batch
 - KEEP each file to one thing: put a new thing in a module of its own, and split a file that
   holds several into modules that each hold one, in a pull request that only moves code;

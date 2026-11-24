@@ -61,9 +61,14 @@ attention to the **Architecture Invariant** notes: they often name something del
 ### `crates/stdx`
 
 What `std` lacks and several crates share, such as errors with context (`Context`), deadlines
-(`Deadline`), a clock that a test can script (`time::Clock`) and child processes (`process`).
+(`Deadline`), a clock that a test can script (`time::Clock`), child processes (`process`), and a
+process's loop, its one door to the operating system (`io`).
 
 **Architecture Invariant:** it knows nothing of Pumpkin.
+
+**Architecture Invariant:** a loop's callbacks run only in its batch, never in the call that
+submitted their operation, and every deadline on the loop is a time on its backend's clock. A test
+stands a simulated world in for the machine at the loop's `io::Backend`.
 
 **Architecture Invariant:** a child process gets only the environment that its caller states, and
 `process::run` ends it at a bound that its caller states. Clippy's configuration bans std's ways
@@ -109,11 +114,12 @@ runtime, the core and the providers never see the language. Only `library` knows
 
 ### `crates/gateway`, `crates/tls`, `crates/sandboxd`
 
-The two ends of a session. The `gateway` is the host's end: the `Session`'s one owner moves trees,
-runs commands, and hears of each op, model request and exit as an `Arrival`. `sandboxd` serves the
-sandbox's end, carries ops from `sandboxctl` and model requests from its model endpoint, and
-freezes the sandbox. `tls` carries a session that crosses the Internet, below the session's
-protocol.
+The two ends of a session. The `gateway` is the host's end: a process's sessions live on its
+loop, in its owner's `Sessions`, through which the owner moves trees, runs commands, answers ops
+and model requests, and hears of each op, model request and exit as an `Arrival`. `sandboxd`
+serves the sandbox's end, carries ops from `sandboxctl` and model requests from its model
+endpoint, and freezes the sandbox. `tls` carries a session that crosses the Internet, below the
+session's protocol.
 
 **Architecture Invariant:** a sandbox can't harm the host through its session. Anything out of
 protocol ends the session, and a session costs the host only bounded memory and bounded waits.
@@ -143,7 +149,9 @@ API and those its entry lists.
 could ever fit (`Provider::fits`), reserves what they need, publishes their images, says how the
 sandboxes meet the gateway (`Meeting`), and creates them. `Sweep`, its part that lists and deletes
 a run's sandboxes, is all a reap needs. `engine` is the operator's Docker engine, which builds
-every image, whichever provider runs it. `aws` is AWS's command line as Pumpkin runs it (`Cli`).
+every image, whichever provider runs it. A task's builds run on a loop (`Builds`): each on an edge
+worker of its own, once the loop has taken a build slot, if the builds take one. `aws` is AWS's
+command line as Pumpkin runs it (`Cli`).
 
 **Architecture Invariant:** runs that share a provider never reach each other's sandboxes. Every
 sandbox carries its run's `RunTag`, and a provider lists and deletes only the sandboxes that carry
@@ -169,19 +177,23 @@ each as a sandbox in a Modal workspace, under gVisor, through its helper, `pumpk
 ### `crates/runtime`
 
 The host side. `Run::prepare` reserves on each provider and begins the record, and `Run::execute`
-drives the `Core` on the run's providers to its outcome, or until a signal stops it. One thread
-drives the core, and each call and lease is a child on a thread of its own. `record` and `log` lay
-out the record, and `Record` reads it back.
+drives the `Core` on the run's providers to its outcome, or until a signal stops it. One loop
+drives the core: it holds every session, the agent, every call, lease and shared role, every
+sandbox's start and delete, and the record's syncs. A provider's call runs on an edge worker,
+which completes into the loop. A model request's exchange upstream runs on a thread of its own,
+which hands the loop its response a frame at a time. A call's body runs on a worker of its own,
+which asks the loop for each request of its target's and waits for the answer. `record` and `log` lay out the record, and `Record` reads it back.
 
 **Architecture Invariant:** the runtime is written once, against `Provider`. It depends on no
 provider's crate, not even in its tests, which run on a simulated provider.
 
-**Architecture Invariant:** every sandbox starts on one path (`Sandboxes::start`), and a run's end
+**Architecture Invariant:** every sandbox starts on one path, the loop's (`starts`), and a run's end
 deletes whatever its providers still list of it, so a run ends with none of its sandboxes left, or
 fails.
 
-**Architecture Invariant:** every deadline of a run is a time on its `Host`'s clock, so a
-simulated host decides every outcome that time decides.
+**Architecture Invariant:** every deadline of a run is a time on its loop's clock, which its
+`Host` gives, so a simulated world decides every outcome that time decides. The loop stamps each
+input with the time of the batch that takes it.
 
 ### `crates/pumpkin`, `crates/install`, `crates/members`, `crates/retention`
 
@@ -203,13 +215,14 @@ member's build runs as the controller's one user.
 ### `crates/test-support`, `xtask`, `dist`, `deploy`, `examples`
 
 `test-support` holds what the tests of several crates share, such as the conformance suite of the
-`Provider` trait. Only tests use it. `xtask` holds the contributor tasks: `ci` runs the checks
-every change passes, and `live` those that reach a real environment. `dist` holds the files that a
-release ships as they are, such as `./pumpkin`, a task repository's launcher. `deploy/aws` is the
-Terraform module that makes a team's Pumpkin on AWS, as [its README](deploy/aws/README.md) says.
-`deploy/docker` makes a team's controller in a privileged container on a Docker host, as
-[its README](deploy/docker/README.md) says: systemd, `sshd` and a Docker engine of the container's
-own. Both install a controller by `deploy/controller`'s one script. `examples` holds tasks.
+`Provider` trait, and the simulated world that a loop runs in (`world`). Only tests use it.
+`xtask` holds the contributor tasks: `ci` runs the checks every change passes, and `live` those
+that reach a real environment. `dist` holds the files that a release ships as they are, such as
+`./pumpkin`, a task repository's launcher. `deploy/aws` is the Terraform module that makes a
+team's Pumpkin on AWS, as [its README](deploy/aws/README.md) says. `deploy/docker` makes a team's
+controller in a privileged container on a Docker host, as [its README](deploy/docker/README.md)
+says: systemd, `sshd` and a Docker engine of the container's own. Both install a controller by
+`deploy/controller`'s one script. `examples` holds tasks.
 
 **Architecture Invariant:** a Docker controller's jobs reach the engine inside its container alone,
 never the host's, so the paths that the Docker provider mounts, its ledger of CPUs and the prune of
@@ -289,5 +302,5 @@ next (`next`).
 
 [`docs/dev/testing.md`](docs/dev/testing.md) holds the rules. `cargo xtask ci` reaches no Docker
 engine, network or cloud, so it tests the core, the gateway, the route and the runtime with
-Pumpkin's own processes, loopback sockets and a simulated host and provider. `cargo xtask live`
+Pumpkin's own processes, loopback sockets, and a simulated world and provider. `cargo xtask live`
 tests the real providers.

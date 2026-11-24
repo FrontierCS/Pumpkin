@@ -11,21 +11,24 @@
     reason = "nextest bounds each test that calls it"
 )]
 
-use std::io::Write as _;
+use std::fs;
+use std::io::{ErrorKind, Write as _};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
-use std::{fs, io};
 
 use schema::sandbox::{command_stdout, log_dir};
 use stdx::process::Environment;
 use stdx::time::{Clock as _, Machine};
 
 pub mod edge;
+pub mod gateway;
 pub mod http;
+pub mod io;
 pub mod suite;
 mod test_dir;
+pub mod world;
 
 pub use test_dir::TestDir;
 
@@ -212,7 +215,7 @@ pub fn sandboxes(record: &Path) -> Vec<String> {
                 let sandbox: serde_json::Value = serde_json::from_slice(&sandbox).unwrap();
                 lines.push(format!("{whose} sandbox, {dir}/sandbox.json: {sandbox}"));
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
             Err(error) => panic!("{dir}/sandbox.json can't be read: {error}"),
         }
     }

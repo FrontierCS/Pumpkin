@@ -1,70 +1,70 @@
 //! The agent's sandbox, which runs the agent's IR command, once its directories, files and
-//! standard input are in place, and whose session takes its ops.
+//! standard input are in place, and whose session takes its ops: each step of its start and its
+//! teardown is a step of the loop's, which the step before it completes into.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io;
-use std::path::Path;
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::thread::{self, Scope};
 use std::time::Duration;
 
 use decision::Event;
-use gateway::{IncomingOp, Process, Put, RefusedOp, Session, Trees};
-use provider::UnixTime;
+use gateway::{Ask, Process, Put, SessionId, Sessions, Takes};
+use provider::SandboxId;
 use schema::ir::{AbsolutePath, Dir, File};
-use schema::sandbox::op::OpReply;
 use schema::sandbox::{
-    ExitStatus, Launch, OpPayloadLimit, command_stdin, file_mode, log_dir, out_dir, pumpkin_dir,
+    ExitStatus, Launch, OpPayloadLimit, Root, command_stdin, file_mode, log_dir, out_dir,
+    pumpkin_dir,
 };
 use schema::workflow::{self, AgentId, TargetId, Workflow};
-use stdx::Context;
-use stdx::time::Clock as _;
 
-use super::log::Entry;
-use super::sandbox::{Sandboxes, Started, Unstarted, Which, collect, launch};
-use super::{Clock, Host, Inbox, Input, Report, Runtime, record};
+use crate::log::Entry;
+use crate::sandbox::{PUMPKIN, Which, launch};
+use crate::starts::DeleteWaiter;
+use crate::{Host, Input, Io, Purpose, Runtime, interruption, record};
 
-/// The agent's sandbox, from when it starts until it is deleted.
-pub(super) struct Agent<C> {
-    sandbox: Started<C>,
-    /// The reserved command, until the driver has reported its exit or the end of its session.
+/// The agent's sandbox, from when its start begins until it is deleted.
+pub(super) struct Agent {
+    pub(super) session: Option<SessionId>,
+    sandbox: Option<SandboxId>,
+    /// The command, from its start until the driver has reported its exit or the end of its
+    /// session.
     process: Option<Process>,
     // The start is recorded once, even when the command sends an op before its confirmation.
     launched: bool,
+    // Whether the core asked for the teardown before the sandbox's start ended.
+    torn: bool,
+    step: Step,
+    launch: Option<Launch>,
+    // What each answer to an op in flight is, by its token, for what its failure says.
+    pub(super) answering: BTreeMap<u64, String>,
 }
 
-impl<C: Clock> Agent<C> {
-    /// Creates the sandbox and installs the files its command needs, by `by`, a time on `clock`.
-    /// Keeps the session even on a file error so its output and deletion are accounted for by the
-    /// usual teardown.
-    fn prepare<H: Host<Clock = C>>(
-        sandboxes: &Sandboxes<'_, H>,
-        agent: &workflow::Agent,
-        by: Duration,
-        hard_end: UnixTime,
-        inbox: Sender<Input<C>>,
-        clock: &C,
-    ) -> Result<(Self, Result<Launch, String>), Unstarted> {
-        let id = agent.id;
-        let ops = Some(op_payload_limit(sandboxes.workflow(), id));
-        let stamp = clock.clone();
-        let wrap = move |arrival| Input::Agent(id, stamp.now(), arrival);
-        let which = Which::Agent(id);
-        let mut sandbox = sandboxes.start(which, ops, (clock, by), hard_end, inbox, wrap)?;
-        let launch = put(&mut sandbox.session, agent, by).map(|stdin| Launch {
-            stdin,
-            ..launch(&agent.command)
-        });
-        Ok((
-            Self {
-                sandbox,
-                process: None,
-                launched: false,
-            },
-            launch,
-        ))
-    }
+/// The agent's step under way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Step {
+    Starting,
+    // Its files, then its standard input, by the order in which they are put.
+    Putting(u8),
+    Ready,
+    Launching,
+    Running,
+    // The answer to an op, which the token's op names.
+    Answer,
+    Freezing,
+    Collecting(u8),
+    Deleting,
+}
 
+// When an agent's set-up ended, and how.
+type SetUp = (Duration, Result<(), String>);
+
+/// The start of the work, which waits for each agent's and shared role's set-up, or the startup.
+pub(super) struct Gate {
+    startup: Duration,
+    agents: BTreeMap<AgentId, Option<SetUp>>,
+    residents: BTreeSet<TargetId>,
+    failures: Vec<Event>,
+}
+
+impl Agent {
     /// The event that the exit of `process`, with `status`, brings the core, if the core still
     /// waits on it as the agent's command: [`Event::AgentExited`]. The agent's end, its command's
     /// exit or its session's end ([`Agent::ended`]), is reported once.
@@ -96,222 +96,411 @@ impl<C: Clock> Agent<C> {
         self.process.is_some() && !std::mem::replace(&mut self.launched, true)
     }
 
-    pub(super) fn reply(&mut self, op: IncomingOp, reply: OpReply, by: Duration) -> io::Result<()> {
-        self.sandbox.session.reply(op, reply, by)
-    }
-
-    pub(super) fn trees(&self) -> Trees {
-        self.sandbox.session.trees()
-    }
-
-    pub(super) fn refuse(&mut self, refused: RefusedOp, by: Duration) -> io::Result<()> {
-        self.sandbox.session.refuse(refused, by)
-    }
-
-    /// Freezes the sandbox, then collects its [`out_dir()`] and [`log_dir()`] into `dir`, all by
-    /// `by`. Returns what failed, if anything.
-    fn freeze_and_collect(&mut self, dir: &Path, by: Duration) -> Vec<String> {
-        let session = &mut self.sandbox.session;
-        let mut failures = Vec::new();
-        if let Err(error) = session.freeze(by) {
-            failures.push(format!("freezing the agent's sandbox failed: {error}"));
-        }
-        for part in [out_dir(), log_dir()] {
-            if let Err(error) = collect(session, &part, dir, by) {
-                failures.push(format!("the agent's {part} is incomplete: {error}"));
-            }
-        }
-        failures
+    /// Whether the agent's teardown freezes or collects its sandbox, whose requests end by the
+    /// teardown's end at the latest. Its delete is a delete like any other.
+    pub(super) fn tearing_down(&self) -> bool {
+        matches!(self.step, Step::Freezing | Step::Collecting(_))
     }
 }
 
-impl<'r, H: Host + 'r> Runtime<'r, H> {
-    pub(super) fn prepared<'s>(
-        &mut self,
-        scope: Option<&'s Scope<'s, 'r>>,
-        id: AgentId,
-        agent: Result<Box<Agent<H::Clock>>, String>,
-    ) -> Result<(), String> {
-        match agent {
-            Ok(agent) => {
-                self.agents.insert(id, *agent);
-            }
-            Err(detail) => {
-                let role = &self.workflow().sandbox(id.role()).name;
-                self.log.note(&format!(
-                    "agent `{role}`: the agent's sandbox didn't start: {detail}"
-                ))?;
-            }
-        }
-        if self.starting.remove(&id) == Some(true)
-            && let Some(scope) = scope
-        {
-            self.tear_down_agent(scope, id)?;
-        }
-        Ok(())
-    }
-
-    pub(super) fn tear_down_agent<'s>(
-        &mut self,
-        scope: &'s Scope<'s, 'r>,
-        id: AgentId,
-    ) -> Result<(), String> {
-        if let Some(starting) = self.starting.get_mut(&id) {
-            *starting = true;
-            return Ok(());
-        }
-        let Some(mut agent) = self.agents.remove(&id) else {
-            let _ = self.inbox.sender().send(Input::Child(Report::Event(
-                self.clock.now(),
-                Event::AgentTornDown { agent: id },
-            )));
-            return self
-                .log
-                .note("the agent's sandbox never started: nothing was collected");
-        };
-        let dir = self.dir.join(Which::Agent(id).record_dir(self.workflow()));
-        let by = self.teardown_end();
-        let sandboxes = self.sandboxes;
-        let sender = self.inbox.sender();
-        let clock = self.clock.clone();
-        thread::Builder::new()
-            .spawn_scoped(scope, move || {
-                let log = |entry| {
-                    let _ = sender.send(Input::Logged(entry));
-                };
-                for reason in agent.freeze_and_collect(&dir, by) {
-                    log(Entry::Note(reason));
-                }
-                let collected = record::collected(&dir);
-                let role = &sandboxes.workflow().sandbox(id.role()).name;
-                log(Entry::Note(format!(
-                    "collected from agent `{role}`'s sandbox: {collected}"
-                )));
-                log(Entry::AgentCollected(id));
-                let (logged, result) = sandboxes.delete(agent.sandbox);
-                for entry in logged {
-                    log(entry);
-                }
-                let report = match result {
-                    Ok(()) => Report::Event(clock.now(), Event::AgentTornDown { agent: id }),
-                    Err(error) => Report::Undeleted(error),
-                };
-                let _ = sender.send(Input::Child(report));
-            })
-            .context("starting the agent's teardown thread")?;
-        Ok(())
-    }
-
-    pub(super) fn start_agents<'s>(&mut self, scope: &'s Scope<'s, 'r>) -> Result<(), String> {
+impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
+    pub(super) fn start_agents(&mut self, io: &mut Io<'r, 's, H>) {
         let workflow = self.workflow();
-        let sandboxes = self.sandboxes;
-        let hard_end = self.unix_hard_end;
-        let mut ready = self.clock.inbox();
-        let mut gates = BTreeMap::new();
-        self.start_residents(scope, &ready.sender())?;
+        self.start_residents(io);
         let mut startup = self
             .residents
             .keys()
             .map(|target| self.placed.startup(target.role()))
             .max()
             .unwrap_or_default();
+        let mut gate = Gate {
+            startup: Duration::ZERO,
+            agents: BTreeMap::new(),
+            residents: self.residents.keys().copied().collect(),
+            failures: Vec::new(),
+        };
         for role in workflow.agents() {
             let id = role.id;
             self.serve(decision::Caller::Agent(id));
-            let clock = self.clock.clone();
-            let inbox = self.inbox.sender();
             let bound = self.placed.startup(id.role());
-            let prepare = move || Agent::prepare(sandboxes, role, bound, hard_end, inbox, &clock);
             startup = startup.max(bound);
-            self.starting.insert(id, false);
-            let (release, gate) = mpsc::channel();
-            let worker = Worker {
+            gate.agents.insert(id, None);
+            self.agents.insert(
                 id,
-                clock: self.clock.clone(),
-                notices: ready.sender(),
-                inbox: self.inbox.sender(),
-                gate,
+                Agent {
+                    session: None,
+                    sandbox: None,
+                    process: None,
+                    launched: false,
+                    torn: false,
+                    step: Step::Starting,
+                    launch: None,
+                    answering: BTreeMap::new(),
+                },
+            );
+            let takes = Takes {
+                ops: Some(op_payload_limit(workflow, id)),
+                models: workflow.model(id.role()).is_some(),
             };
-            thread::Builder::new()
-                .spawn_scoped(scope, move || worker.start(prepare(), sandboxes, bound))
-                .context("starting the agent's setup thread")?;
-            gates.insert(id, release);
+            self.begin_start(io, Which::Agent(id), (bound, takes));
         }
-        self.release_agents(startup, gates, &mut ready);
-        Ok(())
+        gate.startup = startup;
+        self.gate = Some(gate);
+        self.release_agents(io);
     }
 
-    fn release_agents(
-        &mut self,
-        startup: Duration,
-        mut gates: BTreeMap<AgentId, Sender<Duration>>,
-        ready: &mut impl Inbox<(Duration, Ready)>,
-    ) {
-        let mut releases = Vec::new();
-        let mut failures = Vec::new();
-        let mut waiting: BTreeSet<_> = self.residents.keys().copied().collect();
-        while !gates.is_empty() || !waiting.is_empty() {
-            if super::interruption::signal().is_some() {
+    // Waits for each agent's and shared role's set-up, until the startup, then starts the work.
+    fn release_agents(&mut self, io: &mut Io<'r, 's, H>) {
+        loop {
+            if interruption::signal().is_some() {
                 return;
             }
-            // Even after the driver wakes past the bound, take notices already queued.
-            let now = self.clock.now();
-            let until = startup.min(now.saturating_add(super::LOOK));
-            let Some((at, notice)) = ready.wait(until) else {
-                if now >= startup {
-                    break;
-                }
-                continue;
+            let Some(gate) = &self.gate else {
+                unreachable!("the agents are released once")
             };
-            match notice {
-                Ready::Agent(id, status) => {
-                    if let Some(release) = gates.remove(&id) {
-                        let reason = match status {
-                            Ok(()) if at <= self.placed.startup(id.role()) => {
-                                releases.push((id, release));
-                                continue;
-                            }
-                            Ok(()) => SETUP_EXPIRED.to_owned(),
-                            Err(reason) => reason,
-                        };
-                        failures.push(Event::AgentFailed { agent: id, reason });
-                    }
-                }
-                Ready::Shared(target, status) => {
-                    waiting.remove(&target);
-                    if let Some(resident) = self.residents.get_mut(&target) {
-                        match status {
-                            Ok(()) if at <= self.placed.startup(target.role()) => {}
-                            Ok(()) => {
-                                failures.extend(resident.fail(target, SHARED_EXPIRED.to_owned()));
-                            }
-                            Err(reason) => failures.extend(resident.fail(target, reason)),
-                        }
-                    }
-                }
+            let waits = gate.agents.values().any(Option::is_none) || !gate.residents.is_empty();
+            if !waits || self.at >= gate.startup {
+                break;
             }
+            self.run(io, gate.startup);
         }
-        if super::interruption::signal().is_some() {
-            return;
-        }
-        let at = self.clock.now();
+        let Some(gate) = self.gate.take() else {
+            unreachable!("the agents are released once")
+        };
+        let Gate {
+            startup,
+            agents,
+            residents,
+            mut failures,
+        } = gate;
+        let at = self.at;
         self.pending.push_back((at, Event::WorkStarted));
-        failures.extend(gates.into_keys().map(|agent| Event::AgentFailed {
-            agent,
-            reason: SETUP_EXPIRED.to_owned(),
-        }));
-        for target in waiting {
-            if let Some(resident) = self.residents.get_mut(&target) {
-                failures.extend(resident.fail(target, SHARED_EXPIRED.to_owned()));
-            }
+        let mut releases = Vec::new();
+        for (agent, ready) in agents {
+            let reason = match ready {
+                Some((ready_at, Ok(()))) if ready_at <= self.placed.startup(agent.role()) => {
+                    releases.push(agent);
+                    continue;
+                }
+                Some((_, Ok(()))) | None => SETUP_EXPIRED.to_owned(),
+                Some((_, Err(reason))) => reason,
+            };
+            failures.push(Event::AgentFailed { agent, reason });
+        }
+        for target in residents {
+            failures.extend(self.resident_fail(io, target, SHARED_EXPIRED.to_owned()));
         }
         self.pending
             .extend(failures.into_iter().map(|event| (at, event)));
         let end = at
             .min(startup)
             .saturating_add(self.workflow().work_deadline());
-        for (id, release) in releases {
-            let _ = release.send(end.min(at.saturating_add(self.placed.startup(id.role()))));
+        for id in releases {
+            let by = end.min(at.saturating_add(self.placed.startup(id.role())));
+            self.launch_agent(io, id, by);
+        }
+    }
+
+    pub(super) fn shared_ready(
+        &mut self,
+        io: &mut Io<'r, 's, H>,
+        target: TargetId,
+        at: Duration,
+        ready: Result<(), String>,
+    ) {
+        let Some(gate) = &mut self.gate else {
+            return;
+        };
+        gate.residents.remove(&target);
+        let failed = match ready {
+            Ok(()) if at <= self.placed.startup(target.role()) => return,
+            Ok(()) => self.resident_fail(io, target, SHARED_EXPIRED.to_owned()),
+            Err(reason) => self.resident_fail(io, target, reason),
+        };
+        if let Some(gate) = &mut self.gate {
+            gate.failures.extend(failed);
+        }
+    }
+
+    fn agent_set_up(&mut self, id: AgentId, ready: Result<(), String>) {
+        let at = self.at;
+        if let Some(gate) = &mut self.gate
+            && let Some(slot) = gate.agents.get_mut(&id)
+        {
+            *slot = Some((at, ready));
+        }
+    }
+
+    fn launch_agent(&mut self, io: &mut Io<'r, 's, H>, id: AgentId, by: Duration) {
+        if interruption::signal().is_some() {
+            return;
+        }
+        let Some(agent) = self.agents.get_mut(&id) else {
+            return;
+        };
+        let (Some(session), Some(launch)) = (agent.session, agent.launch.take()) else {
+            return;
+        };
+        agent.step = Step::Launching;
+        let token = self.token(Purpose::Agent(id, Step::Launching));
+        let process = Sessions::ask(self, io, session, Ask::Start(launch), (by, token));
+        if let Some(agent) = self.agents.get_mut(&id) {
+            agent.process = process;
+        }
+    }
+
+    /// Takes the agent's sandbox, started and set up, whose files go in next.
+    pub(super) fn agent_ready(
+        &mut self,
+        io: &mut Io<'r, 's, H>,
+        id: AgentId,
+        (sandbox, session): (SandboxId, SessionId),
+    ) {
+        let Some(agent) = self.agents.get_mut(&id) else {
+            unreachable!("an agent's start ended for no agent")
+        };
+        agent.session = Some(session);
+        agent.sandbox = Some(sandbox);
+        agent.step = Step::Putting(0);
+        self.put_agent(io, id);
+    }
+
+    // Puts the agent's next part: its directories and files, then its standard input's text.
+    fn put_agent(&mut self, io: &mut Io<'r, 's, H>, id: AgentId) {
+        let workflow = self.workflow();
+        let Some(role) = workflow.agents().find(|agent| agent.id == id) else {
+            unreachable!("agent {id:?} is no agent of the workflow's")
+        };
+        let Some(agent) = self.agents.get_mut(&id) else {
+            return;
+        };
+        let (Step::Putting(part), Some(session)) = (agent.step, agent.session) else {
+            return;
+        };
+        let by = self.placed.startup(id.role());
+        let (dir, entries) = match (part, &role.stdin) {
+            (0, _) => (AbsolutePath::root(), files(role)),
+            (1, Some(text)) => {
+                let put = Put::File(command_stdin(), file_mode(), text.as_bytes().to_vec());
+                (pumpkin_dir(), vec![put])
+            }
+            _ => return self.agent_put(io, id),
+        };
+        let token = self.token(Purpose::Agent(id, Step::Putting(part)));
+        Sessions::ask(
+            self,
+            io,
+            session,
+            Ask::Put(dir, Root::Kept, entries),
+            (by, token),
+        );
+    }
+
+    // Ends the agent's set-up, its files put, and hands the gate its launch.
+    fn agent_put(&mut self, io: &mut Io<'r, 's, H>, id: AgentId) {
+        let Some(role) = self.workflow().agents().find(|agent| agent.id == id) else {
+            unreachable!("agent {id:?} is no agent of the workflow's")
+        };
+        let Some(agent) = self.agents.get_mut(&id) else {
+            return;
+        };
+        let stdin = role
+            .stdin
+            .as_ref()
+            .map(|_| pumpkin_dir().join(&command_stdin()));
+        agent.launch = Some(Launch {
+            stdin,
+            ..launch(&role.command)
+        });
+        agent.step = Step::Ready;
+        let torn = agent.torn;
+        self.agent_set_up(id, Ok(()));
+        if torn {
+            self.tear_down_agent(io, id);
+        }
+    }
+
+    /// Takes why the agent's sandbox didn't start, which its disposal follows.
+    pub(super) fn agent_unstarted(
+        &mut self,
+        io: &mut Io<'r, 's, H>,
+        id: AgentId,
+        unstarted: crate::sandbox::Unstarted,
+    ) {
+        let reason = format!("the agent's sandbox didn't start: {}", unstarted.reason());
+        self.agent_set_up(id, Err(reason));
+        match unstarted {
+            crate::sandbox::Unstarted::Uncreated(reason) => self.agent_disposed(id, Ok(reason)),
+            crate::sandbox::Unstarted::Created {
+                which,
+                id: made,
+                reason,
+            } => {
+                self.dispose(io, (which, made), &reason);
+            }
+        }
+    }
+
+    /// Takes how the disposal of the agent's sandbox that didn't start went.
+    pub(super) fn agent_disposed(&mut self, id: AgentId, disposed: Result<String, String>) {
+        let torn = self.agents.remove(&id).is_some_and(|agent| agent.torn);
+        match disposed {
+            Ok(detail) => self.input(Input::Unstarted(id, detail, torn)),
+            Err(reason) => self.input(Input::Undeleted(reason)),
+        }
+    }
+
+    pub(super) fn tear_down_agent(&mut self, io: &mut Io<'r, 's, H>, id: AgentId) {
+        let Some(agent) = self.agents.get_mut(&id) else {
+            let torn_down = Event::AgentTornDown { agent: id };
+            self.input(Input::Core(torn_down));
+            return self.note("the agent's sandbox never started: nothing was collected");
+        };
+        match agent.step {
+            Step::Starting | Step::Putting(_) => {
+                agent.torn = true;
+                return;
+            }
+            Step::Freezing | Step::Collecting(_) | Step::Deleting => return,
+            Step::Ready | Step::Launching | Step::Running | Step::Answer => {}
+        }
+        let Some(session) = agent.session else {
+            unreachable!("an agent past its start holds its session until its delete")
+        };
+        // The core waits on neither its command's exit nor its session's end from now on: the
+        // freeze kills the one, and the delete ends the other.
+        agent.process = None;
+        agent.step = Step::Freezing;
+        let token = self.token(Purpose::Agent(id, Step::Freezing));
+        let by = self.teardown_end();
+        Sessions::ask(self, io, session, Ask::Freeze, (by, token));
+    }
+
+    /// Takes the answer to one of the agent's steps.
+    pub(super) fn agent_answered(
+        &mut self,
+        io: &mut Io<'r, 's, H>,
+        (id, step, token): (AgentId, Step, u64),
+        answer: gateway::Answer,
+    ) {
+        use gateway::Answer::{Collected, Done, Started};
+        match (step, answer) {
+            (Step::Putting(part), Done(done)) => match done {
+                Ok(()) => {
+                    if let Some(agent) = self.agents.get_mut(&id) {
+                        agent.step = Step::Putting(part + 1);
+                    }
+                    self.put_agent(io, id);
+                }
+                Err(error) => {
+                    let reason = match part {
+                        0 => format!("the agent's files can't be put below `/`: {error}"),
+                        _ => format!("the agent's standard input can't be put: {error}"),
+                    };
+                    let torn = self.agents.get_mut(&id).is_some_and(|agent| {
+                        agent.step = Step::Ready;
+                        agent.torn
+                    });
+                    self.agent_set_up(id, Err(reason));
+                    if torn {
+                        self.tear_down_agent(io, id);
+                    }
+                }
+            },
+            (Step::Launching, Started(started)) => match started {
+                Ok(_) => {
+                    if let Some(agent) = self.agents.get_mut(&id) {
+                        agent.step = Step::Running;
+                    }
+                    if let Err(error) = self.launched(id, self.at) {
+                        self.fail(error);
+                    }
+                }
+                Err(error) => {
+                    if let Some(agent) = self.agents.get_mut(&id) {
+                        agent.step = Step::Running;
+                    }
+                    let reason = format!("the agent's command didn't start: {error}");
+                    self.input(Input::Core(Event::AgentFailed { agent: id, reason }));
+                }
+            },
+            (Step::Answer, Done(done)) => {
+                let what = (self.agents.get_mut(&id))
+                    .and_then(|agent| agent.answering.remove(&token))
+                    .unwrap_or_default();
+                if let Err(error) = done {
+                    self.note(&format!("{what} failed: {error}"));
+                }
+            }
+            (Step::Freezing, Done(done)) => {
+                if let Err(error) = done {
+                    self.note(&format!("freezing the agent's sandbox failed: {error}"));
+                }
+                self.collect_agent(io, id, 0);
+            }
+            (Step::Collecting(part), Collected(collected)) => {
+                if let Err(error) = collected {
+                    let name = [out_dir(), log_dir()][usize::from(part)].clone();
+                    let from = pumpkin_dir().join(&name);
+                    self.note(&format!(
+                        "the agent's {name} is incomplete: collecting {from} failed: {error}"
+                    ));
+                }
+                self.collect_agent(io, id, part + 1);
+            }
+            (step, answer) => unreachable!("{answer:?} answered the agent's {step:?}"),
+        }
+    }
+
+    // Collects the agent's `out`, then its `log`, then deletes its sandbox.
+    fn collect_agent(&mut self, io: &mut Io<'r, 's, H>, id: AgentId, part: u8) {
+        let which = Which::Agent(id);
+        let dir = self.dir.join(which.record_dir(self.workflow()));
+        let Some(agent) = self.agents.get_mut(&id) else {
+            return;
+        };
+        let Some(session) = agent.session else {
+            return;
+        };
+        if let Some(name) = [out_dir(), log_dir()].get(usize::from(part)) {
+            agent.step = Step::Collecting(part);
+            let from = pumpkin_dir().join(name);
+            let into = dir.join(name.as_str());
+            let token = self.token(Purpose::Agent(id, Step::Collecting(part)));
+            let by = self.teardown_end();
+            let collect = Ask::Collect(from, into, PUMPKIN);
+            Sessions::ask(self, io, session, collect, (by, token));
+            return;
+        }
+        let collected = record::collected(&dir);
+        let role = &self.workflow().sandbox(id.role()).name;
+        self.note(&format!(
+            "collected from agent `{role}`'s sandbox: {collected}"
+        ));
+        self.logged(Entry::AgentCollected(id));
+        let Some(agent) = self.agents.get_mut(&id) else {
+            return;
+        };
+        agent.step = Step::Deleting;
+        agent.session = None;
+        let Some(sandbox) = agent.sandbox.clone() else {
+            unreachable!("an agent that holds its session holds its sandbox")
+        };
+        let waiter = DeleteWaiter::Sandbox {
+            after: Event::AgentTornDown { agent: id },
+            session: Some(session),
+        };
+        self.begin_delete(io, which, sandbox, waiter);
+    }
+
+    /// Queues `input`, which reached the loop now.
+    pub(super) fn input(&mut self, input: Input) {
+        self.inputs.push_back((self.at, input));
+    }
+
+    pub(super) fn note(&mut self, note: &str) {
+        if let Err(error) = self.log.note(note) {
+            self.fail(error);
         }
     }
 }
@@ -320,79 +509,8 @@ const SETUP_EXPIRED: &str = "the agent's setup missed the startup deadline";
 
 const SHARED_EXPIRED: &str = "the shared role's setup missed the startup deadline";
 
-pub(super) enum Ready {
-    Agent(AgentId, Result<(), String>),
-    Shared(TargetId, Result<(), String>),
-}
-
-struct Worker<C> {
-    id: AgentId,
-    clock: C,
-    notices: Sender<(Duration, Ready)>,
-    inbox: Sender<Input<C>>,
-    gate: Receiver<Duration>,
-}
-
-impl<C: Clock> Worker<C> {
-    fn start(
-        self,
-        prepared: Result<(Agent<C>, Result<Launch, String>), Unstarted>,
-        sandboxes: &Sandboxes<'_, impl Host<Clock = C>>,
-        by: Duration,
-    ) {
-        let id = self.id;
-        let (mut agent, launch) = match prepared {
-            Ok(prepared) => prepared,
-            Err(failure) => {
-                let reason = format!("the agent's sandbox didn't start: {}", failure.reason());
-                let _ = self
-                    .notices
-                    .send((self.clock.now(), Ready::Agent(id, Err(reason))));
-                match failure.dispose(sandboxes) {
-                    Ok(detail) => {
-                        let _ = self.inbox.send(Input::Prepared(id, Err(detail)));
-                    }
-                    Err(reason) => {
-                        let _ = self.inbox.send(Input::Child(Report::Undeleted(reason)));
-                    }
-                }
-                return;
-            }
-        };
-        let start = launch.and_then(|launch| {
-            let (process, send) = agent
-                .sandbox
-                .session
-                .prepare_start(by)
-                .context("reserving the agent's command")?;
-            agent.process = Some(process);
-            Ok(move |by| send(launch, by))
-        });
-        // The driver owns the session before any command may send an op or exit.
-        let _ = self.inbox.send(Input::Prepared(id, Ok(Box::new(agent))));
-        let status = start.as_ref().map(|_| ()).map_err(Clone::clone);
-        let _ = self
-            .notices
-            .send((self.clock.now(), Ready::Agent(id, status)));
-        if let Ok(start) = start
-            && let Ok(end) = self.gate.recv()
-            && super::interruption::signal().is_none()
-        {
-            let result = start(end).context("the agent's command didn't start");
-            let _ = self
-                .inbox
-                .send(Input::Launched(id, self.clock.now(), result));
-        }
-    }
-}
-
-/// Puts `agent`'s directories and files in its sandbox, at `/`, then its standard input's text,
-/// if it has one, at [`command_stdin()`], by `by`. Returns where the standard input is.
-fn put(
-    session: &mut Session<impl Clock>,
-    agent: &workflow::Agent,
-    by: Duration,
-) -> Result<Option<AbsolutePath>, String> {
+// The agent's directories and files, to put below `/`.
+fn files(agent: &workflow::Agent) -> Vec<Put> {
     let dirs = (agent.dirs.iter()).map(|Dir { path, mode }| Put::Dir(path.relative(), *mode));
     let files = (agent.files.iter()).map(|file| {
         let File {
@@ -400,17 +518,9 @@ fn put(
             mode,
             content,
         } = file;
-        Put::File(path.relative(), *mode, content.as_bytes())
+        Put::File(path.relative(), *mode, content.as_bytes().to_vec())
     });
-    (session.put(&AbsolutePath::root(), dirs.chain(files), by))
-        .context("the agent's files can't be put below `/`")?;
-    let Some(text) = &agent.stdin else {
-        return Ok(None);
-    };
-    let stdin = command_stdin();
-    let put = [Put::File(stdin.clone(), file_mode(), text.as_bytes())];
-    (session.put(&pumpkin_dir(), put, by)).context("the agent's standard input can't be put")?;
-    Ok(Some(pumpkin_dir().join(&stdin)))
+    dirs.chain(files).collect()
 }
 
 /// The largest payload the agent may send: the largest `payload_max_bytes` of its job and now

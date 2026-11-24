@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use gateway::IncomingModelRequest;
-use route::{Admission, Answer, Apart, Headers, Keep, Route, Serving, Upstream};
+use gateway::ModelRequest;
+use route::{Admission, Answer, Apart, Headers, Keep, Respond, Route, Serving, Upstream};
 use schema::ir::{Api, ApiRoute, ModelRoute, Name, Sha256Digest};
 use schema::workflow::{ByRole, Sandbox, Workflow};
 use serde_json::{Map, Value, json};
@@ -122,14 +122,15 @@ impl Served {
         })
     }
 
-    /// Serves one model request, number `number`, with its `exchange` keeping it, as `admission` of
-    /// the index of the entry that takes it admits it: `forwarding` is called once if the request
-    /// goes upstream, and `answered` once, with the name and API of the entry that took it, if one
-    /// did, and the answer. It gives up at `by`, a time on the exchange's clock.
+    /// Serves one model request, number `number`, through `client`, with its `exchange` keeping
+    /// it, as `admission` of the index of the entry that takes it admits it: `forwarding` is called
+    /// once if the request goes upstream, and `answered` once, with the name and API of the entry
+    /// that took it, if one did, and the answer. It gives up at `by`, a time on the exchange's
+    /// clock.
     pub(super) fn serve<'b>(
         &self,
         (number, exchange): (u64, &Exchange<impl Clock>),
-        incoming: IncomingModelRequest,
+        incoming: (&ModelRequest, &mut dyn Respond),
         admission: impl FnOnce(usize) -> Admission<'b>,
         by: Duration,
         forwarding: impl FnOnce(),

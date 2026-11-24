@@ -41,10 +41,9 @@ use schema::workflow::{AgentId, TargetId, Workflow};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use stdx::Context;
-use stdx::time::Clock as _;
 
 use super::sandbox::Deleted;
-use super::{Durable, Host, Stopped, record};
+use super::{Host, Stopped, record};
 
 mod call;
 mod fold;
@@ -67,16 +66,16 @@ pub(super) use roles::ir_in;
 pub use usage::{Cost, PlaceUse, Priced, TokensCost, Used};
 pub(super) use usage::{usage_of, used};
 
-pub(super) struct Log<'h, H: Host> {
+pub(super) struct Log {
     path: PathBuf,
     file: File,
     seq: u64,
-    host: &'h H,
-    clock: H::Clock,
+    // The time of the loop's batch, since the run started, at which each line is written.
+    at: Duration,
 }
 
-impl<'h, H: Host> Log<'h, H> {
-    pub(super) fn create(host: &'h H, clock: H::Clock, dir: &Path) -> Result<Self, String> {
+impl Log {
+    pub(super) fn create(host: &impl Host, dir: &Path) -> Result<Self, String> {
         let path = dir.join("log.jsonl");
         let file = OpenOptions::new()
             .append(true)
@@ -89,9 +88,19 @@ impl<'h, H: Host> Log<'h, H> {
             path,
             file,
             seq: 0,
-            host,
-            clock,
+            at: Duration::ZERO,
         })
+    }
+
+    /// Writes the lines that follow at `at`, the time of the loop's batch.
+    pub(super) fn at(&mut self, at: Duration) {
+        self.at = at;
+    }
+
+    /// A handle of the log, and its path, which a sync of the lines so far takes.
+    pub(super) fn handle(&self) -> Result<(File, PathBuf), String> {
+        let file = self.file.try_clone().context(self.path.display())?;
+        Ok((file, self.path.clone()))
     }
 
     pub(super) fn start(
@@ -106,7 +115,7 @@ impl<'h, H: Host> Log<'h, H> {
             "unix_ns": nanos(unix.since_epoch()),
             "hard_end_ns": nanos(hard_end),
         });
-        self.decided(workflow, Duration::ZERO, event, actions, false)
+        self.decided(workflow, Duration::ZERO, event, actions)
     }
 
     pub(super) fn event(
@@ -115,15 +124,8 @@ impl<'h, H: Host> Log<'h, H> {
         observed: Duration,
         event: &Event,
         actions: &[Action],
-        delivers_receipt: bool,
     ) -> Result<(), String> {
-        self.decided(
-            workflow,
-            observed,
-            event_json(event),
-            actions,
-            delivers_receipt,
-        )
+        self.decided(workflow, observed, event_json(event), actions)
     }
 
     pub(super) fn refused(&mut self, caller: Caller, refused: &RefusedOp) -> Result<(), String> {
@@ -136,9 +138,8 @@ impl<'h, H: Host> Log<'h, H> {
             "request": request,
             "message": refused.message(),
         });
-        self.told(event)?;
-        // The refusal is sent next, an act that no action lists.
-        self.sync()
+        // The refusal is sent next, an act that no action lists, once the line lasts.
+        self.told(event)
     }
 
     /// Writes the `model_answered` event of a request: its `caller`, `request` number, the
@@ -343,16 +344,12 @@ impl<'h, H: Host> Log<'h, H> {
         observed: Duration,
         event: Value,
         actions: &[Action],
-        delivers_receipt: bool,
     ) -> Result<(), String> {
         let actions: Vec<Value> = actions
             .iter()
             .map(|action| action_json(workflow, action))
             .collect();
-        // A line whose actions the runtime carries out next lasts before it does.
-        let leads = delivers_receipt || !actions.is_empty();
-        self.observed(observed, event, &actions)?;
-        if leads { self.sync() } else { Ok(()) }
+        self.observed(observed, event, &actions)
     }
 
     fn observed(
@@ -378,7 +375,7 @@ impl<'h, H: Host> Log<'h, H> {
 
     fn append(&mut self, mut record: Value) -> Result<(), String> {
         record["seq"] = self.seq.into();
-        record["at_ns"] = nanos(self.clock.now()).into();
+        record["at_ns"] = nanos(self.at).into();
         let mut line = record.to_string();
         line.push('\n');
         self.file
@@ -386,12 +383,6 @@ impl<'h, H: Host> Log<'h, H> {
             .context(self.path.display())?;
         self.seq += 1;
         Ok(())
-    }
-
-    pub(super) fn sync(&self) -> Result<(), String> {
-        (self.host)
-            .sync(&self.file, Durable::Data)
-            .context(self.path.display())
     }
 }
 

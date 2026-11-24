@@ -23,12 +23,13 @@ use std::os::unix::fs::{PermissionsExt as _, symlink};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 
 use expect_test::{Expect, expect};
-use gateway::{Arrival, Dialer, GatewayAddress, Listener, Process, Put, Sockets};
+use gateway::{Arrival, Ask, Dialer, GatewayAddress, Listener, Process, Put, Sockets};
 use schema::frame;
 use schema::frame::MAX_BODY_BYTES;
 use schema::ir::{AbsolutePath, Argv, Env, EnvVar, Mode, Name};
@@ -41,10 +42,11 @@ use schema::sandbox::{
 use serde_json::{Value, json};
 use stdx::Deadline;
 use stdx::process::Environment;
-use stdx::time::Machine;
+use test_support::gateway::{Session, passive};
 use test_support::{HUNG, TestDir, hung};
 
-type Session = gateway::Session<Machine>;
+// The loop that holds a test's sessions.
+type Sessions = test_support::gateway::Gateway;
 
 const PATH_ONLY: Environment = Environment::Only(&["PATH"]);
 
@@ -72,7 +74,7 @@ enum Meeting {
     reason = "the issuers are held for their drop, which ends the meeting"
 )]
 enum Gateway {
-    Sockets(Sockets),
+    Sockets(Arc<Sockets>),
     Tcp(Listener, SocketAddr),
     Listen(SocketAddrV4),
 }
@@ -82,6 +84,8 @@ struct Sandbox {
     path: OsString,
     gateway: Gateway,
     session: Session,
+    // Dropped after `session`, as its drop waits for that session's end.
+    sessions: Sessions,
     arrivals: Receiver<Arrival>,
     sandboxd: Child,
     commands: Cell<u32>,
@@ -102,11 +106,12 @@ impl Sandbox {
         let root = fs::canonicalize(dir.path()).unwrap();
         let path = tools(&root);
         sandboxd.env("PATH", &path);
+        let sessions = Sessions::new();
         let (gateway, registration) = match meeting {
             Meeting::Socket => {
-                let sockets = Sockets::create(root.join("sockets")).unwrap();
+                let sockets = Arc::new(Sockets::create(root.join("sockets")).unwrap());
                 let name = Name::try_from("sandbox".to_owned()).unwrap();
-                let (SocketDial { dir }, registration) = sockets.issue(&name).unwrap();
+                let (SocketDial { dir }, registration) = sessions.issue(&sockets, &name).unwrap();
                 sandboxd
                     .arg(dir.join(SOCKET_NAME))
                     .env(SANDBOXD_GRANT, GRANT)
@@ -151,9 +156,8 @@ impl Sandbox {
             listened(address);
         }
         let (sender, arrivals) = mpsc::channel();
-        let accepted =
-            registration.accept((&Machine, hung()), None, false, sender, |a| a, || false);
-        let mut session = accepted.unwrap();
+        let accepted = sessions.accept(registration, hung(), passive(), sender);
+        let session = accepted.unwrap();
         let dirs = ["in", "out", "home", "log"].map(relative);
         session
             .put(
@@ -167,6 +171,7 @@ impl Sandbox {
             path,
             gateway,
             session,
+            sessions,
             arrivals,
             sandboxd,
             commands: Cell::new(0),
@@ -365,6 +370,7 @@ impl Sandbox {
             root,
             gateway,
             session,
+            sessions,
             arrivals,
             path: _,
             mut sandboxd,
@@ -372,6 +378,8 @@ impl Sandbox {
             dir,
         } = self;
         drop(session);
+        // The loop stops once the session has ended, which then has sent its last arrival.
+        drop(sessions);
         // The meeting ends with the session it opened.
         drop(gateway);
         lines.extend(
@@ -422,7 +430,7 @@ fn put_run_collect(sandbox: &mut Sandbox) -> Vec<String> {
     let root = absolute(&sandbox.root);
     let put = [
         Put::Dir(dir, dir_mode()),
-        Put::File(payload, file_mode(), &raw),
+        Put::File(payload, file_mode(), raw.clone()),
     ];
     sandbox.session.put(&root, put, hung()).unwrap();
     let script = r#"
@@ -459,7 +467,9 @@ fn modes_and_stdin() {
         |sandbox| {
             let mode = |mode: &str| Mode::try_from(mode.to_owned()).unwrap();
             let dir = |path, mode_: &str| Put::Dir(relative(path), mode(mode_));
-            let file = |path, mode_: &str, bytes| Put::File(relative(path), mode(mode_), bytes);
+            let file = |path, mode_: &str, bytes: &[u8]| {
+                Put::File(relative(path), mode(mode_), bytes.to_vec())
+            };
             let put = [
                 dir("home", "0700"),
                 dir("in/tools", "0555"),
@@ -506,14 +516,9 @@ fn modes_and_stdin() {
             }
             let removed = fs::remove_dir_all(&collected);
             lines.push(format!("the collected tree removed: {removed:?}"));
-            let trees = sandbox.session.trees();
-            let again = [Put::File(relative("again"), mode("0644"), b"")];
-            let replaced = trees.put(
-                &sandbox.at("in/tools"),
-                Root::Replaced,
-                again,
-                (&Machine, hung()),
-            );
+            let again = vec![Put::File(relative("again"), mode("0644"), Vec::new())];
+            let again = Ask::Put(sandbox.at("in/tools"), Root::Replaced, again);
+            let replaced = sandbox.session.ask(again, hung()).done();
             let held: Vec<_> = (fs::read_dir(sandbox.root.join("in/tools")).unwrap())
                 .map(|entry| entry.unwrap().file_name().into_string().unwrap())
                 .collect();
@@ -723,8 +728,8 @@ fn refusals() {
             lines.push(format!("missing program by name, 1000 times: {failures:?}"));
             let file = relative("in/file");
             let twice = [
-                Put::File(file.clone(), file_mode(), b"first"),
-                Put::File(file, file_mode(), b"second"),
+                Put::File(file.clone(), file_mode(), b"first".to_vec()),
+                Put::File(file, file_mode(), b"second".to_vec()),
             ];
             let put = sandbox.session.put(&absolute(&sandbox.root), twice, hung());
             lines.push(format!("same file twice: {}", show_error(sandbox, put)));
@@ -760,21 +765,21 @@ fn new_roots() {
     check(
         Meeting::Socket,
         |sandbox| {
-            let trees = sandbox.session.trees();
             let root = absolute(&sandbox.root.join("in/fresh/tree"));
-            let put = || [Put::Dir(relative("a"), dir_mode())];
-            let first = thread::scope(|scope| {
-                let put = scope.spawn(|| trees.put(&root, Root::New, put(), (&Machine, hung())));
-                put.join().unwrap()
-            });
-            first.unwrap();
+            let put = |at: &AbsolutePath, root, entry| {
+                let entries = vec![Put::Dir(relative(entry), dir_mode())];
+                sandbox
+                    .session
+                    .ask(Ask::Put(at.clone(), root, entries), hung())
+                    .done()
+            };
+            put(&root, Root::New, "a").unwrap();
             let made = sandbox.root.join("in/fresh/tree/a").is_dir();
-            let again = trees.put(&root, Root::New, put(), (&Machine, hung()));
+            let again = put(&root, Root::New, "a");
             let mut lines = vec![
                 format!("put, its parents made: {made}"),
                 format!("put again: {}", show_error(sandbox, again)),
             ];
-            let other = || [Put::Dir(relative("b"), dir_mode())];
             let file = sandbox.root.join("in/file");
             fs::write(&file, "x").unwrap();
             for at in [
@@ -782,9 +787,7 @@ fn new_roots() {
                 absolute(&file),
                 absolute(&sandbox.root.join("in/none")),
             ] {
-                trees
-                    .put(&at, Root::Replaced, other(), (&Machine, hung()))
-                    .unwrap();
+                put(&at, Root::Replaced, "b").unwrap();
                 let held: Vec<_> = (fs::read_dir(at.as_str()).unwrap())
                     .map(|entry| entry.unwrap().file_name().into_string().unwrap())
                     .collect();
@@ -1374,16 +1377,17 @@ fn ended(mut sandboxd: Child) -> String {
 fn as_root_with_user() {
     let scratch = TestDir::new();
     let root = scratch.path();
-    let sockets = Sockets::create(root.join("sockets")).unwrap();
+    let sessions = Sessions::new();
+    let sockets = Arc::new(Sockets::create(root.join("sockets")).unwrap());
     let name = Name::try_from("as-root".to_owned()).unwrap();
-    let (SocketDial { dir }, registration) = sockets.issue(&name).unwrap();
+    let (SocketDial { dir }, registration) = sessions.issue(&sockets, &name).unwrap();
     let container = format!("sandboxd-{}-as-root", std::process::id());
     start_as_root(&dir, &container, "1234:1235");
     let (sender, arrivals) = mpsc::channel();
-    let accepted = registration.accept((&Machine, hung()), None, false, sender, |a| a, || false);
-    let mut session = accepted.unwrap();
-    let mut lines = as_user(&mut session, &arrivals, &root.join("collected"));
-    lines.extend(left_behind(&mut session, &arrivals, &container));
+    let accepted = sessions.accept(registration, hung(), passive(), sender);
+    let session = accepted.unwrap();
+    let mut lines = as_user(&session, &arrivals, &root.join("collected"));
+    lines.extend(left_behind(&session, &arrivals, &container));
     drop(session);
     // Gone already, once the session ended, which is as good as removed.
     let _ = (test_support::docker())
@@ -1425,7 +1429,7 @@ fn start_as_root(dir: &Path, container: &str, user: &str) {
     assert!(started, "the container was to start");
 }
 
-fn as_user(session: &mut Session, arrivals: &Receiver<Arrival>, collected: &Path) -> Vec<String> {
+fn as_user(session: &Session, arrivals: &Receiver<Arrival>, collected: &Path) -> Vec<String> {
     let dirs = ["home", "log"].map(relative);
     let put = dirs.map(|dir| Put::Dir(dir, dir_mode()));
     session
@@ -1449,11 +1453,7 @@ fn as_user(session: &mut Session, arrivals: &Receiver<Arrival>, collected: &Path
     lines
 }
 
-fn left_behind(
-    session: &mut Session,
-    arrivals: &Receiver<Arrival>,
-    container: &str,
-) -> Vec<String> {
+fn left_behind(session: &Session, arrivals: &Receiver<Arrival>, container: &str) -> Vec<String> {
     let exited = sh_as_user(
         session,
         arrivals,
@@ -1477,7 +1477,7 @@ fn left_behind(
     ]
 }
 
-fn sh_as_user(session: &mut Session, arrivals: &Receiver<Arrival>, script: &str) -> ExitStatus {
+fn sh_as_user(session: &Session, arrivals: &Receiver<Arrival>, script: &str) -> ExitStatus {
     let out = absolute(Path::new("/pumpkin/log/out"));
     let launch = Launch {
         argv: Argv::try_from(["sh", "-c", script].map(str::to_owned).to_vec()).unwrap(),

@@ -13,13 +13,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use std::{fmt, fs, io, iter, thread};
 
-use engine::{BuildContext, Building, Built, Engine, Started};
+use engine::{Admit, BuildContext, Builds, Built, Ended, Engine, Looked, Stepped};
 use lang::{Args, Declared, Label, Loader, Plan, Problems, Recipe};
 use recipe::Given;
 use schema::ir::Image;
 use schema::workflow::Workflow;
+use stdx::Context as _;
+use stdx::io::{Io, Loop};
+use stdx::slots::{Slots, Taker, Taking};
 use tempfile::TempDir;
 
 use crate::bodies::{self, Keeping, Sources};
@@ -241,20 +245,22 @@ impl Root {
         problems
     }
 
-    fn start(
+    /// What `engine` finds of the image that `declared` declares, once `admit` holds its tag, and
+    /// the standard library's files that its context reads, to keep until its build has ended.
+    fn look(
         &self,
         engine: &Engine,
         declared: &Declared<'_, Built>,
-        admit: &mut dyn engine::Admit,
-    ) -> Result<Started, String> {
+        admit: &mut dyn Admit,
+    ) -> Result<(Looked, Option<Library>), String> {
         let Declared {
             recipe,
             ref contexts,
         } = *declared;
-        // Held while the engine reads the context, which it copies before it starts.
-        let (context, given, _library) = self.inputs(recipe, contexts)?;
+        let (context, given, library) = self.inputs(recipe, contexts)?;
         let file = engine::Recipe::File(recipe.recipe.clone());
-        engine.start(&context, &file, &given, &recipe.repository, admit)
+        let looked = engine.look(&context, &file, &given, &recipe.repository, admit)?;
+        Ok((looked, library))
     }
 
     /// The inputs of a build of `recipe`. The `Library` holds the standard library's files that
@@ -454,13 +460,13 @@ pub(crate) fn check(
     })
 }
 
-/// An [`engine::Admit`] that is told when a build ends while others are still running.
-pub(crate) trait Admission: engine::Admit {
-    fn ended(&mut self, engine: &Engine);
+/// An [`Admit`] that is told when a build ends while others wait or run.
+pub(crate) trait Admission: Admit {
+    fn ended(&mut self);
 }
 
 impl Admission for () {
-    fn ended(&mut self, _: &Engine) {}
+    fn ended(&mut self) {}
 }
 
 /// The tag of each image that a task's build made.
@@ -480,75 +486,140 @@ impl Task<'_> {
         &self.workflow
     }
 
-    /// Builds the task's images on `engine`, each build as `admission` admits it, and gives the
-    /// workflow with its images built, the tag of each, and the sources of its bodies.
+    /// Builds the task's images on `engine`, each build as `admission` admits it, once it holds one
+    /// of `slots`, named for its holder in it, if given, and gives the workflow with its images
+    /// built, the tag of each, and the sources of its bodies. Fails if the builds' loop can't be
+    /// made.
     pub(crate) fn build(
         self,
         engine: &Engine,
-        admission: &mut (dyn Admission + Send),
-    ) -> Result<(Workflow, Tags, Sources), Problems> {
+        admission: &mut dyn Admission,
+        slots: Option<(Slots, String)>,
+    ) -> Result<Result<(Workflow, Tags, Sources), Problems>, String> {
         let Self {
             root,
             plan,
             workflow: _,
             sources,
         } = self;
-        let mut builds = Builds::new(admission);
-        let built = plan.build(jobs(), |ready| builds.step(&*root, engine, ready))?;
-        Ok((built, builds.tags, sources))
+        let machine = stdx::io::machine().context("making the loop that builds run on failed")?;
+        // The builds' one operation at a time: the take of their slot.
+        let mut io = Io::new(machine, 1);
+        let mut builds = TaskBuilds {
+            builds: Builds::new(0, slots),
+            images: BTreeMap::new(),
+            said: BTreeSet::new(),
+            tags: Tags::new(),
+        };
+        let built = plan.build(jobs(), |ready| {
+            builds.step(&mut io, (&*root, engine), admission, ready)
+        });
+        builds.builds.release(&mut io);
+        Ok(built.map(|built| (built, builds.tags, sources)))
     }
 }
 
-struct Builds<'a> {
-    building: Vec<((usize, String), Building)>,
+// A task's builds on their loop, which owns them, with what each build that found no image is of:
+// its repository and its stage, as it is said, whether it started, and the standard library's
+// files that its context reads, kept until it ends.
+struct TaskBuilds {
+    builds: Builds<Engine>,
+    images: BTreeMap<usize, Unbuilt>,
     said: BTreeSet<String>,
-    admission: &'a mut (dyn Admission + Send),
     tags: Tags,
 }
 
-impl<'a> Builds<'a> {
-    fn new(admission: &'a mut (dyn Admission + Send)) -> Self {
-        Self {
-            building: Vec::new(),
-            said: BTreeSet::new(),
-            admission,
-            tags: Tags::new(),
-        }
-    }
+struct Unbuilt {
+    repository: String,
+    stage: String,
+    started: bool,
+    _library: Option<Library>,
+}
 
+impl Loop for TaskBuilds {
+    type Event = Ended<Built>;
+
+    fn event(&mut self, _: &mut Io<Self>, ended: Ended<Built>) {
+        self.builds.ended(ended);
+    }
+}
+
+impl Taker for TaskBuilds {
+    fn taking(&mut self, _: u64) -> &mut Taking {
+        self.builds.taking()
+    }
+}
+
+impl TaskBuilds {
+    // A step of the plan's builds: it looks for each image of `ready`, and starts the build of each
+    // that it doesn't find, then gives what ended.
     fn step(
         &mut self,
-        root: &Root,
-        engine: &Engine,
+        io: &mut Io<Self>,
+        (root, engine): (&Root, &Engine),
+        admission: &mut dyn Admission,
         ready: Vec<(usize, Declared<'_, Built>)>,
     ) -> Vec<(usize, Result<Built, String>)> {
         let mut ended = Vec::new();
         for (index, declared) in ready {
-            match root.start(engine, &declared, &mut *self.admission) {
-                Ok(Started::Found(built)) => ended.push((index, Ok(built))),
-                Ok(Started::Building(started)) => {
+            match root.look(engine, &declared, admission) {
+                Ok((Looked::Found(built), _)) => ended.push((index, Ok(built))),
+                Ok((Looked::Missing(missing), library)) => {
                     let (repository, stage) = image(&declared);
-                    if self.said.insert(repository.to_owned()) {
-                        say(format_args!("building an image in {repository}"));
-                    }
-                    self.building
-                        .push(((index, format!("{repository}{stage}")), started));
+                    let image = Unbuilt {
+                        repository: repository.to_owned(),
+                        stage,
+                        started: false,
+                        _library: library,
+                    };
+                    self.images.insert(index, image);
+                    self.builds.add(index, missing);
                 }
                 Err(why) => ended.push((index, Err(why))),
             }
         }
-        // Wait for a build only when no start has ended, as nothing else can go on.
-        if ended.is_empty() && !self.building.is_empty() {
-            // `finish` writes a failed build's output, so the line that says it failed comes after.
-            let ((index, image), built) = engine::finish(&mut self.building);
-            match &built {
-                Ok(_) => say(format_args!("built an image in {image}")),
-                Err(_) => say(format_args!("the build of an image in {image} failed")),
+        // Waits for a build only when nothing has ended, as nothing else can go on.
+        loop {
+            let Stepped {
+                started,
+                ended: built,
+            } = self.builds.step(io, engine, admission);
+            let any_ended = !built.is_empty();
+            for index in started {
+                let image = self.image(index);
+                image.started = true;
+                let repository = image.repository.clone();
+                if self.said.insert(repository.clone()) {
+                    say(format_args!("building an image in {repository}"));
+                }
             }
-            if !self.building.is_empty() {
-                self.admission.ended(engine);
+            for (index, built) in built {
+                let Unbuilt {
+                    repository,
+                    stage,
+                    started,
+                    ..
+                } = self.images.remove(&index).unwrap_or_else(|| missing(index));
+                // A failed build wrote its output as it ended, so the line that says it failed
+                // comes after.
+                if started {
+                    match &built {
+                        Ok(_) => say(format_args!("built an image in {repository}{stage}")),
+                        Err(_) => say(format_args!(
+                            "the build of an image in {repository}{stage} failed"
+                        )),
+                    }
+                }
+                ended.push((index, built));
             }
-            ended.push((index, built));
+            // After what it says of the builds that ended, as a prune may take minutes.
+            if any_ended && !self.images.is_empty() {
+                admission.ended();
+            }
+            if !ended.is_empty() {
+                break;
+            }
+            io.run_until(self, Duration::MAX);
         }
         for built in ended.iter().filter_map(|(_, built)| built.as_ref().ok()) {
             self.tags
@@ -556,6 +627,16 @@ impl<'a> Builds<'a> {
         }
         ended
     }
+
+    fn image(&mut self, index: usize) -> &mut Unbuilt {
+        self.images
+            .get_mut(&index)
+            .unwrap_or_else(|| missing(index))
+    }
+}
+
+fn missing(index: usize) -> ! {
+    unreachable!("build {index} came back from the builds, though only a build added to them does")
 }
 
 fn image<'d>(declared: &Declared<'d, Built>) -> (&'d str, String) {
@@ -564,8 +645,8 @@ fn image<'d>(declared: &Declared<'d, Built>) -> (&'d str, String) {
     (&recipe.repository, stage.collect())
 }
 
-// This machine's, though the builds run on the engine, which may be another's: they are its
-// processes that wait on the engine, and hash and stage what it builds.
+// This machine's, though the builds run on the engine, which may be another's: this machine hashes
+// and stages what it builds, and each build waits on the engine on an edge worker of its own.
 fn jobs() -> NonZeroUsize {
     thread::available_parallelism().unwrap_or(NonZeroUsize::MIN)
 }

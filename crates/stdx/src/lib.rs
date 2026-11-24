@@ -3,8 +3,9 @@
 use std::fmt::Display;
 use std::sync::LockResult;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use std::{io, panic, thread};
+use std::{panic, thread};
 
+pub mod io;
 pub mod net;
 pub mod process;
 pub mod signal;
@@ -57,7 +58,7 @@ pub fn on_stack<T: Send>(
     name: &str,
     stack_bytes: usize,
     run: impl FnOnce() -> T + Send,
-) -> io::Result<T> {
+) -> std::io::Result<T> {
     thread::scope(|scope| {
         let thread = (thread::Builder::new())
             .name(name.to_owned())

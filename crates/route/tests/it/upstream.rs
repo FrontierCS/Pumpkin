@@ -17,6 +17,7 @@ use gateway::{Arrival, IncomingModelRequest};
 use route::{Admission, Answer as Told, Apart, Keep, Key, Route, Upstream, UpstreamUrl};
 use schema::ir::{Api, ModelBudget};
 use stdx::time::Machine;
+use test_support::gateway::{Gateway, Session};
 use test_support::http::{read_request, write_chunk};
 use test_support::{HUNG, TestDir, hung};
 
@@ -25,7 +26,8 @@ use super::kept::{
 };
 use super::read::CHAT_CUSTOM;
 use super::{
-    Request, chat, fake_sandbox, listed, meeting, messages, models, next_model_request, post,
+    Client, Request, chat, fake_sandbox, listed, meeting, messages, models, models_only,
+    next_model_request, post,
 };
 
 const KEY: &str = "sk-test-0123\n";
@@ -240,8 +242,9 @@ fn exchanged(cases: &[Case]) -> String {
     let (parts, heard_part) = mpsc::channel();
     let (holds, held) = mpsc::channel();
     let stand_in = thread::spawn(move || serve(&stand_in, answers, &heard_part, &holds));
+    let gateway = Gateway::new();
     // Its sockets fit in a socket's address by this path to their directory.
-    let (_sockets, registration, socket) = meeting(dir);
+    let (_sockets, registration, socket) = meeting(&gateway, dir);
     let mut requests = Vec::new();
     let mut hangs_up = None;
     for case in &forwarded {
@@ -253,12 +256,12 @@ fn exchanged(cases: &[Case]) -> String {
     }
     let sandbox = thread::spawn(move || fake_sandbox(&socket, requests, Some(&parts), hangs_up));
     let (sender, arrivals) = mpsc::channel();
-    let accepted = registration.accept((&Machine, hung()), None, true, sender, |a| a, || false);
+    let accepted = gateway.accept(registration, hung(), models_only(), sender);
     let session = accepted.unwrap();
     let mut outcomes = Vec::new();
     for (case, entry) in cases.iter().zip(&made) {
         let Ok(entry) = entry else { continue };
-        let served = serve_case(case, entry, &arrivals, &held);
+        let served = serve_case(case, (entry, &session), &arrivals, &held);
         outcomes.push((served, entry.1.key_was_refused()));
     }
     let mut heard = sandbox.join().unwrap().into_iter();
@@ -300,7 +303,7 @@ fn exchanged(cases: &[Case]) -> String {
 
 fn serve_case(
     case: &Case,
-    entry: &(Route, Upstream),
+    (entry, session): (&(Route, Upstream), &Session),
     arrivals: &Receiver<Arrival>,
     held: &Receiver<()>,
 ) -> Vec<(Option<Told>, String)> {
@@ -308,34 +311,36 @@ fn serve_case(
     let incoming = next_model_request(arrivals);
     let first = if case.answer == Some(Answer::Holds) {
         thread::scope(|scope| {
-            let served = scope.spawn(move || serve_one(entry, incoming, Admission::Open, by));
+            let served =
+                scope.spawn(move || serve_one((entry, session), &incoming, Admission::Open, by));
             held.recv_timeout(HUNG).unwrap();
             entry.1.shutdown();
             served.join().unwrap()
         })
     } else {
-        serve_one(entry, incoming, Admission::Open, by)
+        serve_one((entry, session), &incoming, Admission::Open, by)
     };
     let mut served = vec![first];
     if let Some(admission) = case.then {
         let incoming = next_model_request(arrivals);
-        served.push(serve_one(entry, incoming, admission, by));
+        served.push(serve_one((entry, session), &incoming, admission, by));
     }
     served
 }
 
 fn serve_one(
-    entry: &(Route, Upstream),
-    incoming: IncomingModelRequest,
+    (entry, session): (&(Route, Upstream), &Session),
+    incoming: &IncomingModelRequest,
     admission: Admission<'_>,
     by: Duration,
 ) -> (Option<Told>, String) {
     let kept = Kept::default();
     let mut told = None;
     let answered = |_, answer| told = Some((answer, kept.sizes()));
+    let mut client = Client::of(session, incoming, by);
     route::serve(
         slice::from_ref(entry),
-        incoming,
+        (&incoming.request, &mut client),
         |_| admission,
         (&Machine, by),
         &kept,

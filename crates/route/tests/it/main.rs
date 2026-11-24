@@ -14,17 +14,20 @@ use std::io::{BufReader, Write};
 use std::net::{Ipv4Addr, TcpListener};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::{fs, thread};
+use std::time::Duration;
+use std::{fs, io, thread};
 
 use expect_test::{Expect, expect};
-use gateway::{Arrival, IncomingModelRequest, Registration, Sockets};
-use route::{Admission, Apart, Headers, Keep, Key, Route, Upstream, UpstreamUrl};
+use gateway::{Arrival, IncomingModelRequest, Registration, Response, Sockets, Takes};
+use route::{Admission, Apart, Headers, Keep, Key, Respond, Route, Upstream, UpstreamUrl};
 use schema::frame;
 use schema::ir::{Api, HeaderName, ModelName, Name};
 use schema::sandbox::{FromSandbox, Hello, HelloReply, SOCKET_NAME, SocketDial, ToSandbox};
 use serde_json::{Value, json};
 use stdx::time::Machine;
+use test_support::gateway::{Gateway, Session};
 use test_support::http::read_request;
 use test_support::{HUNG, TestDir, hung};
 
@@ -147,12 +150,13 @@ fn check_apis(entries: &[(Api, &[&str])], cases: &[(&str, Request)], expect: &Ex
         (route, Upstream::new(api, &url, &Key::read(&key).unwrap()))
     };
     let entries: Vec<(Route, Upstream)> = entries.iter().map(entry).collect();
+    let gateway = Gateway::new();
     // Its sockets fit in a socket's address by this path to their directory.
-    let (_sockets, registration, socket) = meeting(dir);
+    let (_sockets, registration, socket) = meeting(&gateway, dir);
     let requests: Vec<Request> = cases.iter().map(|(_, request)| request.clone()).collect();
     let sandbox = thread::spawn(move || fake_sandbox(&socket, requests, None, None));
     let (sender, arrivals) = mpsc::channel();
-    let accepted = registration.accept((&Machine, hung()), None, true, sender, |a| a, || false);
+    let accepted = gateway.accept(registration, hung(), models_only(), sender);
     let session = accepted.unwrap();
     let mut first = None;
     let sent: Vec<Option<String>> = cases
@@ -163,9 +167,10 @@ fn check_apis(entries: &[(Api, &[&str])], cases: &[(&str, Request)], expect: &Ex
             let by = (&Machine, hung());
             let answered = |_, _| {};
             let dropped = Dropped::default();
+            let mut client = Client::of(&session, &incoming, by.1);
             route::serve(
                 &entries,
-                incoming,
+                (&incoming.request, &mut client),
                 |_| Admission::Open,
                 by,
                 &dropped,
@@ -202,6 +207,53 @@ fn check_apis(entries: &[(Api, &[&str])], cases: &[(&str, Request)], expect: &Ex
     drop(session);
 }
 
+/// The response to a model request of `session`, by `by`, which it ends cut short if
+/// [`route::serve`] leaves it unended, as a run does.
+struct Client<'s> {
+    session: &'s Session,
+    number: u32,
+    by: Duration,
+    ended: bool,
+}
+
+impl<'s> Client<'s> {
+    fn of(session: &'s Session, incoming: &IncomingModelRequest, by: Duration) -> Self {
+        Self {
+            session,
+            number: incoming.number,
+            by,
+            ended: false,
+        }
+    }
+}
+
+impl Respond for Client<'_> {
+    fn head(&mut self, status: u16, headers: Vec<(String, String)>) -> io::Result<()> {
+        let head = Response::Head { status, headers };
+        self.session.respond(self.number, head, self.by)
+    }
+
+    fn data(&mut self, bytes: &[u8]) -> io::Result<()> {
+        let data = Response::Data(bytes.to_vec());
+        self.session.respond(self.number, data, self.by)
+    }
+
+    fn end(&mut self, cut: bool) -> io::Result<()> {
+        self.ended = true;
+        self.session
+            .respond(self.number, Response::End { cut }, self.by)
+    }
+}
+
+impl Drop for Client<'_> {
+    fn drop(&mut self) {
+        if !self.ended {
+            // A session that has ended has no client left to tell.
+            let _ = self.end(true);
+        }
+    }
+}
+
 /// Keeps of an exchange only the names of the headers that the route left behind.
 #[derive(Default)]
 struct Dropped(RefCell<Vec<String>>);
@@ -226,13 +278,21 @@ fn next_model_request(arrivals: &Receiver<Arrival>) -> IncomingModelRequest {
     }
 }
 
-/// The sockets of a run's sandboxes, made in `dir`, the registration of the agent's socket, and
-/// that socket's path.
-fn meeting(dir: &Path) -> (Sockets, Registration, PathBuf) {
-    let sockets = Sockets::create(dir.join("sockets")).unwrap();
+/// The sockets of a run's sandboxes, made in `dir`, the registration of the agent's socket on
+/// `gateway`, and that socket's path.
+fn meeting(gateway: &Gateway, dir: &Path) -> (Arc<Sockets>, Registration, PathBuf) {
+    let sockets = Arc::new(Sockets::create(dir.join("sockets")).unwrap());
     let name = Name::try_from("agent".to_owned()).unwrap();
-    let (SocketDial { dir }, registration) = sockets.issue(&name).unwrap();
+    let (SocketDial { dir }, registration) = gateway.issue(&sockets, &name).unwrap();
     (sockets, registration, dir.join(SOCKET_NAME))
+}
+
+/// What the agent's session takes: model requests, and no ops.
+fn models_only() -> Takes {
+    Takes {
+        ops: None,
+        models: true,
+    }
 }
 
 /// Opens a session at `socket` with a hello, then sends each request in turn, waiting for its

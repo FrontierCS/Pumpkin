@@ -3,7 +3,6 @@
     reason = "a test helper fails the test that calls it"
 )]
 
-use std::env;
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
@@ -14,13 +13,16 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::Path;
 use std::process::{ExitStatus, Output, Stdio};
+use std::sync::mpsc;
 use std::time::Duration;
+use std::{env, thread};
 
 use expect_test::{Expect, expect};
 use rustix::net::sockopt;
 use rustix::process::{Pid, Signal, WaitOptions};
 use stdx::Deadline;
 use stdx::process::{Bound, Echo, Environment, Failure, Run, Stream};
+use stdx::slots::Slots;
 
 /// How long a stand-in that hangs first runs before its bound, which [`check`] doubles until the
 /// stand-in has started its process by then.
@@ -569,28 +571,6 @@ fn printed() {
 }
 
 #[test]
-fn first_exited() {
-    let spawn = |script: &str| {
-        let mut command = stdx::process::command("sh", Environment::Inherited);
-        command.args(["-c", script]);
-        let (stdout, stderr) = (Stdio::inherit(), Stdio::inherit());
-        stdx::process::spawn(&mut command, Stdio::piped(), stdout, stderr).unwrap()
-    };
-    // `cat` exits only once its input closes.
-    let (mut waiting, mut exiting) = (spawn("cat >/dev/null; exit 4"), spawn("exit 3"));
-    let mut shown = Vec::new();
-    let (index, status) = stdx::process::wait_any(&mut [&mut waiting, &mut exiting]);
-    shown.push(format!("child {index}: {}", status.unwrap()));
-    drop(waiting.stdin.take());
-    let (index, status) = stdx::process::wait_any(&mut [&mut waiting]);
-    shown.push(format!("child {index}: {}", status.unwrap()));
-    expect![[r#"
-        child 1: exit status: 3
-        child 0: exit status: 4"#]]
-    .assert_eq(&shown.join("\n"));
-}
-
-#[test]
 fn tcp_options() {
     // What the gateway and `sandboxd` each set at their end of a session over TCP.
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -607,41 +587,51 @@ fn tcp_options() {
         .assert_eq(&read.join(", "));
 }
 
-// With each of 2 slots held, the second by a holder yet to name itself, a take waits for the
-// first let go; with each held again, a take whose `waiting` fails fails with its error.
+// With each of 2 slots held, the second by a holder yet to name itself, a take on another
+// thread waits until the first is let go, then holds it, named in it, while it calls.
 #[test]
 fn slots() {
     let dir = tempfile::tempdir().unwrap();
-    let count = NonZeroUsize::new(2).unwrap();
-    let free = |_: &[String]| Err("waited, though a slot was free".to_owned());
-    let first = stdx::slots::take(dir.path(), count, "first", free).unwrap();
+    let slots = Slots {
+        dir: dir.path().to_owned(),
+        count: NonZeroUsize::new(2).unwrap(),
+    };
     let unnamed = File::create(dir.path().join("1")).unwrap();
     unnamed.lock().unwrap();
-    let mut heard = Vec::new();
-    let _late = stdx::slots::take(dir.path(), count, "late", |holders| {
-        heard = holders.to_vec();
-        drop(first);
-        Ok(())
+    let (heard, hearing) = mpsc::channel();
+    let late = {
+        let (slots, dir) = (slots.clone(), dir.path().to_owned());
+        let waiting = move |holders: &[String]| heard.send(holders.to_vec()).unwrap();
+        move || stdx::slots::holding(slots, "late", waiting, || Ok(named(&dir)))
+    };
+    let waited = |_: &[String]| panic!("waited, though a slot was free");
+    let (heard, late) = stdx::slots::holding(slots, "first", waited, || {
+        let late = thread::spawn(late);
+        Ok((hearing.recv().unwrap(), late))
     })
     .unwrap();
-    let held = |_: &[String]| Err("given up".to_owned());
-    let refused = stdx::slots::take(dir.path(), count, "refused", held).map(drop);
-    let mut slots: Vec<String> = (fs::read_dir(dir.path()).unwrap())
+    let shown = [
+        format!("the late one, waiting, heard: {heard:?}"),
+        format!(
+            "the slots, by their holders, as it held one: {}",
+            late.join().unwrap().unwrap()
+        ),
+    ];
+    expect![[r#"
+        the late one, waiting, heard: ["first", "1"]
+        the slots, by their holders, as it held one: 0: "late", 1: """#]]
+    .assert_eq(&shown.join("\n"));
+}
+
+// Each file of `dir` with what it holds, sorted.
+fn named(dir: &Path) -> String {
+    let mut slots: Vec<String> = (fs::read_dir(dir).unwrap())
         .map(|entry| {
             let name = entry.unwrap().file_name().into_string().unwrap();
-            let holder = fs::read_to_string(dir.path().join(&name)).unwrap();
+            let holder = fs::read_to_string(dir.join(&name)).unwrap();
             format!("{name}: {holder:?}")
         })
         .collect();
     slots.sort();
-    let shown = [
-        format!("the late one, waiting, heard: {heard:?}"),
-        format!("the refused one: {refused:?}"),
-        format!("the slots, by their holders: {}", slots.join(", ")),
-    ];
-    expect![[r#"
-        the late one, waiting, heard: ["first", "1"]
-        the refused one: Err("given up")
-        the slots, by their holders: 0: "late", 1: """#]]
-    .assert_eq(&shown.join("\n"));
+    slots.join(", ")
 }

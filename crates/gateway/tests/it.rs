@@ -1,9 +1,9 @@
 //! The gateway's end of a session, against a fake sandbox that answers the gateway's first request
 //! with frames of its choosing, ops and model requests among them, waiting where it chooses for an
-//! op's reply or a model response's end, for a while or for the gateway to hang up, and then ends
-//! the session: it sends what a buggy `sandboxd` might. Other fakes open their sessions with first
-//! frames of their own. An accept that is stopped takes no connection. A dialer's fakes listen
-//! behind the stand-in TLS edge.
+//! op's reply, a model response's end or a put's tree, for a while, for the case to let it go on or
+//! for the gateway to hang up, and then ends the session: it sends what a buggy `sandboxd` might.
+//! Other fakes open their sessions with first frames of their own. An accept that is stopped takes
+//! no connection. A dialer's fakes listen behind the stand-in TLS edge.
 #![expect(
     clippy::unwrap_used,
     clippy::panic,
@@ -15,42 +15,46 @@ use std::io::{Read as _, Write};
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::num::NonZeroU64;
 use std::ops::Range;
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use std::{fs, iter, panic};
 
 use expect_test::{Expect, expect};
 use gateway::{
-    Arrival, Dialer, GatewayAddress, IncomingModelRequest, IncomingOp, Listener, Process, Put,
-    Registration, Sockets, Unattested,
+    Arrival, Ask, Dialer, GatewayAddress, IncomingModelRequest, IncomingOp, Listener, Process, Put,
+    Registration, Response, Sockets, Takes, Unattested,
 };
 use schema::frame;
 use schema::ir::{AbsolutePath, Argv, Env, Name, Resources};
 use schema::sandbox::op::{OpReply, OpsReply};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
-    Endpoint, HELLO_TIMEOUT, Hello, HelloReply, Launch, Listening, MAX_HELLO_BYTES,
+    Endpoint, Entry, HELLO_TIMEOUT, Hello, HelloReply, Launch, Listening, MAX_HELLO_BYTES,
     MAX_MODEL_REQUEST_BYTES, MAX_MODEL_REQUESTS_IN_FLIGHT, MAX_OP_PAYLOAD_BYTES, OpPayloadLimit,
-    PROTOCOL_VERSION, PrivateDial, RelativePath, SOCKET_NAME, SocketDial, ToSandbox, file_mode,
+    PROTOCOL_VERSION, PrivateDial, RelativePath, Root, SOCKET_NAME, SocketDial, ToSandbox,
+    file_mode,
 };
 use serde_json::{Value, json};
 use stdx::Deadline;
-use stdx::time::{self, Clock, Machine};
+use stdx::io::{Backend, Handle, Outcome, Slot};
+use stdx::time::{self, Clock as _, Machine};
+use test_support::gateway::{Gateway, Session, passive};
 use test_support::{HUNG, TestDir, hung};
 
-type Session = gateway::Session<Still>;
-
-type Action = fn(&mut Session, &Receiver<Arrival>, &Path) -> String;
+type Action = fn(&Session, &Receiver<Arrival>, &Path) -> String;
 
 type Answer = fn(stream: u32) -> Vec<(Value, Vec<u8>)>;
 
 type Opening = fn(&mut UnixStream);
+
+// A hello case's deadline, read as the case starts, so that the cases before it don't use it up.
+type By = fn() -> Duration;
 
 // How long the fake sandbox reads and sends nothing where its answer has a `pause`, as over a slow
 // link, whose end no event marks. A request by a `hung` deadline outlasts it, so no outcome rests
@@ -65,12 +69,12 @@ const HELLO_BOUND: Duration = Duration::from_millis(50);
 // sandbox's stall, or what the case's action marks.
 const STALLED: &str = "stalled";
 
+// What a case writes in its directory for the fake sandbox to go on where its answer awaits it.
+const GO: &str = "go";
+
 fn short() -> Duration {
     Machine.now() + Duration::from_millis(100)
 }
-
-// The thread that sends `start_late`'s start, and that looks late.
-const LATE: &str = "late";
 
 // What a `Still` reads once its event has come. A request whose deadline is `EVENT` ends on the
 // event. A deadline from `hung()` is later, so no event ends it.
@@ -80,44 +84,62 @@ const EVENT: Duration = Duration::from_secs(HUNG.as_secs() / 2);
 // the event.
 const LOOK: Duration = Duration::from_millis(10);
 
-// A clock that reads its origin until its event and `EVENT` from then on, so that a request ends on
-// the event, not on the machine's time.
-#[derive(Clone)]
-struct Still(Arc<dyn Fn() -> bool + Send + Sync>);
+// The machine's backend, on a clock that reads its origin until its event and `EVENT` from then
+// on, so that a request ends on the event, not on the machine's time. Its event is the case's,
+// which `marker` marks.
+struct Still {
+    machine: Box<dyn Backend>,
+    marker: PathBuf,
+}
 
 impl Still {
-    // Its event is the case's, which `marker` marks. A thread named `LATE` looks late: its first
-    // read is the start's write, and its second, the wait for `done`, waits for the event.
-    fn until_stalled(marker: PathBuf) -> Self {
-        thread_local!(static READS: Cell<u32> = const { Cell::new(0) });
-        Self(Arc::new(move || {
-            let earlier = READS.replace(READS.get() + 1);
-            let late = thread::current().name() == Some(LATE) && earlier == 1;
-            while late && !marker.exists() {
-                thread::sleep(LOOK);
-            }
-            marker.exists()
-        }))
-    }
-
-    // Its event is its second read.
-    fn after_a_read() -> Self {
-        let reads = AtomicU32::new(0);
-        Self(Arc::new(move || reads.fetch_add(1, Ordering::Relaxed) > 0))
+    fn gateway(marker: PathBuf) -> Gateway {
+        let machine = stdx::io::machine().unwrap();
+        Gateway::on(Box::new(Self { machine, marker }))
     }
 }
 
-impl Clock for Still {
-    fn now(&self) -> Duration {
-        if (self.0)() { EVENT } else { Duration::ZERO }
+impl Backend for Still {
+    fn now(&mut self) -> Duration {
+        if self.marker.exists() {
+            EVENT
+        } else {
+            Duration::ZERO
+        }
     }
 
-    fn realtime(&self) -> SystemTime {
-        SystemTime::now()
+    fn listen(&mut self, path: &Path, mode: u32) -> std::io::Result<Handle> {
+        self.machine.listen(path, mode)
     }
 
-    fn look(&self) -> Option<Duration> {
-        Some(LOOK)
+    fn adopt(&mut self, stream: OwnedFd) -> std::io::Result<Handle> {
+        self.machine.adopt(stream)
+    }
+
+    fn file(&mut self, file: fs::File) -> Handle {
+        self.machine.file(file)
+    }
+
+    fn shutdown(&mut self, handle: Handle) {
+        self.machine.shutdown(handle);
+    }
+
+    fn close(&mut self, handle: Handle) {
+        self.machine.close(handle);
+    }
+
+    fn submit(&mut self, slot: Slot, op: stdx::io::Op) {
+        self.machine.submit(slot, op);
+    }
+
+    fn wait(&mut self, until: Duration, owed: bool, done: &mut Vec<(Slot, Outcome)>) {
+        let left = until.saturating_sub(self.now()).min(LOOK);
+        let now = self.machine.now();
+        self.machine.wait(now.saturating_add(left), owed, done);
+    }
+
+    fn waker(&self) -> Arc<dyn Fn() + Send + Sync> {
+        self.machine.waker()
     }
 }
 
@@ -148,10 +170,11 @@ fn run(
     action: Action,
     answer: Answer,
 ) -> String {
-    let (mut session, arrivals, sandbox) = connect(dir, ops, models, answer);
+    let gateway = Still::gateway(dir.join(STALLED));
+    let (session, arrivals, sandbox) = connect(&gateway, dir, ops, models, answer);
     let dir = dir.to_owned();
     let (outcome, session, arrivals) = bounded("the action", move || {
-        let outcome = action(&mut session, &arrivals, &dir);
+        let outcome = action(&session, &arrivals, &dir);
         (outcome, session, arrivals)
     });
     heard(outcome, session, arrivals, sandbox)
@@ -170,94 +193,112 @@ fn bounded<R: Send + 'static>(what: &str, f: impl FnOnce() -> R + Send + 'static
     }
 }
 
-fn issued(dir: &Path) -> (Sockets, Registration, PathBuf) {
-    let sockets = Sockets::create(dir.to_owned()).unwrap();
+fn issued(gateway: &Gateway, dir: &Path) -> (Arc<Sockets>, Registration, PathBuf) {
+    let sockets = Arc::new(Sockets::create(dir.to_owned()).unwrap());
     let name = Name::try_from("sandbox".to_owned()).unwrap();
-    let (SocketDial { dir }, registration) = sockets.issue(&name).unwrap();
+    let (SocketDial { dir }, registration) = gateway.issue(&sockets, &name).unwrap();
     (sockets, registration, dir.join(SOCKET_NAME))
 }
 
 fn connect(
+    gateway: &Gateway,
     dir: &Path,
     ops: Option<OpPayloadLimit>,
     models: bool,
     answer: Answer,
 ) -> (Session, Receiver<Arrival>, JoinHandle<Vec<String>>) {
     fs::create_dir(dir).unwrap();
-    let (_sockets, registration, socket) = issued(&dir.join("sockets"));
+    let (_sockets, registration, socket) = issued(gateway, &dir.join("sockets"));
     let sandbox_socket = socket.clone();
-    let stalled = dir.join(STALLED);
-    let clock = Still::until_stalled(stalled.clone());
-    let sandbox = thread::spawn(move || {
-        let stall = || fs::write(&stalled, "").unwrap();
-        let mut connection = UnixStream::connect(sandbox_socket).unwrap();
-        frame::write(&mut connection, &hello(), &[]).unwrap();
-        let reply = frame::read::<HelloReply>(&mut connection).unwrap();
-        let reply = reply.map(|(reply, _)| reply);
-        assert_eq!(
-            reply,
-            Some(HelloReply::Accepted { grant: None }),
-            "the answer to the hello"
-        );
-        let Some((request, _)) = frame::read::<ToSandbox>(&mut connection).unwrap() else {
-            // The gateway sends no request if it ends the session first.
-            return Vec::new();
-        };
-        let mut replies = Vec::new();
-        for (message, body) in answer(stream_of(&request).unwrap()) {
-            let went_on = if message.is_null() {
-                hear_reply(&mut connection, &mut replies)
-            } else if message == "read_frame" {
-                frame::read::<ToSandbox>(&mut connection).unwrap().is_some()
-            } else if message == "pause" {
-                thread::sleep(PAUSE);
-                true
-            } else if message == "stall" {
-                // Here and below, it reads nothing more, as a stuck sandbox: what the connection's
-                // buffers hold by the hang-up depends on their sizes.
-                stall();
-                send_unended(&mut connection);
-                return replies;
-            } else if message == "stall_in_frame" {
-                // A byte alone of a frame longer than the connection's buffers hold, so that the
-                // gateway is still writing it as the sandbox stalls.
-                connection.read_exact(&mut [0]).unwrap();
-                stall();
-                send_unended(&mut connection);
-                return replies;
-            } else if message == "hang_up_unread" {
-                // A byte alone, so that the rest of the frame is unread as the connection closes.
-                connection.read_exact(&mut [0]).unwrap();
-                return replies;
-            } else if let Some(message) = message.get("until_hang_up") {
-                await_hang_up(&mut connection, message, &body, stall);
-                return replies;
-            } else {
-                frame::write(&mut connection, &message, &body).is_ok()
-            };
-            // The gateway may hang up at any frame, leaving the rest unheard.
-            if !went_on {
-                break;
-            }
-        }
-        // End the session, as a sandbox that closes its end of the connection does, but note the op
-        // replies and model responses until the gateway closes its end too. A connection the
-        // gateway has closed already is fine.
-        let _ = connection.shutdown(Shutdown::Write);
-        while hear_reply(&mut connection, &mut replies) {}
-        replies
-    });
+    let marks = (dir.join(STALLED), dir.join(GO));
+    let sandbox = thread::spawn(move || fake_sandbox(&sandbox_socket, &marks, answer));
     let (sender, arrivals) = mpsc::channel();
-    let session = registration
-        .accept((&clock, hung()), ops, models, sender, |a| a, || false)
+    let session = gateway
+        .accept(registration, hung(), Takes { ops, models }, sender)
         .unwrap();
     let second = UnixStream::connect(&socket).unwrap_err().kind();
     assert_eq!(second, std::io::ErrorKind::NotFound, "a second connection");
     (session, arrivals, sandbox)
 }
 
+// The fake sandbox at `socket`, which marks its event at the first of `marks` and goes on where
+// its answer awaits the second.
+fn fake_sandbox(socket: &Path, (stalled, go): &(PathBuf, PathBuf), answer: Answer) -> Vec<String> {
+    let stall = || fs::write(stalled, "").unwrap();
+    let mut connection = UnixStream::connect(socket).unwrap();
+    frame::write(&mut connection, &hello(), &[]).unwrap();
+    let reply = frame::read::<HelloReply>(&mut connection).unwrap();
+    let reply = reply.map(|(reply, _)| reply);
+    assert_eq!(
+        reply,
+        Some(HelloReply::Accepted { grant: None }),
+        "the answer to the hello"
+    );
+    let Some((request, _)) = frame::read::<ToSandbox>(&mut connection).unwrap() else {
+        // The gateway sends no request if it ends the session first.
+        return Vec::new();
+    };
+    let mut replies = Vec::new();
+    for (message, body) in answer(stream_of(&request).unwrap()) {
+        let went_on = if message.is_null() {
+            hear_reply(&mut connection, &mut replies)
+        } else if message == "read_frame" {
+            frame::read::<ToSandbox>(&mut connection).unwrap().is_some()
+        } else if message == "pause" {
+            thread::sleep(PAUSE);
+            true
+        } else if message == "mark" {
+            stall();
+            true
+        } else if message == "await_go" {
+            while !go.exists() {
+                thread::sleep(LOOK);
+            }
+            true
+        } else if message == "until_end" {
+            let tree = read_tree(&mut connection);
+            let went_on = tree.is_some();
+            replies.extend(tree);
+            went_on
+        } else if message == "stall" {
+            // Here and below, it reads nothing more, as a stuck sandbox: what the connection's
+            // buffers hold by the hang-up depends on their sizes.
+            stall();
+            send_unended(&mut connection);
+            return replies;
+        } else if message == "stall_in_frame" {
+            // A byte alone of a frame longer than the connection's buffers hold, so that the
+            // gateway is still writing it as the sandbox stalls.
+            connection.read_exact(&mut [0]).unwrap();
+            stall();
+            send_unended(&mut connection);
+            return replies;
+        } else if message == "hang_up_unread" {
+            // A byte alone, so that the rest of the frame is unread as the connection closes.
+            connection.read_exact(&mut [0]).unwrap();
+            return replies;
+        } else if let Some(message) = message.get("until_hang_up") {
+            await_hang_up(&mut connection, message, &body, stall);
+            return replies;
+        } else {
+            frame::write(&mut connection, &message, &body).is_ok()
+        };
+        // The gateway may hang up at any frame, leaving the rest unheard.
+        if !went_on {
+            break;
+        }
+    }
+    // End the session, as a sandbox that closes its end of the connection does, but note the op
+    // replies and model responses until the gateway closes its end too. A connection the
+    // gateway has closed already is fine.
+    let _ = connection.shutdown(Shutdown::Write);
+    while hear_reply(&mut connection, &mut replies) {}
+    replies
+}
+
 fn opened(dir: &Path, opening: Opening, by: Duration) -> String {
-    let (_sockets, registration, socket) = issued(dir);
+    let gateway = Gateway::new();
+    let (_sockets, registration, socket) = issued(&gateway, dir);
     let mut connection = UnixStream::connect(socket).unwrap();
     opening(&mut connection);
     let sandbox = thread::spawn(move || {
@@ -275,8 +316,8 @@ fn opened(dir: &Path, opening: Opening, by: Duration) -> String {
         answer
     });
     let (sender, _arrivals) = mpsc::channel();
-    let accepted = registration.accept((&Machine, by), None, false, sender, |a| a, || false);
-    let outcome = outcome(accepted.and_then(|mut session| session.freeze(hung())));
+    let accepted = gateway.accept(registration, by, passive(), sender);
+    let outcome = outcome(accepted.and_then(|session| session.freeze(hung())));
     format!("heard {}; {outcome}", sandbox.join().unwrap())
 }
 
@@ -286,16 +327,11 @@ fn heard(
     arrivals: Receiver<Arrival>,
     sandbox: JoinHandle<Vec<String>>,
 ) -> String {
-    let (left, closed) = bounded("dropping the session", move || {
+    // The session lets go of its arrivals once dropped, which ends their iteration.
+    bounded("dropping the session", move || {
         drop(session);
-        let left = arrivals.try_iter().count();
-        let closed = matches!(arrivals.try_recv(), Err(TryRecvError::Disconnected));
-        (left, closed)
+        arrivals.iter().count()
     });
-    assert!(
-        closed,
-        "the session's reader ran on after its drop, with {left} arrivals sent"
-    );
     let replies = sandbox.join().unwrap();
     if replies.is_empty() {
         outcome
@@ -346,6 +382,31 @@ fn note(message: ToSandbox, body: &[u8]) -> Option<String> {
         | ToSandbox::Freeze { .. }
         | ToSandbox::Collect { .. } => None,
     }
+}
+
+// Reads a put's frames up to its tree's end: each file, with its size and whether all its bytes
+// came.
+fn read_tree(connection: &mut UnixStream) -> Option<String> {
+    let mut files: Vec<(String, u64, u64)> = Vec::new();
+    loop {
+        match frame::read::<ToSandbox>(connection).ok()?? {
+            (ToSandbox::Entry { entry, .. }, _) => {
+                if let Entry::File { path, size, .. } = entry {
+                    files.push((path.to_string(), size, 0));
+                }
+            }
+            (ToSandbox::Data { .. }, body) => files.last_mut()?.2 += body.len() as u64,
+            (ToSandbox::End { .. }, _) => break,
+            (other, _) => panic!("a tree's frame was to come, not {other:?}"),
+        }
+    }
+    let files: Vec<String> = (files.into_iter())
+        .map(|(path, size, came)| {
+            let whole = if came == size { "whole" } else { "short" };
+            format!("{path}: {size} bytes, {whole}")
+        })
+        .collect();
+    Some(format!("a tree of [{}]", files.join("; ")))
 }
 
 fn await_hang_up(connection: &mut UnixStream, message: &Value, body: &[u8], stall: impl Fn()) {
@@ -401,7 +462,7 @@ fn stream_of(request: &ToSandbox) -> Option<u32> {
     }
 }
 
-fn collect(session: &mut Session, _: &Receiver<Arrival>, dir: &Path) -> String {
+fn collect(session: &Session, _: &Receiver<Arrival>, dir: &Path) -> String {
     let into = dir.join("collected");
     let limits = Limits {
         bytes: 8,
@@ -433,7 +494,7 @@ fn launch() -> Launch {
     }
 }
 
-fn start_and_freeze(session: &mut Session, _: &Receiver<Arrival>, _: &Path) -> String {
+fn start_and_freeze(session: &Session, _: &Receiver<Arrival>, _: &Path) -> String {
     let process = session.start(launch(), hung());
     let frozen = session.freeze(hung());
     format!(
@@ -443,7 +504,7 @@ fn start_and_freeze(session: &mut Session, _: &Receiver<Arrival>, _: &Path) -> S
     )
 }
 
-fn over_the_cap(session: &mut Session, arrivals: &Receiver<Arrival>, dir: &Path) -> String {
+fn over_the_cap(session: &Session, arrivals: &Receiver<Arrival>, dir: &Path) -> String {
     let refused = OpPayloadLimit::try_from(MAX_OP_PAYLOAD_BYTES + 1).unwrap_err();
     format!(
         "op payload limit: {refused}; {}",
@@ -451,37 +512,32 @@ fn over_the_cap(session: &mut Session, arrivals: &Receiver<Arrival>, dir: &Path)
     )
 }
 
-fn freeze_and_take(session: &mut Session, arrivals: &Receiver<Arrival>, dir: &Path) -> String {
+fn freeze_and_take(session: &Session, arrivals: &Receiver<Arrival>, _: &Path) -> String {
     let frozen = outcome(session.freeze(hung()));
-    format!("freeze: {frozen}; {}", take(session, arrivals, dir, None))
+    format!("freeze: {frozen}; {}", take(session, arrivals, None))
 }
 
-fn start_and_take(session: &mut Session, arrivals: &Receiver<Arrival>, dir: &Path) -> String {
+fn start_and_take(session: &Session, arrivals: &Receiver<Arrival>, _: &Path) -> String {
     match session.start(launch(), hung()) {
-        Ok(process) => format!("started; {}", take(session, arrivals, dir, Some(process))),
+        Ok(process) => format!("started; {}", take(session, arrivals, Some(process))),
         Err(error) => format!(
             "start: {}; {}",
             outcome(Err(error)),
-            take(session, arrivals, dir, None)
+            take(session, arrivals, None)
         ),
     }
 }
 
-fn collect_and_take(session: &mut Session, arrivals: &Receiver<Arrival>, dir: &Path) -> String {
+fn collect_and_take(session: &Session, arrivals: &Receiver<Arrival>, dir: &Path) -> String {
     let collected = collect(session, arrivals, dir);
-    format!("{collected}; {}", take(session, arrivals, dir, None))
+    format!("{collected}; {}", take(session, arrivals, None))
 }
 
-fn take(
-    session: &mut Session,
-    arrivals: &Receiver<Arrival>,
-    dir: &Path,
-    started: Option<Process>,
-) -> String {
+fn take(session: &Session, arrivals: &Receiver<Arrival>, started: Option<Process>) -> String {
     let mut lines = Vec::new();
     loop {
         let Some(arrival) = next(arrivals) else {
-            panic!("the session's reader stopped before the session's end arrived");
+            panic!("the session's arrivals stopped before its end arrived");
         };
         match arrival {
             Arrival::Op(op) => {
@@ -502,7 +558,7 @@ fn take(
                     lines.push(format!("refuse: {:?}: {error}", error.kind()));
                 }
             }
-            Arrival::ModelRequest(incoming) => lines.push(answer_model(incoming, dir)),
+            Arrival::ModelRequest(incoming) => lines.push(answer_model(session, incoming)),
             Arrival::Exited { process, status } => {
                 let whose = if started == Some(process) {
                     "the"
@@ -517,7 +573,10 @@ fn take(
             }
         }
     }
-    if let Some(after) = next(arrivals) {
+    // A request of a session that has ended fails at once, sending nothing, and is answered after
+    // whatever arrived before it.
+    let _ = session.freeze(Duration::ZERO);
+    if let Ok(after) = arrivals.try_recv() {
         lines.push(format!("then {after:?}"));
     }
     lines.join("; ")
@@ -550,47 +609,31 @@ fn no_grants() -> OpReply {
     })
 }
 
-fn answer_elsewhere(session: &mut Session, arrivals: &Receiver<Arrival>, dir: &Path) -> String {
+// Two sessions on one loop, each of which starts a command and answers an op of its own.
+fn answer_elsewhere(_: &Session, _: &Receiver<Arrival>, dir: &Path) -> String {
+    let gateway = Gateway::new();
     let ops = Some(OpPayloadLimit::NONE);
-    let (mut other, others, sandbox) = connect(&dir.join("other"), ops, false, |s| {
-        vec![
-            done(s),
-            op(0, json!({ "kind": "ops" }), 0),
-            await_reply(),
-            train(1, 1),
-            op_data(1, b"x"),
-            await_reply(),
-        ]
-    });
-    let [(mine, my_command), (own, its_command)] =
-        [(&mut *session, arrivals), (&mut other, &others)].map(|(session, arrivals)| {
+    let answer: Answer = |s| vec![done(s), op(0, json!({ "kind": "ops" }), 0), await_reply()];
+    let [mine, other] =
+        ["mine", "other"].map(|name| connect(&gateway, &dir.join(name), ops, false, answer));
+    let [(mine_op, my_command), (own, its_command)] =
+        [&mine, &other].map(|(session, arrivals, _)| {
             let process = session.start(launch(), hung()).unwrap();
             (next_op(arrivals), process)
         });
-    let message = "from another session".to_owned();
-    let elsewhere = panicked(|| other.reply(mine, OpReply::refused(message), hung()));
-    let own = outcome(other.reply(own, no_grants(), hung()));
-    let refused = match next(&others) {
-        Some(Arrival::Refused(refused)) => refused,
-        arrived => panic!("a refused op was to arrive, not {arrived:?}"),
-    };
-    let refusal = panicked(|| session.refuse(refused, hung()));
+    let mine_op = outcome(mine.0.reply(mine_op, no_grants(), hung()));
+    let own = outcome(other.0.reply(own, no_grants(), hung()));
     let outcome = format!(
-        "the sessions' commands equal: {}; op 0 on another session: {elsewhere}; that session's \
-         own op 0: {own}; its op 1 refused on another session: {refusal}",
+        "the sessions' commands equal: {}; each one's own op 0: {mine_op}, {own}",
         my_command == its_command
     );
-    heard(outcome, other, others, sandbox)
+    let (session, arrivals, sandbox) = other;
+    let outcome = heard(outcome, session, arrivals, sandbox);
+    let (session, arrivals, sandbox) = mine;
+    heard(outcome, session, arrivals, sandbox)
 }
 
-fn panicked(answer: impl FnOnce() -> std::io::Result<()> + Send) -> String {
-    match thread::scope(|scope| scope.spawn(answer).join()) {
-        Ok(answered) => outcome(answered),
-        Err(panic) => format!("panicked: {}", panic.downcast::<String>().unwrap()),
-    }
-}
-
-fn too_long_reply(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -> String {
+fn too_long_reply(session: &Session, arrivals: &Receiver<Arrival>, _: &Path) -> String {
     let mut lines = vec![format!("freeze: {}", outcome(session.freeze(hung())))];
     for message in ["x".repeat(frame::MAX_MESSAGE_BYTES), "no".to_owned()] {
         let op = next_op(arrivals);
@@ -603,16 +646,18 @@ fn too_long_reply(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path)
     lines.join("; ")
 }
 
-fn answer_model(incoming: IncomingModelRequest, dir: &Path) -> String {
-    let request = &incoming.request;
+fn answer_model(session: &Session, incoming: IncomingModelRequest) -> String {
+    let IncomingModelRequest {
+        request, number, ..
+    } = incoming;
     let body = String::from_utf8_lossy(&request.body);
     let line = format!(
         "{} {} {:?} {body:?}",
         request.method, request.path, request.headers
     );
-    let path = request.path.clone();
+    let path = request.path.as_str();
     let mut headers = vec![("content-type".to_owned(), "text/plain".to_owned())];
-    let by = match path.as_str() {
+    let by = match path {
         "/late" => Duration::ZERO,
         "/stale" => EVENT,
         "/long" => {
@@ -621,48 +666,68 @@ fn answer_model(incoming: IncomingModelRequest, dir: &Path) -> String {
         }
         _ => hung(),
     };
-    let clock = Still::until_stalled(dir.join(STALLED));
-    let answered = incoming
-        .respond(200, headers, (&clock, by))
-        .and_then(|mut response| {
-            if path == "/stale" {
-                return response.send(&vec![0; 8 << 20]);
-            }
-            response.send(b"hel")?;
-            match path.as_str() {
-                "/cut" => response.cut(),
-                "/drop" => {
-                    drop(response);
-                    Ok(())
-                }
-                _ => response.send(b"lo").and_then(|()| response.end()),
-            }
-        });
+    let respond = |response| session.respond(number, response, by);
+    let data = |bytes: &[u8]| {
+        (bytes.chunks(frame::MAX_BODY_BYTES))
+            .try_for_each(|chunk| respond(Response::Data(chunk.to_vec())))
+    };
+    let head = Response::Head {
+        status: 200,
+        headers,
+    };
+    let answered = respond(head).and_then(|()| {
+        if path == "/stale" {
+            return data(&vec![0; 8 << 20]);
+        }
+        data(b"hel")?;
+        if path == "/cut" {
+            return respond(Response::End { cut: true });
+        }
+        data(b"lo")?;
+        respond(Response::End { cut: false })
+    });
+    if answered.is_err() {
+        // A response that fails is ended cut short, which fails too once its session has ended.
+        let _ = respond(Response::End { cut: true });
+    }
     format!("{line}: {}", outcome(answered))
 }
 
-fn answer_on_a_thread(_: &mut Session, _: &Receiver<Arrival>, dir: &Path) -> String {
-    let (mut session, arrivals, sandbox) = connect(&dir.join("other"), None, true, |s| {
+// The owner drops the session while frames of a response wait on a sandbox that reads nothing.
+fn respond_as_it_ends(_: &Session, _: &Receiver<Arrival>, dir: &Path) -> String {
+    let gateway = Gateway::new();
+    let (session, arrivals, sandbox) = connect(&gateway, &dir.join("other"), None, true, |s| {
         vec![done(s), model_request(3, "/", 0), stall()]
     });
     session.freeze(hung()).unwrap();
     let Some(Arrival::ModelRequest(incoming)) = next(&arrivals) else {
         panic!("a model request was to arrive");
     };
-    let answer = thread::spawn(move || {
-        let mut response = incoming.respond(200, Vec::new(), (&Machine, hung()))?;
-        response.send(&vec![0; 8 << 20])
-    });
-    // Time for the answer to fill the buffers and wait on the sandbox, so that the session ends
-    // under it. Whenever it ends, the answer fails for the session's end.
-    thread::sleep(PAUSE);
+    let head = Response::Head {
+        status: 200,
+        headers: Vec::new(),
+    };
+    session.respond(incoming.number, head, hung()).unwrap();
+    // More than the socket's buffers hold.
+    let frames: Vec<_> = (0..8)
+        .map(|_| {
+            let data = Response::Data(vec![0; frame::MAX_BODY_BYTES]);
+            session.ask(Ask::Respond(incoming.number, data), hung())
+        })
+        .collect();
     drop(session);
-    let answered = outcome(answer.join().unwrap());
+    let mut answered: Vec<String> = (frames.into_iter())
+        .map(|frame| outcome(frame.done()))
+        .collect();
+    answered.dedup();
     sandbox.join().unwrap();
-    format!("an answer on another thread, as its session ends: {answered}")
+    format!(
+        "frames of a response that wait, as the session drops: {}",
+        answered.join(", ")
+    )
 }
 
-fn then_freeze(session: &mut Session, first: std::io::Result<()>) -> String {
+fn then_freeze(session: &Session, first: std::io::Result<()>) -> String {
     format!(
         "{}; then {}",
         outcome(first),
@@ -670,38 +735,114 @@ fn then_freeze(session: &mut Session, first: std::io::Result<()>) -> String {
     )
 }
 
-fn freezes(session: &mut Session, by: Duration) -> String {
+fn freezes(session: &Session, by: Duration) -> String {
     let first = session.freeze(by);
     then_freeze(session, first)
 }
 
-fn after_the_end(session: &mut Session, _: &Receiver<Arrival>, _: &Path) -> String {
+fn after_the_end(session: &Session, _: &Receiver<Arrival>, _: &Path) -> String {
     let ended = freezes(session, hung());
     let late = outcome(session.freeze(Duration::ZERO));
     format!("{ended}; then by a passed deadline {late}")
 }
 
-fn put_large(session: &mut Session, by: Duration) -> std::io::Result<()> {
-    let dir = AbsolutePath::try_from("/in".to_owned()).unwrap();
+fn put_dir() -> AbsolutePath {
+    AbsolutePath::try_from("/in".to_owned()).unwrap()
+}
+
+fn large_file() -> Put {
     let file = RelativePath::try_from("big".to_owned()).unwrap();
     // More than the socket's buffers hold, so that the put waits on a sandbox that reads nothing.
-    let bytes = vec![0; 8 << 20];
-    session.put(&dir, [Put::File(file, file_mode(), &bytes)], by)
+    Put::File(file, file_mode(), vec![0; 8 << 20])
 }
 
-// The put's entry waits for an op that the sandbox sends after its `done`, and the reader passes on
-// frames in the order they came, so the `done` is waiting when the put looks.
-fn put_after_op(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -> String {
-    let dir = AbsolutePath::try_from("/in".to_owned()).unwrap();
-    let entry = iter::once_with(|| {
-        let _ = next_op(arrivals);
-        let file = RelativePath::try_from("f".to_owned()).unwrap();
-        Put::File(file, file_mode(), b"hi")
-    });
-    format!("put: {}", outcome(session.put(&dir, entry, hung())))
+fn put_large() -> Ask {
+    Ask::Put(put_dir(), Root::Kept, vec![large_file()])
 }
 
-fn late_reply(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -> String {
+// The sandbox answers the put's first frame at once, while the put still waits to send the rest of
+// its file, which the sandbox never reads.
+fn put_answered_early(session: &Session, _: &Receiver<Arrival>, _: &Path) -> String {
+    format!("put: {}", outcome(session.ask(put_large(), hung()).done()))
+}
+
+fn three_puts(session: &Session, _: &Receiver<Arrival>, _: &Path) -> String {
+    let puts = [(); 3].map(|()| session.ask(put_large(), hung()));
+    let puts = puts.map(|put| outcome(put.done()));
+    format!("puts: {}", puts.join(", "))
+}
+
+fn await_mark(dir: &Path) {
+    while !dir.join(STALLED).exists() {
+        thread::sleep(LOOK);
+    }
+}
+
+// The put is given up once the sandbox has read its request, and before it reads on.
+fn put_cancelled(session: &Session, _: &Receiver<Arrival>, dir: &Path) -> String {
+    let put = session.ask(put_large(), hung());
+    await_mark(dir);
+    put.cancel();
+    fs::write(dir.join(GO), "").unwrap();
+    let put = outcome(put.done());
+    let frozen = outcome(session.freeze(hung()));
+    format!("put: {put}; then freeze: {frozen}")
+}
+
+// The put is given up once the sandbox has read its whole tree, and before it answers.
+fn put_cancelled_whole(session: &Session, _: &Receiver<Arrival>, dir: &Path) -> String {
+    let small = Put::File(
+        RelativePath::try_from("small".to_owned()).unwrap(),
+        file_mode(),
+        vec![1],
+    );
+    let put = session.ask(Ask::Put(put_dir(), Root::Kept, vec![small]), hung());
+    await_mark(dir);
+    put.cancel();
+    fs::write(dir.join(GO), "").unwrap();
+    format!("put: {}", outcome(put.done()))
+}
+
+// A host file that the test writes only once the sandbox has read the put's request, behind a
+// large file; then a host file that is missing.
+fn put_host_files(session: &Session, _: &Receiver<Arrival>, dir: &Path) -> String {
+    let late = dir.join("late");
+    let relative = |path: &str| RelativePath::try_from(path.to_owned()).unwrap();
+    let entries = vec![
+        large_file(),
+        Put::Read(relative("late"), file_mode(), late.clone()),
+    ];
+    let put = session.ask(Ask::Put(put_dir(), Root::Kept, entries), hung());
+    await_mark(dir);
+    fs::write(&late, "late").unwrap();
+    fs::write(dir.join(GO), "").unwrap();
+    let put = outcome(put.done());
+    let missing = Put::Read(relative("missing"), file_mode(), dir.join("missing"));
+    let missing = outcome(session.put(&put_dir(), [missing], hung()));
+    let frozen = outcome(session.freeze(hung()));
+    format!("put: {put}; a missing file's put: {missing}; then freeze: {frozen}")
+}
+
+// Two collects at once. The sandbox reads the first one's request, then marks its event, after
+// which the second is asked, and given up.
+fn collect_beside_a_cancel(session: &Session, _: &Receiver<Arrival>, dir: &Path) -> String {
+    let out = AbsolutePath::try_from("/out".to_owned()).unwrap();
+    let limits = Limits {
+        bytes: 8,
+        entries: 3,
+    };
+    let collect = |into: PathBuf| session.ask(Ask::Collect(out.clone(), into, limits), hung());
+    let first = collect(dir.join("first"));
+    await_mark(dir);
+    let second = collect(dir.join("second"));
+    second.cancel();
+    let second = outcome(second.collected().map(drop));
+    let first = outcome(first.collected().map(drop));
+    let arrived = walk(&dir.join("first"));
+    format!("first: {first}; arrived {arrived:?}; second: {second}")
+}
+
+fn late_reply(session: &Session, arrivals: &Receiver<Arrival>, _: &Path) -> String {
     session.freeze(hung()).unwrap();
     let op = next_op(arrivals);
     let replied = session.reply(op, no_grants(), Duration::ZERO);
@@ -709,19 +850,16 @@ fn late_reply(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -> 
 }
 
 // The sandbox answers the start, then sends an op. The owner takes the op, then marks the event,
-// which passes the start's deadline before the start's thread looks.
-fn start_late(session: &mut Session, arrivals: &Receiver<Arrival>, dir: &Path) -> String {
-    let (_, send) = session.prepare_start(EVENT).unwrap();
-    let late = thread::Builder::new().name(LATE.to_owned());
-    let started = late.spawn(move || send(launch(), EVENT)).unwrap();
+// which passes the start's deadline once its answer has come.
+fn start_late(session: &Session, arrivals: &Receiver<Arrival>, dir: &Path) -> String {
+    let started = outcome(session.start(launch(), EVENT).map(drop));
     let op = next_op(arrivals);
     fs::write(dir.join(STALLED), "").unwrap();
-    let started = outcome(started.join().unwrap());
     let replied = outcome(session.reply(op, no_grants(), hung()));
     format!("start: {started}; reply: {replied}")
 }
 
-fn collect_until_stalled(session: &mut Session, _: &Receiver<Arrival>, dir: &Path) -> String {
+fn collect_until_stalled(session: &Session, _: &Receiver<Arrival>, dir: &Path) -> String {
     let limits = Limits {
         bytes: u64::MAX,
         entries: u64::MAX,
@@ -816,8 +954,9 @@ fn flight() -> Range<u32> {
     0..u32::try_from(MAX_MODEL_REQUESTS_IN_FLIGHT).unwrap()
 }
 
-// Not frames: `await_reply`, `read_frame`, `pause`, `until_hang_up`, `stall`, `stall_in_frame` and
-// `hang_up_unread` mark where the fake sandbox waits, and `connect` acts on them.
+// Not frames: `await_reply`, `read_frame`, `pause`, `mark`, `await_go`, `until_end`,
+// `until_hang_up`, `stall`, `stall_in_frame` and `hang_up_unread` mark where the fake sandbox waits
+// or marks its event, and `connect` acts on them.
 fn await_reply() -> (Value, Vec<u8>) {
     (Value::Null, Vec::new())
 }
@@ -828,6 +967,18 @@ fn read_frame() -> (Value, Vec<u8>) {
 
 fn pause() -> (Value, Vec<u8>) {
     (Value::from("pause"), Vec::new())
+}
+
+fn mark() -> (Value, Vec<u8>) {
+    (Value::from("mark"), Vec::new())
+}
+
+fn await_go() -> (Value, Vec<u8>) {
+    (Value::from("await_go"), Vec::new())
+}
+
+fn until_end() -> (Value, Vec<u8>) {
+    (Value::from("until_end"), Vec::new())
 }
 
 fn until_hang_up((message, body): (Value, Vec<u8>)) -> (Value, Vec<u8>) {
@@ -909,6 +1060,10 @@ fn sandbox_answers() {
                 }),
                 (collect, |s| vec![file(s, "f", 2), end(s), stall()]),
                 (collect, |s| vec![reply("failed", s)]),
+                // The second collect's cancel gives it up alone, and the first one's tree arrives.
+                (collect_beside_a_cancel, |s| {
+                    vec![mark(), read_frame(), pause(), dir(s, "a"), end(s), stall()]
+                }),
                 // A started command's stream carries only its exit, so a second `done` breaks the
                 // protocol.
                 (start_and_freeze, |s| vec![done(s); 2]),
@@ -940,6 +1095,7 @@ fn sandbox_answers() {
             ConnectionAborted: the sandbox broke the protocol: the tree it sent on stream 1 is malformed: file data is empty: send at least one byte in each frame; arrived ["f="]
             ConnectionAborted: the sandbox broke the protocol: the tree it sent on stream 1 is malformed: a file ended 2 bytes short: send all of its bytes before the next part; arrived ["f="]
             Other: no; arrived []
+            first: ok; arrived ["a/"]; second: Interrupted: stopped before the tree was whole
             start: ok; freeze: ConnectionAborted: the sandbox broke the protocol: it sent more on stream 1 than a request takes
             start: ok; freeze: ConnectionAborted: the sandbox ended the session
             ok; then ConnectionAborted: the sandbox ended the session; then by a passed deadline ConnectionAborted: the sandbox ended the session"#]],
@@ -956,9 +1112,7 @@ fn protocol_breaks() {
                 (freeze_and_take, |s| vec![end(s), done(s)]),
                 (start_and_take, |s| vec![reply("exited", s), done(s)]),
                 (collect_and_take, |s| vec![dir(s, "a"), done(s), end(s)]),
-                (put_after_op, |s| {
-                    vec![done(s), op(0, json!({ "kind": "ops" }), 0), await_reply()]
-                }),
+                (put_answered_early, |s| vec![done(s), stall()]),
                 (freeze_and_take, |s| vec![done(s + 1), done(s)]),
                 (freeze_and_take, |s| vec![done(0), done(s)]),
                 (collect_and_take, |s| vec![dir(s, "a/b"), stall()]),
@@ -1079,11 +1233,11 @@ fn sandbox_model_requests() {
                     frames.extend([model_request(4, "/", 0), await_reply(), await_reply()]);
                     frames
                 }),
-                // Responses cut short, dropped, and too long to start, which is cut short too and
-                // leaves the session open; then one started too late, which ends it.
+                // Responses cut short, and too long to start, which is cut short too and leaves the
+                // session open; then one started too late, which ends it.
                 (freeze_and_take, |s| {
                     let mut frames = vec![done(s)];
-                    for (n, path) in (3..).zip(["/cut", "/drop", "/long", "/late"]) {
+                    for (n, path) in (3..).zip(["/cut", "/long", "/late"]) {
                         frames.extend([model_request(n, path, 0), await_reply()]);
                     }
                     frames
@@ -1105,7 +1259,7 @@ fn sandbox_model_requests() {
                     let stale = model_request(3, "/stale", 0);
                     vec![done(s), stale, read_frame(), stall_in_frame()]
                 }),
-                (answer_on_a_thread, |_| Vec::new()),
+                (respond_as_it_ends, |_| Vec::new()),
                 (freeze_and_take, |s| {
                     let (mut open, body) = model_request(3, "/", 0);
                     open["headers"] = json!([["content-type", "x"], ["X-Key", "y"]]);
@@ -1121,12 +1275,12 @@ fn sandbox_model_requests() {
         ),
         &expect![[r#"
             freeze: ok; POST / [("content-type", "application/json")] "{\"a\":1}": ok; POST / [("content-type", "application/json")] "": ok; ended: the sandbox ended the session; the sandbox heard model request 3: 200 [("content-type", "text/plain")], model request 3: "hel", model request 3: "lo", model request 3: end, model request 4: 200 [("content-type", "text/plain")], model request 4: "hel", model request 4: "lo", model request 4: end
-            freeze: ok; POST /cut [("content-type", "application/json")] "": ok; POST /drop [("content-type", "application/json")] "": ok; POST /long [("content-type", "application/json")] "": InvalidInput: the message is 65642 bytes: a frame's message holds at most 65536; POST /late [("content-type", "application/json")] "": TimedOut: the response's deadline passed before it was sent: expected time left to send it; ended: the response's deadline passed before it was sent: expected time left to send it; the sandbox heard model request 3: 200 [("content-type", "text/plain")], model request 3: "hel", model request 3: cut, model request 4: 200 [("content-type", "text/plain")], model request 4: "hel", model request 4: cut, model request 5: cut
+            freeze: ok; POST /cut [("content-type", "application/json")] "": ok; POST /long [("content-type", "application/json")] "": InvalidInput: the message is 65642 bytes: a frame's message holds at most 65536; POST /late [("content-type", "application/json")] "": TimedOut: the response's deadline passed before it was sent: expected time left to send it; ended: the response's deadline passed before it was sent: expected time left to send it; the sandbox heard model request 3: 200 [("content-type", "text/plain")], model request 3: "hel", model request 3: cut, model request 4: cut
             freeze: ok; ended: the sandbox broke the protocol: it opened model request 3, which is in flight
             freeze: ok; ended: the sandbox broke the protocol: it sent data for model request 3, which is not open
             freeze: ConnectionAborted: the sandbox broke the protocol: it sent data for model request 3, which is not open; POST / [("content-type", "application/json")] "a": ConnectionAborted: the sandbox broke the protocol: it sent data for model request 3, which is not open; ended: the sandbox broke the protocol: it sent data for model request 3, which is not open
             freeze: ok; POST /stale [("content-type", "application/json")] "": TimedOut: the sandbox didn't take what was sent before the response's deadline: expected it to read while the deadline lasts; ended: the sandbox didn't take what was sent before the response's deadline: expected it to read while the deadline lasts
-            an answer on another thread, as its session ends: ConnectionAborted: the owner dropped the session
+            frames of a response that wait, as the session drops: ConnectionAborted: the owner dropped the session
             freeze: ok; ended: the sandbox broke the protocol: it opened model request 3 with a header name that is not in lowercase
             freeze: ok; ended: the sandbox broke the protocol: it opened model request 3 with a body of 67108865 bytes, more than the protocol's 67108864
             freeze: ok; ended: the sandbox broke the protocol: it sent 3 bytes of model request 3's body, past its size: 2 were left"#]],
@@ -1148,10 +1302,10 @@ fn model_flight() {
                     frames.extend([model_request(99, "/", 0), await_reply()]);
                     frames
                 }),
-                // A full flight, then one more once their responses have ended cut short, dropped,
-                // or cut short as their heads are too long to send.
+                // A full flight, then one more once their responses have ended cut short, or cut
+                // short as their heads are too long to send.
                 (freeze_and_take, |s| {
-                    let paths = ["/cut", "/drop", "/long"];
+                    let paths = ["/cut", "/long"];
                     let mut frames: Vec<_> = flight()
                         .zip(paths.into_iter().cycle())
                         .map(|(n, path)| model_request(n, path, 0))
@@ -1178,7 +1332,7 @@ fn model_flight() {
         ),
         &expect![[r#"
             freeze: ok; POST / [("content-type", "application/json")] "": ok; POST / [("content-type", "application/json")] "": ok; POST / [("content-type", "application/json")] "": ok; POST / [("content-type", "application/json")] "": ok; POST / [("content-type", "application/json")] "": ok; POST / [("content-type", "application/json")] "": ok; POST / [("content-type", "application/json")] "": ok; POST / [("content-type", "application/json")] "": ok; ended: the sandbox ended the session; the sandbox heard model request 0: 200 [("content-type", "text/plain")], model request 0: "hel", model request 0: "lo", model request 0: end, model request 1: 200 [("content-type", "text/plain")], model request 1: "hel", model request 1: "lo", model request 1: end, model request 2: 200 [("content-type", "text/plain")], model request 2: "hel", model request 2: "lo", model request 2: end, model request 3: 200 [("content-type", "text/plain")], model request 3: "hel", model request 3: "lo", model request 3: end, model request 4: 200 [("content-type", "text/plain")], model request 4: "hel", model request 4: "lo", model request 4: end, model request 5: 200 [("content-type", "text/plain")], model request 5: "hel", model request 5: "lo", model request 5: end, model request 6: 200 [("content-type", "text/plain")], model request 6: "hel", model request 6: "lo", model request 6: end, model request 99: 200 [("content-type", "text/plain")], model request 99: "hel", model request 99: "lo", model request 99: end
-            freeze: ok; POST /cut [("content-type", "application/json")] "": ok; POST /drop [("content-type", "application/json")] "": ok; POST /long [("content-type", "application/json")] "": InvalidInput: the message is 65642 bytes: a frame's message holds at most 65536; POST /cut [("content-type", "application/json")] "": ok; POST /drop [("content-type", "application/json")] "": ok; POST /long [("content-type", "application/json")] "": InvalidInput: the message is 65642 bytes: a frame's message holds at most 65536; POST /cut [("content-type", "application/json")] "": ok; POST / [("content-type", "application/json")] "": ok; ended: the sandbox ended the session; the sandbox heard model request 0: 200 [("content-type", "text/plain")], model request 0: "hel", model request 0: cut, model request 1: 200 [("content-type", "text/plain")], model request 1: "hel", model request 1: cut, model request 2: cut, model request 3: 200 [("content-type", "text/plain")], model request 3: "hel", model request 3: cut, model request 4: 200 [("content-type", "text/plain")], model request 4: "hel", model request 4: cut, model request 5: cut, model request 6: 200 [("content-type", "text/plain")], model request 6: "hel", model request 6: cut, model request 99: 200 [("content-type", "text/plain")], model request 99: "hel", model request 99: "lo", model request 99: end
+            freeze: ok; POST /cut [("content-type", "application/json")] "": ok; POST /long [("content-type", "application/json")] "": InvalidInput: the message is 65642 bytes: a frame's message holds at most 65536; POST /cut [("content-type", "application/json")] "": ok; POST /long [("content-type", "application/json")] "": InvalidInput: the message is 65642 bytes: a frame's message holds at most 65536; POST /cut [("content-type", "application/json")] "": ok; POST /long [("content-type", "application/json")] "": InvalidInput: the message is 65642 bytes: a frame's message holds at most 65536; POST /cut [("content-type", "application/json")] "": ok; POST / [("content-type", "application/json")] "": ok; ended: the sandbox ended the session; the sandbox heard model request 0: 200 [("content-type", "text/plain")], model request 0: "hel", model request 0: cut, model request 1: cut, model request 2: 200 [("content-type", "text/plain")], model request 2: "hel", model request 2: cut, model request 3: cut, model request 4: 200 [("content-type", "text/plain")], model request 4: "hel", model request 4: cut, model request 5: cut, model request 6: 200 [("content-type", "text/plain")], model request 6: "hel", model request 6: cut, model request 99: 200 [("content-type", "text/plain")], model request 99: "hel", model request 99: "lo", model request 99: end
             freeze: ConnectionAborted: the sandbox broke the protocol: it opened model request 99 while 7 are in flight, the most the protocol allows; POST / [("content-type", "application/json")] "": ConnectionAborted: the sandbox broke the protocol: it opened model request 99 while 7 are in flight, the most the protocol allows; POST / [("content-type", "application/json")] "": ConnectionAborted: the sandbox broke the protocol: it opened model request 99 while 7 are in flight, the most the protocol allows; POST / [("content-type", "application/json")] "": ConnectionAborted: the sandbox broke the protocol: it opened model request 99 while 7 are in flight, the most the protocol allows; POST / [("content-type", "application/json")] "": ConnectionAborted: the sandbox broke the protocol: it opened model request 99 while 7 are in flight, the most the protocol allows; POST / [("content-type", "application/json")] "": ConnectionAborted: the sandbox broke the protocol: it opened model request 99 while 7 are in flight, the most the protocol allows; POST / [("content-type", "application/json")] "": ConnectionAborted: the sandbox broke the protocol: it opened model request 99 while 7 are in flight, the most the protocol allows; POST / [("content-type", "application/json")] "": ConnectionAborted: the sandbox broke the protocol: it opened model request 99 while 7 are in flight, the most the protocol allows; ended: the sandbox broke the protocol: it opened model request 99 while 7 are in flight, the most the protocol allows
             freeze: ok; ended: the sandbox broke the protocol: it opened model request 99 while 7 are in flight, the most the protocol allows"#]],
     );
@@ -1207,12 +1361,10 @@ fn another_sessions_op() {
         fakes(
             Some(OpPayloadLimit::NONE),
             false,
-            &[(answer_elsewhere, |s| {
-                vec![done(s), op(0, json!({ "kind": "ops" }), 0), await_reply()]
-            })],
+            &[(answer_elsewhere, |_| Vec::new())],
         ),
         &expect![[
-            r#"the sessions' commands equal: false; op 0 on another session: panicked: internal error: entered unreachable code: op 0 was answered on a session other than the one it arrived on, though the contracts of `reply` and `refuse` require the one that handed it out; that session's own op 0: ok; its op 1 refused on another session: panicked: internal error: entered unreachable code: op 1 was answered on a session other than the one it arrived on, though the contracts of `reply` and `refuse` require the one that handed it out; the sandbox heard op 0: {"kind":"ops","role":"agent","remaining_seconds":0,"resources":{"cpu_millis":1,"memory_bytes":1},"grants":[]}"#
+            r#"the sessions' commands equal: false; each one's own op 0: ok, ok; the sandbox heard op 0: {"kind":"ops","role":"agent","remaining_seconds":0,"resources":{"cpu_millis":1,"memory_bytes":1},"grants":[]}; the sandbox heard op 0: {"kind":"ops","role":"agent","remaining_seconds":0,"resources":{"cpu_millis":1,"memory_bytes":1},"grants":[]}"#
         ]],
     );
 }
@@ -1225,16 +1377,20 @@ fn deadlines() {
             false,
             &[
                 // The sandbox pauses, or stops reading a large put, then reads on: the requests
-                // wait, as their deadlines haven't passed. It answers the put after reading its
-                // entry but before reading the entry's data, and the gateway takes the answer once
-                // the put is all written.
+                // wait, as their deadlines haven't passed. It answers the put once it has read the
+                // entry's data, eight frames, and the tree's end.
                 (
                     |session, _, _| freezes(session, hung()),
                     |s| vec![pause(), done(s)],
                 ),
                 (
-                    |session, _, _| outcome(put_large(session, hung())),
-                    |s| vec![read_frame(), pause(), done(s), await_reply()],
+                    |session, _, _| outcome(session.ask(put_large(), hung()).done()),
+                    |s| {
+                        let mut frames = vec![read_frame(), pause()];
+                        frames.extend(iter::repeat_with(read_frame).take(9));
+                        frames.extend([done(s), await_reply()]);
+                        frames
+                    },
                 ),
                 // The sandbox answers nothing, stops reading inside a large put's first frame of
                 // data, after its entry's, or sends a tree that never ends, until the gateway hangs
@@ -1242,7 +1398,7 @@ fn deadlines() {
                 (|session, _, _| freezes(session, EVENT), |_| vec![stall()]),
                 (
                     |session, _, _| {
-                        let put = put_large(session, EVENT);
+                        let put = session.ask(put_large(), EVENT).done();
                         then_freeze(session, put)
                     },
                     |_| vec![read_frame(), stall_in_frame()],
@@ -1266,8 +1422,7 @@ fn deadlines() {
                 (late_reply, |s| {
                     vec![done(s), op(0, json!({ "kind": "ops" }), 0), await_reply()]
                 }),
-                // An answer that came before the deadline passed is taken, though its request
-                // looks only after.
+                // A start answered before its deadline passes keeps its session open past it.
                 (start_late, |s| {
                     vec![done(s), op(0, json!({ "kind": "ops" }), 0), await_reply()]
                 }),
@@ -1293,11 +1448,65 @@ fn deadlines() {
 }
 
 #[test]
+fn puts() {
+    check(
+        fakes(
+            None,
+            false,
+            &[
+                // The sandbox reads once all three have begun: each goes on as the others' frames
+                // go. It reads each one's request, entry, eight frames of data and end.
+                (three_puts, |s| {
+                    let mut frames = vec![pause()];
+                    frames.extend(iter::repeat_with(read_frame).take(3 * 11 - 1));
+                    frames.extend([done(s), done(s + 1), done(s + 2), await_reply()]);
+                    frames
+                }),
+                // A put given up ends its tree, short of its file, and fails as interrupted; one
+                // given up once its tree has gone is whole.
+                (put_cancelled, |s| {
+                    vec![
+                        mark(),
+                        await_go(),
+                        until_end(),
+                        reply("failed", s),
+                        read_frame(),
+                        done(s + 1),
+                    ]
+                }),
+                (put_cancelled_whole, |s| {
+                    vec![until_end(), mark(), await_go(), done(s)]
+                }),
+                (put_host_files, |s| {
+                    vec![
+                        mark(),
+                        await_go(),
+                        until_end(),
+                        done(s),
+                        read_frame(),
+                        until_end(),
+                        done(s + 1),
+                        read_frame(),
+                        done(s + 2),
+                    ]
+                }),
+            ],
+        ),
+        &expect![[r#"
+            puts: ok, ok, ok
+            put: Interrupted: stopped before the tree was whole; then freeze: ok; the sandbox heard a tree of [big: 8388608 bytes, short]
+            put: ok; the sandbox heard a tree of [small: 1 bytes, whole]
+            put: ok; a missing file's put: NotFound: missing: No such file or directory (os error 2); then freeze: ok; the sandbox heard a tree of [big: 8388608 bytes, whole; late: 4 bytes, whole], a tree of []"#]],
+    );
+}
+
+#[test]
 fn sockets() {
     check(
         |dir| {
             let run = dir.join("sockets");
-            let (_sockets, _registration, socket) = issued(&run);
+            let gateway = Gateway::new();
+            let (_sockets, _registration, socket) = issued(&gateway, &run);
             let sandbox = socket.parent().unwrap();
             [&run, sandbox, &socket]
                 .map(|path| {
@@ -1315,31 +1524,6 @@ fn sockets() {
 }
 
 #[test]
-fn stopped() {
-    check(
-        |dir| {
-            let lines = [true, false].map(|first| {
-                let (_sockets, registration, socket) = issued(&dir.join(format!("{first}")));
-                let _waiting = UnixStream::connect(&socket).unwrap();
-                let (sender, _) = mpsc::channel();
-                let by = hung();
-                let stopped = || first || !socket.exists();
-                let accepted =
-                    registration.accept((&Machine, by), None, false, sender, |a| a, stopped);
-                let returned = time::left(&Machine, by).map_or("past", |_| "before");
-                let accepted = outcome(accepted.map(drop));
-                let accepted = accepted.replace(&dir.display().to_string(), "<dir>");
-                format!("returned {returned} its deadline: {accepted}")
-            });
-            lines.into()
-        },
-        &expect![[r#"
-            returned before its deadline: Other: the accept was stopped before a sandbox connected to <dir>/true/sandbox/s: expected its sandbox to connect before the stop
-            returned before its deadline: Other: the accept was stopped before the sandbox's hello: expected its hello before the stop"#]],
-    );
-}
-
-#[test]
 #[expect(
     clippy::too_many_lines,
     reason = "most of it is the cases and their snapshot"
@@ -1347,16 +1531,16 @@ fn stopped() {
 fn hellos() {
     check(
         |dir| {
-            let cases: [(&str, Opening, Duration); 14] = [
+            let cases: [(&str, Opening, By); 14] = [
                 (
                     "this version",
                     |c| frame::write(c, &hello(), &[]).unwrap(),
-                    hung(),
+                    hung,
                 ),
                 (
                     "a v0 sandboxd",
                     |c| frame::write(c, &json!({ "version": 0 }), &[]).unwrap(),
-                    hung(),
+                    hung,
                 ),
                 (
                     "a later version, with a field this one lacks",
@@ -1364,7 +1548,7 @@ fn hellos() {
                         let hello = json!({ "version": PROTOCOL_VERSION + 1, "later": true });
                         frame::write(c, &hello, &[]).unwrap();
                     },
-                    hung(),
+                    hung,
                 ),
                 (
                     "this version, with a field it lacks",
@@ -1372,7 +1556,7 @@ fn hellos() {
                         let hello = json!({ "version": PROTOCOL_VERSION, "later": true });
                         frame::write(c, &hello, &[]).unwrap();
                     },
-                    hung(),
+                    hung,
                 ),
                 (
                     "a later version, as long as a hello may be",
@@ -1382,7 +1566,7 @@ fn hellos() {
                         hello["later"] = json!("x".repeat(pad));
                         frame::write(c, &hello, &[]).unwrap();
                     },
-                    hung(),
+                    hung,
                 ),
                 (
                     "a length a byte over a hello's, and nothing more",
@@ -1390,27 +1574,27 @@ fn hellos() {
                         let len = u32::try_from(MAX_HELLO_BYTES + 1).unwrap();
                         c.write_all(&len.to_be_bytes()).unwrap();
                     },
-                    hung(),
+                    hung,
                 ),
                 (
                     "this version, with an attestation",
                     |c| frame::write(c, &hello(), b"x").unwrap(),
-                    hung(),
+                    hung,
                 ),
                 (
                     "a reply, not a hello",
                     |c| frame::write(c, &done(1).0, &[]).unwrap(),
-                    hung(),
+                    hung,
                 ),
                 (
                     "a frame whose message, `null`, is no object",
                     |c| frame::write(c, &Value::Null, &[]).unwrap(),
-                    hung(),
+                    hung,
                 ),
                 (
                     "a frame whose message, `hello`, isn't JSON",
                     |c| c.write_all(b"\0\0\0\x05hello\0\0\0\0").unwrap(),
-                    hung(),
+                    hung,
                 ),
                 (
                     "part of a frame, then the connection's end",
@@ -1418,7 +1602,7 @@ fn hellos() {
                         c.write_all(b"\0\0\0\x0d{\"version\"").unwrap();
                         c.shutdown(Shutdown::Write).unwrap();
                     },
-                    hung(),
+                    hung,
                 ),
                 (
                     "a hello's message, then the connection's end",
@@ -1428,18 +1612,18 @@ fn hellos() {
                         c.write_all(&written[..written.len() - 4]).unwrap();
                         c.shutdown(Shutdown::Write).unwrap();
                     },
-                    hung(),
+                    hung,
                 ),
                 (
                     "nothing, then the connection's end",
                     |c| c.shutdown(Shutdown::Write).unwrap(),
-                    hung(),
+                    hung,
                 ),
-                ("nothing, past the deadline", |_| {}, short()),
+                ("nothing, past the deadline", |_| {}, short),
             ];
             (cases.into_iter().enumerate())
                 .map(|(n, (name, opening, by))| {
-                    let opened = opened(&dir.join(n.to_string()), opening, by);
+                    let opened = opened(&dir.join(n.to_string()), opening, by());
                     format!("{name}: {opened}")
                 })
                 .collect()
@@ -1571,9 +1755,10 @@ fn twice(address: SocketAddr, said: &Sender<String>, name: &'static str) -> [Joi
 }
 
 fn accept_and_freeze(registration: Registration, by: Duration) -> String {
+    let gateway = Gateway::new();
     let (sender, _arrivals) = mpsc::channel();
-    let accepted = registration.accept((&Machine, by), None, false, sender, |a| a, || false);
-    outcome(accepted.and_then(|mut session| session.freeze(hung())))
+    let accepted = gateway.accept(registration, by, passive(), sender);
+    outcome(accepted.and_then(|session| session.freeze(hung())))
 }
 
 fn refusals(listener: &Listener, address: SocketAddr) -> Vec<String> {
@@ -1631,10 +1816,13 @@ fn awaited(listener: &Listener, address: SocketAddr) -> Vec<String> {
     let answer: Named = |s, _| vec![done(s).0, op(0, json!({ "kind": "ops" }), 0).0];
     let hello = attesting("awaited");
     let sandbox = sandbox(address, hello.clone(), PAUSE, answer, (said, "awaited"));
-    let ops = Some(OpPayloadLimit::NONE);
+    let takes = Takes {
+        ops: Some(OpPayloadLimit::NONE),
+        models: false,
+    };
+    let gateway = Gateway::new();
     let (sender, arrivals) = mpsc::channel();
-    let accepted = registration.accept((&Machine, hung()), ops, false, sender, |a| a, || false);
-    let mut session = accepted.unwrap();
+    let session = gateway.accept(registration, hung(), takes, sender).unwrap();
     let frozen = outcome(session.freeze(hung()));
     let mut lines = vec![format!("{}; freeze: {frozen}", heard.recv().unwrap())];
     let op = next_op(&arrivals);
@@ -1716,8 +1904,9 @@ fn stopped_accept(listener: &Listener, address: SocketAddr) -> Vec<String> {
         looks.set(looks.get() + 1);
         looks.get() > 2
     };
+    let gateway = Gateway::new();
     let (sender, _) = mpsc::channel();
-    let accepted = registration.accept((&Machine, by), None, false, sender, |a| a, stopped);
+    let accepted = gateway.accept_stopped(registration, by, passive(), sender, stopped);
     let accepted = outcome(accepted.map(drop));
     let returned = time::left(&Machine, by).map_or("past", |_| "before");
     let presented = present(address, &attesting("stopped"));
@@ -1845,10 +2034,11 @@ fn dials() {
                 let (Listening { grant }, unreached) = dialer.issue().unwrap();
                 (grant, unreached)
             };
+            let gateway = Gateway::new();
             let accepted = |registration: Registration, by, stopped: bool| {
                 let (sender, _) = mpsc::channel();
                 let session =
-                    registration.accept((&Machine, by), None, false, sender, |a| a, || stopped);
+                    gateway.accept_stopped(registration, by, passive(), sender, || stopped);
                 session
                     .map(drop)
                     .map_err(|error| format!("{:?}: {error}", error.kind()))
@@ -1877,15 +2067,8 @@ fn dials() {
                 .unwrap()
                 .port();
             let (_, unreached) = issue();
-            // Its deadline passes once the first dial has failed.
-            let (sender, _) = mpsc::channel();
-            let registration = unreached.at(endpoint(closed));
-            let clock = Still::after_a_read();
-            let session =
-                registration.accept((&clock, EVENT), None, false, sender, |a| a, || false);
-            let session = session
-                .map(drop)
-                .map_err(|error| format!("{:?}: {error}", error.kind()));
+            // Its deadline passes after the first dial has failed.
+            let session = accepted(unreached.at(endpoint(closed)), short(), false);
             let session = session.map_err(|error| error.replace(&closed.to_string(), "$PORT"));
             lines.push(format!("nothing listening: {session:?}"));
             lines.push(format!(
@@ -1917,9 +2100,10 @@ fn untrusted() -> String {
         let shown = test_support::edge::server().accept(stream, Deadline::after(HUNG));
         shown.map(drop).map_err(|error| error.kind())
     });
+    let gateway = Gateway::new();
     let (sender, _) = mpsc::channel();
     let registration = unreached.at(endpoint(port));
-    let session = registration.accept((&Machine, hung()), None, false, sender, |a| a, || false);
+    let session = gateway.accept(registration, hung(), passive(), sender);
     let session = session.map(drop).map_err(|error| {
         format!("{:?}: {error}", error.kind()).replace(&port.to_string(), "$PORT")
     });

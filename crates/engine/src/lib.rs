@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use std::{fmt, fs, io};
+use std::{fmt, io};
 
 use base64::Engine as _;
 use schema::ir::{Image, MILLIS_PER_CPU, Resources, User};
@@ -22,12 +22,15 @@ use schema::sandbox::{PUMPKIN_BYTES, pumpkin_dir};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use stdx::process::{self, Bound, Echo, Environment, Failure, Run};
+use stdx::slots::Slots;
 
 mod build;
+mod builds;
 pub mod prune;
 mod sandboxd;
 
-pub use build::{Admit, BuildContext, Building, Built, Recipe, Started, finish, mounted};
+pub use build::{BuildContext, Built, Looked, Missing, Recipe, mounted};
+pub use builds::{Admit, Builder, Builds, Ended, Stepped};
 
 // How long a `docker` command that is neither a create's nor a removal may run before it is
 // killed: each such command makes one request of the engine, or a few, and none waits on a pull or
@@ -353,7 +356,6 @@ impl Engine {
     }
 
     fn platform_of(&self, image: &Image) -> Result<Platform, String> {
-        let _slot = self.publishing()?;
         let context = &self.report.context;
         let name = context.as_str();
         let inspect = [
@@ -368,7 +370,8 @@ impl Engine {
         // once each call the engine. `docker image inspect` fails alike whatever went wrong, so an
         // image it lacks is told by its text, as `image_id` tells one; and in the containerd image
         // store an image's full ID names that image alone.
-        let inspected = match docker(context, inspect) {
+        let inspected = self.publishing(|| Ok(docker(context, inspect)))?;
+        let inspected = match inspected {
             Ok(inspected) => inspected,
             Err(failure) if failure.reported().contains("No such image") => {
                 return Err(format!(
@@ -412,13 +415,16 @@ impl Engine {
         Ok(Platform { os, architecture })
     }
 
-    // Takes one of the engine's publish slots ([`PUBLISH_SLOTS`]), held until the file returned is
-    // dropped; the first time that this engine waits for one, it says so, and which processes hold
-    // them.
-    fn publishing(&self) -> Result<fs::File, String> {
-        let dir = self.dir.join(PUBLISH_SLOTS_DIR);
+    // What `call` gives, called while it holds one of the engine's publish slots
+    // ([`PUBLISH_SLOTS`]); the first time that this engine waits for one, it says so, and which
+    // processes hold them.
+    fn publishing<T>(&self, call: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+        let slots = Slots {
+            dir: self.dir.join(PUBLISH_SLOTS_DIR),
+            count: PUBLISH_SLOTS,
+        };
         let holder = format!("process {}", std::process::id());
-        stdx::slots::take(&dir, PUBLISH_SLOTS, &holder, |holders| {
+        let waiting = |holders: &[String]| {
             if !self.said_waiting.swap(true, Ordering::Relaxed) {
                 // As `pumpkin` says everything else: a standard error that can't be written is left
                 // unwritten, as the publish goes on all the same.
@@ -428,8 +434,8 @@ impl Engine {
                     holders.join(", ")
                 );
             }
-            Ok(())
-        })
+        };
+        stdx::slots::holding(slots, &holder, waiting, call)
     }
 
     /// Each image that the engine has, by its ID, as [`Engine::inspected`] gives it.
@@ -562,13 +568,14 @@ impl<'e> Pusher<'e> {
         repository: &str,
         tag: &str,
     ) -> Result<(), String> {
-        let _slot = self.engine.publishing()?;
         let context = &self.engine.report.context;
         let target = format!("{}/{repository}:{tag}", login.registry);
-        let tagged = docker(context, ["tag", "--", image.as_str(), &target]);
         let push = ["push", "--quiet", "--", &target];
-        let pushed =
-            tagged.and_then(|_| docker_as(context, push, Bound::Within(PUSH_TIMEOUT), Some(login)));
+        let pushed = self.engine.publishing(|| {
+            let tagged = docker(context, ["tag", "--", image.as_str(), &target]);
+            let bound = Bound::Within(PUSH_TIMEOUT);
+            Ok(tagged.and_then(|_| docker_as(context, push, bound, Some(login))))
+        })?;
         pushed
             .map(drop)
             .map_err(|error| format!("pushing `{target}` failed: {}", fix_reported(&error)))

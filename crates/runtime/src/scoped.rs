@@ -1,12 +1,11 @@
-//! A body waits in its own job inbox for the numbered work its session grant admitted. The
-//! driver's thread registers the waiter before starting that work, and wakes it after recording
-//! the event that finished it. A sandbox sharing the job can have a gateway op outstanding too.
+//! A body waits on the loop for the numbered work its session grant admitted. The loop registers
+//! the waiter before starting that work, and answers it after recording the event that finished
+//! it. A sandbox sharing the job can have a gateway op outstanding too.
 
 use decision::{Caller, Core, Event, JobId, LeaseId};
 use schema::sandbox::op::{Last, LeaseState, LeaseStatusReply, OpReply};
 
-use crate::child::Message;
-use crate::{Host, Runtime, relay};
+use crate::{Host, Io, Runtime};
 
 #[derive(Clone, Copy)]
 pub(super) enum Waiting {
@@ -21,9 +20,10 @@ pub(super) struct Waiter {
     number: Option<u64>,
 }
 
-impl<H: Host> Runtime<'_, H> {
+impl<'r, 's, H: Host + 'r> Runtime<'r, 's, H> {
     pub(super) fn watch(
         &mut self,
+        io: &mut Io<'r, 's, H>,
         core: &Core<'_>,
         job: JobId,
         waiting: Waiting,
@@ -31,7 +31,7 @@ impl<H: Host> Runtime<'_, H> {
     ) -> Result<(), String> {
         let id = match reply {
             OpReply::Refused { message, .. } => {
-                self.answer_body(job, Err(message));
+                self.answer_body(io, job, Err(message));
                 return Ok(());
             }
             OpReply::Lease(accepted) => LeaseId(accepted.lease),
@@ -56,7 +56,7 @@ impl<H: Host> Runtime<'_, H> {
             number,
         };
         if let Some(result) = waiter.completed(status) {
-            self.answer_body(job, result);
+            self.answer_body(io, job, result);
         } else {
             self.waiting.insert(id, waiter);
         }
@@ -87,13 +87,6 @@ impl<H: Host> Runtime<'_, H> {
         let receipt = result?;
         self.waiting.remove(&lease);
         Some((job, receipt))
-    }
-
-    pub(super) fn answer_body(&mut self, job: JobId, result: Result<LeaseStatusReply, String>) {
-        let _ = self
-            .call(job)
-            .orders
-            .send(Message::Order(relay::Order::Body(result)));
     }
 }
 

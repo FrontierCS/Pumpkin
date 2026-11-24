@@ -14,17 +14,15 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::io;
-use std::time::Duration;
 
-use gateway::{IncomingModelRequest, ModelRequest};
+use gateway::ModelRequest;
 use schema::ir::{Api, ModelBudget, ModelName};
 use serde_json::{Map, Value, json};
-use stdx::time::Clock;
 use ureq::http::{HeaderName, HeaderValue};
 
 use super::upstream::{Answer, Bar};
 use super::{read, usage};
-use crate::Apart;
+use crate::{Apart, Respond};
 
 // The request headers of each API's own: the form of the request and of its answer. A client's
 // product adds its own, which its entry lists ([`Headers`]). Any other could reach more of the
@@ -492,23 +490,19 @@ impl Refusal {
         }
     }
 
-    /// Answers `request`, of `api`, with the refusal: its status, with `allow: POST` for a 405, and
-    /// its [`body`](Refusal::body). Fails if `by`, a time on `clock`, passes first.
-    pub(crate) fn answer(
-        self,
-        api: Api,
-        request: IncomingModelRequest,
-        (clock, by): (&impl Clock, Duration),
-    ) -> io::Result<()> {
+    /// Answers its request, of `api`, through `client` with the refusal: its status, with
+    /// `allow: POST` for a 405, and its [`body`](Refusal::body). Fails if the client stops taking
+    /// the response.
+    pub(crate) fn answer(self, api: Api, client: &mut dyn Respond) -> io::Result<()> {
         let mut headers = vec![("content-type".to_owned(), "application/json".to_owned())];
         if let Status::MethodNotAllowed = self.status {
             // HTTP requires a 405 to name the methods its target allows.
             headers.push(("allow".to_owned(), "POST".to_owned()));
         }
         let body = self.body(api);
-        let mut response = request.respond(self.status.code(), headers, (clock, by))?;
-        response.send(body.as_bytes())?;
-        response.end()
+        client.head(self.status.code(), headers)?;
+        client.data(body.as_bytes())?;
+        client.end(false)
     }
 
     /// The body that answers its client, of `api`: its message in a JSON error of `api`'s form.
