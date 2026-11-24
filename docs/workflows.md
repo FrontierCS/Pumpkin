@@ -45,8 +45,8 @@ holder calls it by name. The run checks each call against the grant before anyth
   left, and what the body returned.
 - A **now function** answers in the call's reply, with no sandbox. Its body proposes changes to
   the run's state. `run.set_submission(payload)` replaces the caller's submission.
-  `run.end_work()` locks the submission, and ends the caller's work once the caller's
-  `finalize_grace_seconds` pass. The run applies the changes once the body returns, all of them
+  `run.end_work()` locks the submission and ends the caller's work. The caller may keep running
+  for its `finalize_grace_seconds`, with its ops refused. The run applies the changes once the body returns, all of them
   or none.
 - A **session** leases runners. Its holder opens a lease, runs commands and copies trees in it one
   at a time, then closes the lease. A target's body holds the target's sessions, and each call gets
