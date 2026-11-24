@@ -5,8 +5,7 @@ _What the change does, and why. Why it needs each new dependency, crate or `pub`
 ### Evidence
 
 _The checks you ran on this head and what they showed: `cargo xtask ci`, any free `live`
-suite the change reaches, each measurement, and each mutant that the change's tests newly
-miss. A maintainer runs the paid `live` suites at review._
+suite the change reaches, and each measurement._
 
 ### Interfaces and cost
 
