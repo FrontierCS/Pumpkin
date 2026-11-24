@@ -377,12 +377,10 @@ fn architecture() {
                [Crates](#crates) and [`style`](docs/dev/style.md#errors), with\n\
                [`main.rs`](src/main.rs) in [`src`](src/).\n"
         .to_owned();
-    let ceilings = "[words]\n\"ARCHITECTURE.md\" = 18\n\"AGENTS.md\" = 2\n";
     check(
         &[
             ("ARCHITECTURE.md", map, Tracked),
             ("AGENTS.md", "# Agents\n".to_owned(), Tracked),
-            (".config/tidy.toml", ceilings.to_owned(), Tracked),
             ("src/main.rs", "fn main() {}\n".to_owned(), Tracked),
         ],
         tidy,
@@ -420,12 +418,10 @@ fn figures() {
                 struct Run;\nfn prepare() {}\nconst OUTCOME: &str = \"outcome.json\";\n"
         .to_owned();
     let manifest = "[package]\nname = \"a-crate\"\n\n[[bin]]\nname = \"a-bin\"\n".to_owned();
-    let ceilings = "[words]\n\"ARCHITECTURE.md\" = 16\n\"docs/dev/guide.md\" = 18\n";
     check(
         &[
             ("ARCHITECTURE.md", map, Tracked),
             ("docs/dev/guide.md", guide, Tracked),
-            (".config/tidy.toml", ceilings.to_owned(), Tracked),
             ("docs/figures/good.svg", good, Tracked),
             ("docs/figures/bad.svg", bad, Tracked),
             (
@@ -503,6 +499,7 @@ fn test_data() {
 fn ceilings() {
     use Standing::{Deleted, Tracked, Untracked};
     let rust = |count| lines("fn f() {}", count);
+    let words = |count: usize| lines("A\tword.", count / 2) + &"More.\n".repeat(count % 2);
     let ceilings = "[long_files]\n\
                     \"src/grown.rs\" = 1001\n\
                     \"src/held.rs\" = 1001\n\
@@ -510,12 +507,11 @@ fn ceilings() {
                     \"src/split.rs\" = 1001\n\
                     \"src/gone.rs\" = 1001\n\
                     [words]\n\
-                    \"docs/long.md\" = 2002\n\
-                    \"docs/grown.md\" = 4\n\
-                    \"docs/held.md\" = 4\n\
-                    \"docs/shrunk.md\" = 5\n\
-                    \"docs/deleted.md\" = 4\n";
-    let four = || "Four words,\n\tthen two.\n".to_owned();
+                    \"docs/grown.md\" = 1501\n\
+                    \"docs/held.md\" = 1501\n\
+                    \"docs/shrunk.md\" = 1502\n\
+                    \"docs/split.md\" = 1501\n\
+                    \"docs/deleted.md\" = 1501\n";
     check(
         &[
             (".config/tidy.toml", ceilings.to_owned(), Tracked),
@@ -523,20 +519,22 @@ fn ceilings() {
             ("src/long.rs", rust(1001), Tracked),
             ("src/page/long.js", lines("f();", 1001), Tracked),
             ("crates/a/tests/it/long.rs", rust(1001), Tracked),
-            ("docs/long.md", lines("A line.", 1001), Tracked),
+            ("docs/lines.md", lines("Line.", 1001), Tracked),
             ("src/grown.rs", rust(1002), Tracked),
             ("src/held.rs", rust(1001), Tracked),
             ("src/shrunk.rs", rust(1001), Tracked),
             ("src/split.rs", rust(1000), Tracked),
-            ("docs/grown.md", four() + "More.\n", Tracked),
-            ("docs/held.md", four(), Tracked),
-            ("docs/shrunk.md", four(), Tracked),
-            ("docs/deleted.md", four(), Deleted),
-            ("docs/new.md", four(), Tracked),
-            ("notes.md", four(), Untracked),
+            ("docs/at_cap.md", words(1500), Tracked),
+            ("docs/long.md", words(1501), Tracked),
+            ("docs/grown.md", words(1502), Tracked),
+            ("docs/held.md", words(1501), Tracked),
+            ("docs/shrunk.md", words(1501), Tracked),
+            ("docs/split.md", words(1500), Tracked),
+            ("docs/deleted.md", words(1501), Deleted),
+            ("notes.md", words(1501), Untracked),
             (
                 "crates/lang/tests/conformance/suite/README.md",
-                four(),
+                words(1501),
                 Tracked,
             ),
         ],
@@ -548,9 +546,10 @@ fn ceilings() {
             src/shrunk.rs: the file is 1001 lines, under its ceiling of 1002 in .config/tidy.toml: lower the ceiling to 1001
             src/split.rs: the file is 1000 lines, within the cap of 1000: take it off .config/tidy.toml
             .config/tidy.toml: `src/gone.rs` isn't a source file of the repository: take it off the list
-            docs/grown.md: the document is 5 words, over its ceiling of 4 in .config/tidy.toml: shorten it, moving each fact to the help or the code it describes, or raise the ceiling in the same change
-            docs/new.md: the document is 4 words, with no ceiling in .config/tidy.toml: list it there with a ceiling of 4
-            docs/shrunk.md: the document is 4 words, under its ceiling of 5 in .config/tidy.toml: lower the ceiling to 4
+            docs/grown.md: the file is 1502 words, over the cap of 1500 and its ceiling of 1501 in .config/tidy.toml, which only goes down: shorten it, moving each fact to the help or the code it describes
+            docs/long.md: the file is 1501 words, over the cap of 1500: shorten it, moving each fact to the help or the code it describes
+            docs/shrunk.md: the file is 1501 words, under its ceiling of 1502 in .config/tidy.toml: lower the ceiling to 1501
+            docs/split.md: the file is 1500 words, within the cap of 1500: take it off .config/tidy.toml
             .config/tidy.toml: `docs/deleted.md` isn't a Markdown document of the repository: take it off the list"#]],
     );
 }

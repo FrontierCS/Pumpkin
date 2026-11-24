@@ -36,16 +36,47 @@ const WIDTH: usize = 100;
 // A file past it holds several things, each better read and changed in a module of its own.
 const FILE_CAP: usize = 1_000;
 
+// A guide grows a sentence at a time, each harmless alone, until it restates the help or the code.
+// The cap sits above all but a few documents, which `CEILINGS` lists, so that most edits of a
+// document leave `CEILINGS` as it is.
+const WORD_CAP: usize = 1_500;
+
 const SOURCES: [&str; 8] = ["rs", "star", "js", "css", "html", "py", "sh", "tf"];
 
-// The files over `FILE_CAP`, each with its ceiling, the most lines it may hold, which only goes
-// down: a ratchet, as TigerBeetle's tidy holds the functions that are already long and stops the
-// others growing past its cap, and fails on an exception that names no file:
+// The files over a cap, each with its ceiling, the most it may hold, which only goes down: a
+// ratchet, as TigerBeetle's tidy holds the functions that are already long and stops the others
+// growing past its cap, and fails on an exception that names no file:
 // https://github.com/tigerbeetle/tigerbeetle/blob/24d92bff033453dcc757adfcd9aa14655d1b1734/src/tidy.zig#L731-L753
 // https://github.com/tigerbeetle/tigerbeetle/blob/24d92bff033453dcc757adfcd9aa14655d1b1734/src/tidy.zig#L1496-L1508
-// A document grows a sentence at a time, each harmless alone, so each Markdown document has a
-// ceiling on its words too, which only a change that says so there raises.
 const CEILINGS: &str = ".config/tidy.toml";
+
+/// A cap on what each file of a kind holds, whose exceptions are its table in [`CEILINGS`].
+struct Cap {
+    table: &'static str,
+    /// The files it applies to, as a problem names a file that isn't one.
+    kind: &'static str,
+    unit: &'static str,
+    cap: usize,
+    /// What to do with a file over the cap.
+    fix: &'static str,
+}
+
+const LINES: Cap = Cap {
+    table: "long_files",
+    kind: "source file",
+    unit: "lines",
+    cap: FILE_CAP,
+    fix: "put what is new in a module of its own, or split the file into modules that each hold \
+          one thing, in a pull request that only moves code",
+};
+
+const WORDS: Cap = Cap {
+    table: "words",
+    kind: "Markdown document",
+    unit: "words",
+    cap: WORD_CAP,
+    fix: "shorten it, moving each fact to the help or the code it describes",
+};
 
 /// Fails unless each of the repository's Rust files, tracked or not yet, but not ignored, its
 /// other source files, its `ARCHITECTURE.md`, its Markdown documents, the tracked ones' words, its
@@ -109,8 +140,8 @@ pub(crate) fn check(repo: &Repo<'_>) -> Result<()> {
     let listed = listed(repo)?;
     problems.extend(test_data(&listed));
     let ceilings = ceilings(repo)?;
-    problems.extend(long_files(repo, &listed, &ceilings)?);
-    problems.extend(document_words(repo, &ceilings)?);
+    problems.extend(capped(&ceilings, &LINES, line_counts(repo, &listed)?)?);
+    problems.extend(capped(&ceilings, &WORDS, word_counts(repo)?)?);
     names.extend(figures::packages(repo, &listed)?);
     problems.extend(figures::check(repo, &listed, &names)?);
     if problems.is_empty() {
@@ -196,36 +227,32 @@ fn ceilings_of(ceilings: &toml::Table, table: &str, unit: &str) -> Result<BTreeM
     Ok(read)
 }
 
-/// The problems of `paths` that are source files ([`SOURCES`]) outside a `tests/` directory: one
-/// over [`FILE_CAP`] and not listed in [`CEILINGS`], or past its ceiling there, and each entry
-/// of the list that is stale, its file gone, within the cap or under its ceiling.
-fn long_files(repo: &Repo<'_>, paths: &[String], ceilings: &toml::Table) -> Result<Vec<String>> {
-    let mut ceilings = ceilings_of(ceilings, "long_files", "lines")?;
-    let split = "put what is new in a module of its own, or split the file into modules that \
-                 each hold one thing, in a pull request that only moves code";
+/// The problems of `counts`, each file of `cap`'s kind with how many of its unit it holds: one
+/// over the cap and not listed in `cap`'s table of `ceilings`, or past its ceiling there, and each
+/// entry of the table that is stale, its file gone, within the cap or under its ceiling.
+fn capped(ceilings: &toml::Table, cap: &Cap, counts: Vec<(String, usize)>) -> Result<Vec<String>> {
+    let Cap {
+        table,
+        kind,
+        unit,
+        cap,
+        fix,
+    } = *cap;
+    let mut ceilings = ceilings_of(ceilings, table, unit)?;
     let mut problems = Vec::new();
-    for path in paths {
-        let file = Path::new(path);
-        let extension = file.extension().and_then(|extension| extension.to_str());
-        if under_tests(file) || !extension.is_some_and(|extension| SOURCES.contains(&extension)) {
-            continue;
-        }
-        let lines = repo.read(path)?.lines().count();
-        let problem = match ceilings.remove(path.as_str()) {
-            None if lines > FILE_CAP => {
-                format!("{path}: the file is {lines} lines, over the cap of {FILE_CAP}: {split}")
+    for (path, count) in counts {
+        let file = format!("{path}: the file is {count} {unit}");
+        let problem = match ceilings.remove(&path) {
+            None if count > cap => format!("{file}, over the cap of {cap}: {fix}"),
+            Some(ceiling) if count > ceiling => format!(
+                "{file}, over the cap of {cap} and its ceiling of {ceiling} in {CEILINGS}, which \
+                 only goes down: {fix}"
+            ),
+            Some(_) if count <= cap => {
+                format!("{file}, within the cap of {cap}: take it off {CEILINGS}")
             }
-            Some(ceiling) if lines > ceiling => format!(
-                "{path}: the file is {lines} lines, over the cap of {FILE_CAP} and its ceiling of \
-                 {ceiling} in {CEILINGS}, which only goes down: {split}"
-            ),
-            Some(_) if lines <= FILE_CAP => format!(
-                "{path}: the file is {lines} lines, within the cap of {FILE_CAP}: take it off \
-                 {CEILINGS}"
-            ),
-            Some(ceiling) if lines < ceiling => format!(
-                "{path}: the file is {lines} lines, under its ceiling of {ceiling} in \
-                 {CEILINGS}: lower the ceiling to {lines}"
+            Some(ceiling) if count < ceiling => format!(
+                "{file}, under its ceiling of {ceiling} in {CEILINGS}: lower the ceiling to {count}"
             ),
             None | Some(_) => continue,
         };
@@ -233,51 +260,40 @@ fn long_files(repo: &Repo<'_>, paths: &[String], ceilings: &toml::Table) -> Resu
     }
     for path in ceilings.keys() {
         problems.push(format!(
-            "{CEILINGS}: `{path}` isn't a source file of the repository: take it off the list"
+            "{CEILINGS}: `{path}` isn't a {kind} of the repository: take it off the list"
         ));
     }
     Ok(problems)
 }
 
-fn document_words(repo: &Repo<'_>, ceilings: &toml::Table) -> Result<Vec<String>> {
-    let mut ceilings = ceilings_of(ceilings, "words", "words")?;
+/// The lines of each of `paths` that is a source file ([`SOURCES`]) outside a `tests/` directory.
+fn line_counts(repo: &Repo<'_>, paths: &[String]) -> Result<Vec<(String, usize)>> {
+    let mut counts = Vec::new();
+    for path in paths {
+        let file = Path::new(path);
+        let extension = file.extension().and_then(|extension| extension.to_str());
+        if !under_tests(file) && extension.is_some_and(|extension| SOURCES.contains(&extension)) {
+            counts.push((path.clone(), repo.read(path)?.lines().count()));
+        }
+    }
+    Ok(counts)
+}
+
+/// The words of each tracked Markdown document, as `wc -w` counts them.
+fn word_counts(repo: &Repo<'_>) -> Result<Vec<(String, usize)>> {
     // Only tracked documents count: a checkout's untracked notes aren't the repository's. A path
     // that a merge left in conflict is listed once.
     let tracked = repo.git(["ls-files", "-z", "--cached", "--deduplicate", "--", "*.md"])?;
-    let mut problems = Vec::new();
+    let mut counts = Vec::new();
     for path in tracked.split('\0').filter(|path| !path.is_empty()) {
         let file = Path::new(path);
         // A symbolic link counts as its target, and a document under `tests/` is a test's input.
-        if under_tests(file) || !repo.has(file) || repo.root.join(file).is_symlink() {
-            continue;
+        if !under_tests(file) && repo.has(file) && !repo.root.join(file).is_symlink() {
+            let words = repo.read(file)?.split_whitespace().count();
+            counts.push((path.to_owned(), words));
         }
-        // As `wc -w` counts them.
-        let words = repo.read(file)?.split_whitespace().count();
-        let problem = match ceilings.remove(path) {
-            None => format!(
-                "{path}: the document is {words} words, with no ceiling in {CEILINGS}: list it \
-                 there with a ceiling of {words}"
-            ),
-            Some(ceiling) if words > ceiling => format!(
-                "{path}: the document is {words} words, over its ceiling of {ceiling} in \
-                 {CEILINGS}: shorten it, moving each fact to the help or the code it describes, \
-                 or raise the ceiling in the same change"
-            ),
-            Some(ceiling) if words < ceiling => format!(
-                "{path}: the document is {words} words, under its ceiling of {ceiling} in \
-                 {CEILINGS}: lower the ceiling to {words}"
-            ),
-            Some(_) => continue,
-        };
-        problems.push(problem);
     }
-    for path in ceilings.keys() {
-        problems.push(format!(
-            "{CEILINGS}: `{path}` isn't a Markdown document of the repository: take it off the \
-             list"
-        ));
-    }
-    Ok(problems)
+    Ok(counts)
 }
 
 /// The problems of `ARCHITECTURE.md`'s links: one to code, or to a document that isn't there.
