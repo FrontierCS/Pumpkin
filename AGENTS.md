@@ -11,8 +11,10 @@
 - PREFER running the narrowest relevant test while iterating
 - ALWAYS find the nearest existing code and its tests before adding new code, and extend
   existing helpers instead of creating parallel ones
-- ALWAYS put new code where `ARCHITECTURE.md` places it, and update `ARCHITECTURE.md` in the
-  same pull request only when a crate or module boundary, or an invariant it states, changes
+- ALWAYS put new code where `ARCHITECTURE.md` places it
+- CHANGE `ARCHITECTURE.md` only when a crate is added, removed or renamed, a name it uses is
+  renamed, or a change breaks a boundary invariant it states. Otherwise put a new fact in the code
+  it describes (a type, a check, a test or a module doc), never in `ARCHITECTURE.md`
 - PREFER small, focused changes: one concern per pull request, nothing speculative
 - PREFER fixing a misplaced boundary over working around it: when keeping a rule needs a
   patch on top (duplicated configuration, a check that keeps copies in step, a ban on what a

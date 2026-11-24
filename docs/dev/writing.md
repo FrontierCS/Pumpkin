@@ -3,8 +3,11 @@
 The rules for Pumpkin's rustdoc, comments, commit messages and pull request texts.
 
 - WRITE a doc only where the name, the type and the signature leave a caller room to go wrong:
-  a unit, a precondition, who owns what, an invariant, a case left unspecified. A private item
-  has none by default, and a test has none: a `//` of a line or two, only for a why
+  a unit, a precondition, who owns what, an invariant, a case left unspecified. A private or
+  `pub(crate)` item, field or variant, and a test helper, have no doc and no `//` above them, but
+  for a unit, a precondition, an invariant or an owner that their type can't say, or a why. A doc
+  that clap or xflags shows as help stays. A test has no doc: a `//` of a line or two, only for a
+  why
 - WRITE a doc as the contract, in plain sentences: what the caller gets and must give, never how
   it works. Write `# Errors` and `# Panics` only for a condition the caller can act on
 - WRITE one idea per sentence, subject and verb first: split a sentence that chains clauses
@@ -12,6 +15,8 @@ The rules for Pumpkin's rustdoc, comments, commit messages and pull request text
   qualifier that changes nothing the reader does
 - KEEP a comment to the code it sits by: say the condition, never which callers, roles or
   features reach it, and never what another module does
+- USE the words the code uses: a term for a part of the code that no type, field or function
+  names is stale, so rename it in the change that renames the code
 - WRITE each rule once, at its home. Elsewhere, name it only where a reader would otherwise
   break it
 - WRITE a why as a `//` at the line it explains: the failure it prevents, where a number comes
@@ -23,7 +28,9 @@ The rules for Pumpkin's rustdoc, comments, commit messages and pull request text
   permalink at a full commit SHA)
 - WRITE a module doc for the module's model and what it leaves to others, never a tour of its
   items
-- TREAT help text (clap, xflags) and `schema::ir` docs as interface
+- TREAT help text (clap, xflags) and `schema::ir` docs as interface, and as the home of what a
+  command, a flag or a key does: a guide names it, links its help or its `schema::ir` doc, and
+  writes only how the parts fit
 - PREFER a type, a check or a test to prose
 - NEVER write history or hedges
 - CHANGE, in a commit about something else, only the docs and comments of the code it changes
@@ -32,7 +39,9 @@ The rules for Pumpkin's rustdoc, comments, commit messages and pull request text
   does: a bird's-eye view, the entry points, a code map giving each crate's purpose, key types
   and boundary invariants, and the cross-cutting concerns. Name code there (a crate, a module,
   a type, a source file), never link it, as a link to code goes stale; link another document,
-  and embed a figure
+  and embed a figure. An invariant there names a boundary between crates and why it matters,
+  never how the code holds it, since the document isn't kept in step with the code, as
+  [matklad's post](https://matklad.github.io/2021/02/06/ARCHITECTURE.md.html) advises
 - DRAW a figure only of what `ARCHITECTURE.md` states in prose and changes slowly, such as the
   machines of a run or how the crates depend on one another, and never more than the prose says:
   an SVG in `docs/figures/`, its text kept as text in the system's fonts, in the style the others
