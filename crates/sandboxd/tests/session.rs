@@ -355,7 +355,17 @@ fn check(meeting: Meeting, scenario: impl FnOnce(&mut Sandbox) -> Vec<String>, e
     let mut sandbox = Sandbox::start(meeting);
     let mut lines = scenario(&mut sandbox);
     lines.extend(sandbox.end());
-    expect.assert_eq(&lines.join("\n"));
+    // The protocol's version, which a change to the protocol moves, as a hello shows it.
+    let text = (lines.join("\n"))
+        .replace(
+            &format!("\"version\":{PROTOCOL_VERSION}"),
+            "\"version\":<version>",
+        )
+        .replace(
+            &format!("\"version\": Number({PROTOCOL_VERSION})"),
+            "\"version\": Number(<version>)",
+        );
+    expect.assert_eq(&text);
 }
 
 impl Sandbox {
@@ -830,7 +840,7 @@ fn hello_answers() {
         Meeting::Socket,
         |sandbox| {
             // A later version's refusal may carry fields that this one doesn't know.
-            let message = format!("a stand-in for sandbox protocol {}", PROTOCOL_VERSION + 1);
+            let message = "a stand-in for a later sandbox protocol";
             let refusal = json!({ "type": "refused", "message": message, "later": true });
             let (mut gateway, sandboxd, hello) = fake_gateway(sandbox, "refused.sock");
             frame::write(&mut gateway, &refusal, &[]).unwrap();
@@ -844,7 +854,7 @@ fn hello_answers() {
             ]
         },
         &expect![[r#"
-            its hello: {"version":3}; refused: exit status: 1: sandboxd: opening the session with the gateway at $ROOT/refused.sock failed: it refused the session: a stand-in for sandbox protocol 4
+            its hello: {"version":<version>}; refused: exit status: 1: sandboxd: opening the session with the gateway at $ROOT/refused.sock failed: it refused the session: a stand-in for a later sandbox protocol
             unanswered: exit status: 1: sandboxd: opening the session with the gateway at $ROOT/unanswered.sock failed: it closed the connection before it answered the hello: expected it to accept or refuse the session
             then Ended { reason: "the owner dropped the session" }
             sandboxd: exit status: 0
@@ -906,18 +916,18 @@ fn listening() {
         },
         &expect![[r#"
             a second peer, once the session is open: Err(ConnectionRefused)
-            Accepted { grant: Some(RegistrationGrant(..)) }: its hello Some(Object {"version": Number(3)}), then closed
-            Accepted { grant: None }: its hello Some(Object {"version": Number(3)}), then closed
-            Refused { message: "why 0" }: its hello Some(Object {"version": Number(3)}), then closed
-            Refused { message: "why 1" }: its hello Some(Object {"version": Number(3)}), then closed
-            Refused { message: "why 2" }: its hello Some(Object {"version": Number(3)}), then closed
-            Refused { message: "why 3" }: its hello Some(Object {"version": Number(3)}), then closed
-            Refused { message: "why 4" }: its hello Some(Object {"version": Number(3)}), then closed
-            Refused { message: "why 5" }: its hello Some(Object {"version": Number(3)}), then closed
-            Refused { message: "why 6" }: its hello Some(Object {"version": Number(3)}), then closed
-            Refused { message: "why 7" }: its hello Some(Object {"version": Number(3)}), then closed
-            Refused { message: "why 8" }: its hello Some(Object {"version": Number(3)}), then closed
-            Accepted { grant: Some(RegistrationGrant(..)) }: its hello Some(Object {"version": Number(3)}), then served: {"message":"/nonexistent: No such file or directory (os error 2)","stream":1,"type":"failed"}
+            Accepted { grant: Some(RegistrationGrant(..)) }: its hello Some(Object {"version": Number(<version>)}), then closed
+            Accepted { grant: None }: its hello Some(Object {"version": Number(<version>)}), then closed
+            Refused { message: "why 0" }: its hello Some(Object {"version": Number(<version>)}), then closed
+            Refused { message: "why 1" }: its hello Some(Object {"version": Number(<version>)}), then closed
+            Refused { message: "why 2" }: its hello Some(Object {"version": Number(<version>)}), then closed
+            Refused { message: "why 3" }: its hello Some(Object {"version": Number(<version>)}), then closed
+            Refused { message: "why 4" }: its hello Some(Object {"version": Number(<version>)}), then closed
+            Refused { message: "why 5" }: its hello Some(Object {"version": Number(<version>)}), then closed
+            Refused { message: "why 6" }: its hello Some(Object {"version": Number(<version>)}), then closed
+            Refused { message: "why 7" }: its hello Some(Object {"version": Number(<version>)}), then closed
+            Refused { message: "why 8" }: its hello Some(Object {"version": Number(<version>)}), then closed
+            Accepted { grant: Some(RegistrationGrant(..)) }: its hello Some(Object {"version": Number(<version>)}), then served: {"message":"/nonexistent: No such file or directory (os error 2)","stream":1,"type":"failed"}
             then, its session ended: exit status: 0: sandboxd: turned away the peer at $PEER0: it presented another registration grant: expected the sandbox's
             sandboxd: turned away the peer at $PEER1: it presented no registration grant: expected the sandbox's
             sandboxd: turned away the peer at $PEER2: it refused the session: why 0

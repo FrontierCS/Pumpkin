@@ -172,7 +172,7 @@ fn check_apis(entries: &[(Api, &[&str])], cases: &[(&str, Request)], expect: &Ex
             forwarded.then(|| {
                 let (line, headers, body) = received.recv_timeout(HUNG).unwrap();
                 let dropped = dropped.0.take();
-                let head = format!("{line} with {headers:?}");
+                let head = received_head(&line, headers);
                 let (head, body) = shown_received(head, &body, sent, &mut first);
                 format!("went upstream, as {head} and {body}, leaving {dropped:?}")
             })
@@ -186,6 +186,17 @@ fn check_apis(entries: &[(Api, &[&str])], cases: &[(&str, Request)], expect: &Ex
         .collect();
     expect.assert_eq(&lines.join("\n").replace(&address, "<stand-in>"));
     drop(session);
+}
+
+/// The request line and the headers that the stand-in received, as a snapshot shows them, with
+/// `ureq`'s version masked, which a dependency's update moves.
+fn received_head(line: &str, mut headers: Vec<(String, String)>) -> String {
+    for (_, value) in &mut headers {
+        if value.starts_with("ureq/") {
+            "ureq/<version>".clone_into(value);
+        }
+    }
+    format!("{line} with {headers:?}")
 }
 
 /// The head and the body of a request that the stand-in received, as a snapshot shows them: the
@@ -667,7 +678,7 @@ fn closure() {
         ],
         &expect![[r#"
             the harness's: went upstream, as POST /v1/responses HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "552"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "text/event-stream"), ("originator", "codex_exec"), ("user-agent", "codex_exec/0.167.0"), ("session-id", "s-1"), ("thread-id", "t-1"), ("x-codex-beta-features", "remote_compaction_v2"), ("x-codex-window-id", "w-1"), ("x-codex-turn-metadata", "{\"turn_id\":\"u-1\"}"), ("x-openai-internal-codex-responses-lite", "true"), ("authorization", "Bearer sk-test-0123")] and the body as sent, leaving ["x-client-request-id", "x-codex-routing-hint"]
-            stored, then not: went upstream, as POST /v1/responses HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "44"), ("user-agent", "ureq/3.5.1"), ("accept", "*/*"), ("host", "<stand-in>"), ("authorization", "Bearer sk-test-0123")] and the body {"input":[],"model":"m-small","store":false}, leaving []
+            stored, then not: went upstream, as POST /v1/responses HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "44"), ("user-agent", "ureq/<version>"), ("accept", "*/*"), ("host", "<stand-in>"), ("authorization", "Bearer sk-test-0123")] and the body {"input":[],"model":"m-small","store":false}, leaving []
             not JSON: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the body is not a JSON object (EOF while parsing an object at line 1 column 1): send one","param":null,"type":"invalid_request_error"}}
             no store: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"`store` is not false: set it to false, since the route keeps nothing on the provider's side","param":null,"type":"invalid_request_error"}}
             stored: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"`store` is not false: set it to false, since the route keeps nothing on the provider's side","param":null,"type":"invalid_request_error"}}

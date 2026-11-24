@@ -69,7 +69,8 @@ fn check(scratch: &Scratch, text: &str, shown: &[(&str, &str)], expect: &Expect)
     for (value, name) in shown {
         text = text.replace(value, name);
     }
-    // The uptime and the disk that the controller's health reports vary.
+    // The uptime and the disk that the controller's health reports vary, as does the size of the
+    // fixture's files, which an upload shows in KiB, unlike a test's own file or a remainder.
     let lines = text.lines().map(|line| match line.split_once("`: up ") {
         Some((before, after)) => {
             let rest = after.split_once(',').map_or("", |(_, rest)| rest);
@@ -81,7 +82,10 @@ fn check(scratch: &Scratch, text: &str, shown: &[(&str, &str)], expect: &Expect)
                 });
             format!("{before}`: up <t>,{rest}{disk}")
         }
-        None => line.to_owned(),
+        None => match (line.strip_suffix(" KiB")).and_then(|rest| rest.rsplit_once(": sending ")) {
+            Some((before, _)) => format!("{before}: sending <n> KiB"),
+            None => line.to_owned(),
+        },
     });
     expect.assert_eq(&lines.collect::<Vec<String>>().join("\n"));
 }
@@ -525,7 +529,7 @@ fn keys_on_standard_input() {
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks all 6 of the task's files: sending 2.9 KiB
+            pumpkin: controller `alice` lacks all 6 of the task's files: sending <n> KiB
             pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
             pumpkin: to follow it: pumpkin wait --controller alice <id>
             pumpkin: to stop it: pumpkin cancel --controller alice <id>
@@ -1119,13 +1123,13 @@ fn send_refused_partial() {
         &expect![[r#"
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(1)
-            pumpkin: controller `alice` lacks all 7 of the task's files: sending 2.9 KiB
+            pumpkin: controller `alice` lacks all 7 of the task's files: sending <n> KiB
             pumpkin: <scratch>/repo/stand-in/notes changed since it was hashed: send the task again
             the calls: serve
             the store holds it: false; its partial: false
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
-            pumpkin: controller `alice` lacks all 7 of the task's files: sending 2.9 KiB
+            pumpkin: controller `alice` lacks all 7 of the task's files: sending <n> KiB
             the calls: serve"#]],
     );
 }
@@ -1356,7 +1360,7 @@ fn sends_from_a_repository_with_a_native_name() {
         &expect![[r#"
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
-            pumpkin: controller `alice` lacks all 6 of the task's files: sending 2.9 KiB"#]],
+            pumpkin: controller `alice` lacks all 6 of the task's files: sending <n> KiB"#]],
     );
 }
 
@@ -1443,7 +1447,7 @@ fn sends_what_the_task_reaches_whatever_git_ignores() {
         &expect![[r#"
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
-            pumpkin: controller `alice` lacks all 7 of the task's files: sending 3.0 KiB
+            pumpkin: controller `alice` lacks all 7 of the task's files: sending <n> KiB
             sent: PUMPKIN.star lib/train.star stand-in/Dockerfile stand-in/final.star stand-in/made stand-in/submit.star stand-in/task.star"#]],
     );
 }
@@ -1470,12 +1474,12 @@ fn send_changed_file() {
         &expect![[r#"
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(1)
-            pumpkin: controller `alice` lacks all 7 of the task's files: sending 2.9 KiB
+            pumpkin: controller `alice` lacks all 7 of the task's files: sending <n> KiB
             pumpkin: <scratch>/repo/stand-in/notes changed since the task was hashed: send the task again
             the calls: serve
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
-            pumpkin: controller `alice` lacks all 7 of the task's files: sending 2.9 KiB
+            pumpkin: controller `alice` lacks all 7 of the task's files: sending <n> KiB
             the calls: serve"#]],
     );
 }
@@ -2526,7 +2530,7 @@ fn members_share_uploads() {
         &expect![[r#"
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
-            pumpkin: controller `alice` lacks all 6 of the task's files: sending 2.9 KiB
+            pumpkin: controller `alice` lacks all 6 of the task's files: sending <n> KiB
             $ HOME=<scratch>/client-bob PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
             pumpkin: controller `alice` holds all 6 of the task's files
@@ -3338,6 +3342,14 @@ fn viewed(scratch: &Scratch) -> ([(String, String); 2], File, [&'static str; 2])
     (client, driver, [ended, live])
 }
 
+// The length of the ended run's log, which `viewed` pads, in the form that `check` takes to mask.
+fn log_bytes(scratch: &Scratch, ended: &str) -> String {
+    let log = scratch
+        .0
+        .join(format!("home/.pumpkin/runs/{ended}/log.jsonl"));
+    fs::metadata(log).unwrap().len().to_string()
+}
+
 fn got(served: &Served, path: &str, fields: &[&str]) -> String {
     let (status, body) = served.ask("GET", path, &[]);
     let body: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -3378,20 +3390,24 @@ fn views_the_controllers_runs_over_a_reopened_connection() {
     check(
         &scratch,
         &steps.join("\n"),
-        &[(ended, "<ended>"), (live, "<live>")],
+        &[
+            (ended, "<ended>"),
+            (live, "<live>"),
+            (&log_bytes(&scratch, ended), "<log bytes>"),
+        ],
         &expect![[r#"
             pumpkin: serving controller `alice`'s runs to this machine alone, until stopped, at
                 http://127.0.0.1:<port>/?t=<token>
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 200 OK
-            next: 310332, end: 310332
+            next: <log bytes>, end: <log bytes>
             GET /api/runs
             HTTP/1.1 200 OK
             "<live>" "work" null
             "<ended>" "finished" "alice"
             GET /api/runs/<ended>
             HTTP/1.1 200 OK
-            state: "finished", end: 310332"#]],
+            state: "finished", end: <log bytes>"#]],
     );
 }
 
@@ -3415,14 +3431,17 @@ fn view_answers_502_once_the_reopened_connection_is_cut_too_then_recovers() {
     check(
         &scratch,
         &steps.join("\n"),
-        &[(ended, "<ended>")],
+        &[
+            (ended, "<ended>"),
+            (&log_bytes(&scratch, ended), "<log bytes>"),
+        ],
         &expect![[r#"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 502 Bad Gateway
             "controller `alice` didn't answer: ended within the answer's body"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 200 OK
-            next: 310332, end: 310332"#]],
+            next: <log bytes>, end: <log bytes>"#]],
     );
 }
 
@@ -3501,14 +3520,17 @@ fn view_asks_ec2_once_no_link_opens() {
     check(
         &scratch,
         &steps.join("\n"),
-        &[(ended, "<ended>")],
+        &[
+            (ended, "<ended>"),
+            (&log_bytes(&scratch, ended), "<log bytes>"),
+        ],
         &expect![[r#"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 502 Bad Gateway
             "controller `alice` didn't answer: ended before its hello; asking EC2 whether it runs failed too: `aws --version` failed with exit status: 1 and wrote nothing to standard error: expected it to exit with 0"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 200 OK
-            end: 310332"#]],
+            end: <log bytes>"#]],
     );
 }
 
