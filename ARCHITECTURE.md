@@ -28,7 +28,7 @@ runtime carries out those decisions on the providers and keeps the run's record.
 sends each model request that it admits to the model provider, with the provider's key.
 
 A run is one process, the driver, on one machine: the operator's own, or a team's controller, an
-EC2 instance that runs the runs a machine sends it.
+EC2 instance or a container on a Docker host, which runs the runs a machine sends it.
 
 ![The programs and machines of a run: the operator's pumpkin starts the driver on the operator's machine or on the controller; the driver's parts, the sandboxes that the providers create and the model provider that the route reaches.](docs/figures/run-machines.svg)
 
@@ -36,10 +36,10 @@ EC2 instance that runs the runs a machine sends it.
 
 `pumpkin` (`crates/pumpkin`) is the operator's command line, and its `main.rs` dispatches the
 commands. `run` builds a task's images and starts its driver. Read its path through the driver
-first. A machine whose configuration names `[controller]` sends each run over `ssh` to the same
-executable there, whose `controller serve` starts the run as a job in a systemd unit of its own.
-Under the name `pumpkin-admin`, a hard link, the executable installs and checks the controller's
-host.
+first. A machine whose configuration names a controller in `[controllers.<name>]` sends each run
+over `ssh` to the same executable there, whose `controller serve` starts the run as a job in a
+systemd unit of its own. Under the name `pumpkin-admin`, a hard link, the executable installs and
+checks the controller's host.
 
 `sandboxd` (`crates/sandboxd`) is the supervisor in every sandbox, a static binary. Under the name
 `sandboxctl`, it is the shim through which code in the sandbox makes ops. `ec2-boot`
@@ -139,11 +139,11 @@ API and those its entry lists.
 
 ### `crates/provider`, `crates/engine`, `crates/aws`
 
-`provider` is the interface that every provider implements. `Provider` reserves what a run's roles
-need, publishes their images, says how the sandboxes meet the gateway (`Meeting`), and creates
-them. `Sweep`, its part that lists and deletes a run's sandboxes, is all a reap needs. `engine` is
-the operator's Docker engine, which builds every image, whichever provider runs it. `aws` is AWS's
-command line as Pumpkin runs it (`Cli`).
+`provider` is the interface that every provider implements. `Provider` says whether a run's roles
+could ever fit (`Provider::fits`), reserves what they need, publishes their images, says how the
+sandboxes meet the gateway (`Meeting`), and creates them. `Sweep`, its part that lists and deletes
+a run's sandboxes, is all a reap needs. `engine` is the operator's Docker engine, which builds
+every image, whichever provider runs it. `aws` is AWS's command line as Pumpkin runs it (`Cli`).
 
 **Architecture Invariant:** runs that share a provider never reach each other's sandboxes. Every
 sandbox carries its run's `RunTag`, and a provider lists and deletes only the sandboxes that carry
@@ -200,14 +200,20 @@ and says of a run what `ls` says.
 names its member, and `serve` acts for that member. This prevents accidents, not members: each
 member's build runs as the controller's one user.
 
-### `crates/test-support`, `xtask`, `dist`, `deploy/aws`, `examples`
+### `crates/test-support`, `xtask`, `dist`, `deploy`, `examples`
 
 `test-support` holds what the tests of several crates share, such as the conformance suite of the
 `Provider` trait. Only tests use it. `xtask` holds the contributor tasks: `ci` runs the checks
 every change passes, and `live` those that reach a real environment. `dist` holds the files that a
 release ships as they are, such as `./pumpkin`, a task repository's launcher. `deploy/aws` is the
 Terraform module that makes a team's Pumpkin on AWS, as [its README](deploy/aws/README.md) says.
-`examples` holds tasks.
+`deploy/docker` makes a team's controller in a privileged container on a Docker host, as
+[its README](deploy/docker/README.md) says: systemd, `sshd` and a Docker engine of the container's
+own. Both install a controller by `deploy/controller`'s one script. `examples` holds tasks.
+
+**Architecture Invariant:** a Docker controller's jobs reach the engine inside its container alone,
+never the host's, so the paths that the Docker provider mounts, its ledger of CPUs and the prune of
+images mean there what they mean on an EC2 controller.
 
 ## Cross-cutting concerns
 

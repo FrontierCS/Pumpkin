@@ -1,60 +1,94 @@
 #cloud-config
-# The controller's first boot, on Ubuntu 24.04 LTS. It installs what the jobs need, at the
-# versions that controller.tf names. Then it runs the `pumpkin-admin install` of the release that
-# `pumpkin_release` pins. That install sets up what Pumpkin relies on there: its user, its units,
-# `sshd`'s settings and the members' keys.
+# The controller's first boot, on Ubuntu 24.04 LTS. It mounts the data volume and makes the host
+# key there. It installs what every controller installs, by deploy/controller's install.sh, and
+# what the jobs need beside it on EC2, at the versions that controller.tf names. Then it runs the
+# `pumpkin-admin install` of the release that `pumpkin_release` pins. That install sets up what
+# Pumpkin relies on there: its user, its units, `sshd`'s settings and the members' keys.
 
-# Over HTTPS.
-apt:
-  primary:
-    - arches: [default]
-      uri: ${ubuntu_snapshot}
-  security:
-    - arches: [default]
-      uri: ${ubuntu_snapshot}
-  sources:
-    docker:
-      source: "deb [arch=amd64 signed-by=$KEY_FILE] https://download.docker.com/linux/ubuntu noble stable"
-      key: |
-        ${indent(8, docker_key)}
+# The data volume goes under what the controller keeps, and the host key is made there if it is
+# missing, as GitLab's image makes its host keys, before `sshd` first starts, so that `sshd` never
+# shows another key. cloud-init runs bootcmd at each boot, before `sysinit.target`, which `sshd`'s
+# socket waits for. Once fstab names the volume, systemd mounts it, and bootcmd does nothing:
+# https://gitlab.com/gitlab-org/omnibus-gitlab/-/blob/9b9a2e883910b2f996fd23f4845435e0cdc71550/docker/assets/wrapper#L125-L140
+# https://github.com/canonical/cloud-init/blob/905d10891051496bd196798b2a8e0d77f161db74/cloudinit/config/cc_bootcmd.py#L19
+# https://github.com/canonical/cloud-init/blob/905d10891051496bd196798b2a8e0d77f161db74/systemd/cloud-init.service.tmpl#L26-L30
+# https://github.com/systemd/systemd/blob/db11bab38ccf1ed257f310d29070843d4c58ea01/man/systemd.socket.xml#L146-L148
+# Terraform attaches the volume once the instance runs, and its AWS provider gives the attachment 5
+# minutes. udev names the volume by its NVMe model, serial and namespace. Its serial is its ID
+# without the dash:
+# https://github.com/hashicorp/terraform-provider-aws/blob/bc18835a79b092336914f2105a03a200324ea6a9/internal/service/ec2/ebs_volume_attachment.go#L45-L48
+# https://github.com/systemd/systemd/blob/db11bab38ccf1ed257f310d29070843d4c58ea01/rules.d/60-persistent-storage.rules.in#L52-L53
+# https://docs.aws.amazon.com/ebs/latest/userguide/identify-nvme-ebs-device.html
+# The volume gets a filesystem only where `blkid` finds no signature, as its exit status 2 says,
+# and its first MiB, where a partition table or a superblock would be, reads as zeros, as a new
+# volume's does. Any other answer stops the boot. No blocks are kept for root, as GitLab's toolkit
+# formats a data disk. fstab names the volume by its UUID, without `nofail`, so that a boot that
+# lacks it stops before Docker or `sshd` start on the root volume. Each later boot grows the
+# filesystem to a volume that an apply grew, as cloud-init grows the root's:
+# https://gitlab.com/gitlab-org/gitlab-environment-toolkit/-/blob/fc323545a6db17046ccd940d38c50fb68581f93c/ansible/roles/common/tasks/data_disks.yml#L7-L57
+# https://gitlab.com/gitlab-org/gitlab-environment-toolkit/-/blob/fc323545a6db17046ccd940d38c50fb68581f93c/ansible/roles/common/defaults/main.yml#L23
+# https://github.com/systemd/systemd/blob/db11bab38ccf1ed257f310d29070843d4c58ea01/man/systemd.mount.xml#L373-L385
+# https://github.com/canonical/cloud-init/blob/905d10891051496bd196798b2a8e0d77f161db74/cloudinit/config/cc_resizefs.py#L44
+bootcmd:
+  - |
+    set -o errexit
+    findmnt --fstab --mountpoint /srv/pumpkin > /dev/null && exit 0
+    volume=/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${replace(volume_id, "-", "")}_1
+    udevadm wait --timeout=300 "$volume"
+    blkid --probe "$volume" || case $? in
+    2) cmp --quiet --bytes=1048576 "$volume" /dev/zero; mkfs.ext4 -q -m 0 "$volume" ;;
+    *) exit 1 ;;
+    esac
+    mkdir --parents /srv/pumpkin /var/lib/docker /var/lib/containerd /home/pumpkin /etc/ssh/keys
+    mount "$volume" /srv/pumpkin
+    mkdir --parents /srv/pumpkin/docker /srv/pumpkin/containerd /srv/pumpkin/home /srv/pumpkin/host-key
+    uuid=$(blkid --probe --match-tag UUID --output value "$volume")
+    cat >> /etc/fstab <<FSTAB
+    UUID=$uuid /srv/pumpkin ext4 defaults,x-systemd.growfs 0 2
+    /srv/pumpkin/docker /var/lib/docker none bind 0 0
+    /srv/pumpkin/containerd /var/lib/containerd none bind 0 0
+    /srv/pumpkin/home /home/pumpkin none bind 0 0
+    /srv/pumpkin/host-key /etc/ssh/keys none bind 0 0
+    FSTAB
+    mount --all
+    key=/etc/ssh/keys/ssh_host_ed25519_key
+    [ -e $key ] || ssh-keygen -q -t ed25519 -N "" -f $key
+    echo "HostKey $key" > /etc/ssh/sshd_config.d/05-pumpkin-host-key.conf
 
-package_update: true
-packages:
-  - [docker-ce, "${docker_version}"]
-  - [docker-ce-cli, "${docker_version}"]
-  - [containerd.io, "${containerd_version}"]
-  - [docker-buildx-plugin, "${buildx_version}"]
-  - unzip
-
+# Compressed, as EC2 takes at most 16 KiB of user data:
+# https://github.com/canonical/cloud-init/blob/905d10891051496bd196798b2a8e0d77f161db74/cloudinit/config/cc_write_files.py#L139
 write_files:
-  # Builds find images by their manifests' digests, which only the containerd image store keeps.
-  - path: /etc/docker/daemon.json
-    content: |
-      {"features": {"containerd-snapshotter": true}}
+  - path: /usr/local/lib/pumpkin-controller/install.sh
+    permissions: "0755"
+    encoding: gz+b64
+    content: ${install_script}
+  - path: /usr/local/lib/pumpkin-controller/docker.asc
+    permissions: "0644"
+    encoding: gz+b64
+    content: ${docker_key}
 
 # cloud-init runs these as one script, and runs it once. The script stops at the first failure and
 # then powers the controller off in 30 minutes, so a controller whose first boot failed costs no
-# more than its volume. Each download is pinned by a SHA-256. AWS CLI v2's is that of the archive
-# whose signature AWS verifies (key FB5D B77F D5C1 18B8 0511 ADA8 A631 0ACC 4672 475C). Pumpkin's
-# is the third word of the `.pumpkinversion` line, after the tag and the commit. uv's is the one
-# that its release publishes beside it.
+# more than its volumes. A bootcmd that failed is such a failure, as it left the data volume
+# unmounted. Each download is pinned by a SHA-256. AWS CLI v2's is that of the archive whose
+# signature AWS verifies (key FB5D B77F D5C1 18B8 0511 ADA8 A631 0ACC 4672 475C). Pumpkin's is the
+# third word of the `.pumpkinversion` line, after the tag and the commit. uv's is the one that its
+# release publishes beside it.
 runcmd:
   - |
     set -o errexit
     trap '[ $? -eq 0 ] || shutdown --poweroff +30 "the first boot of the controller failed"' EXIT
+    mountpoint --quiet /srv/pumpkin
+    /usr/local/lib/pumpkin-controller/install.sh sources
+    /usr/local/lib/pumpkin-controller/install.sh docker unzip
     cd "$(mktemp --directory)"
     curl --fail --silent --show-error --location --proto '=https' --output awscli.zip \
         https://awscli.amazonaws.com/awscli-exe-linux-x86_64-${aws_cli_version}.zip
     echo '${aws_cli_sha256}  awscli.zip' | sha256sum --check --strict
     unzip -q awscli.zip
     ./aws/install
-    set -- ${pumpkin_release}
-    curl --fail --silent --show-error --location --proto '=https' --output pumpkin.tar.xz \
-        "https://github.com/FrontierCS/Pumpkin/releases/download/$1/pumpkin-$1-x86_64-unknown-linux-musl.tar.xz"
-    echo "$3  pumpkin.tar.xz" | sha256sum --check --strict
-    mkdir pumpkin
-    tar --extract --xz --file=pumpkin.tar.xz --directory=pumpkin
-    pumpkin/bin/pumpkin-admin install --settings ${settings_arn}
+    /usr/local/lib/pumpkin-controller/install.sh release '${pumpkin_release}' pumpkin
+    pumpkin/bin/pumpkin-admin install ec2 --settings ${settings_arn}
     curl --fail --silent --show-error --location --proto '=https' --output uv.tar.gz \
         https://github.com/astral-sh/uv/releases/download/${uv_version}/uv-x86_64-unknown-linux-gnu.tar.gz
     echo '${uv_sha256}  uv.tar.gz' | sha256sum --check --strict

@@ -391,8 +391,8 @@ impl Record {
     }
 
     /// The names of the directories in `runs` that may hold a record, in order of id, oldest
-    /// first. Leaves out the names that start with `.`, each a record in the making or being
-    /// removed.
+    /// first. Leaves out each name that starts with `.`, a record in the making or being removed,
+    /// or with no digit, as an id of [`new_id`]'s does.
     pub fn names(runs: &Path) -> Result<Vec<String>, String> {
         names(runs)
     }
@@ -833,7 +833,7 @@ fn names(runs: &Path) -> Result<Vec<String>, String> {
         let Ok(name) = entry.file_name().into_string() else {
             continue;
         };
-        if is_dir && !name.starts_with('.') {
+        if is_dir && name.starts_with(|c: char| c.is_ascii_digit()) {
             names.push(name);
         }
     }

@@ -1,7 +1,9 @@
 //! The jobs of a controller: what `pumpkin controller job`, which the unit of each job runs, does
-//! on the controller, and the prune that keeps the controller's volume from filling.
+//! on the controller, and the prune that keeps the controller's volume from filling. That volume
+//! is the filesystem of the user's home, which holds the engine's images and build cache too, as
+//! `deploy/aws` and `deploy/docker` lay them out.
 //!
-//! They find the controller's settings through the host file (`crate::host::settings`). Everything
+//! They find the controller's settings through the host file (`crate::host::target`). Everything
 //! else they read and write lies below the controller user's home:
 //!
 //! - the store of the files that clients sent, each named by its SHA-256, as `crate::manifest`
@@ -31,7 +33,6 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 use std::{fs, io, thread};
 
-use aws::{Cli, ParameterArn};
 use engine::Engine;
 use engine::prune::{Disk, HIGH_PERCENT, Held, REFUSED_PERCENT};
 use provider::RunTag;
@@ -49,18 +50,18 @@ use crate::{cli, config, say, star};
 mod boot;
 mod installs;
 mod member;
-mod parameter;
 mod records;
 mod release;
 mod settings;
+mod source;
 mod start;
 mod store;
 
 pub(crate) use boot::{BOOT_LOG, BOOT_UNIT, boot, state as boot_state};
 pub(crate) use member::{member, run_member, write_member};
-pub(crate) use parameter::parameter_value;
 pub(crate) use records::mark_copied;
 pub(crate) use settings::{Deployment, Taken, deployment, tables as settings_tables, take};
+pub(crate) use source::{Source, parameter_value};
 pub(crate) use start::start;
 
 pub(crate) const JOBS: &str = "jobs";
@@ -101,10 +102,6 @@ const BUILDING: &str = "building";
 // `ls` lists it as waiting.
 pub(crate) const WAITING: &str = "waiting";
 
-// The path on the controller's one volume, which holds the engine's images and build cache, the
-// store, the trees and the records, as `deploy/aws` makes it.
-pub(crate) const VOLUME: &str = "/";
-
 // The bound of `df`, which reads only the volume's counters.
 const DF_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -130,9 +127,8 @@ pub(crate) fn job(job: cli::Job) -> Result<Exit, String> {
     fs::create_dir_all(&dir).context(dir.display())?;
     // Record that the unit ran even if its start receipt could not be written.
     point(&dir.join(OWN), &dir.join(format!(".{OWN}")))?;
-    let settings = crate::host::settings()?;
-    let region = settings.region().clone();
-    let assembled = assemble(&Cli::connect(region.clone())?, &settings, &sent)?;
+    let settings = crate::host::target()?.settings();
+    let (assembled, controller) = assemble(&settings, &sent)?;
     let path = dir.join("pumpkin.toml");
     fs::write(&path, assembled).context(path.display())?;
     let Some(config) = path.to_str().map(str::to_owned) else {
@@ -150,9 +146,11 @@ pub(crate) fn job(job: cli::Job) -> Result<Exit, String> {
     if let Err(error) = prune(&home, &path, &jobs) {
         say(format_args!("the prune at the job's start failed: {error}"));
     }
-    build_first(&id, &home, &path, &jobs, &run.entry, &run.args.0)?;
+    let task = (&run.entry, &run.args.0);
+    build_first(&id, &home, &path, &jobs, task, &controller)?;
     let run = cli::Run {
         config: Some(config),
+        controller: Some(controller),
         wait: cli::Waiting(None),
         ..run
     };
@@ -313,27 +311,29 @@ fn point(link: &Path, staged: &Path) -> Result<(), String> {
     fs::rename(staged, link).context(link.display())
 }
 
-/// A job's configuration, as TOML. It holds the controller's settings, which `cli` reads from SSM
-/// parameter `settings`, as [`configuration`] makes them one, with the gateway at the controller's
-/// private IPv4 address. It holds each Modal provider as the client sent it, with `dials_from` at
-/// the controller's public IPv4 address, and `config`, the client's Modal file in `sent`, if any.
-/// It holds the client's `[upstreams]`, each `key_file` its file in `sent`.
+/// A job's configuration, as TOML. It holds the controller's settings, read from `settings`, as
+/// [`configuration`] makes them one, with the gateway at the controller's private IPv4 address if
+/// they name an EC2 provider. It holds each Modal provider as the client sent it, with
+/// `dials_from` at the controller's public IPv4 address, and `config`, the client's Modal file in
+/// `sent`, if any. It holds the client's `[upstreams]`, each `key_file` its file in `sent`.
 ///
 /// Fails if the settings drain.
-fn assemble(cli: &Cli, settings: &ParameterArn, sent: &Path) -> Result<String, String> {
-    let value = parameter_value(cli, &JOB.settings, settings.as_str())?;
-    let named = format!("the controller's settings, SSM parameter `{settings}`,");
+fn assemble(settings: &Source, sent: &Path) -> Result<(String, crate::controller::Name), String> {
+    let value = settings.read(&JOB.settings)?;
+    let named = format!("the controller's settings, {settings},");
     let mut tables = settings::tables(&value, &named)?;
-    // The job reads none of the host's `[deployment]`.
     let Taken {
         version: envelope,
-        deployment: _,
         draining,
     } = settings::take(&mut tables, &named)?;
     if draining {
         return Err(settings::drained(&named));
     }
-    let (private, public) = addresses()?;
+    // Only an EC2 instance has its metadata service, so a controller elsewhere, whose settings
+    // name no EC2 provider, and whose client sends no Modal provider, asks for no address.
+    let private = names_kind(&tables, "ec2")
+        .then(|| address("local-ipv4"))
+        .transpose()?;
     let config = sent.join(SENT_CONFIG);
     let text = match fs::read_to_string(&config) {
         Ok(text) => text,
@@ -341,6 +341,7 @@ fn assemble(cli: &Cli, settings: &ParameterArn, sent: &Path) -> Result<String, S
         Err(error) => return Err(format!("{}: {error}", config.display())),
     };
     let config::Sent {
+        controller,
         mut upstreams,
         modal,
     } = toml::from_str(&text).map_err(|error| {
@@ -360,6 +361,7 @@ fn assemble(cli: &Cli, settings: &ParameterArn, sent: &Path) -> Result<String, S
         .context(modal_config.display())?
         .then(|| modal_config.to_string_lossy().into_owned());
     if let Some(modal) = &mut modal {
+        let public = address("public-ipv4")?;
         modal.insert("dials_from".to_owned(), public.to_string().into());
         if let Some(config) = modal_config {
             modal.insert("config".to_owned(), config.into());
@@ -367,13 +369,14 @@ fn assemble(cli: &Cli, settings: &ParameterArn, sent: &Path) -> Result<String, S
     }
     upstreams.keys_in(sent);
     let upstreams = toml::Value::try_from(upstreams).map_err(|error| written(&error))?;
-    configuration(tables, &named, envelope, private, modal.as_ref(), upstreams)
+    let assembled = configuration(tables, &named, envelope, private, modal.as_ref(), upstreams)?;
+    Ok((assembled, controller))
 }
 
 /// A job's configuration, as TOML. It holds `tables`, the controller's settings named as `named`,
 /// of envelope `envelope`, as [`settings::take`] takes them. `[gateway] private` is set to
-/// `private`, port 0. Each Modal provider is set as `modal` says ([`take_modal`]). `upstreams` are
-/// the client's.
+/// `private`, port 0, if given. Each Modal provider is set as `modal` says ([`take_modal`]).
+/// `upstreams` are the client's.
 ///
 /// Fails if the settings set `gateway` or `upstreams`, which each job sets. Fails too if the result
 /// isn't a configuration.
@@ -381,7 +384,7 @@ pub(crate) fn configuration(
     mut tables: toml::Table,
     named: &str,
     envelope: settings::Version,
-    private: Ipv4Addr,
+    private: Option<Ipv4Addr>,
     modal: Option<&toml::Table>,
     upstreams: toml::Value,
 ) -> Result<String, String> {
@@ -392,8 +395,11 @@ pub(crate) fn configuration(
             ));
         }
     }
-    let gateway = toml::Table::from_iter([("private".to_owned(), format!("{private}:0").into())]);
-    tables.insert("gateway".to_owned(), gateway.into());
+    if let Some(private) = private {
+        let gateway =
+            toml::Table::from_iter([("private".to_owned(), format!("{private}:0").into())]);
+        tables.insert("gateway".to_owned(), gateway.into());
+    }
     take_modal(&mut tables, modal, named)?;
     tables.insert("upstreams".to_owned(), upstreams);
     settings::remove_unknown(&mut tables, named, envelope)?;
@@ -430,7 +436,7 @@ fn take_modal(
         .collect();
     if modal.is_empty() {
         return Err(format!(
-            "{named} name no Modal provider, whose `images` the client's `[controller.modal]` \
+            "{named} name no Modal provider, whose `images` the client's controller's `modal` \
              needs: list the profile's workspace in deploy/aws's `modal_workspaces`, and apply it"
         ));
     }
@@ -444,10 +450,16 @@ fn take_modal(
     Ok(())
 }
 
-/// This instance's private and public IPv4 addresses, `local-ipv4` and `public-ipv4`, as its
-/// metadata service serves them under an `IMDSv2` token, through `curl`.
-fn addresses() -> Result<(Ipv4Addr, Ipv4Addr), String> {
-    // Long enough for the two reads that follow.
+/// Whether `tables`, a controller's settings, name a provider of kind `kind`.
+pub(crate) fn names_kind(tables: &toml::Table, kind: &str) -> bool {
+    let providers = tables.get("providers").and_then(toml::Value::as_table);
+    (providers.into_iter().flatten()).any(|(_, kinds)| kinds.get(kind).is_some())
+}
+
+/// This instance's IPv4 address `item`, `local-ipv4` or `public-ipv4`, as its metadata service
+/// serves it under an `IMDSv2` token, through `curl`.
+fn address(item: &str) -> Result<Ipv4Addr, String> {
+    // Long enough for the read that follows.
     let ttl = "X-aws-ec2-metadata-token-ttl-seconds: 60";
     let token = curl(&[
         "--request",
@@ -457,17 +469,14 @@ fn addresses() -> Result<(Ipv4Addr, Ipv4Addr), String> {
         &format!("{IMDS}/api/token"),
     ])?;
     let token = format!("X-aws-ec2-metadata-token: {token}");
-    let address = |item: &str| {
-        let address = curl(&["--header", &token, &format!("{IMDS}/meta-data/{item}")])?;
-        address.parse().map_err(|_| {
-            format!(
-                "the instance metadata's `{item}` is `{}`, which is no IPv4 address: expected \
-                 the controller's, as its subnet gives it",
-                address.escape_debug()
-            )
-        })
-    };
-    Ok((address("local-ipv4")?, address("public-ipv4")?))
+    let address = curl(&["--header", &token, &format!("{IMDS}/meta-data/{item}")])?;
+    address.parse().map_err(|_| {
+        format!(
+            "the instance metadata's `{item}` is `{}`, which is no IPv4 address: expected the \
+             controller's, as its subnet gives it",
+            address.escape_debug()
+        )
+    })
 }
 
 fn curl(args: &[&str]) -> Result<String, String> {
@@ -558,7 +567,7 @@ fn prune(home: &Path, config: &Path, jobs: &Path) -> Result<(), String> {
         fs::remove_dir_all(&dir).context(dir.display())?;
     }
     // The engine is reached only once there may be something to remove.
-    if !disk(VOLUME)?.full() {
+    if !disk(home)?.full() {
         return Ok(());
     }
     collect(home, &engine(config)?, jobs)
@@ -586,7 +595,7 @@ fn collect(home: &Path, engine: &Engine, jobs: &Path) -> Result<(), String> {
     let images = engine.images()?;
     let locked = open_jobs(jobs)?;
     locked.lock().context(jobs_named(jobs))?;
-    let disk = disk(VOLUME)?;
+    let disk = disk(home)?;
     if !disk.full() {
         return Ok(());
     }
@@ -610,21 +619,25 @@ fn jobs_named(jobs: &Path) -> String {
     format!("locking {} failed", jobs.display())
 }
 
-/// Builds the images of the task whose entry is `entry`, given `args`, for job `id`. It builds on
-/// the engine of the configuration at `config`. The job's `Admission` admits each build. The
-/// job's command then finds each image by its tag. If the job built one, it lets go of the build
-/// slot that the admission took, and prunes. The job holds what it holds until it ends. Gives the
-/// task's problems, or each build that failed, said.
+/// Builds the images of the task whose entry and args `task` gives, for job `id`. It builds on the
+/// engine of the configuration at `config`. The job's `Admission` admits each build. The job's
+/// command then finds each image by its tag. If the job built one, it lets go of the build slot
+/// that the admission took, and prunes. The job holds what it holds until it ends. Gives the
+/// task's problems, or each build that failed, said. Fails before the first build, naming the
+/// controller by the client's name for it, `controller`, if the task's roles never fit the
+/// configuration's providers.
 fn build_first(
     id: &RunTag,
     home: &Path,
     config: &Path,
     jobs: &Path,
-    entry: &star::Entry,
-    args: &lang::Args,
+    task: (&star::Entry, &lang::Args),
+    controller: &crate::controller::Name,
 ) -> Result<(), String> {
+    let (entry, args) = task;
     let mut admission = Admission {
         id,
+        controller,
         home,
         jobs,
         slots: Workspace::find()?.slots(),
@@ -632,6 +645,8 @@ fn build_first(
     };
     let built = star::checked(entry, args, |task| {
         let engine = engine(config)?;
+        // Before a build slot is waited for and anything is built.
+        crate::run::never_fits_controller(task.workflow(), config, &engine, controller)?;
         let tags = match task.build(&engine, &mut admission) {
             Ok((_, tags, _)) => tags,
             Err(problems) => return Ok(Err(problems)),
@@ -661,6 +676,8 @@ fn build_first(
 /// names the records that their members haven't copied, which no prune removes.
 struct Admission<'j> {
     id: &'j RunTag,
+    /// The client's name for the controller, which the commands that a refusal names name.
+    controller: &'j crate::controller::Name,
     home: &'j Path,
     jobs: &'j Path,
     slots: PathBuf,
@@ -675,7 +692,7 @@ impl Admission<'_> {
     /// Prunes the images and the build cache of `engine`, once the volume is full, saying why the
     /// prune failed, if it did, as the build goes on.
     fn prune(&self, engine: &Engine) {
-        let pruned = disk(VOLUME).and_then(|disk| {
+        let pruned = disk(self.home).and_then(|disk| {
             if disk.full() {
                 collect(self.home, engine, self.jobs)
             } else {
@@ -717,13 +734,13 @@ impl engine::Admit for Admission<'_> {
             self.slot = Some(take_slot(&self.slots, self.id, &self.sent())?);
         }
         self.prune(engine);
-        let disk = disk(VOLUME)?;
+        let disk = disk(self.home)?;
         if disk.refused() {
             let used_bytes = disk.size_bytes.saturating_sub(disk.free_bytes);
             let used = (used_bytes.saturating_mul(100))
                 .checked_div(disk.size_bytes)
                 .unwrap_or(100);
-            let uncopied = records::uncopied(self.home, self.jobs);
+            let uncopied = records::uncopied(self.home, self.jobs, self.controller);
             return Err(format!(
                 "the controller's volume is {used}% used, past the {REFUSED_PERCENT}% at which a \
                  build is refused, though the prune has removed what no job holds: free space \
@@ -808,10 +825,11 @@ fn last_used(home: &Path, runs: &Path) -> Result<BTreeMap<Image, String>, String
 
 /// The disk that holds `path`, as `df` says, in bytes: its size, and what an ordinary user may
 /// still write there.
-pub(crate) fn disk(path: &str) -> Result<Disk, String> {
+pub(crate) fn disk(path: &Path) -> Result<Disk, String> {
     // Only `PATH`, so that no locale changes what it prints.
     let mut df = stdx::process::command("df", Environment::Only(&["PATH"]));
-    df.args(["--block-size=1", "--output=size,avail", "--", path]);
+    df.args(["--block-size=1", "--output=size,avail", "--"])
+        .arg(path);
     let how = Run::new(Bound::Within(DF_TIMEOUT), Echo::Silent);
     let printed = stdx::process::run(&mut df, how).map_err(|failure| failure.to_string())?;
     let printed = String::from_utf8_lossy(&printed.stdout);

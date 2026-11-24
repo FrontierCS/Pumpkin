@@ -26,7 +26,7 @@ const SCRATCH_RANDOM: usize = 6;
 impl Reached {
     pub(super) fn copy(&mut self, build: &Build, id: &str) -> Result<Option<String>, String> {
         let id = RunTag::try_from(id.to_owned())?;
-        let runs = PathBuf::from(crate::default_runs()?);
+        let runs = super::copies(&self.name)?;
         fs::create_dir_all(&runs).context(runs.display())?;
         let copy = directory(&runs, Path::new(id.as_str()))?;
         say(format_args!(
@@ -76,7 +76,11 @@ impl Reached {
                 "controller `{}` didn't note the copy, so it keeps run {id}'s record until it \
                  notes one: {error}; to copy it again: {}",
                 self.name,
-                next::of_run("wait", None, id.as_str()),
+                next::of_run(
+                    "wait",
+                    &next::At::Controller(self.name.clone()),
+                    id.as_str()
+                ),
                 id = id.as_str()
             ));
         }

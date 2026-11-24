@@ -55,12 +55,12 @@ pub(super) fn cut_text(text: String) -> String {
 }
 
 /// The row of the run list for a run that has not ended.
-pub(super) fn live_row(held: &Held, named: Option<&str>) -> Value {
+pub(super) fn live_row(held: &Held, at: &next::At) -> Value {
     let progress = held.readout.progress.clone();
     let model = progress.as_ref().map(|progress| progress.model.clone());
     let listed = Listed::of(&held.record, held.task.clone(), None, progress);
     let id = held.record.id();
-    let mut row = listed_json(id, &Row::of(id, &listed, crate::unix_now(), named));
+    let mut row = listed_json(id, &Row::of(id, &listed, crate::unix_now(), at));
     row["requests"] = json!(model.as_ref().map(|model| model.requests));
     row["tokens"] = json!(
         model
@@ -138,7 +138,7 @@ fn how(ending: &Ending) -> String {
 /// The reply for one run: its state and verdict, times, lanes, talk, model use, cost and log end.
 ///
 /// `again` adds the command that starts the run over.
-pub(super) fn run_json(held: &Held, named: Option<&str>, again: bool) -> Value {
+pub(super) fn run_json(held: &Held, at: &next::At, again: bool) -> Value {
     let record = &held.record;
     let id = record.id();
     let readout = &held.readout;
@@ -151,7 +151,7 @@ pub(super) fn run_json(held: &Held, named: Option<&str>, again: bool) -> Value {
         held.ending.clone(),
         progress.clone(),
     );
-    let row = Row::of(id, &listed, now, named);
+    let row = Row::of(id, &listed, now, at);
     let verdict = match (&held.ending, &progress) {
         (Some(ending), _) => format!("Run {id} {}", how(ending)),
         (None, None) => format!("Run {id} is publishing what its sandboxes run"),
@@ -229,7 +229,7 @@ pub(super) fn run_json(held: &Held, named: Option<&str>, again: bool) -> Value {
         "log_epoch": held.log_epoch,
     });
     if again {
-        run["again"] = match controller::here(record, None) {
+        run["again"] = match controller::here(record, None, None) {
             Ok(args) => json!({ "command": next::run_again(&args) }),
             Err(error) => json!({ "error": error }),
         };

@@ -1,5 +1,7 @@
-- ALWAYS pass the checks before finishing: `cargo xtask ci`, and `cargo xtask live docker`,
-  the tests that need a Docker engine, when a change touches code only those tests reach
+- ALWAYS pass the checks before finishing: `cargo xtask ci`; `cargo xtask live docker`, the
+  tests that need a Docker engine, when a change touches code only those tests reach; and
+  `cargo xtask live controller` and `cargo xtask live controller --lost` when a change touches
+  what `docs/dev/testing.md` names for them
 - RUN `cargo xtask live ec2` and `cargo xtask live modal`, which cost money, at review of a
   change that only a real provider reaches, as `docs/dev/testing.md` says
 - RUN `cargo xtask install-tools` only before working offline or before a plain `cargo test` in

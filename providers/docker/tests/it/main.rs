@@ -651,6 +651,7 @@ fn cpus() {
             let more = provider().reserve(&wide, &[vec![sized("wide", count + 1)]]);
             let more = more.unwrap_err();
             let more = more.replace(&(count + 1).to_string(), "<cpus + 1>");
+            let more = more.replace(&format!("{count} CPUs"), "<cpus> CPUs");
             let more = more.replace(&cores.to_string(), "<cores>");
             lines.push(format!("one that needs more than the machine has: {more}"));
             drop(reserved);
@@ -664,7 +665,7 @@ fn cpus() {
             another run's role: on whole cores: true, as it sees them: true
             each apart from the others: true
             one that needs more than are left: refused, naming them: true
-            one that needs more than the machine has: the run's roles need more whole cores at once than the <cores> that this machine gives sandboxes, to hold their CPUs (`wide` <cpus + 1>): give them fewer CPUs"#]],
+            one that needs more than the machine has: the roles that run at once need more whole cores than the <cores> that sandboxes get, <cpus> CPUs in all, as each sandbox holds whole cores for its CPUs (`wide` <cpus + 1>): change their needs, or run it where sandboxes are larger"#]],
     );
 }
 

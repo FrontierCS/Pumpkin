@@ -87,25 +87,25 @@ variable "controller_instance_type" {
 }
 
 variable "controller_volume_gib" {
-  description = "The controller's root volume, in GiB, which holds the build cache and the images of recent tasks, at 20 to 70 GB a task, which each job prunes as the volume fills, the trees and the records."
+  description = "The controller's data volume, in GiB, which outlives each instance of the controller. It holds the build cache and the images of recent tasks, at 20 to 70 GB a task, which each job prunes as the volume fills, the trees and the records."
   type        = number
   default     = 1000
 }
 
 variable "controller_volume_iops" {
-  description = "The controller's root volume's IOPS, a gp3's provisioned I/O operations a second, which the builds of several tasks at once, each unpacking and writing its layers, and the prunes share: gp3's baseline is 3000."
+  description = "The controller's data volume's IOPS, a gp3's provisioned I/O operations a second, which the builds of several tasks at once, each unpacking and writing its layers, and the prunes share: gp3's baseline is 3000."
   type        = number
   default     = 6000
 }
 
 variable "controller_volume_throughput" {
-  description = "The controller's root volume's throughput, in MiB/s, a gp3's provisioned throughput, which the builds' layers and the pushes of their images read and write: gp3's baseline is 125."
+  description = "The controller's data volume's throughput, in MiB/s, a gp3's provisioned throughput, which the builds' layers and the pushes of their images read and write: gp3's baseline is 125."
   type        = number
   default     = 500
 }
 
 variable "pumpkin_release" {
-  description = "A Pumpkin release's `pumpkinversion` line: its tag, its commit and its archive's SHA-256. The controller runs that release's `pumpkin-admin install --settings` at its first boot. An apply that changes it replaces the controller: change it in a cutover, as the module's README says under Versions."
+  description = "A Pumpkin release's `pumpkinversion` line: its tag, its commit and its archive's SHA-256. The controller runs that release's `pumpkin-admin install ec2 --settings` at its first boot. An apply that changes it replaces the controller: change it in a cutover, as the module's README says under Versions."
   type        = string
 
   validation {

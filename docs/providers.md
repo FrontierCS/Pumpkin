@@ -55,25 +55,29 @@ its run's hard end.
 
 ## The controller
 
-The controller is the same `pumpkin`, on an EC2 instance of the operator's own, under
-`pumpkin controller`. Only the instance that `deploy/aws` makes can be one: its jobs read their
+The controller is the same `pumpkin`, under `pumpkin controller`, on an EC2 instance that
+`deploy/aws` makes or in the container that `deploy/docker` makes. On EC2, its jobs read their
 settings, such as the EC2 provider's launch templates, from the module's SSM parameter, and the
-machine finds and starts it through EC2. It admits only the keys that the module's `members`
-lists. It names each member's jobs. The machine reaches it at its private address alone. It is
-in the controller's VPC, or reaches it through a VPN that translates its addresses into the VPC's.
+machine finds and starts it through EC2. The machine reaches it at its private address alone. It
+is in the controller's VPC, or reaches it through a VPN that translates its addresses into the
+VPC's. On Docker, its jobs read their settings from a file that the admin writes, and run on the
+Docker provider alone, on the container's own engine. The machine reaches it at the address that
+its configuration names, and it never stops. Either admits only the keys that its members' list
+holds, and names each member's jobs.
 A machine whose configuration names
-`[controller]` sends it each run, over ssh: `pumpkin run` sends the files below the paths that
+`[controllers.<name>]` sends it each run, over ssh: `pumpkin run` sends the files below the paths that
 the task reaches in its repository, whether git tracks or ignores them, then starts the run's job, which builds the images and runs the driver there, in a
 systemd unit of its own. `wait`, `ls`, `cancel`, `view` and `reap` work on the controller's runs
-with the same arguments, and `wait` copies an ended run's record back to the machine. A run whose
-copy there has ended needs no controller.
+with the same arguments, and `wait` copies an ended run's record back to the machine, into
+`.pumpkin/runs/<name>/`. A run whose copy there has ended needs no controller. A job refuses a run
+that never fits the controller before it waits for a build slot.
 
 A job builds once it takes one of the controller's build slots, one for every two of its CPUs. While
 every slot is taken, it waits. Once a prune has removed the images that no job holds, a job refuses
 to build while more than 85% of the controller's volume is used. `ls` says first how long the
-controller has been up, its jobs, how full its disk is, and whether its boot failed. It lists a job
+controller has been up (on Docker, its host), its jobs, how full its disk is, and whether its boot failed. It lists a job
 that has yet to start its run as `waiting` for a build slot or `building`, or as `unstarted` once it
-has ended without one. It lists this machine's copies of runs beside the controller's. `cancel`
+has ended without one. It lists this machine's copies of the controller's runs beside the controller's. `cancel`
 stops a job whose run has yet to start. `cancel` and `reap` send this machine's Modal configuration
 file, which the boot lacks.
 
@@ -81,15 +85,16 @@ file, which the boot lacks.
 `pumpkin controller serve`, a copy of this `pumpkin` that it installs on the controller if needed.
 It starts the controller if it is stopped. Once the connection has ended, the next request opens
 it again. While that fails, the page says so and asks again after 5 s, then after twice the wait
-before, up to a minute. When the controller has stopped, as an idle one does, the page offers a
+before, up to a minute. When an EC2 controller has stopped, as an idle one does, the page offers a
 "Start it" button (`aws ec2 start-instances`). Until the controller answers, each request asks EC2
-whether it runs (`aws ec2 describe-instances`). `view --runs` serves the copies that `wait` made.
+whether it runs (`aws ec2 describe-instances`), or probes the `address` of one on Docker.
+`view --runs .pumpkin/runs/<name>` serves the copies that `wait` made.
 
 ![The data between a machine and its controller, over ssh: the task's tree to the controller's store, the job's start, what the run says as it is followed, what ls reads of each run, and an ended run's record, each as the controller modules of pumpkin carry it, and the view's requests for the runs' data and their replies, over one ssh to the view on the controller.](figures/controller-data.svg)
 
-The controller starts when a command needs it and stops itself once it has been idle a while,
-with no job and no ssh session; at boot it reaps what lost runs left. A machine's keys go to it
-only with a job, into the job's directory in memory, which the job's unit removes as it ends. A job
+An EC2 controller starts when a command needs it and stops itself once it has been idle a while,
+with no job and no ssh session. At boot, each controller reaps what lost runs left. A machine's
+keys go to it only with a job, into the job's directory in memory, which the job's unit removes as it ends. A job
 runs the same Pumpkin and helper programs as the machine, which uploads its install when
 the controller lacks it. At boot, each installed build reaps its own records and appends its
 output to `~/boot.log`.

@@ -100,7 +100,7 @@ fn main() -> Exit {
         Ok(cli::Command::View(flags)) => view::view(flags),
         Ok(cli::Command::Job(flags)) => job::job(flags),
         Ok(cli::Command::Boot) => job::boot(),
-        Ok(cli::Command::Install(settings)) => host::install(&settings),
+        Ok(cli::Command::Install(target)) => host::install(&target),
         Ok(cli::Command::CheckDeployment(settings)) => deployment::check(&settings),
         Ok(cli::Command::Members) => host::members(),
         Ok(cli::Command::CheckMembers(dir)) => keydir::check(&dir),
@@ -195,37 +195,72 @@ fn not_utf8(what: &str, path: &str, absolute: &Path) -> String {
     )
 }
 
+/// The client of the controller that a command of `run` goes to, with the prefix of the run's id
+/// there, given `runs` and `controller`, its flags; `None` for a run of this machine's, which
+/// `--runs` or a record's path names, or with no controller in the configuration. Fails if
+/// `controller` names a controller and `run` names a record's path.
+fn client_of<'r>(
+    run: &'r cli::RunName,
+    runs: Option<&String>,
+    controller: Option<controller::Name>,
+) -> Result<Option<(config::Client, &'r str)>, String> {
+    if runs.is_some() {
+        return Ok(None);
+    }
+    match (run, controller) {
+        (cli::RunName::Record(path), Some(name)) => Err(format!(
+            "`{path}` is a record's path, and `--controller` names controller `{name}`, where a \
+             run is named by its id: give the run's id, or leave out `--controller`"
+        )),
+        (cli::RunName::Record(_), None) => Ok(None),
+        (cli::RunName::Prefix(prefix), name) => {
+            let client = config::client(None, name.as_ref())?;
+            Ok(client.map(|client| (client, prefix.as_str())))
+        }
+    }
+}
+
 fn wait(flags: cli::Wait) -> Result<Exit, String> {
-    let cli::Wait { run, runs, printed } = flags;
-    if let (cli::RunName::Prefix(prefix), None) = (&run, &runs)
-        && let Some(client) = config::client(None)?
-    {
+    let cli::Wait {
+        run,
+        runs,
+        controller,
+        printed,
+    } = flags;
+    if let Some((client, prefix)) = client_of(&run, runs.as_ref(), controller)? {
+        let name = &client.controller.name;
         // A run that has ended is copied here, and is read here; any other is waited for there.
-        if let Ok(record) = Record::find(Path::new(&default_runs()?), prefix)
+        if let Ok(record) = Record::find(&controller::copies(name)?, prefix)
             && let Some(ending) = record.ending()?
         {
-            let args = controller::here(&record, None)?;
-            return end(&record, &ending, printed, None, &args);
+            let args = controller::here(&record, None, Some(name))?;
+            let at = next::At::Controller(name.clone());
+            return end(&record, &ending, printed, &at, &args);
         }
         return controller::wait(&client, prefix, printed);
     }
     let (record, named) = found(run, runs)?;
-    follow(&record, "wait", named.as_deref(), printed)
+    follow(&record, "wait", &next::At::runs(named.as_deref()), printed)
 }
 
 fn ls(flags: cli::Ls) -> Result<Exit, String> {
-    let cli::Ls { runs, prefixes } = flags;
+    let cli::Ls {
+        runs,
+        controller,
+        prefixes,
+    } = flags;
     if runs.is_none()
-        && let Some(client) = config::client(None)?
+        && let Some(client) = config::client(None, controller.as_ref())?
     {
         return controller::ls(&client, &prefixes);
     }
     let (runs, named) = runs_dir(runs)?;
+    let at = next::At::runs(named.as_deref());
     let now = unix_now();
     let since = progress::listed_since(&prefixes, now);
-    let (listing, unlisted) = listed_in(Path::new(&runs), &prefixes, since, now, named.as_deref())?;
+    let (listing, unlisted) = listed_in(Path::new(&runs), &prefixes, since, now, &at)?;
     said_beside(&listing, &unlisted);
-    let lines = progress::lines(&listing, named.as_deref());
+    let lines = progress::lines(&listing, &at);
     print(lines.as_bytes()).context("printing the runs failed")?;
     if !unlisted.is_empty() {
         let runs = counted(unlisted.len(), "run");
@@ -269,18 +304,18 @@ fn unix_now() -> UnixTime {
 /// The runs of `runs` whose ids start with one of `prefixes`, or every run if there are none, and
 /// those that can't be listed. A run that ended before `since` is listed as older, and one that
 /// another build made and this can't read is an `unread` row. Each row is made at `now`, with its
-/// commands naming `named` as the runs directory. A `runs` that is missing is an empty listing
-/// unless `named` names it.
+/// commands naming the runs where `at` says. A `runs` that is missing is an empty listing unless
+/// `at` names it by `--runs`.
 fn listed_in(
     runs: &Path,
     prefixes: &[String],
     since: Option<UnixTime>,
     now: UnixTime,
-    named: Option<&str>,
+    at: &next::At,
 ) -> Result<(progress::Listing, Vec<progress::Unlisted>), String> {
     let mut listing = progress::Listing::default();
     let mut unlisted = Vec::new();
-    if named.is_none() && !runs.try_exists().context(runs.display())? {
+    if at.dir().is_none() && !runs.try_exists().context(runs.display())? {
         return Ok((listing, unlisted));
     }
     for (id, record) in Record::all(runs)? {
@@ -316,7 +351,7 @@ fn listed_in(
             });
         match listed {
             Ok(Some(listed)) => {
-                let mut row = progress::Row::of(&id, &listed, now, named);
+                let mut row = progress::Row::of(&id, &listed, now, at);
                 row.unread = unread;
                 listing.runs.insert(id, progress::Entry::Row(Box::new(row)));
             }

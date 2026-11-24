@@ -232,6 +232,23 @@ struct EntryJson {
     roles: BTreeMap<String, CpuList>,
 }
 
+/// The whole cores that `phases` take at once, laid out on every core, as no other run held any.
+/// Fails if they need more than there are: such a run never fits.
+pub(crate) fn fits(cpus: &Cpus, phases: &[Vec<Role>]) -> Result<usize, String> {
+    let all: Vec<&Vec<u32>> = cpus.cores.iter().collect();
+    let Some((_, needed)) = lay_out(&all, phases) else {
+        let cpus_count: usize = cpus.cores.iter().map(Vec::len).sum();
+        return Err(format!(
+            "the roles that run at once need more whole cores than the {} that sandboxes get, \
+             {cpus_count} CPUs in all, as each sandbox holds whole cores for its CPUs ({}): \
+             change their needs, or run it where sandboxes are larger",
+            all.len(),
+            needs(phases)
+        ));
+    };
+    Ok(needed)
+}
+
 pub(crate) fn reserve(
     cpus: &Cpus,
     run: &RunTag,
@@ -239,15 +256,9 @@ pub(crate) fn reserve(
 ) -> Result<Reservation, String> {
     // The run is laid out on every core first, to tell a run that can never fit this machine from
     // one that waits for another's cores.
+    let needed = fits(cpus, phases)?;
     let all: Vec<&Vec<u32>> = cpus.cores.iter().collect();
     let count = all.len();
-    let Some((_, needed)) = lay_out(&all, phases) else {
-        return Err(format!(
-            "the run's roles need more whole cores at once than the {count} that this machine \
-             gives sandboxes, to hold their CPUs ({}): give them fewer CPUs",
-            needs(phases)
-        ));
-    };
     let ledger = open_ledger(&cpus.ledger)?;
     let held = held(&ledger)?;
     let in_use: BTreeSet<u32> = held

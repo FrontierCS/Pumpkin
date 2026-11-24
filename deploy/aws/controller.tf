@@ -1,7 +1,7 @@
 # The team's controller. It builds the tasks' images and runs the drivers, and it runs no role.
 # Its members reach it over ssh from its VPC, each with a key that `members` lists. It stops
 # itself when it has no job and no SSH session, by a unit that `pumpkin-admin install` sets up, so
-# it costs only its volume between runs.
+# it costs only its volumes between runs.
 
 resource "aws_iam_role" "controller" {
   name               = "${local.prefix}-controller"
@@ -66,9 +66,9 @@ locals {
 # them takes effect at the next job. Their `[deployment]` names the deployment and the members'
 # parameter. The host's members unit reads it every minute, and each job leaves it out. They name
 # the controller's Docker engine, the EC2 provider `aws`, and, with a pull role, the `images` of
-# the Modal provider `modal`. A job drops `images` if its client sends no `[controller.modal]`.
-# With `draining`, each job is refused as it starts. Nothing else is here: the rest is each job's
-# own or its client's. The advanced tier holds 8 KB.
+# the Modal provider `modal`. A job drops `images` if its client sends no
+# `[controllers.<name>.modal]`. With `draining`, each job is refused as it starts. Nothing else is
+# here: the rest is each job's own or its client's. The advanced tier holds 8 KB.
 resource "aws_ssm_parameter" "settings" {
   name = "/${local.prefix}/settings"
   type = "String"
@@ -118,6 +118,27 @@ resource "terraform_data" "pumpkin_release" {
   input = var.pumpkin_release
 }
 
+locals {
+  controller_user_data_values = {
+    install_script  = base64gzip(file("${path.module}/../controller/install.sh"))
+    docker_key      = base64gzip(file("${path.module}/../controller/docker.asc"))
+    aws_cli_version = local.controller_versions.aws_cli
+    aws_cli_sha256  = local.controller_versions.aws_cli_sha256
+    uv_version      = local.controller_versions.uv
+    uv_sha256       = local.controller_versions.uv_sha256
+    pumpkin_release = var.pumpkin_release
+    settings_arn    = aws_ssm_parameter.settings.arn
+  }
+  controller_user_data = templatefile("${path.module}/controller.yaml", merge(
+    local.controller_user_data_values, { volume_id = aws_ebs_volume.controller.id }
+  ))
+  # The same with a volume ID of a volume ID's length, so that a plan measures it before the volume
+  # exists: an EBS volume's ID is `vol-` and 17 hexadecimal digits.
+  controller_user_data_measured = templatefile("${path.module}/controller.yaml", merge(
+    local.controller_user_data_values, { volume_id = "vol-00000000000000000" }
+  ))
+}
+
 resource "aws_instance" "controller" {
   ami                    = data.aws_ssm_parameter.ubuntu.insecure_value
   instance_type          = var.controller_instance_type
@@ -126,21 +147,12 @@ resource "aws_instance" "controller" {
   iam_instance_profile   = aws_iam_instance_profile.controller.name
   # A public address: the way out to the settings parameter, ECR and Modal, and the one Modal's tunnels admit.
   associate_public_ip_address = true
-  # A shutdown stops it, keeping its volume: the build cache, the trees and the records.
+  # A shutdown stops it, so that a member's command can start it again.
   instance_initiated_shutdown_behavior = "stop"
-  user_data = templatefile("${path.module}/controller.yaml", {
-    ubuntu_snapshot    = "https://snapshot.ubuntu.com/ubuntu/${local.controller_versions.ubuntu_snapshot}"
-    docker_key         = file("${path.module}/docker.asc")
-    docker_version     = local.controller_versions.docker
-    containerd_version = local.controller_versions.containerd
-    buildx_version     = local.controller_versions.buildx
-    aws_cli_version    = local.controller_versions.aws_cli
-    aws_cli_sha256     = local.controller_versions.aws_cli_sha256
-    uv_version         = local.controller_versions.uv
-    uv_sha256          = local.controller_versions.uv_sha256
-    pumpkin_release    = var.pumpkin_release
-    settings_arn       = aws_ssm_parameter.settings.arn
-  })
+  # What every controller installs is deploy/controller's, beside this module in the package that
+  # a root fetches whole
+  # (https://github.com/hashicorp/web-unified-docs/blob/4ec2d604280fff09cfca1d2648fed5cb51f81f14/content/terraform/v1.16.x/docs/language/modules/sources.mdx#L484-L487).
+  user_data = local.controller_user_data
 
   # The first boot's install reads the settings and the members' keys.
   depends_on = [aws_iam_role_policy.controller]
@@ -152,40 +164,79 @@ resource "aws_instance" "controller" {
     http_put_response_hop_limit = 1
   }
 
+  # The OS and the packages alone, which each instance installs anew: what the controller keeps
+  # is on its data volume. 30 GiB, as the GitHub runner module gives a runner's root
+  # (https://github.com/github-aws-runners/terraform-aws-github-runner/blob/3355ae029d598d7baf096eebafd19bfd5429bbaa/variables.tf#L324-L340).
   root_block_device {
-    volume_size = var.controller_volume_gib
+    volume_size = 30
     volume_type = "gp3"
-    iops        = var.controller_volume_iops
-    throughput  = var.controller_volume_throughput
     encrypted   = true
   }
 
-  # The tag by which `pumpkin` finds the controller of `[controller] name`.
+  # The tag by which `pumpkin` finds the controller of `[controllers.<name>]`.
   tags = { Name = "${local.prefix}-controller", "pumpkin:controller" = var.name }
 
   # cloud-init runs the user data at the instance's first boot alone. So a new `pumpkin_release`
   # replaces the controller, and the new one's first boot installs it.
   lifecycle {
-    # A stopped instance reads as having no public address, and a change to it replaces the
-    # instance, its volume and the records on it with it. The controller stops itself when idle.
+    # A stopped instance reads as having no public address, and a change to it would replace the
+    # instance. The controller stops itself when idle.
     ignore_changes = [ami, user_data, associate_public_ip_address]
     # On the release, not on the user data, so that a change to the rest of the user data replaces
     # nothing.
     replace_triggered_by = [terraform_data.pumpkin_release]
+    # EC2 takes 16 KiB of user data, counted before base64 ("User data is limited to 16 KB, in raw
+    # form, before it is base64-encoded":
+    # https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/user-data.html), and refuses a launch past
+    # it after the old instance is gone. Base64 of 16,383 bytes is at most 21,844 characters, which
+    # `length` counts where it can't count bytes.
+    precondition {
+      condition     = length(base64encode(local.controller_user_data_measured)) <= 21844
+      error_message = "The controller's user data passes EC2's 16 KiB: shorten deploy/aws/controller.yaml or deploy/controller/."
+    }
   }
 }
 
-# What the controller installs, at these versions: Docker's packages, as its repository names
-# them; AWS CLI v2; uv; and the rest from Ubuntu's archive as it was at the snapshot.
+data "aws_subnet" "controller" {
+  id = var.subnet_id
+}
+
+# What the controller keeps from one instance to the next, as the first boot mounts it: the
+# engine's images and build cache, the home of `pumpkin` with its store, trees, jobs, installs and
+# records, and the host key. A replacement of the instance moves it to the new one. Its zone stays
+# the one it was made in, so that a subnet in another zone fails the attachment instead of
+# replacing the volume. GitLab's toolkit keeps a data disk's zone so, and stops its instance before
+# it detaches the disk
+# (https://gitlab.com/gitlab-org/gitlab-environment-toolkit/-/blob/2eef5ab5ed5a085424096e5ee7e44457390afb04/terraform/modules/gitlab_aws_instance/data_disks.tf#L4-L62).
+resource "aws_ebs_volume" "controller" {
+  availability_zone = data.aws_subnet.controller.availability_zone
+  type              = "gp3"
+  size              = var.controller_volume_gib
+  iops              = var.controller_volume_iops
+  throughput        = var.controller_volume_throughput
+  encrypted         = true
+  tags              = { Name = "${local.prefix}-controller" }
+
+  lifecycle {
+    ignore_changes = [availability_zone]
+  }
+}
+
+# The instance stops before the volume is detached, so that its shutdown unmounts the volume.
+resource "aws_volume_attachment" "controller" {
+  device_name                    = "/dev/sdf"
+  volume_id                      = aws_ebs_volume.controller.id
+  instance_id                    = aws_instance.controller.id
+  stop_instance_before_detaching = true
+}
+
+# What the controller installs beside what deploy/controller's install.sh pins, at these versions:
+# AWS CLI v2 and uv.
 locals {
   controller_versions = {
-    ubuntu_snapshot = "20261101T000000Z"
-    docker          = "5:29.9.2-1~ubuntu.24.04~noble"
-    containerd      = "2.4.2-3~ubuntu.24.04~noble"
-    buildx          = "0.38.1-1~ubuntu.24.04~noble"
-    aws_cli         = "2.38.1"
-    aws_cli_sha256  = "b11ed416d91f4251da363a17706938eeaf0e520745754c104c0c1890dd8363c7"
-    uv              = "0.13.5"
-    uv_sha256       = "f68d291c75783122dad58ab77def0e13f3233f358731db5d6d7e8715603b928f"
+    aws_cli        = "2.38.1"
+    aws_cli_sha256 = "b11ed416d91f4251da363a17706938eeaf0e520745754c104c0c1890dd8363c7"
+    uv             = "0.13.5"
+    uv_sha256      = "f68d291c75783122dad58ab77def0e13f3233f358731db5d6d7e8715603b928f"
   }
 }

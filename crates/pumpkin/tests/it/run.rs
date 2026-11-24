@@ -90,7 +90,8 @@ fn usage() {
         pumpkin(&["help", "bogus"]),
         same(&["help", "controller"], &["controller", "--help"]),
         pumpkin(&["controller", "install", "--settings", "arn"]),
-        admin(&["install", "--settings", "/pumpkin-alice/settings"]),
+        admin(&["install", "ec2", "--settings", "/pumpkin-alice/settings"]),
+        admin(&["install", "docker", "--settings", "settings.toml"]),
         admin(&["check", "--help"]),
         admin(&["run", "a.star"]),
     ];
@@ -265,9 +266,13 @@ fn usage() {
 
             Usage: pumpkin controller <action>
             pumpkin: to read how to use it: pumpkin help controller
-            $ pumpkin-admin install --settings /pumpkin-alice/settings
+            $ pumpkin-admin install ec2 --settings /pumpkin-alice/settings
             exit status: Some(2)
-            error: invalid value '/pumpkin-alice/settings' for '--settings <arn>': `/pumpkin-alice/settings` is not an SSM parameter's ARN: use one such as `arn:aws:ssm:us-west-1:123456789012:parameter/pumpkin-alice/settings`
+            error: invalid value for '--settings <settings>': `/pumpkin-alice/settings` is not an SSM parameter's ARN: use one such as `arn:aws:ssm:us-west-1:123456789012:parameter/pumpkin-alice/settings`
+            pumpkin: to read how to use it: pumpkin-admin install --help
+            $ pumpkin-admin install docker --settings settings.toml
+            exit status: Some(2)
+            error: invalid value for '--settings <settings>': `settings.toml` is no absolute path: name the file of the controller's settings by one
             pumpkin: to read how to use it: pumpkin-admin install --help
             $ pumpkin-admin check --help
             exit status: Some(0)
@@ -730,7 +735,7 @@ fn configurations() {
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/missing.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config undocked.toml
             exit status: Some(1)
-            pumpkin: undocked.toml: `[docker]` is missing: name it, or `[controller]`, as `pumpkin help config` says
+            pumpkin: undocked.toml: `[docker]` is missing: name it, or `[controllers.<name>]`, as `pumpkin help config` says
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/undocked.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config nameless.toml
             exit status: Some(1)

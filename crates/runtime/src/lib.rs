@@ -90,6 +90,23 @@ pub struct Recorded<'a> {
     pub sources: &'a BTreeMap<Label, String>,
 }
 
+/// Fails if a provider could never hold the roles that `placed` places on it, whatever other runs
+/// hold.
+///
+/// It names the provider and says why, as [`Provider::fits`] does, and holds nothing. `providers`
+/// holds each provider that `placed` names.
+// A request that no resources could ever satisfy is refused as it is made, as Slurm fails a job
+// whose request has a fundamental flaw:
+// https://github.com/SchedMD/slurm/blob/4e8cf4192ade61024f04a1d466d4f97456d178bf/src/slurmctld/job_mgr.c#L5588-L5599
+pub fn fits(placed: &Placed, providers: &ByProvider<&dyn Provider>) -> Result<(), String> {
+    let capacity = Capacity::of(placed.workflow())?;
+    placed.by_provider(|name| {
+        let phases = capacity.phases(placed, name);
+        (providers.get(name).fits(&phases)).context(format_args!("provider `{name}`"))
+    })?;
+    Ok(())
+}
+
 /// The upstreams that serve each role's model route, one for each entry in the route's order, and
 /// the budgets that bound what the roles spend through them ([`budgets`]).
 pub struct ModelRoutes<'s> {

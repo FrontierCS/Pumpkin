@@ -33,12 +33,11 @@ use crate::job::{JOBS, WAITING};
 use crate::link::copy::CopiedRequest;
 use crate::link::{
     self, Ask, Health, HealthRequest, Hello, Job, Jobs, JobsRequest, ListRequest, Listed, Owner,
-    ViewRequest,
 };
 use crate::manifest::store::{Missing, PutAnswer};
 use crate::progress::{self, Entry, Listing, Row, Unlisted};
-use crate::say;
 use crate::view::Answering;
+use crate::{next, say};
 
 /// How long to wait for a request before ending: a page that is open polls every few seconds, so
 /// a minute with none is a closed page or a lost connection, and ending closes its SSH connection.
@@ -118,14 +117,8 @@ fn requests(
             Ask::Jobs(request) => {
                 link::answer(output, request, |JobsRequest {}| jobs(home, member))
             }
-            Ask::List(request) => link::answer(output, request, |ListRequest { prefixes }| {
-                listed(home, &prefixes)
-            }),
-            Ask::View(request) => {
-                link::answer(output, request, |ViewRequest { target, deflate }| {
-                    Ok(view.answer(&target, deflate))
-                })
-            }
+            Ask::List(request) => link::answer(output, request, |request| listed(home, request)),
+            Ask::View(request) => link::answer(output, request, |request| Ok(view.answer(request))),
         };
         if !delivered(written)? {
             break;
@@ -296,7 +289,7 @@ fn health(home: &Path) -> Result<Health, String> {
     let Disk {
         size_bytes,
         free_bytes,
-    } = crate::job::disk(crate::job::VOLUME)?;
+    } = crate::job::disk(home)?;
     Ok(Health {
         up_seconds,
         disk_size_bytes: size_bytes,
@@ -305,14 +298,19 @@ fn health(home: &Path) -> Result<Health, String> {
     })
 }
 
-/// The listing of the runs below `home` whose ids start with one of `prefixes`, as
-/// [`crate::listed_in`] makes it, at this machine's time, with the jobs yet to start a run.
-fn listed(home: &Path, prefixes: &[String]) -> Result<Listed, String> {
+/// The listing of the runs below `home` that `request` asks for, as [`crate::listed_in`] makes it,
+/// at this machine's time, with the jobs yet to start a run.
+fn listed(home: &Path, request: ListRequest) -> Result<Listed, String> {
+    let ListRequest {
+        prefixes,
+        controller,
+    } = request;
+    let (prefixes, at) = (&prefixes[..], &next::At::Controller(controller));
     let now = crate::unix_now();
     let since = progress::listed_since(prefixes, now);
     let runs = home.join(crate::job::runs());
-    let (mut listing, mut unlisted) = crate::listed_in(&runs, prefixes, since, now, None)?;
-    unstarted(home, prefixes, since, now, &mut listing)?;
+    let (mut listing, mut unlisted) = crate::listed_in(&runs, prefixes, since, now, at)?;
+    unstarted(home, prefixes, since, now, at, &mut listing)?;
     let jobs = home.join(JOBS);
     // A run whose member can't be read is left out, as one whose record can't be read is.
     listing.runs.retain(|id, entry| {
@@ -346,6 +344,7 @@ fn unstarted(
     prefixes: &[String],
     since: Option<UnixTime>,
     now: UnixTime,
+    at: &next::At,
     listing: &mut Listing,
 ) -> Result<(), String> {
     let jobs = home.join(JOBS);
@@ -378,7 +377,7 @@ fn unstarted(
             listing.runs.insert(id.to_owned(), Entry::Older);
             continue;
         };
-        let row = Row::of(id, &listed, now, None);
+        let row = Row::of(id, &listed, now, at);
         listing
             .runs
             .insert(id.to_owned(), Entry::Row(Box::new(row)));

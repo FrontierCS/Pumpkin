@@ -83,25 +83,27 @@ mod flags {
             /// without reaching the network.
             cmd aws-certificates {}
 
-            /// Runs the checks that reach a real environment, which `ci` leaves out. `docker`
-            /// runs the ignored tests, which need a Docker engine, the static sandboxd or a server
-            /// elsewhere. They use the context that `PUMPKIN_DOCKER_CONTEXT` names, or `default`.
-            /// `ec2` and `modal` cost money. Each runs `pumpkin-admin check`, then `examples/smoke`
-            /// on that provider through the controller that `~/.config/pumpkin/pumpkin.toml`
-            /// names, with Pumpkin at `HEAD`, which `./pumpkin` builds below the target directory.
-            /// Every probe of a sandbox's confinement must pass, and every sandbox must be deleted.
-            /// If anything tagged with the run is left on EC2, EventBridge Scheduler or Modal, the
-            /// check fails and runs `pumpkin cancel` to remove it.
+            /// Runs the checks that reach a real environment, which `ci` leaves out. `docker` runs
+            /// the ignored tests, which need a Docker engine, the static sandboxd or a server
+            /// elsewhere, on the context that `PUMPKIN_DOCKER_CONTEXT` names, or `default`.
+            /// `controller` makes a controller with `deploy/docker`, runs `examples/smoke` through
+            /// it, and checks its members. `ec2` and `modal` cost money: each runs `pumpkin-admin
+            /// check`, then `examples/smoke` on that provider through the controller that
+            /// `~/.config/pumpkin/pumpkin.toml` names. Each runs Pumpkin at `HEAD`. Every probe of
+            /// a sandbox must pass, and every sandbox must be deleted. Anything of the run left on
+            /// EC2, EventBridge Scheduler or Modal fails the check, which cancels the run.
             cmd live {
-                /// `docker`, `ec2` or `modal`.
+                /// `docker`, `controller`, `ec2` or `modal`.
                 required target: String
-                /// With `modal`, the model of the GPU, of a class of `[controller.modal]`, that
+                /// With `modal`, the model of the GPU, of a class of the controller's `modal`, that
                 /// the smoke's GPU runner needs.
                 optional --gpu-model model: String
                 /// With `ec2` or `modal`, kills the run's job on the controller once the agent
                 /// holds a lease of each grant. Checks that each sandbox ends by itself at the
                 /// run's hard end, about 95 minutes after its start, and that `pumpkin reap` then
-                /// removes what is left. Costs at most about $1 on EC2 and $4 on Modal.
+                /// removes what is left. Costs at most about $1 on EC2 and $4 on Modal. With
+                /// `controller`, kills the job likewise, makes the controller's container anew, and
+                /// checks that its boot reaped the run.
                 optional --lost
             }
 
@@ -307,25 +309,29 @@ fn try_main() -> Result<()> {
             gpu_model,
             lost,
         }) => {
-            let provider = match target.as_str() {
-                "docker" if lost => {
-                    return Err("`--lost` is for `ec2` and `modal`: leave it out".into());
-                }
-                "docker" => return live::docker(),
-                "ec2" => settings::Provider::Ec2,
-                "modal" => settings::Provider::Modal,
-                _ => {
-                    return Err(format!(
-                        "`{target}` is no live target: give `docker`, `ec2` or `modal`"
-                    )
-                    .into());
-                }
-            };
-            if gpu_model.is_some() && provider != settings::Provider::Modal {
+            if gpu_model.is_some() && target != "modal" {
                 return Err(
                     "`--gpu-model` is for `cargo xtask live modal` alone: leave it out".into(),
                 );
             }
+            let provider = match target.as_str() {
+                "docker" if lost => {
+                    return Err(
+                        "`--lost` is for `controller`, `ec2` and `modal`: leave it out".into(),
+                    );
+                }
+                "docker" => return live::docker(),
+                "controller" => return live::controller(lost),
+                "ec2" => settings::Provider::Ec2,
+                "modal" => settings::Provider::Modal,
+                _ => {
+                    return Err(format!(
+                        "`{target}` is no live target: give `docker`, `controller`, `ec2` or \
+                         `modal`"
+                    )
+                    .into());
+                }
+            };
             live::smoke(provider, gpu_model.as_deref(), lost)
         }
         flags::XtaskCmd::OpStats(flags::OpStats { run_dir, caller }) => {

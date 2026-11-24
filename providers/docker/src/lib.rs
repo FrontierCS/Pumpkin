@@ -153,6 +153,10 @@ impl Provider for Docker<'_> {
         cpus::reserve(&self.cpus, run, phases)
     }
 
+    fn fits(&self, phases: &[Vec<Role>]) -> Result<(), String> {
+        cpus::fits(&self.cpus, phases).map(|_| ())
+    }
+
     // A sandbox runs what the engine has, as it pulls nothing, so a publish checks that the
     // engine has the image, for its own platform, and names it as it is.
     fn publish_image(&self, image: &Image) -> Result<ImageRef, String> {

@@ -311,10 +311,15 @@ pub(super) const NOTES: &[Notes] = &[
 
 const INSTALL: Example = Example {
     before: "sudo ./pumpkin/bin/",
-    line: "pumpkin-admin install --settings\n\
+    line: "pumpkin-admin install ec2 --settings\n\
            arn:aws:ssm:us-west-1:123456789012:parameter/pumpkin-alice/settings",
     after: "",
-    about: "Install this release on the controller host, as root",
+    about: "Install this release on the controller's EC2 instance, as root",
+};
+const INSTALL_DOCKER: Example = Example {
+    line: "pumpkin-admin install docker --settings /etc/pumpkin/conf/settings.toml",
+    about: "Install it in the controller's container, as its image does at every start",
+    ..ALONE
 };
 const CHECK: Example = Example {
     line: "pumpkin-admin check --settings\n\
@@ -340,11 +345,12 @@ pub(super) const ADMIN: &[Notes] = &[
     },
     Notes {
         command: &["install"],
-        examples: &[INSTALL],
+        examples: &[INSTALL, INSTALL_DOCKER],
         statuses: &[],
-        more: "The settings name the members' list in their `[deployment] members`. The list\n\
-               holds a line `<member> <key>` for each key. A member's name is 1 to 32 of a-z,\n\
-               0-9 and `-`, and starts with a letter. The key is the line of the member's\n\
+        more: "The settings name the members' list in their `[deployment] members`: an SSM\n\
+               parameter's ARN, or a file's absolute path. The list holds a line\n\
+               `<member> <key>` for each key. A member's name is 1 to 32 of a-z, 0-9 and `-`,\n\
+               and starts with a letter. The key is the line of the member's\n\
                ~/.config/pumpkin/ssh/key.pub. A list with any other line, or a key twice, is\n\
                refused whole.",
     },
@@ -571,9 +577,9 @@ pumpkin.toml is the machine's configuration, which `pumpkin run` reads, and
 the file that --config names, by default $HOME/.config/pumpkin/pumpkin.toml. It
 is TOML, with the tables below. Every key is required unless it says what its
 absence means. [gateway] and the [upstreams.<name>] tables may be left out. Any
-other key is refused. On a machine whose runs go to the person's controller,
-[controller] takes the place of [docker], [providers.<name>.<kind>] and
-[gateway].
+other key is refused. On a machine whose runs go to the person's controllers,
+[controllers.<name>] takes the place of [docker], [providers.<name>.<kind>]
+and [gateway].
 
 Example, of a machine whose runs go to EC2 and Modal:
   [docker]
@@ -622,20 +628,22 @@ Example, of a machine whose runs go to EC2 and Modal:
   upstream_name = \"provider/model-a\"
   usd_per_mtok = { input = 1.25, cached = 0.125, output = 10 }
 
-Example, of a machine whose runs go to the person's controller, and Modal:
-  [controller]
-  name = \"alice\"
+Example, of a machine whose runs go to the person's controllers, one with Modal:
+  [controllers.alice]
   region = \"us-west-1\"
 
-  [controller.modal]
+  [controllers.alice.modal]
   profile = \"pumpkin\"
 
-  [controller.modal.classes.a100]
+  [controllers.alice.modal.classes.a100]
   gpu = \"A100-80GB\"
   gpu_model = \"NVIDIA A100-SXM4-80GB\"
   cpu_millis = 8000
   memory_bytes = 68719476736
   startup_seconds = 1800
+
+  [controllers.lab]
+  address = \"lab.example.org:2222\"
 
 [docker] is the machine's Docker engine:
   context       The context that reaches it, as `docker context ls` lists it.
@@ -737,33 +745,45 @@ Each entry of a workflow's model route reaches the one upstream that serves
 every model it allows.
 
 On a controller, each job reads its configuration from the controller's
-settings, which deploy/aws writes. The job sets [gateway] itself. The client
-sends [upstreams] and [controller.modal]. The settings name `envelope`, the
-version of the envelope that wrote them. deploy/aws's README says which
-versions a job takes. The admin sets `draining = true` for a cutover. Each job
-is then refused as it starts, and the jobs that run go on to their ends.
+settings, which deploy/aws writes, or the admin of a controller on Docker. The
+job sets [gateway] itself. The client sends [upstreams] and the controller's
+modal.
+The settings name `envelope`, the version of the envelope that wrote them.
+deploy/aws's README says which versions a job takes. The admin sets
+`draining = true` for a cutover. Each job is then refused as it starts, and the
+jobs that run go on to their ends.
 
-[controller] is the person's controller, which deploy/aws makes. `run`, `wait`,
-`ls`, `cancel`, `view` and `reap` go to it, as each one's help says.
-Each run is sent the [upstreams.<name>] tables, their keys, [controller.modal]
-and Modal's configuration file. They go into a directory of the run's own in
-the controller's tmpfs, which the run's end removes. The job runs the client's
-install with the module's settings and [controller.modal].
-The client uses AWS CLI v2, ssh, ssh-keygen and git from PATH. It sends the
-task's files and starts its job over SSH to the controller's private address.
-It uses up to four connections for large task uploads. The machine is in the
-controller's VPC, or reaches it through a VPN that translates its addresses
-into the VPC's. The first command creates a key. The controller admits the key
-once its admin lists it under the person's name in deploy/aws's `members`.
-Until then, each command is refused with the line to send the admin. The client
-keeps that key and the pinned host key in $HOME/.config/pumpkin/ssh/.
-  name          The `name` that deploy/aws was applied with.
-  region        The region it was applied in.
+[controllers.<name>] is a controller of the person's, which deploy/aws or
+deploy/docker makes. <name> is its name, as its settings' [deployment] name it.
+`run`, `wait`, `ls`, `cancel`, `view` and `reap` go to the one that
+--controller names, as each one's help says. Without --controller, they go to
+the configuration's one controller, and refuse if it names several. Copies of
+a controller's runs' records are in <name> in the runs directory.
+Each run is sent the [upstreams.<name>] tables, their keys, the controller's
+modal and Modal's configuration file. They go into a directory of the run's own
+in the controller's tmpfs, which the run's end removes. The job runs the
+client's install with the controller's settings and modal.
+The client uses ssh, ssh-keygen and git from PATH, and AWS CLI v2 for `region`.
+It sends the task's files and starts its job over SSH. It uses up to four
+connections for large task uploads. The first command creates a key. The
+controller admits the key once its admin lists it under the person's name in
+the controller's members' list. Until then, each command is refused with the
+line to send the admin. The client keeps that key and the pinned host key in
+$HOME/.config/pumpkin/ssh/.
+  region        The region that deploy/aws was applied in, for a controller
+                that deploy/aws made. The client finds it there by its tag,
+                starts it if it is stopped, and reaches it at its private
+                address. The machine is in the controller's VPC, or reaches it
+                through a VPN that translates its addresses into the VPC's.
+  address       The host and port, host:port, of a controller's sshd at a fixed
+                address, such as the port that deploy/docker publishes. The
+                client never starts it. A configuration names `region` or
+                `address`, not both.
 
-[controller.modal] is the Modal provider that the controller's runs may place
-roles on, if any. It takes the settings of a provider of kind modal, but
-`images`, which the module's settings give, and `dials_from`, which each run
-sets:
+[controllers.<name>.modal] is the Modal provider that the controller's runs may
+place roles on, if any, on a controller that deploy/aws made. It takes the settings
+of a provider of kind modal, but `images`, which the module's settings give,
+and `dials_from`, which each run sets:
   profile       As modal's. The profile is in Modal's configuration file,
                 ~/.modal.toml. Each run is sent that file if it is there.
                 Its workspace is one that deploy/aws's `modal_workspaces`

@@ -29,6 +29,7 @@ use schema::ir::Sha256Digest;
 
 pub(crate) use self::exit::Exit;
 use self::notes::{ADMIN, CONFIG, Layout, NOTES, Notes, section};
+use crate::controller::Name as Controller;
 use crate::ending::Printed;
 use crate::star::Entry;
 
@@ -71,8 +72,8 @@ enum Parsed {
     /// provider and drives the run. `run` prints the run's id once the run has started,
     /// and the run goes on without `run`.
     ///
-    /// With `[controller]` in the configuration, `run` sends the task to the controller, which
-    /// builds and runs it. `run` then prints the id at once and returns before the build.
+    /// With `[controllers.<name>]` in the configuration, `run` sends the task to the controller,
+    /// which builds and runs it. `run` then prints the id at once and returns before the build.
     /// `pumpkin wait` follows the build and the run. `--runs` and `--sandboxd` are refused.
     Run(Run),
     /// Wait for a run to end and say how it ended.
@@ -81,8 +82,8 @@ enum Parsed {
     /// run has ended, `wait` says its summary and the command that runs it again. Ending `wait`
     /// doesn't stop the run, but `pumpkin cancel` does.
     ///
-    /// With `[controller]` in the configuration and no `--runs`, `wait` follows the run on the
-    /// controller. It then copies the record into the default runs directory.
+    /// With `[controllers.<name>]` in the configuration and no `--runs`, `wait` follows the run
+    /// on the controller. It then copies the record into `<name>` in the default runs directory.
     Wait(Wait),
     /// List runs and their states.
     ///
@@ -91,8 +92,8 @@ enum Parsed {
     /// the others. A live run's line gives its phase and the bound on it. An ended run's line
     /// gives its state, how long it ran and its result's values, cut short if they are long.
     /// `pumpkin wait --outcome` prints them whole. If a run can't be listed, `ls` says why and
-    /// lists the others. With `[controller]` in the configuration and no `--runs`, `ls` lists the
-    /// controller's runs beside this machine's copies.
+    /// lists the others. With `[controllers.<name>]` in the configuration and no `--runs`, `ls`
+    /// lists the controller's runs beside this machine's copies of them.
     Ls(Ls),
     /// Stop a run and remove what it left.
     ///
@@ -100,8 +101,8 @@ enum Parsed {
     /// doesn't end the stop. `cancel` then removes what the run left, as `pumpkin reap` does, and
     /// says how the run ended. A run that has ended or is lost gets no signal.
     ///
-    /// With `[controller]` in the configuration and no `--runs`, `cancel` stops the run on the
-    /// controller. It then copies a started run's record here, as `pumpkin wait` does.
+    /// With `[controllers.<name>]` in the configuration and no `--runs`, `cancel` stops the run on
+    /// the controller. It then copies a started run's record here, as `pumpkin wait` does.
     Cancel(CancelRun),
     /// Serve the runs to this machine's browser.
     ///
@@ -109,8 +110,8 @@ enum Parsed {
     /// 127.0.0.1 alone and needs the token in the address. The page lists the runs newest first,
     /// each as `ls` says it. A run's page shows its summary, its sandboxes' lanes, who talks to
     /// whom and its log. The page changes a run only by a cancel, which runs `pumpkin cancel`.
-    /// With `[controller]` in the configuration and no `--runs`, `view` serves the controller's
-    /// runs.
+    /// With `[controllers.<name>]` in the configuration and no `--runs`, `view` serves the
+    /// controller's runs.
     View(View),
     /// Print the help of a command or a topic.
     ///
@@ -127,8 +128,8 @@ enum Parsed {
     /// failed. It leaves a live run to its driver. If a run can't be reaped, `reap` says why and
     /// reaps the others. It prints the ids of the runs it cleaned.
     ///
-    /// With `[controller]` in the configuration and no `--runs`, `reap` reaps the controller's
-    /// runs that this build made.
+    /// With `[controllers.<name>]` in the configuration and no `--runs`, `reap` reaps the
+    /// controller's runs that this build made.
     #[command(hide = true)]
     Reap(Reap),
     /// Run the controller's own commands.
@@ -197,7 +198,7 @@ pub(crate) enum Command {
     View(View),
     Job(Job),
     Boot,
-    Install(aws::ParameterArn),
+    Install(crate::host::Target),
     CheckDeployment(aws::ParameterArn),
     BootAll,
     Idle,
@@ -410,6 +411,9 @@ pub(crate) struct Run {
     pub(crate) runs: Option<String>,
     #[arg(long, value_name = "file", value_parser = utf8(RECORDED), help = CONFIG_HELP)]
     pub(crate) config: Option<String>,
+    #[arg(long, value_name = "name", value_parser = controller(), help = CONTROLLER_HELP)]
+    #[arg(conflicts_with = "runs")]
+    pub(crate) controller: Option<Controller>,
     /// The static sandboxd that every sandbox runs, with the static ec2-boot beside it (default:
     /// the one beside `pumpkin`, where `cargo xtask build` puts both).
     #[arg(long, value_name = "path", value_parser = utf8(RECORDED))]
@@ -426,6 +430,7 @@ impl Run {
             args: _,
             runs,
             config,
+            controller: _,
             sandboxd,
             wait: _,
         } = self;
@@ -452,6 +457,9 @@ pub(crate) struct Wait {
     pub(crate) run: RunName,
     #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT), help = RUNS_HELP)]
     pub(crate) runs: Option<String>,
+    #[arg(long, value_name = "name", value_parser = controller(), help = CONTROLLER_HELP)]
+    #[arg(conflicts_with = "runs")]
+    pub(crate) controller: Option<Controller>,
     #[command(flatten)]
     pub(crate) printed: Printed,
 }
@@ -461,6 +469,9 @@ pub(crate) struct View {
     /// The directory of the runs to serve (default: `runs` in the repository's `.pumpkin`).
     #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT))]
     pub(crate) runs: Option<String>,
+    #[arg(long, value_name = "name", value_parser = controller(), help = CONTROLLER_HELP)]
+    #[arg(conflicts_with = "runs")]
+    pub(crate) controller: Option<Controller>,
     /// The port on 127.0.0.1 to serve at (default: a free one).
     #[arg(long, value_name = "port")]
     pub(crate) port: Option<u16>,
@@ -471,6 +482,9 @@ pub(crate) struct Ls {
     /// The directory of the runs to list (default: `runs` in the repository's `.pumpkin`).
     #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT))]
     pub(crate) runs: Option<String>,
+    #[arg(long, value_name = "name", value_parser = controller(), help = CONTROLLER_HELP)]
+    #[arg(conflicts_with = "runs")]
+    pub(crate) controller: Option<Controller>,
     /// A prefix of the ids of the runs to list, such as a day's in UTC, as `20261110`.
     #[arg(value_name = "prefix", value_parser = utf8(", as every id is: name a prefix of an id"))]
     pub(crate) prefixes: Vec<String>,
@@ -481,6 +495,9 @@ pub(crate) struct Ls {
 pub(crate) struct CancelRun {
     #[command(flatten)]
     pub(crate) cancel: Cancel,
+    #[arg(long, value_name = "name", value_parser = controller(), help = CONTROLLER_HELP)]
+    #[arg(conflicts_with = "runs")]
+    pub(crate) controller: Option<Controller>,
     /// Match the run among every member's runs on the controller, not only this member's.
     #[arg(long)]
     pub(crate) any_member: bool,
@@ -502,6 +519,9 @@ pub(crate) struct Reap {
     /// The directory of the runs to reap (default: `runs` in the repository's `.pumpkin`).
     #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT))]
     pub(crate) runs: Option<String>,
+    #[arg(long, value_name = "name", value_parser = controller(), help = CONTROLLER_HELP)]
+    #[arg(conflicts_with = "runs")]
+    pub(crate) controller: Option<Controller>,
     // The Modal configuration file that a client sends with a reap, as with a cancel.
     #[arg(skip)]
     pub(crate) modal_config: Option<PathBuf>,
@@ -533,6 +553,13 @@ const ENTRY_HELP: &str = "A task's entry file, below the nearest directory that 
 
 const CONFIG_HELP: &str = "The machine's configuration, which `pumpkin help config` describes \
                            (default: `$HOME/.config/pumpkin/pumpkin.toml`)";
+
+const CONTROLLER_HELP: &str = "The controller of the configuration's `[controllers.<name>]` to \
+                               reach (default: its one controller)";
+
+fn controller() -> impl TypedValueParser<Value = Controller> {
+    utf8(", as every controller's name is: name one").try_map(Controller::try_from)
+}
 
 pub(crate) struct Job {
     pub(crate) id: RunTag,

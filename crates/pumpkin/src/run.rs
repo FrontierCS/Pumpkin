@@ -18,7 +18,7 @@ use runtime::{Budgets, ModelRoutes, Record, Recorded, Run, System, TokenPrices};
 use rustix::process::Signal;
 use schema::ir::{ModelName, Name};
 use schema::sandbox::HELLO_TIMEOUT;
-use schema::workflow::{ByProvider, ByRole, Class, Placed, Workflow};
+use schema::workflow::{ByProvider, ByRole, Class, ParseErrors, Placed, Workflow};
 use stdx::Context;
 
 use crate::bodies::{Bodies, Sources};
@@ -33,7 +33,7 @@ use crate::{
 };
 
 pub(crate) fn run(flags: cli::Run) -> Result<Exit, String> {
-    if let Some(client) = config::client(flags.config.as_deref())? {
+    if let Some(client) = config::client(flags.config.as_deref(), flags.controller.as_ref())? {
         return controller::run(&client, flags);
     }
     start(
@@ -45,7 +45,8 @@ pub(crate) fn run(flags: cli::Run) -> Result<Exit, String> {
 
 /// Starts run `id` in a driver of its own, and returns once the run has started, or with
 /// `flags.wait` once it has ended. It says nothing of how to follow the run to a follower
-/// ([`Reader`]).
+/// ([`Reader`]). The commands it says to run next name `flags.controller`, if given, as a
+/// controller's job is given its client's name for the controller.
 pub(crate) fn start(id: &RunTag, flags: cli::Run, reader: Reader) -> Result<Exit, String> {
     // Absolute, so that the record's path, which the driver says and `run` opens, names it from
     // any directory. A runs directory not given is left for the driver to find as `run` does,
@@ -56,8 +57,11 @@ pub(crate) fn start(id: &RunTag, flags: cli::Run, reader: Reader) -> Result<Exit
         runs: named.clone(),
         ..flags
     };
-    let named = named.as_deref();
-    let runs = named.unwrap_or(&runs);
+    let runs = named.as_deref().unwrap_or(&runs);
+    let named = &match &flags.controller {
+        Some(controller) => next::At::Controller(controller.clone()),
+        None => next::At::runs(named.as_deref()),
+    };
     // The driver parses these as `run`'s own, and finds everything else wrong with them. The
     // entry comes last, after `--`, so that a path that starts with `-` is not taken for a flag.
     let mut args: Vec<OsString> = vec!["run".into()];
@@ -96,7 +100,7 @@ pub(crate) fn start(id: &RunTag, flags: cli::Run, reader: Reader) -> Result<Exit
 fn unstarted(
     status: ExitStatus,
     record: Option<&Record>,
-    runs: Option<&str>,
+    runs: &next::At,
     printed: Printed,
 ) -> Result<Exit, String> {
     if status.code().is_some() {
@@ -144,6 +148,7 @@ pub(crate) fn driver_run(args: Vec<OsString>) -> Result<Exit, String> {
         args: cli::TaskArgs(args),
         runs,
         config,
+        controller: _,
         sandboxd,
         wait: _,
     } = run;
@@ -286,29 +291,8 @@ fn prepared<'e>(
         .models(task.workflow())
         .context(config.display())?;
     let engine = &*engine.insert(crate::engine(context, reader)?);
-    // The engine's own provider is reached here, so that an engine that can't run sandboxes is
-    // refused before any image is built.
-    let offers = (providers.into_by_name().into_iter())
-        .map(|(name, kind)| {
-            let offer = Offer::new(&name, kind, engine)?;
-            Ok((name, offer))
-        })
-        .collect::<Result<_, String>>()?;
-    let (_, offered) = place(
-        entry,
-        task.workflow().clone(),
-        offers,
-        Offer::classes,
-        config,
-    )?;
-    // Each provider that a role is placed on is reached here, so that one that can't be reached is
-    // refused before any image is built. A provider that no role is placed on is never reached.
-    let reached = (offered.into_iter())
-        .map(|(name, offer)| {
-            let connected = Connected::new(&name, offer, engine)?;
-            Ok((name, connected))
-        })
-        .collect::<Result<_, String>>()?;
+    let here = Offered::Here { entry, config };
+    let reached = reached(task.workflow(), providers, engine, &here)?;
     let (workflow, _, sources) = match task.build(engine, &mut ()) {
         Ok(built) => built,
         Err(problems) => return Ok(Err(problems)),
@@ -316,7 +300,7 @@ fn prepared<'e>(
     // Only `Workflow::place` makes a `Placed`, so the workflow with its images built is placed
     // again, on the providers reached. A build changes no role's needs, so each role is placed
     // where it was.
-    let (placed, placed_on) = place(entry, workflow, reached, Connected::classes, config)?;
+    let (placed, placed_on) = place(workflow, reached, Connected::classes, &here)?;
     Ok(Ok(Prepared {
         placed,
         placed_on,
@@ -326,6 +310,43 @@ fn prepared<'e>(
         budgets,
         prices,
     }))
+}
+
+/// The providers of `providers` that the roles of `workflow` are placed on, each reached on
+/// `engine`. Fails, before the task is built and anything is reserved, if a role fits no class that
+/// they offer, a provider can't be reached, or one could never hold the roles that run at once
+/// ([`runtime::fits`]), and says each problem as `offered` has it. A run that fits once other runs
+/// end passes.
+fn reached<'e>(
+    workflow: &Workflow,
+    providers: config::Providers<config::Kind>,
+    engine: &'e Engine,
+    offered: &Offered<'_>,
+) -> Result<BTreeMap<Name, Connected<'e>>, String> {
+    // The engine's own provider is reached here, so that an engine that can't run sandboxes is
+    // refused before any image is built.
+    let offers = (providers.into_by_name().into_iter())
+        .map(|(name, kind)| {
+            let offer = Offer::new(&name, kind, engine)?;
+            Ok((name, offer))
+        })
+        .collect::<Result<_, String>>()?;
+    let (_, placed_on) = place(workflow.clone(), offers, Offer::classes, offered)?;
+    // Each provider that a role is placed on is reached here, so that one that can't be reached is
+    // refused before any image is built. A provider that no role is placed on is never reached.
+    let reached = (placed_on.into_iter())
+        .map(|(name, offer)| {
+            let connected = Connected::new(&name, offer, engine)?;
+            Ok((name, connected))
+        })
+        .collect::<Result<_, String>>()?;
+    let (placed, placed_on) = place(workflow.clone(), reached, Connected::classes, offered)?;
+    let fits = runtime::fits(&placed, &placed_on.as_ref().map(Connected::provider));
+    fits.map_err(|error| match offered {
+        Offered::Here { config, .. } => format!("{}: {error}", config.display()),
+        Offered::Controller(name) => format!("controller `{name}`: {error}"),
+    })?;
+    Ok(placed_on.into_iter().collect())
 }
 
 /// A provider that the configuration names, as the roles are placed: the machine's engine,
@@ -409,28 +430,74 @@ impl<'e> Connected<'e> {
     }
 }
 
-/// `workflow`, the task's at `path`, placed in the classes that `classes` gives of each of
-/// `offered`, some of `config`'s providers. It comes with each provider that it places a role on.
-/// Otherwise, once it has said why each role that fits none fits none, it gives how many there
-/// are.
+/// `workflow` placed in the classes that `classes` gives of each of `providers`, which `offered`
+/// offers. It comes with each provider that it places a role on. Otherwise, once it has said why
+/// each role that fits none fits none, it gives how many there are.
 fn place<P>(
-    path: &Path,
     workflow: Workflow,
-    offered: BTreeMap<Name, P>,
+    providers: BTreeMap<Name, P>,
     classes: impl Fn(&P) -> &BTreeMap<Name, Class>,
-    config: &Path,
+    offered: &Offered<'_>,
 ) -> Result<(Placed, ByProvider<P>), String> {
-    workflow.place(offered, classes).map_err(|errors| {
-        let path = path.display();
-        for error in errors.as_slice() {
-            say(format_args!("{path}: {error}"));
+    (workflow.place(providers, classes)).map_err(|errors| misplaced(&errors, offered))
+}
+
+/// Who offers the sandboxes of a run that a refusal of it names.
+enum Offered<'a> {
+    /// The providers of the configuration at `config`, to the operator of the task whose entry is
+    /// at `entry`.
+    Here { entry: &'a Path, config: &'a Path },
+    /// A controller, to its member, by the name that the member's configuration gives it.
+    Controller(&'a controller::Name),
+}
+
+/// Says each of `errors`, a placement's, as `offered` has it, and returns the error that closes
+/// them.
+fn misplaced(errors: &ParseErrors, offered: &Offered<'_>) -> String {
+    let count = errors.as_slice().len();
+    match offered {
+        Offered::Here { entry, config } => {
+            let path = entry.display();
+            for error in errors.as_slice() {
+                say(format_args!("{path}: {error}"));
+            }
+            let has = format_args!(
+                "{path}: placing the workflow's roles in the classes that {}'s providers offer has",
+                config.display()
+            );
+            closing_problems(has, count)
         }
-        let has = format_args!(
-            "{path}: placing the workflow's roles in the classes that {}'s providers offer has",
-            config.display()
-        );
-        closing_problems(has, errors.as_slice().len())
-    })
+        Offered::Controller(name) => {
+            for error in errors.as_slice() {
+                say(format_args!("controller `{name}`: {error}"));
+            }
+            let has = format_args!(
+                "controller `{name}`: placing the workflow's roles in the classes of sandbox \
+                 that it offers has"
+            );
+            closing_problems(has, count)
+        }
+    }
+}
+
+/// Fails as [`reached`] does, to the member of the controller that they name `controller`, if
+/// the roles of `workflow` never fit the providers of the configuration at `config`, which it
+/// reaches on `engine`.
+pub(crate) fn never_fits_controller(
+    workflow: &Workflow,
+    config: &Path,
+    engine: &Engine,
+    controller: &controller::Name,
+) -> Result<(), String> {
+    let config::Config {
+        docker: _,
+        providers,
+        gateway: _,
+        upstreams: _,
+    } = config::read(config)?;
+    let offered = Offered::Controller(controller);
+    reached(workflow, providers, engine, &offered)?;
+    Ok(())
 }
 
 /// What the driver fails with, refused `error` before the record is begun: once it has said

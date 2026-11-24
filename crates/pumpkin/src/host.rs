@@ -3,9 +3,10 @@
 //!
 //! The install makes the user that runs every Pumpkin process there, and makes it linger, so that
 //! its job units outlive every SSH session. It writes this `pumpkin-admin` at [`ADMIN`], where the
-//! units run it. It writes the host file, which names the controller's settings ([`mod@file`]). It
-//! writes the units that reap at boot, stop the controller when idle and copy the members' keys
-//! (`members`). It writes `sshd`'s settings, which admit only those keys for the user.
+//! units run it. It writes the host file, which names the controller's target and settings
+//! ([`mod@file`]). It writes the units that reap at boot and copy the members' keys (`members`),
+//! and, on EC2, the units that stop the controller when idle. It writes `sshd`'s settings, which
+//! admit only those keys for the user.
 //!
 //! The host's provisioner installs the OS, Docker and the other packages that jobs run. The
 //! install fails where it finds one missing, and names it.
@@ -26,15 +27,14 @@ mod gateway_ports;
 mod idle;
 mod members;
 
-use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, chown};
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 use std::{fs, io};
 
-use aws::ParameterArn;
 pub(crate) use boot::boot_all;
-pub(crate) use file::settings;
+pub(crate) use file::{Kind, Target, target};
 use gateway_ports::GATEWAY_PORTS;
 pub(crate) use idle::idle;
 pub(crate) use members::members;
@@ -52,6 +52,10 @@ const ADMIN: &str = "/usr/local/sbin/pumpkin-admin";
 // of the user's for `-c`, so no file that a job writes in the home runs before a member's command.
 const SHELL: &str = "/bin/sh";
 
+// The UID of `USER`, the one that `useradd` picks on Ubuntu's images, after `ubuntu`'s 1000, so
+// that the files of a home that a volume keeps stay the user's on the next host.
+const UID: u32 = 1001;
+
 // The group that Docker's package makes. The engine serves its members as root.
 const DOCKER_GROUP: &str = "docker";
 
@@ -63,14 +67,9 @@ const IDLE_TIMER: &str = "pumpkin-idle.timer";
 
 const MEMBERS_TIMER: &str = "pumpkin-members.timer";
 
-// Each unit, by name, as its file holds it before `fill`.
-const UNITS: [(&str, &str); 5] = [
+// Each unit of every target, by name, as its file holds it before `fill`.
+const UNITS: [(&str, &str); 3] = [
     (BOOT_UNIT, include_str!("host/pumpkin-boot.service")),
-    (
-        "pumpkin-idle.service",
-        include_str!("host/pumpkin-idle.service"),
-    ),
-    (IDLE_TIMER, include_str!("host/pumpkin-idle.timer")),
     (
         "pumpkin-members.service",
         include_str!("host/pumpkin-members.service"),
@@ -78,11 +77,24 @@ const UNITS: [(&str, &str); 5] = [
     (MEMBERS_TIMER, include_str!("host/pumpkin-members.timer")),
 ];
 
-// The units that are enabled. The timers start the services that are not.
-const ENABLED: [&str; 3] = [BOOT_UNIT, IDLE_TIMER, MEMBERS_TIMER];
+// The units of a target that idles. Off by default, as Buildkite's agent leaves its idle stop to
+// its AWS stack:
+// https://github.com/buildkite/agent/blob/1371aac0e4864b963f701d6bdd0ffc3314f3fde3/clicommand/agent_start.go#L263-L268
+// https://github.com/buildkite/elastic-ci-stack-for-aws/blob/46aea5a452b279e83f12d6bc502fc95352728f42/packer/linux/conf/bin/bk-install-elastic-stack.sh#L183
+const IDLE_UNITS: [(&str, &str); 2] = [
+    (
+        "pumpkin-idle.service",
+        include_str!("host/pumpkin-idle.service"),
+    ),
+    (IDLE_TIMER, include_str!("host/pumpkin-idle.timer")),
+];
 
-// The enabled units that start as soon as they are enabled. The boot unit starts at boot.
-const STARTED: [&str; 2] = [IDLE_TIMER, MEMBERS_TIMER];
+// The units that are enabled, but the idle timer. The timers start the services that are not.
+const ENABLED: [&str; 2] = [BOOT_UNIT, MEMBERS_TIMER];
+
+// The enabled units that start as soon as they are enabled, but the idle timer. The boot unit
+// starts at boot.
+const STARTED: [&str; 1] = [MEMBERS_TIMER];
 
 const SSHD_DIR: &str = "/etc/ssh/sshd_config.d";
 
@@ -103,8 +115,7 @@ const SSHD: [(&str, &str); 2] = [
 // bound is past it.
 const SYSTEM_TIMEOUT: Duration = Duration::from_mins(2);
 
-/// Installs the host's software, as the module says, for the controller whose settings are SSM
-/// parameter `settings`. Returns 0.
+/// Installs the host's software, as the module says, for a controller on `target`. Returns 0.
 ///
 /// # Errors
 ///
@@ -112,7 +123,7 @@ const SYSTEM_TIMEOUT: Duration = Duration::from_mins(2);
 /// provisioner's part is missing, or if a step fails. The steps before the failed one stay done.
 /// The install copies the members' keys first, so settings that name no members' keys change
 /// nothing, and a copy that fails leaves `sshd` as it was.
-pub(crate) fn install(settings: &ParameterArn) -> Result<Exit, String> {
+pub(crate) fn install(target: &Target) -> Result<Exit, String> {
     if !rustix::process::geteuid().is_root() {
         return Err(
             "this `pumpkin-admin install` doesn't run as root: run it as root, as with sudo"
@@ -120,21 +131,30 @@ pub(crate) fn install(settings: &ParameterArn) -> Result<Exit, String> {
         );
     }
     ports()?;
-    members::copy(settings)?;
-    file::write(settings)?;
+    members::copy(&target.settings())?;
+    file::write(target)?;
     user()?;
     let exe = crate::workspace::exe("expected the `pumpkin-admin` to install")?;
     let bytes = fs::read(&exe).context(exe.display())?;
     wrote(Path::new(ADMIN), &bytes, 0o755)?;
+    let units: Vec<(&str, &str)> = if target.idles() {
+        [&UNITS[..], &IDLE_UNITS[..]].concat()
+    } else {
+        UNITS.to_vec()
+    };
     let mut changed = false;
-    for (file, text) in UNITS {
+    for &(file, text) in &units {
         changed |= wrote(
             &Path::new(UNITS_DIR).join(file),
             fill(text).as_bytes(),
             0o644,
         )?;
     }
-    units(changed)?;
+    let names: Vec<&str> = units.iter().map(|&(unit, _)| unit).collect();
+    let idle = target.idles().then_some(IDLE_TIMER);
+    let enabled: Vec<&str> = ENABLED.into_iter().chain(idle).collect();
+    let started: Vec<&str> = STARTED.into_iter().chain(idle).collect();
+    self::units(&names, changed, &enabled, &started)?;
     let mut written = Vec::new();
     for (file, text) in SSHD {
         let path = Path::new(SSHD_DIR).join(file);
@@ -227,38 +247,58 @@ fn searchable(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Adds `USER` with its shell and Docker's group, and makes it linger. Skips each step that the
-/// user already has.
+/// Adds `USER` with its UID, shell and Docker's group, gives it its home, and makes it linger.
+/// Skips each step that the user already has.
 fn user() -> Result<(), String> {
     let docker = getent("group", DOCKER_GROUP)?.ok_or_else(|| {
         format!(
             "the group `{DOCKER_GROUP}` is missing: install Docker first, whose package makes it"
         )
     })?;
-    match getent("passwd", USER)? {
-        None => {
-            let groups = format!("--groups={DOCKER_GROUP}");
-            let shell = format!("--shell={SHELL}");
-            let args = ["--create-home", "--user-group", &shell, &groups, USER];
-            ran("useradd", &args)?;
-            say(format_args!("added the user {USER}"));
-        }
-        Some(entry) => {
-            // name:password:UID:GID:GECOS:home:shell, as passwd(5) says.
-            if entry.split(':').nth(6) != Some(SHELL) {
-                ran("usermod", &[&format!("--shell={SHELL}"), USER])?;
-                say(format_args!("made {SHELL} the shell of {USER}"));
-            }
-            // name:password:GID:members, the members split by commas, as group(5) says.
-            let members = docker.split(':').nth(3).unwrap_or_default();
-            if !members.split(',').any(|member| member == USER) {
-                ran(
-                    "usermod",
-                    &["--append", &format!("--groups={DOCKER_GROUP}"), USER],
-                )?;
-                say(format_args!("added {USER} to the group {DOCKER_GROUP}"));
-            }
-        }
+    let added = getent("passwd", USER)?.is_none();
+    if added {
+        let uid = format!("--uid={UID}");
+        let groups = format!("--groups={DOCKER_GROUP}");
+        let shell = format!("--shell={SHELL}");
+        let args = ["--create-home", "--user-group", &uid, &shell, &groups, USER];
+        ran("useradd", &args)?;
+        say(format_args!("added the user {USER}"));
+    }
+    let entry = getent("passwd", USER)?.unwrap_or_default();
+    // name:password:UID:GID:GECOS:home:shell, as passwd(5) says.
+    let fields: Vec<&str> = entry.trim_end().split(':').collect();
+    let parsed = match fields[..] {
+        [_, _, uid, gid, _, home, shell] => (uid.parse::<u32>().ok())
+            .zip(gid.parse::<u32>().ok())
+            .map(|(uid, gid)| (uid, gid, home, shell)),
+        _ => None,
+    };
+    let Some((uid, gid, home, shell)) = parsed else {
+        return Err(format!(
+            "`getent passwd {USER}` gives `{}`: expected an entry of passwd(5), 7 fields with a \
+             numeric UID and GID",
+            entry.trim_end().escape_debug()
+        ));
+    };
+    if !added && shell != SHELL {
+        ran("usermod", &[&format!("--shell={SHELL}"), USER])?;
+        say(format_args!("made {SHELL} the shell of {USER}"));
+    }
+    // name:password:GID:members, the members split by commas, as group(5) says.
+    let members = docker.split(':').nth(3).unwrap_or_default();
+    if !added && !members.split(',').any(|member| member == USER) {
+        ran(
+            "usermod",
+            &["--append", &format!("--groups={DOCKER_GROUP}"), USER],
+        )?;
+        say(format_args!("added {USER} to the group {DOCKER_GROUP}"));
+    }
+    // `useradd` leaves a home that already exists as it was, such as a new volume's mount point,
+    // which is root's.
+    let home = Path::new(home);
+    if fs::metadata(home).context(home.display())?.uid() != uid {
+        chown(home, Some(uid), Some(gid)).context(home.display())?;
+        say(format_args!("gave {} to {USER}", home.display()));
     }
     // `loginctl enable-linger` makes this file, whose presence is the user's lingering.
     let linger = Path::new("/var/lib/systemd/linger").join(USER);
@@ -279,17 +319,17 @@ fn getent(database: &str, key: &str) -> Result<Option<String>, String> {
     }
 }
 
-/// Reloads systemd's units if any changed, and enables each unit of `ENABLED` that isn't. Starts
-/// the units of `STARTED`, which starts none that already runs.
+/// Reloads systemd's units if any of `units` changed, and enables each unit of `enabled` that
+/// isn't. Starts the units of `started`, which starts none that already runs.
 // A reload re-arms a waiting timer from its new file, so a timer that changed needs no restart:
 // https://github.com/systemd/systemd/blob/e8dc52766e1fdb4f8c09c3ab654d1270e1090c8d/src/core/timer.c#L306-L321
-fn units(changed: bool) -> Result<(), String> {
-    if changed || unloaded()? {
+fn units(units: &[&str], changed: bool, enabled: &[&str], started: &[&str]) -> Result<(), String> {
+    if changed || unloaded(units)? {
         systemctl(&["daemon-reload"])?;
     }
     let mut disabled = Vec::new();
     // One unit a call, as `is-enabled` exits with 0 if any of those it is given is enabled.
-    for unit in ENABLED {
+    for &unit in enabled {
         match run(command("systemctl", &["is-enabled", "--quiet", unit])) {
             Ok(_) => {}
             Err(Failure::Exited { .. }) => disabled.push(unit),
@@ -300,16 +340,16 @@ fn units(changed: bool) -> Result<(), String> {
         systemctl(&[&["enable"], &disabled[..]].concat())?;
         say(format_args!("enabled {}", disabled.join(" ")));
     }
-    systemctl(&[&["start"], &STARTED[..]].concat())
+    systemctl(&[&["start"], started].concat())
 }
 
-/// Whether the file of a unit of `UNITS` has changed since systemd loaded it. It has if an earlier
+/// Whether the file of a unit of `units` has changed since systemd loaded it. It has if an earlier
 /// install wrote the files and ended before it reloaded systemd.
 // systemd's `NeedDaemonReload` compares a unit's file with what systemd loaded:
 // https://github.com/systemd/systemd/blob/e8dc52766e1fdb4f8c09c3ab654d1270e1090c8d/man/org.freedesktop.systemd1.xml#L2413-L2416
-fn unloaded() -> Result<bool, String> {
+fn unloaded(units: &[&str]) -> Result<bool, String> {
     let mut args = vec!["show", "--property=NeedDaemonReload"];
-    args.extend(UNITS.map(|(unit, _)| unit));
+    args.extend(units);
     let output = run(command("systemctl", &args)).map_err(|failure| failure.to_string())?;
     let shown = String::from_utf8_lossy(&output.stdout);
     Ok(shown.lines().any(|line| line == "NeedDaemonReload=yes"))

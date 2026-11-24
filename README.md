@@ -393,9 +393,10 @@ provider that offers what it needs, such as its CPUs, its memory or its GPU.
 | `ec2` | a container on an EC2 instance of its own | the envelope that `deploy/aws` makes |
 | `modal` | a sandbox in a Modal workspace, under gVisor | a Modal profile, and the envelope's images |
 
-The controller is the same `pumpkin`, on an EC2 instance of the operator's own, which
-[`deploy/aws`](deploy/aws/README.md) makes. A machine whose configuration names `[controller]`
-uploads its Pumpkin install and sends jobs over SSH to the controller's private address.
+The controller is the same `pumpkin`, on an EC2 instance that
+[`deploy/aws`](deploy/aws/README.md) makes, or in a container on any Linux x86-64 host with a
+Docker engine, which [`deploy/docker`](deploy/docker/README.md) makes. A machine whose
+configuration names `[controllers.<name>]` uploads its Pumpkin install and sends jobs over SSH.
 The controller builds task images and runs the drivers in systemd units. The operator can close
 the connection and use the same commands to follow, list, stop, reap or view those runs later.
 [docs/providers.md](docs/providers.md) says how the pieces fit.
@@ -405,7 +406,8 @@ the connection and use the same commands to follow, list, stop, reap or view tho
 - Writing workflows: [workflows](docs/workflows.md), [the language](docs/language.md).
 - Running workflows: [running](docs/running.md), [records and the page](docs/record.md).
 - Deploying: [providers and the controller](docs/providers.md),
-  [`deploy/aws`](deploy/aws/README.md), `pumpkin help config`.
+  [`deploy/aws`](deploy/aws/README.md), [`deploy/docker`](deploy/docker/README.md),
+  `pumpkin help config`.
 - Models: [routes, budgets and prices](docs/models.md).
 - Contributing: [`ARCHITECTURE.md`](ARCHITECTURE.md), the map of the code, and
   [`docs/dev/`](docs/dev/), the rules for changing it. `cargo xtask ci` runs the checks that
