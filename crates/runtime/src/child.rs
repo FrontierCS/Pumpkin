@@ -28,7 +28,7 @@ use super::{Asked, Clock, Host, Inbox, Input, Runtime};
 pub(super) struct Child<'r, H: Host, O: Send + 'static> {
     pub(super) which: Which,
     pub(super) deadlines: Deadlines,
-    /// The run's hard end, as its sandbox's create takes it
+    /// Its sandbox's hard end, when what it holds is to be collected, as its create takes it
     /// ([`Create::hard_end`](provider::Create::hard_end)).
     pub(super) hard_end: UnixTime,
     /// Its directory in the record, which exists and is empty.

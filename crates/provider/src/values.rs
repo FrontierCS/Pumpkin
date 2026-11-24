@@ -81,8 +81,9 @@ pub struct Create {
     /// Whether the sandbox's `sandboxd` serves the model endpoint, at
     /// [`MODEL_PORT`](schema::sandbox::MODEL_PORT).
     pub model: bool,
-    /// The run's hard end, by this host's clock, which bounds how long the sandbox runs should
-    /// the run's driver die ([`Creator::create`](crate::Creator::create)).
+    /// The sandbox's hard end, by this host's clock: when what it holds is to be collected, at
+    /// most the run's hard end. It bounds how long the sandbox runs should the run's driver die
+    /// ([`Creator::create`](crate::Creator::create)).
     pub hard_end: UnixTime,
     /// When the run stops waiting for the sandbox to start, by this host's clock, at most the
     /// hard end: the create's deadline ([`Creator::create`](crate::Creator::create)).

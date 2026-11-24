@@ -101,7 +101,7 @@ impl Settings {
     }
 }
 
-/// The sandboxes' timer, which ends each instance soon after its run's hard end, outside its guest,
+/// The sandboxes' timer, which ends each instance soon after its hard end, outside its guest,
 /// so also one whose guest hangs: the schedule group, and the role that each schedule's target runs
 /// with, which `EventBridge` Scheduler assumes, and which may terminate run instances.
 // Without `deny_unknown_fields`, as `Settings`.

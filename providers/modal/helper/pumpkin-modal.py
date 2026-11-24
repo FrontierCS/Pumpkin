@@ -97,7 +97,7 @@ def create(modal, request: dict) -> dict:
     """Creates the run's sandbox of the request's role, and returns its ID and its tunnel's host
     and port.
 
-    Modal ends it at the run's `hard_end`, in seconds since the Unix epoch, if nothing ends it
+    Modal ends it at its `hard_end`, in seconds since the Unix epoch, if nothing ends it
     first. Its `sandboxd` ends it too if no gateway has claimed it a minute after its start's
     deadline, `by`, as when Modal makes it after the create was given up."""
     # Modal counts the timeout from its create, which this is just before.

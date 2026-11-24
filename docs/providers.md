@@ -38,7 +38,7 @@ templates of the envelope that `deploy/aws` makes, which the configuration's cla
 images go to the envelope's private ECR repositories, and each instance pulls its role's image with
 its own role, through ECR's credential helper, which keeps no login. An instance's firewall lets its
 container reach the gateway's address and port and nothing else, not the instance nor its metadata.
-Each instance's termination is scheduled at its run's hard end, outside the instance, so it ends
+Each instance's termination is scheduled at its sandbox's hard end, outside the instance, so it ends
 even if the driver dies. Its user data holds no secret: a sandbox proves which it is by its
 instance's identity document, which AWS signs, and the gateway admits it once, for the instance
 that the run launched, from that instance's address. The provider holds AWS's certificate of the
@@ -51,7 +51,7 @@ imports from the envelope's ECR repositories with a role that it assumes by its 
 no AWS credential of the operator's reaches Modal. A sandbox opens no connection but DNS to
 Modal's resolver; the driver dials it through Modal's TLS tunnel, which takes connections only
 from the configuration's `dials_from` address. A class names its GPU as Modal does, such as `A100-80GB`, and Modal ends each sandbox at
-its run's hard end.
+its hard end.
 
 ## The controller
 

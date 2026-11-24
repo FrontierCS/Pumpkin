@@ -449,7 +449,7 @@ fn timer_name(run: &RunTag, id: &InstanceId) -> String {
 }
 
 #[derive(Clone, Copy)]
-// The run's hard end, in whole seconds since the epoch.
+// The sandbox's hard end, in whole seconds since the epoch.
 struct HardEnd(u64);
 
 impl HardEnd {

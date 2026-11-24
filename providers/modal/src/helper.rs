@@ -83,8 +83,8 @@ pub(crate) enum Request<'a> {
         cpu_millis: u64,
         memory_mib: u64,
         gpu: Option<&'a Gpu>,
-        /// The run's hard end, in whole seconds since the Unix epoch, from which the helper takes
-        /// the sandbox's timeout as it creates it, as Modal counts that from then.
+        /// The sandbox's hard end, in whole seconds since the Unix epoch, from which the helper
+        /// takes the sandbox's timeout as it creates it, as Modal counts that from then.
         hard_end: u64,
         /// When the sandbox's start is due by, in whole seconds since the Unix epoch, which its
         /// `sandboxd` takes as `--by`, so that one no start claims ends itself.

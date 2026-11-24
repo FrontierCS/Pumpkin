@@ -8,7 +8,7 @@
 //! tunnel, which takes connections from the settings' `dials_from` address alone. The sandbox has
 //! no connection out, though Modal's resolver still answers its DNS queries; it runs under gVisor
 //! with its class's GPU, if any, and its role's CPU and memory as both its request and its limit;
-//! and Modal ends it at its run's hard end, if nothing ends it first.
+//! and Modal ends it at its hard end, if nothing ends it first.
 
 use std::collections::BTreeMap;
 use std::fs;

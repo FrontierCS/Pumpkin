@@ -265,7 +265,7 @@ impl<'r, H: Host> Run<'r, H> {
             sandboxes: &sandboxes,
             bodies,
             clock,
-            unix_hard_end: unix.saturating_add(lasts(&self.placed)),
+            unix_start: unix,
             log,
             payloads: Payloads::create(host, &self.dir)?,
             agents: BTreeMap::new(),
@@ -358,7 +358,8 @@ struct Runtime<'r, H: Host> {
     sandboxes: &'r Sandboxes<'r, H>,
     bodies: &'r dyn Bodies,
     clock: H::Clock,
-    unix_hard_end: UnixTime,
+    /// When the run started, by this host's clock.
+    unix_start: UnixTime,
     log: Log<'r, H>,
     payloads: Payloads<'r, H>,
     agents: BTreeMap<AgentId, Agent<H::Clock>>,
@@ -518,6 +519,12 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
 
     fn hard_end(&self) -> Duration {
         lasts(self.placed)
+    }
+
+    /// `at`, a time since the run started, by this host's clock: a sandbox's hard end, as its
+    /// create takes it ([`Create::hard_end`](provider::Create::hard_end)).
+    fn unix_at(&self, at: Duration) -> UnixTime {
+        self.unix_start.saturating_add(at)
     }
 
     // When the agent's teardown must have ended, as a time since the run started: the hard end
