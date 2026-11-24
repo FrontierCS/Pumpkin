@@ -34,6 +34,18 @@ We built Pumpkin to provide clean abstractions so people can easily do error han
 | Record | The logs you saved. | One directory per run: the workflow, the log, sandbox output, model exchanges, and the result. `wait`, `ls`, and `view` read it. |
 | Where it runs | Local Docker, or another launcher for EC2 or Modal. | The same `pumpkin run`, on this machine's Docker, on EC2, or on Modal. |
 
+## How it works
+
+`pumpkin` evaluates a task to its workflow IR, and each run's driver carries that out in sandboxes and writes the record that `wait`, `ls` and `view` read.
+
+![A task's sources go to pumpkin, which evaluates them to the workflow IR and builds the images; the driver, one process for each run, reads the IR, calls the functions' bodies from the sources the evaluation read, and has a provider create a sandbox for each instance of a role; it writes the record, which pumpkin wait, pumpkin ls and the page read.](docs/figures/overview.svg)
+
+Each run's sandboxes come from Docker, EC2 or Modal, on this machine or, over `ssh`, on a team's controller.
+
+![On the operator's machine, pumpkin builds images on the Docker engine, where the Docker provider's containers also run; a machine with a controller sends its runs over ssh to the controller, an EC2 instance or a privileged container on a Docker host. An EC2 controller builds the images on its own engine, pushes them to ECR, launches EC2 instances that pull them, and creates Modal sandboxes, which Modal imports from the same repositories. A Docker controller builds the images on an engine of its container's own, never the host's, where the Docker provider's containers also run.](docs/figures/providers.svg)
+
+[`ARCHITECTURE.md`](ARCHITECTURE.md) maps the code, and [Providers](docs/providers.md) says what each provider and the controller need.
+
 ## Quickstart
 
 On Linux x86-64, run `./pumpkin` from the root of the task repository. The `.pumpkinversion` file

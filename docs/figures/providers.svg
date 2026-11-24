@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 352" width="880" height="352" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 568" width="880" height="568" role="img" aria-labelledby="title desc">
 <title id="title">Where a run's sandboxes run, and how their images reach them</title>
-<desc id="desc">On the operator's machine, pumpkin builds images on the machine's Docker engine, where the Docker provider also runs its sandboxes as containers. A machine whose configuration names a controller sends its runs, over ssh, to the controller, an EC2 instance in the operator's AWS account that runs the same pumpkin. There the controller builds the images on its own Docker engine, pushes them to private ECR repositories, launches EC2 instances that pull them, one sandbox each, and creates Modal sandboxes, which Modal imports from the same repositories.</desc>
+<desc id="desc">On the operator's machine, pumpkin builds images on the machine's Docker engine, where the Docker provider also runs its sandboxes as containers. A machine whose configuration names a controller sends its runs, over ssh, to the controller, which runs the same pumpkin and is an EC2 instance in the operator's AWS account or a privileged container on a Docker host. The EC2 controller builds the images on its own Docker engine, pushes them to private ECR repositories, launches EC2 instances that pull them, one sandbox each, and creates Modal sandboxes, which Modal imports from the same repositories. The Docker controller builds the images on a Docker engine of its container's own, never the host's, where the Docker provider also runs its sandboxes as containers.</desc>
 <style>
 :root{--bg:#ffffff;--ink:#1f2328;--mute:#59636e;--line:#818b98;--card:#f6f8fa;--hot:#0969da;--hot-bg:#ddf4ff}
 @media (prefers-color-scheme:dark){:root{--bg:#0d1117;--ink:#e6edf3;--mute:#9198a1;--line:#6e7681;--card:#151b23;--hot:#58a6ff;--hot-bg:#10243e}}
@@ -18,7 +18,7 @@ text{font:12.5px system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;f
 .head{fill:var(--line)}
 </style>
 <defs><marker id="head" viewBox="0 0 8 8" refX="8" refY="4" markerWidth="8" markerHeight="8" orient="auto"><path class="head" d="M0 0L8 4L0 8z"/></marker></defs>
-<rect class="bg" width="880" height="352"/>
+<rect class="bg" width="880" height="568"/>
 
 <rect class="zone" x="16" y="16" width="228" height="320" rx="12"/>
 <text class="zone-label" x="32" y="38">THE OPERATOR'S MACHINE</text>
@@ -37,6 +37,8 @@ text{font:12.5px system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;f
 
 <path class="arrow" d="M229 86H314" marker-end="url(#head)"/>
 <text class="note mid" x="272" y="78">ssh</text>
+<path class="arrow" d="M229 106H282V412H314" marker-end="url(#head)"/>
+<text class="note mid" x="263" y="264">ssh</text>
 
 <rect class="zone" x="300" y="16" width="372" height="320" rx="12"/>
 <text class="zone-label" x="316" y="38">THE OPERATOR'S AWS, AS DEPLOY/AWS MAKES IT</text>
@@ -62,4 +64,14 @@ text{font:12.5px system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;f
 <text class="note" x="788" y="128">creates</text>
 <path class="arrow" d="M392 247V296H760V248" marker-end="url(#head)"/>
 <text class="note mid" x="576" y="288">Modal imports the images</text>
+
+<rect class="zone" x="300" y="352" width="372" height="200" rx="12"/>
+<text class="zone-label" x="316" y="374">A DOCKER HOST, AS DEPLOY/DOCKER MAKES IT</text>
+<rect class="hot" x="316" y="388" width="340" height="148" rx="10"/>
+<text class="name mid" x="486" y="412">the controller</text>
+<text class="note mid" x="486" y="430">a privileged container: the same pumpkin runs there</text>
+<rect class="box" x="336" y="444" width="300" height="76" rx="8"/>
+<text class="name mid" x="486" y="468">the container's own Docker engine</text>
+<text class="note mid" x="486" y="486">never the host's; it builds every image,</text>
+<text class="note mid" x="486" y="501">and the Docker provider's containers run here</text>
 </svg>
