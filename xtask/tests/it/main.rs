@@ -459,6 +459,72 @@ fn figures() {
 }
 
 #[test]
+fn links() {
+    use Standing::Tracked;
+    // Each link is made here, so that tidy doesn't find it in this file.
+    let at = |rest: &str| format!("https://github.com/o/r/{rest}");
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    let code = [
+        format!("// {}\n", at(&format!("blob/{sha}/src/a.rs#L1-L2"))),
+        format!("// {}\n", at("blob/main/src/a.rs")),
+        format!("// <{}>, a directory at a tag\n", at("tree/v1.0/src")),
+        format!("// ({}), at a short SHA\n", at("blob/0123456/a.zig")),
+        format!("// {}, a document\n", at("blob/main/docs/a.md#part")),
+        format!("// {}, {}\n", at(""), at("tree/main")),
+        format!("// {}\n", at("releases/download/v1/a.tgz")),
+        format!("const S: &str = \"{}\";\n", at("blob/main/a.rs")),
+    ];
+    let text = |line: String| line + "\n";
+    check(
+        &[
+            ("a.rs", code.concat(), Tracked),
+            (
+                "b.md",
+                text(format!("[B]({})", at("blob/master/b.py"))),
+                Tracked,
+            ),
+            (
+                "c.toml",
+                text(format!("# {}", at("blob/HEAD/c.rs"))),
+                Tracked,
+            ),
+            ("d.txt", text(at("blob/main/d.rs")), Tracked),
+        ],
+        tidy,
+        &expect![[r#"
+            a.rs:2:4: a link to code at `main`, which can move: link it at the full SHA of the commit that was read
+            a.rs:3:5: a link to code at `v1.0`, which can move: link it at the full SHA of the commit that was read
+            a.rs:4:5: a link to code at `0123456`, which can move: link it at the full SHA of the commit that was read
+            a.rs:8:18: a link to code at `main`, which can move: link it at the full SHA of the commit that was read
+            b.md:1:5: a link to code at `master`, which can move: link it at the full SHA of the commit that was read
+            c.toml:1:3: a link to code at `HEAD`, which can move: link it at the full SHA of the commit that was read"#]],
+    );
+}
+
+#[test]
+fn test_binaries() {
+    use Standing::Tracked;
+    let file = |path, text: &str| (path, text.to_owned(), Tracked);
+    let package = |name: &str| format!("[package]\nname = \"{name}\"\n");
+    check(
+        &[
+            file("Cargo.toml", "[workspace]\n"),
+            file("held/Cargo.toml", &package("held")),
+            file("held/tests/it/main.rs", ""),
+            file("held/tests/it/part.rs", ""),
+            file("held/tests/it/part/main.rs", ""),
+            file("held/inner/Cargo.toml", &package("inner")),
+            file("held/inner/tests/it.rs", ""),
+            file("loose/Cargo.toml", &package("loose")),
+            file("loose/tests/a.rs", ""),
+            file("loose/tests/b/main.rs", ""),
+        ],
+        tidy,
+        &expect!["loose/Cargo.toml: the package has 2 integration test binaries, `tests/a.rs`, `tests/b/main.rs`: make each a module of one, as each links the package and its dependencies again"],
+    );
+}
+
+#[test]
 fn test_data() {
     use Standing::{Deleted, Ignored, Tracked, Untracked};
     let file = |path| (path, "data\n".to_owned(), Tracked);

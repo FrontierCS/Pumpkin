@@ -538,6 +538,10 @@ fn mutants(paths: &[PathBuf], rev: Option<&str>) -> Result<()> {
     let repo = Repo { root: root() };
     let base = repo.git(["merge-base", rev.unwrap_or("origin/main"), "HEAD"])?;
     let diff = diff::since(&repo, &base, paths, &again)?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "cargo-mutants' input and the base's tree belong to no directory of the checkout's"
+    )]
     let scratch = tempfile::tempdir().context("making a scratch directory failed")?;
     let diff_path = scratch.path().join("changes.diff");
     fs::write(&diff_path, diff).context(format_args!("writing {} failed", diff_path.display()))?;

@@ -1,8 +1,7 @@
-//! The checks of the writing rule, of a source file's length, of a document's words, of
-//! `ARCHITECTURE.md`'s links, of the figures and of the layout of `tests/` that a machine can make,
-//! which `cargo xtask ci` runs.
-//! `docs/dev/writing.md`, `docs/dev/style.md` and `docs/dev/testing.md` hold the rules, and each
-//! problem says what is wrong and what to do.
+//! The checks of the rules that a machine can check, which `cargo xtask ci` runs: of comments and
+//! docs, of a source file's lines and a document's words, of links, of the figures and of the
+//! layout of `tests/`. `docs/dev/` doesn't restate a rule that a check holds, so each problem says
+//! what is wrong and what to do.
 //!
 //! Each file is read as proc-macro2's tokens, so a string literal is never taken for a comment: a
 //! doc comment is a token, and any other comment lies between two. Code in a comment is told from
@@ -19,9 +18,11 @@ use proc_macro2::{Delimiter, LineColumn, Spacing, TokenStream, TokenTree};
 use crate::Result;
 use crate::repo::Repo;
 
-// By its path, as xtask's test binary includes this file from elsewhere.
+// By their paths, as xtask's test binary includes this file from elsewhere.
 #[path = "tidy/figures.rs"]
 mod figures;
+#[path = "tidy/links.rs"]
+mod links;
 
 // The 95th percentiles of module docs' and item docs' lengths in comparable Rust applications.
 const MODULE_CAP: usize = 25;
@@ -56,7 +57,7 @@ struct Cap {
     /// The files it applies to, as a problem names a file that isn't one.
     kind: &'static str,
     unit: &'static str,
-    cap: usize,
+    limit: usize,
     /// What to do with a file over the cap.
     fix: &'static str,
 }
@@ -65,7 +66,7 @@ const LINES: Cap = Cap {
     table: "long_files",
     kind: "source file",
     unit: "lines",
-    cap: FILE_CAP,
+    limit: FILE_CAP,
     fix: "put what is new in a module of its own, or split the file into modules that each hold \
           one thing, in a pull request that only moves code",
 };
@@ -74,7 +75,7 @@ const WORDS: Cap = Cap {
     table: "words",
     kind: "Markdown document",
     unit: "words",
-    cap: WORD_CAP,
+    limit: WORD_CAP,
     fix: "shorten it, moving each fact to the help or the code it describes",
 };
 
@@ -139,9 +140,11 @@ pub(crate) fn check(repo: &Repo<'_>) -> Result<()> {
     problems.extend(architecture(repo)?);
     let listed = listed(repo)?;
     problems.extend(test_data(&listed));
+    problems.extend(test_binaries(&listed));
     let ceilings = ceilings(repo)?;
     problems.extend(capped(&ceilings, &LINES, line_counts(repo, &listed)?)?);
     problems.extend(capped(&ceilings, &WORDS, word_counts(repo)?)?);
+    problems.extend(links::check(repo, &listed)?);
     names.extend(figures::packages(repo, &listed)?);
     problems.extend(figures::check(repo, &listed, &names)?);
     if problems.is_empty() {
@@ -195,6 +198,36 @@ fn test_data(paths: &[String]) -> Vec<String> {
     problems
 }
 
+/// The problems of `paths`: a package with more than one integration test binary, of which cargo
+/// builds one of each `tests/*.rs` and each `tests/*/main.rs` beside a `Cargo.toml`.
+// Each binary links the package and its dependencies again, as matklad's post says:
+// https://matklad.github.io/2021/02/27/delete-cargo-integration-tests.html
+fn test_binaries(paths: &[String]) -> Vec<String> {
+    let mut problems = Vec::new();
+    let manifests = paths
+        .iter()
+        .filter(|path| path.rsplit('/').next() == Some("Cargo.toml"));
+    for manifest in manifests {
+        let dir = manifest.strip_suffix("Cargo.toml").unwrap_or_default();
+        let tests: Vec<&str> = (paths.iter())
+            .filter_map(|path| path.strip_prefix(dir)?.strip_prefix("tests/"))
+            .filter(|test| match test.split_once('/') {
+                None => Path::new(test).extension() == Some("rs".as_ref()),
+                Some((_, file)) => file == "main.rs",
+            })
+            .collect();
+        if tests.len() > 1 {
+            problems.push(format!(
+                "{manifest}: the package has {} integration test binaries, `tests/{}`: make each a \
+                 module of one, as each links the package and its dependencies again",
+                tests.len(),
+                tests.join("`, `tests/")
+            ));
+        }
+    }
+    problems
+}
+
 fn under_tests(file: &Path) -> bool {
     (file.parent()).is_some_and(|parent| {
         (parent.components()).any(|component| component.as_os_str() == "tests")
@@ -235,7 +268,7 @@ fn capped(ceilings: &toml::Table, cap: &Cap, counts: Vec<(String, usize)>) -> Re
         table,
         kind,
         unit,
-        cap,
+        limit: cap,
         fix,
     } = *cap;
     let mut ceilings = ceilings_of(ceilings, table, unit)?;

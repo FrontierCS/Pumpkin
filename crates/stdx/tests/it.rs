@@ -2,6 +2,11 @@
     clippy::unwrap_used,
     reason = "a test helper fails the test that calls it"
 )]
+#![expect(
+    clippy::disallowed_methods,
+    reason = "`test_support::TestDir` depends on stdx, so stdx's tests make their scratch with \
+              `tempfile`"
+)]
 
 use std::env;
 use std::ffi::OsStr;
