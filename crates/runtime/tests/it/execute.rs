@@ -2383,7 +2383,7 @@ fn taken_past_the_deadline() {
 #[test]
 fn held_by_a_slow_sync() {
     let slow = SlowSync {
-        record: Synced::Seq(2),
+        record: Synced::Holding("log.jsonl", r#""kind":"agent_started""#),
         queued: 1,
         at: Duration::from_millis(30_500),
     };
@@ -2491,7 +2491,7 @@ fn setup_started_past_its_deadline() {
 #[test]
 fn sync_fails() {
     check(
-        &SimHost::new().failed_sync(Synced::Seq(2)),
+        &SimHost::new().failed_sync(Synced::Holding("log.jsonl", r#""kind":"agent_started""#)),
         "sync-fails",
         &[(PROVIDER, &Sim::new())],
         &ops_workflow(&["ops", "ops", "exit"], 30),
@@ -2512,7 +2512,7 @@ fn sync_fails() {
 #[test]
 fn refusal_held_by_a_slow_sync() {
     let slow = SlowSync {
-        record: Synced::Seq(3),
+        record: Synced::Holding("log.jsonl", r#""request":{"kind":"ops"}"#),
         queued: 0,
         at: Duration::from_millis(30_500),
     };
