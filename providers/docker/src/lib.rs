@@ -27,7 +27,7 @@ use provider::{
 };
 use schema::ir::{Image, Name};
 use schema::sandbox::{SANDBOXCTL_PATH, SANDBOXD_PATH, SOCKET_NAME, SocketDial};
-use schema::workflow::{Class, Offers};
+use schema::workflow::{Class, Companions, Offers};
 use serde_json::json;
 use stdx::process::{Bound, Failure};
 use stdx::{Context, Deadline};
@@ -93,6 +93,7 @@ impl<'e> Docker<'e> {
             // A class that states its CPU's model is offered only to roles that need that model,
             // and the engine has this one class, which every role is to fit.
             cpu_model: None,
+            companions: Companions::None,
         };
         Ok(Self {
             engine,

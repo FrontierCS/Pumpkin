@@ -10,7 +10,7 @@
 )]
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::num::{NonZeroU32, NonZeroU64};
+use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 
 use expect_test::{Expect, expect};
 use schema::sandbox::op::{
@@ -22,7 +22,7 @@ use schema::sandbox::{
     MAX_TRANSFER_BYTES, RegistrationGrant, RelativePath, ToSandbox, command_env, command_stderr,
     command_stdin, command_stdout, pumpkin_dir, pumpkin_subdirs, read_hello,
 };
-use schema::workflow::{Class, Offers, Part, Placement, UsdPerHour, Workflow};
+use schema::workflow::{Class, Companions, Offers, Part, Placement, UsdPerHour, Workflow};
 use schema::{ec2_boot, frame, ir};
 use serde_json::{Value, json};
 use test_support::workflow;
@@ -163,21 +163,27 @@ impl Case for Styled {
 
 /// The classes that two providers offer, as an EC2 envelope and a Modal workspace might: on
 /// `aws`, `judge`, `agent` and `judge_memory`, the last two alike, `judge_60`, and `ice_lake`,
-/// which states its CPU's model; and on `gpus`, `h100` and `h100_4`, with GPUs.
+/// which states its CPU's model; and on `gpus`, `h100` and `h100_4`, with GPUs and companions.
 fn offered() -> BTreeMap<ir::Name, BTreeMap<ir::Name, Class>> {
     let name = valid::<ir::Name>;
     let flags = |flags: &[&str]| flags.iter().map(|flag| valid(flag)).collect();
-    let h100 = |count| {
-        let model = valid("NVIDIA H100 80GB HBM3");
-        let count = NonZeroU32::new(count).unwrap();
-        Some(ir::Gpu { count, model })
-    };
     let offers = |cpus: u64, memory_gib: u64| Offers {
         cpu_millis: NonZeroU64::new(cpus * 1000).unwrap(),
         memory_bytes: NonZeroU64::new(memory_gib << 30).unwrap(),
         gpu: None,
         cpu_features: flags(&["avx2", "sse4_2"]),
         cpu_model: None,
+        companions: Companions::None,
+    };
+    let h100 = |count, cpus, memory_gib| {
+        let model = valid("NVIDIA H100 80GB HBM3");
+        let count = NonZeroU32::new(count).unwrap();
+        Offers {
+            gpu: Some(ir::Gpu { count, model }),
+            cpu_features: BTreeSet::new(),
+            companions: MODAL_COMPANIONS,
+            ..offers(cpus, memory_gib)
+        }
     };
     let class = |provider: &str, class: &str, offers, startup_seconds| {
         let declared = Class {
@@ -207,26 +213,8 @@ fn offered() -> BTreeMap<ir::Name, BTreeMap<ir::Name, Class>> {
             60,
         ),
         class("aws", "ice_lake", ice_lake, 60),
-        class(
-            "gpus",
-            "h100",
-            Offers {
-                gpu: h100(1),
-                cpu_features: BTreeSet::new(),
-                ..offers(8, 64)
-            },
-            600,
-        ),
-        class(
-            "gpus",
-            "h100_4",
-            Offers {
-                gpu: h100(4),
-                cpu_features: BTreeSet::new(),
-                ..offers(32, 256)
-            },
-            600,
-        ),
+        class("gpus", "h100", h100(1, 8, 64), 600),
+        class("gpus", "h100_4", h100(4, 32, 256), 600),
     ];
     let mut offered: BTreeMap<_, BTreeMap<_, _>> = BTreeMap::new();
     for (provider, class, declared) in classes {
@@ -234,6 +222,13 @@ fn offered() -> BTreeMap<ir::Name, BTreeMap<ir::Name, Class>> {
     }
     offered
 }
+
+/// The companions that [`offered`]'s classes with GPUs hold, as a Modal sandbox holds them.
+const MODAL_COMPANIONS: Companions = Companions::Reserved {
+    cpu_millis_each: NonZeroU64::new(32).unwrap(),
+    memory_bytes_each: NonZeroU64::new(32 << 20).unwrap(),
+    most: NonZeroUsize::new(250).unwrap(),
+};
 
 /// The CPU model that [`offered`]'s `ice_lake` states.
 const XEON: &str = "Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz";
@@ -1525,11 +1520,121 @@ fn companions() {
             /roles/0/runtime/agent/grants/1/session/runner: `gpu`'s companion `judge` runs target `trainer`'s image, sha256:2222222222222222222222222222222222222222222222222222222222222222: give the companion an image no target has
             parsed"#]],
     );
+}
+
+/// [`accompanied`]'s runner with so many companions and the needs given, placed on the classes
+/// offered. It shows where the runner is placed, or why it can't be.
+struct Accompanying {
+    needs: Value,
+    companions: usize,
+    offered: BTreeMap<ir::Name, BTreeMap<ir::Name, Class>>,
+}
+
+impl Case for Accompanying {
+    fn outcome(self) -> String {
+        let companions = (0..self.companions).map(|index| companion(&format!("c{index}"), '4'));
+        let mut ir = accompanied(companions.collect());
+        ir["roles"][3]["needs"] = self.needs.clone();
+        let ir = serde_json::from_value::<ir::Workflow>(ir).unwrap();
+        let placed = Workflow::parse(&ir)
+            .unwrap()
+            .place(self.offered, |classes| classes);
+        let at = match placed {
+            Ok((placed, _)) => {
+                let (runner, _) = placed.workflow().roles().nth(3).unwrap();
+                let placement = placed.placement(runner);
+                format!("`{}` `{}`", placement.provider, placement.class)
+            }
+            Err(errors) => errors.to_string(),
+        };
+        format!("{} with {}: {at}", self.needs, self.companions)
+    }
+}
+
+/// [`offered`], and on `modal`, `cpu`: a class without GPUs, of 1 CPU and more memory than
+/// `aws`'s smallest, that holds companions.
+fn with_cpu() -> BTreeMap<ir::Name, BTreeMap<ir::Name, Class>> {
+    let mut offered = offered();
+    let mut cpu = offered[&valid::<ir::Name>("gpus")][&valid::<ir::Name>("h100")].clone();
+    cpu.offers.gpu = None;
+    cpu.offers.cpu_millis = NonZeroU64::new(1000).unwrap();
+    offered.insert(valid("modal"), BTreeMap::from([(valid("cpu"), cpu)]));
+    offered
+}
+
+/// [`offered`], with no class that offers companions.
+fn unoffered() -> BTreeMap<ir::Name, BTreeMap<ir::Name, Class>> {
+    let mut offered = offered();
+    for class in offered.values_mut().flat_map(BTreeMap::values_mut) {
+        class.offers.companions = Companions::None;
+    }
+    offered
+}
+
+#[test]
+fn placed_companions() {
+    let needs = |cpu_millis: u64, memory_mib: u64, gpus: u32| {
+        let mut needs = json!({ "cpu_millis": cpu_millis, "memory_bytes": memory_mib << 20 });
+        if gpus > 0 {
+            needs["gpu"] = json!({ "count": gpus, "model": "NVIDIA H100 80GB HBM3" });
+        }
+        needs
+    };
+    let on = |needs: Value, companions: usize| Accompanying {
+        needs,
+        companions,
+        offered: offered(),
+    };
+    let on_cpu = |needs: Value, companions: usize| Accompanying {
+        offered: with_cpu(),
+        ..on(needs, companions)
+    };
+    let on_unoffered = |needs: Value, companions: usize| Accompanying {
+        offered: unoffered(),
+        ..on(needs, companions)
+    };
     check(
-        [Placing(accompanied(two))],
-        &expect![
-            "/roles/3/runtime/runner/companions: `gpu` declares 2 companions, and no class of sandbox holds companions: declare none"
+        [
+            on(needs(500, 1024, 1), 15),
+            on(needs(500, 1024, 1), 16),
+            on(needs(8000, 512, 1), 16),
+            on(needs(8000, 512, 1), 17),
+            on(needs(8000, 1000, 1), 31),
+            on(needs(8000, 1000, 1), 32),
+            on(needs(500, 512, 1), 17),
+            on(needs(16_000, 128 << 10, 4), 250),
+            on(needs(16_000, 128 << 10, 4), 251),
+            on(needs(500, 1024, 0), 1),
+            on_cpu(needs(500, 1024, 0), 1),
+            on_cpu(needs(500, 1024, 0), 32),
+            on_cpu(needs(16, 1024, 0), 1),
+            on_unoffered(needs(500, 1024, 1), 1),
+            on_unoffered(needs(128_000, 1024, 0), 0),
+            Accompanying {
+                offered: BTreeMap::new(),
+                ..on(needs(500, 1024, 1), 1)
+            },
         ],
+        &expect![[r#"
+            {"cpu_millis":500,"gpu":{"count":1,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":1073741824} with 15: `gpus` `h100`
+            {"cpu_millis":500,"gpu":{"count":1,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":1073741824} with 16: /roles/3/runtime/runner/companions: `gpu` declares 16 companions, more than any class that fits its needs holds: `gpus`'s `h100` holds 15 for needs of 500 thousandths of a CPU and 1 GiB, so need at least 512 thousandths of a CPU, or declare at most 15
+            {"cpu_millis":8000,"gpu":{"count":1,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":536870912} with 16: `gpus` `h100`
+            {"cpu_millis":8000,"gpu":{"count":1,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":536870912} with 17: /roles/3/runtime/runner/companions: `gpu` declares 17 companions, more than any class that fits its needs holds: `gpus`'s `h100` holds 16 for needs of 8000 thousandths of a CPU and 512 MiB, so need at least 544 MiB, or declare at most 16
+            {"cpu_millis":8000,"gpu":{"count":1,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":1048576000} with 31: `gpus` `h100`
+            {"cpu_millis":8000,"gpu":{"count":1,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":1048576000} with 32: /roles/3/runtime/runner/companions: `gpu` declares 32 companions, more than any class that fits its needs holds: `gpus`'s `h100` holds 31 for needs of 8000 thousandths of a CPU and 1000 MiB, so need at least 1 GiB, or declare at most 31
+            {"cpu_millis":500,"gpu":{"count":1,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":536870912} with 17: /roles/3/runtime/runner/companions: `gpu` declares 17 companions, more than any class that fits its needs holds: `gpus`'s `h100` holds 15 for needs of 500 thousandths of a CPU and 512 MiB, so need at least 544 thousandths of a CPU and 544 MiB, or declare at most 15
+            {"cpu_millis":16000,"gpu":{"count":4,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":137438953472} with 250: `gpus` `h100_4`
+            {"cpu_millis":16000,"gpu":{"count":4,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":137438953472} with 251: /roles/3/runtime/runner/companions: `gpu` declares 251 companions, more than any class that fits its needs holds: `gpus`'s `h100_4` holds at most 250, so declare at most 250
+            {"cpu_millis":500,"memory_bytes":1073741824} with 1: /roles/3/runtime/runner/companions: `gpu` declares 1 companion, and no class that fits its needs offers companions: declare none, or change its needs to fit a class that offers them
+            {"cpu_millis":500,"memory_bytes":1073741824} with 1: `modal` `cpu`
+            {"cpu_millis":500,"memory_bytes":1073741824} with 32: /roles/3/runtime/runner/companions: `gpu` declares 32 companions, more than any class that fits its needs holds: `modal`'s `cpu` holds 15 for needs of 500 thousandths of a CPU and 1 GiB, so declare at most 15
+            {"cpu_millis":16,"memory_bytes":1073741824} with 1: /roles/3/runtime/runner/companions: `gpu` declares 1 companion, more than any class that fits its needs holds: `modal`'s `cpu` holds 0 for needs of 16 thousandths of a CPU and 1 GiB, so need at least 32 thousandths of a CPU, or declare none
+            {"cpu_millis":500,"gpu":{"count":1,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":1073741824} with 1: /roles/3/runtime/runner/companions: `gpu` declares 1 companion, and no class of sandbox offers companions: declare none, or run it where a class offers them
+            {"cpu_millis":128000,"memory_bytes":1073741824} with 0: /roles/3/needs: `gpu` fits no class of sandbox, as `aws`'s `agent` offers 8000 thousandths of a CPU, fewer than its 128000; `aws`'s `ice_lake` offers 4000 thousandths of a CPU, fewer than its 128000; `aws`'s `judge` offers 8000 thousandths of a CPU, fewer than its 128000; `aws`'s `judge_60` offers 64000 thousandths of a CPU, fewer than its 128000; `aws`'s `judge_memory` offers 8000 thousandths of a CPU, fewer than its 128000; `gpus`'s `h100` offers 8000 thousandths of a CPU, fewer than its 128000; `gpus`'s `h100_4` offers 32000 thousandths of a CPU, fewer than its 128000: change its needs, or run it where sandboxes are larger
+            {"cpu_millis":500,"gpu":{"count":1,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":1073741824} with 1: /roles/0/needs: `agent` fits no class of sandbox, as no class is offered: change its needs, or run it where sandboxes are larger
+            /roles/1/needs: `trainer` fits no class of sandbox, as no class is offered: change its needs, or run it where sandboxes are larger
+            /roles/2/needs: `final_judge` fits no class of sandbox, as no class is offered: change its needs, or run it where sandboxes are larger
+            /roles/3/needs: `gpu` fits no class of sandbox, as no class is offered: change its needs, or run it where sandboxes are larger"#]],
     );
 }
 

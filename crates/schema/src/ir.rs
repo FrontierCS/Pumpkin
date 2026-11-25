@@ -229,9 +229,9 @@ pub struct RunnerRuntime {
     #[serde(default, skip_serializing_if = "Env::is_empty")]
     pub env: Env,
     /// The containers that each of the runner's sandboxes holds beside its own, each named once
-    /// among them. They share the sandbox's [`Needs`] and its lifetime. No class of sandbox holds
-    /// them, so [placing](crate::workflow::Workflow::place) refuses a runner that declares
-    /// any. Absent, none.
+    /// among them. They share the sandbox's [`Needs`] and its lifetime. The runner is placed only
+    /// in a class that holds them all for its needs
+    /// ([`Offers::companions`](crate::workflow::Offers::companions)). Absent, none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub companions: Vec<Companion>,
 }

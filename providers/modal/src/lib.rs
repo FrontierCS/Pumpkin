@@ -34,7 +34,7 @@ use provider::{
 };
 use schema::ir::{self, GpuModel, Image, Name};
 use schema::sandbox::{Endpoint, Listening};
-use schema::workflow::{Class, Offers, UsdPerHour};
+use schema::workflow::{Class, Companions, Offers, UsdPerHour};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use stdx::Deadline;
@@ -192,6 +192,7 @@ impl TryFrom<ClassTable> for SandboxClass {
             gpu: offered,
             cpu_features: BTreeSet::new(),
             cpu_model: None,
+            companions: Companions::None,
         };
         let class = Class {
             offers,
@@ -210,13 +211,15 @@ impl From<SandboxClass> for ClassTable {
             startup_seconds,
             usd_per_hour,
         } = class;
-        // Its GPU's count is `gpu`'s, and a class of the settings names no CPU's flags or model.
+        // Its GPU's count is `gpu`'s, and a class of the settings names no CPU's flags, CPU model
+        // or companions.
         let Offers {
             cpu_millis,
             memory_bytes,
             gpu: offered,
             cpu_features: _,
             cpu_model: _,
+            companions: _,
         } = offers;
         Self {
             gpu,

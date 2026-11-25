@@ -43,7 +43,7 @@ use expect_test::{Expect, expect};
 use schema::ir::{self, AbsolutePath, ArgumentValue, Argv, CpuModel, Name, Sha256Digest};
 use schema::sandbox::op::{CommandEnd, OpReply, REASON_BYTES, SessionOp, TransferEnd};
 use schema::sandbox::{ExitStatus, RESULT_MAX_BYTES};
-use schema::workflow::{Class, Offers, Workflow};
+use schema::workflow::{Class, Companions, Offers, Workflow};
 use serde_json::{Value, json};
 use test_support::workflow;
 
@@ -171,6 +171,7 @@ fn offered() -> BTreeMap<Name, BTreeMap<Name, Class>> {
             gpu: None,
             cpu_features: BTreeSet::new(),
             cpu_model,
+            companions: Companions::None,
         };
         let declared = Class {
             offers,

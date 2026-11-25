@@ -54,7 +54,7 @@ use schema::sandbox::{
     RelativePath, Root, SOCKET_NAME, SocketDial, ToSandbox, dir_mode, file_mode, log_dir, out_dir,
     pumpkin_dir,
 };
-use schema::workflow::{Class, Offers, UsdPerHour};
+use schema::workflow::{Class, Companions, Offers, UsdPerHour};
 use serde_json::{Map, Value, json};
 use stdx::Deadline;
 use stdx::time::{Clock as _, Machine};
@@ -535,6 +535,7 @@ fn ready(startup_seconds: NonZeroU64) -> Ready {
             gpu: None,
             cpu_features: BTreeSet::new(),
             cpu_model,
+            companions: Companions::None,
         };
         let class = Class {
             offers,

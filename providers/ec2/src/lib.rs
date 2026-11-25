@@ -34,7 +34,7 @@ use provider::{
 use schema::ec2_boot::{BOOT_IN_IMAGE, SANDBOXD_IN_IMAGE};
 use schema::ir::{self, CpuFlag, CpuModel, Image, Name};
 use schema::sandbox::PrivateDial;
-use schema::workflow::{Class, Offers, UsdPerHour};
+use schema::workflow::{Class, Companions, Offers, UsdPerHour};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -89,6 +89,7 @@ impl Settings {
                 gpu: None,
                 cpu_features: class.cpu_features.clone(),
                 cpu_model: class.cpu_model.clone(),
+                companions: Companions::None,
             };
             let class = Class {
                 offers,
