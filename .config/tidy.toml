@@ -1,5 +1,5 @@
 # The files over a cap of tidy's, each with its ceiling, the most it may hold, which only goes down
-# (`CEILINGS` in `xtask/src/tidy.rs`).
+# (`CEILINGS` in `xtask/src/tidy/ceilings.rs`).
 
 # The source files over `FILE_CAP` lines.
 [long_files]
