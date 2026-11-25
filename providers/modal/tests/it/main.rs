@@ -15,7 +15,7 @@ use std::time::Duration;
 use expect_test::{Expect, expect};
 use modal::Settings;
 use provider::{CompanionDial, Create, ImageRef, ListenDials, Role, RunTag, SandboxdRef, UnixTime};
-use schema::ir::{AbsolutePath, CompanionName, Env, Image, Name, Resources, User};
+use schema::ir::{CompanionName, Image, Name, Resources, User};
 use schema::sandbox::{Listening, RegistrationGrant, Relayed, TlsIdentity};
 use serde_json::{Value, json};
 
@@ -85,8 +85,6 @@ fn companion(name: &str, image: &str, id: u8) -> CompanionDial {
         name: CompanionName::try_from(name.to_owned()).unwrap(),
         image: ImageRef::from(image.to_owned()),
         user: user(u32::from(id)),
-        cwd: AbsolutePath::try_from("/srv".to_owned()).unwrap(),
-        env: serde_json::from_value::<Env>(json!(["TOKEN=task"])).unwrap(),
         relayed: Relayed {
             grant: RegistrationGrant::from([id; 16]),
             identity: TlsIdentity::new(vec![0xce, id], vec![0x5e, id]),

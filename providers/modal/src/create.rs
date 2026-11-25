@@ -195,9 +195,6 @@ fn sidecar(companion: &CompanionDial, by: UnixTime) -> Result<Sidecar<'_>, Strin
         name,
         image,
         user,
-        // Each command is given its directory and environment as it is started, as `main`'s are.
-        cwd: _,
-        env: _,
         relayed: Relayed { grant, identity },
     } = companion;
     let mut args = listening(RELAYED_PORT, by, *user);
