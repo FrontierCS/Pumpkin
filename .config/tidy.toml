@@ -269,9 +269,9 @@
 "providers/ec2/tests/it/envelope.rs" = 1
 "providers/ec2/tests/it/main.rs" = 1
 "providers/modal/src/envelope.rs" = 1
-"providers/modal/src/helper.rs" = 6
+"providers/modal/src/helper.rs" = 4
 "providers/modal/src/lib.rs" = 11
-"providers/modal/src/sandboxes.rs" = 9
+"providers/modal/src/sandboxes.rs" = 7
 "xtask/src/aws_certificates.rs" = 1
 "xtask/src/aws_certificates/table.rs" = 1
 "xtask/src/diff.rs" = 1

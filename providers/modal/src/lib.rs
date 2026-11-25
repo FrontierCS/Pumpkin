@@ -23,7 +23,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv4Addr;
-use std::num::{NonZeroU32, NonZeroU64};
+use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::path::Path;
 
 use aws::{Cli, Region, Repository, RepositoryName, RoleArn};
@@ -33,33 +33,34 @@ use provider::{
     Ready, Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
 use schema::ir::{self, GpuModel, Image, Name};
-use schema::workflow::{Class, Offers, UsdPerHour};
+use schema::sandbox::SANDBOXD_PATH;
+use schema::workflow::{Class, Companions, Offers, UsdPerHour};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use stdx::Deadline;
 
+use crate::create::{MIB, Sandboxd, memory_mib};
 use crate::helper::{ASK_TIMEOUT, ConfigFile, Helper, IMPORT_TIMEOUT, Profile, Request};
 use crate::iam::ECR;
+use crate::images::Batch;
 
+mod create;
 pub mod envelope;
 mod helper;
 pub mod iam;
+mod images;
 mod sandboxes;
 
-/// The bytes in a MiB, the unit in which Modal gives a sandbox memory.
-const MIB: u64 = 1024 * 1024;
-
-fn memory_mib(role: &Role) -> Result<u64, String> {
-    let memory_bytes = role.resources.memory_bytes.get();
-    if !memory_bytes.is_multiple_of(MIB) {
-        return Err(format!(
-            "role `{}` asks for {memory_bytes} bytes of memory, which Modal gives in whole MiB: \
-             ask for a multiple of {MIB}",
-            role.name
-        ));
-    }
-    Ok(memory_bytes / MIB)
-}
+/// The companions that a sandbox of any class holds, each a sidecar of Modal's.
+// Modal refuses a sidecar past one for each 32 thousandths of a CPU and 32 MiB that the sandbox
+// reserves. It counts no container of the sandbox's own, and refuses any past 250:
+// https://modal.com/docs/guide/sandbox-sidecars
+// A sandbox reserves what its role needs (`sandboxes`), which is what placing counts by.
+const COMPANIONS: Companions = Companions::Reserved {
+    cpu_millis_each: NonZeroU64::new(32).unwrap(),
+    memory_bytes_each: NonZeroU64::new(32 * MIB).unwrap(),
+    most: NonZeroUsize::new(250).unwrap(),
+};
 
 /// The provider's settings, in a table such as [the crate's](crate#settings).
 // Without `deny_unknown_fields`, so that a reader of settings may ignore a key that a later
@@ -191,7 +192,7 @@ impl TryFrom<ClassTable> for SandboxClass {
             gpu: offered,
             cpu_features: BTreeSet::new(),
             cpu_model: None,
-            companions: false,
+            companions: COMPANIONS,
         };
         let class = Class {
             offers,
@@ -210,8 +211,8 @@ impl From<SandboxClass> for ClassTable {
             startup_seconds,
             usd_per_hour,
         } = class;
-        // Its GPU's count is `gpu`'s, and a class of the settings names no CPU's flags, CPU model
-        // or companions.
+        // Its GPU's count is `gpu`'s, a class of the settings names no CPU's flags or model, and
+        // every class offers the same companions.
         let Offers {
             cpu_millis,
             memory_bytes,
@@ -365,23 +366,14 @@ impl Provider for Modal<'_> {
     /// It fails if the engine lacks the image or has it for another platform, or if Modal can't
     /// import it, as one its role may not pull.
     fn publish_image(&self, image: &Image) -> Result<ImageRef, String> {
-        // Modal runs `sandboxd`'s platform alone.
-        let runs = "Modal runs sandboxes on";
-        (self.pusher.engine()).check_platform(image, &Platform::sandboxd(), runs)?;
-        let reference = self.cli.publish(&self.pusher, &self.repository, image)?;
-        let Images {
-            region, role_arn, ..
-        } = &self.images;
-        let request = Request::Import {
-            reference: &reference,
-            role_arn: role_arn.as_str(),
-            region: region.as_str(),
-        };
-        let imported = self
-            .reached
-            .helper
-            .call::<String>(&request, Deadline::after(IMPORT_TIMEOUT))?;
-        Ok(ImageRef::from(format!("{imported}@{image}")))
+        let imported = self.import(&[self.push(image)?], None)?;
+        let [imported] = <[String; 1]>::try_from(imported).map_err(|imported| {
+            format!(
+                "the Modal helper's `import` answered {} ids for one image: expected its id",
+                imported.len()
+            )
+        })?;
+        Ok(images::reference(&imported, image))
     }
 
     fn publish_sandboxd(&self, path: &Path) -> Result<SandboxdRef, String> {
@@ -398,34 +390,57 @@ impl Provider for Modal<'_> {
     }
 }
 
+impl Modal<'_> {
+    /// Pushes `image` to the repository, unless held there, and returns its reference there, by
+    /// its digest. Fails if the engine lacks the image, or has it for another platform.
+    fn push(&self, image: &Image) -> Result<String, String> {
+        // Modal runs `sandboxd`'s platform alone.
+        let runs = "Modal runs sandboxes on";
+        (self.pusher.engine()).check_platform(image, &Platform::sandboxd(), runs)?;
+        self.cli.publish(&self.pusher, &self.repository, image)
+    }
+
+    /// Has Modal import the image at each of `references`, which [`push`](Self::push) gave, with
+    /// `sandboxd` built in if given. Returns what the helper answers: their ids in Modal, in the
+    /// order of `references`.
+    fn import(
+        &self,
+        references: &[String],
+        sandboxd: Option<Sandboxd<'_>>,
+    ) -> Result<Vec<String>, String> {
+        let Images {
+            region, role_arn, ..
+        } = &self.images;
+        let request = Request::Import {
+            references: references.iter().map(String::as_str).collect(),
+            role_arn: role_arn.as_str(),
+            region: region.as_str(),
+            sandboxd,
+        };
+        (self.reached.helper).call(&request, Deadline::after(IMPORT_TIMEOUT))
+    }
+}
+
 impl Creator<ListenDials, Listened> for Modal<'_> {
     fn create(&self, create: &Create, dials: ListenDials) -> Result<Listened, String> {
-        let ListenDials { main, companions } = dials;
-        assert!(
-            companions.is_empty(),
-            "Modal was asked for a sandbox that holds companions, though its classes offer none \
-             (`Offers::companions`), and placing puts a runner that declares any on none of them"
-        );
-        let (created, main) = self.create_sandbox(create, &main)?;
-        Ok(Listened {
-            created,
-            main,
-            relay: None,
-        })
+        self.create_sandbox(create, &dials)
     }
 }
 
 impl Listens for Modal<'_> {
-    // Its classes hold no companions.
+    /// Publishes `images` as [`Listens::publish_companion_images`] asks. Each is pushed as a
+    /// role's is ([`Provider::publish_image`]), once however often `images` names it. Modal then
+    /// imports them all at once, and builds `sandboxd` into each, as it starts a sidecar only
+    /// from an image that it has built. So no create waits for a build.
     fn publish_companion_images(
         &self,
         images: &[Image],
-        _: &SandboxdRef,
+        sandboxd: &SandboxdRef,
     ) -> Result<Vec<ImageRef>, String> {
-        Err(format!(
-            "a Modal sandbox holds no companions, so none of these {} images is published: \
-             declare the companions on a runner whose class offers them (`Offers::companions`)",
-            images.len()
-        ))
+        let sandboxd = Sandboxd::published(sandboxd, vec![SANDBOXD_PATH])?;
+        let batch = Batch::of(images);
+        let pushed: Result<Vec<String>, String> =
+            batch.distinct().map(|image| self.push(image)).collect();
+        batch.references(self.import(&pushed?, Some(sandboxd))?)
     }
 }

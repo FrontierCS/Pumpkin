@@ -9,6 +9,11 @@
 //! no connection out, though Modal's resolver still answers its DNS queries; it runs under gVisor
 //! with its class's GPU, if any, and its role's CPU and memory as both its request and its limit;
 //! and Modal ends it at its hard end, if nothing ends it first.
+//!
+//! A runner's companions are the sandbox's sidecars, which share its CPU, memory, tag and end.
+//! Each runs its image with `sandboxd` built in, as Modal starts a sidecar only from an image
+//! that it has built. A sidecar has no tunnel and no connection out. The sandbox's containers
+//! reach one another by name, and nothing separates them.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -16,65 +21,25 @@ use std::path::Path;
 use std::time::Duration;
 
 use provider::{
-    Console, Create, Created, Listed, Phase, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
+    Console, Create, Listed, ListenDials, Listened, RunTag, SandboxId, SandboxdRef, Sweep,
+    Undeleted,
 };
 use schema::ir::Sha256Digest;
-use schema::sandbox::{Endpoint, Listening};
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 use stdx::Deadline;
 use stdx::time::{Clock as _, Machine};
 
-use crate::helper::{ASK_TIMEOUT, Request, Sandboxd};
-use crate::{Gpu, Modal, Reached, memory_mib};
+use crate::create::{self, Made};
+use crate::helper::{ASK_TIMEOUT, Request};
+use crate::{Modal, Reached};
 
 /// How long a delete may run before it is killed: Modal stops a sandbox in seconds, and the
 /// helper waits for each of the delete's in turn.
 const DELETE_TIMEOUT: Duration = Duration::from_mins(10);
 
-/// What a published `sandboxd`'s reference holds between its path and its digest.
-const DIGEST: &str = "@sha256:";
-
 /// What every id of a sandbox of Modal's starts with, so an id without it names none.
 const ID_PREFIX: &str = "sb-";
-
-/// What the helper's `create` returns.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Made {
-    id: String,
-    host: String,
-    port: u16,
-    phases: Vec<Timed>,
-}
-
-/// A step of the helper's `create`, with when it began and how long it took, in nanoseconds. It
-/// began by the machine's monotonic clock, which `stdx::time::Machine` reads too.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Timed {
-    name: String,
-    began_ns: u64,
-    took_ns: u64,
-}
-
-impl Timed {
-    /// The step as a phase of a create that began at `began`, by the machine's monotonic clock.
-    fn phase(self, began: Duration) -> Phase {
-        let Self {
-            name,
-            began_ns,
-            took_ns,
-        } = self;
-        Phase {
-            name,
-            // The helper reads the clock after `began`, so only its bug makes a step begin before.
-            // Such a step shows at the create's start, rather than fail the create.
-            began: Duration::from_nanos(began_ns).saturating_sub(began),
-            took: Duration::from_nanos(took_ns),
-        }
-    }
-}
 
 /// What the helper's `list` returns of a sandbox.
 #[derive(Deserialize)]
@@ -112,14 +77,14 @@ pub(crate) fn publish_sandboxd(path: &Path) -> Result<SandboxdRef, String> {
 }
 
 impl Modal<'_> {
-    /// Creates the sandbox that `create` describes, listening as `dial` says, as
-    /// `provider::Creator::create` asks, giving up at its deadline, when the helper is killed;
-    /// with the endpoint of its tunnel, and the phases that the helper timed.
+    /// Creates the sandbox that `create` describes, each of its containers listening as `dials`
+    /// says, as `provider::Creator::create` asks. It gives up at the create's deadline, when the
+    /// helper is killed.
     pub(crate) fn create_sandbox(
         &self,
         create: &Create,
-        dial: &Listening,
-    ) -> Result<(Created, Endpoint), String> {
+        dials: &ListenDials,
+    ) -> Result<Listened, String> {
         let began = Machine.now();
         let Some(class) = self.classes.get(&create.class) else {
             return Err(format!(
@@ -127,86 +92,18 @@ impl Modal<'_> {
                 create.class
             ));
         };
-        let Some((image, _)) = create.image.as_str().split_once('@') else {
-            return Err(format!(
-                "`{}` is no image this provider published: publish one first",
-                create.image.as_str()
-            ));
-        };
-        let request = self.creating(create, dial, class.gpu.as_ref(), image)?;
+        let gpu = class.gpu.as_ref().map(|gpu| gpu.written.as_str());
+        let request = Request::Create(create::request(create, dials, gpu, self.dials_from)?);
         let made = self
             .reached
             .helper
             .call::<Made>(&request, Deadline::at_unix(create.by.since_epoch()));
-        let Made {
-            id,
-            host,
-            port,
-            phases,
-        } = made.map_err(|error| {
+        let made = made.map_err(|error| {
             format!("{error}; what Modal made by then, if anything, the run's list finds")
         })?;
-        let endpoint = Endpoint::new(host, port).map_err(|error| {
-            format!("Modal's tunnel to sandbox {id} isn't an endpoint: {error}")
-        })?;
-        let phases = phases.into_iter().map(|timed| timed.phase(began));
-        let created = Created {
-            id: SandboxId::from(id),
-            phases: phases.collect(),
-        };
-        Ok((created, endpoint))
-    }
-
-    /// The helper's request that creates the sandbox `create` describes, of a class with `gpu`,
-    /// from `image`, its image's id in Modal, or why Modal can't make that sandbox.
-    fn creating<'a>(
-        &'a self,
-        create: &'a Create,
-        dial: &'a Listening,
-        gpu: Option<&'a Gpu>,
-        image: &'a str,
-    ) -> Result<Request<'a>, String> {
-        let Create {
-            run,
-            // Modal's names are unique in an App, which holds every run's sandboxes, and a run's
-            // names only in the run, so its sandboxes go unnamed.
-            name: _,
-            role,
-            // Each sandbox has resources of its own, whichever instance of its role it is.
-            instance: _,
-            // Taken as the parameters `gpu` and `image`.
-            class: _,
-            image: _,
-            sandboxd,
-            ops,
-            model,
-            hard_end,
-            by,
-        } = create;
-        let Listening { grant } = dial;
-        let Some((path, sha256)) = sandboxd.as_str().rsplit_once(DIGEST) else {
-            return Err(format!(
-                "`{}` is no sandboxd this provider published: publish one first",
-                sandboxd.as_str()
-            ));
-        };
-        let memory_mib = memory_mib(role)?;
-        Ok(Request::Create {
-            run: run.as_str(),
-            role: role.name.as_str(),
-            image,
-            sandboxd: Sandboxd { path, sha256 },
-            user: format!("{}:{}", role.user.uid, role.user.gid),
-            ops: *ops,
-            model: *model,
-            grant,
-            cpu_millis: role.resources.cpu_millis.get(),
-            memory_mib,
-            gpu,
-            hard_end: hard_end.since_epoch().as_secs(),
-            by: by.since_epoch().as_secs(),
-            source: format!("{}/32", self.dials_from),
-        })
+        // The sandbox is made by now, whatever its answer lacks.
+        (made.listened(began, !dials.companions.is_empty()))
+            .map_err(|error| format!("{error}; the run's list finds the sandbox"))
     }
 
     /// What sandbox `id` of `run` has printed, as `provider::Provider::console` asks: the end of

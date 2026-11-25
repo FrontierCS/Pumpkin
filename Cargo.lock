@@ -619,6 +619,7 @@ version = "0.0.0"
 dependencies = [
  "aws",
  "engine",
+ "expect-test",
  "provider",
  "schema",
  "serde",
