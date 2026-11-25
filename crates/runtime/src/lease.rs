@@ -115,8 +115,28 @@ fn drive<H: Host>(
 ) -> Event {
     let lease = leased.lease;
     let failed = |reason: String| Event::LeaseFailed { lease, reason };
-    if child.stopped() {
-        return Event::LeaseEnded { lease };
+    // What reached the lease as its sandbox started. The core's stop ends it. Otherwise the
+    // first end of a session fails it, as an end that comes once it is ready does.
+    let mut early = None;
+    while let Some(message) = child.inbox.take() {
+        match message {
+            Message::Stop => return Event::LeaseEnded { lease },
+            Message::Session(_, Arrival::Ended { reason }) => {
+                early.get_or_insert(reason);
+            }
+            // The core orders a lease nothing until it is ready, and none of its commands runs.
+            Message::Session(
+                _,
+                Arrival::Exited { .. }
+                | Arrival::Op(_)
+                | Arrival::Refused(_)
+                | Arrival::ModelRequest(_),
+            )
+            | Message::Order(_) => {}
+        }
+    }
+    if let Some(reason) = early {
+        return failed(ended(&reason));
     }
     if let Err(error) = std::fs::create_dir(child.dir.join(log_dir().as_str())) {
         return failed(format!(
@@ -235,7 +255,7 @@ fn serve<H: Host>(
                 child.event(command_ended(lease, ran.command, (end, stdout, stderr)));
             }
             Some(Message::Session(_, Arrival::Ended { reason })) => {
-                return Err(format!("the runner's session ended: {reason}"));
+                return Err(ended(&reason));
             }
             // A type for a passive session's arrivals would split the gateway's `pub` `Arrival` by
             // the kind of session.
@@ -250,6 +270,11 @@ fn serve<H: Host>(
             ),
         }
     }
+}
+
+/// Why a lease fails once its runner's session has ended, for `reason`.
+fn ended(reason: &str) -> String {
+    format!("the runner's session ended: {reason}")
 }
 
 /// Kills `running`, whose timeout has passed, in its container, whose session `sessions` gives. A

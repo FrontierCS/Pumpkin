@@ -155,6 +155,8 @@ pub(crate) struct Sim {
     // How long each step of a create takes, if any time.
     step: Option<Duration>,
     listens: bool,
+    // The sandbox, by its name in its run, whose session ends once it is set up.
+    brief: Option<&'static str>,
 }
 
 // What is called once the run log holds each part in a line.
@@ -282,6 +284,8 @@ struct Status {
     stall_to: Option<Duration>,
     deleted: bool,
     freezing: Freezing,
+    // Whether its session ends once its first put is answered.
+    brief: bool,
     journal: Option<Journal>,
     record: Option<PathBuf>,
     time: Option<SimTime>,
@@ -361,6 +365,7 @@ impl Sim {
             once_logged: None,
             step: None,
             listens: false,
+            brief: None,
         }
     }
 
@@ -478,6 +483,16 @@ impl Sim {
     pub(crate) fn listening(self) -> Self {
         Self {
             listens: true,
+            ..self
+        }
+    }
+
+    #[must_use]
+    /// Makes the session of the sandbox named `name` in its run end once its set-up is answered,
+    /// as a crash then would.
+    pub(crate) fn ending_once_set_up(self, name: &'static str) -> Self {
+        Self {
+            brief: Some(name),
             ..self
         }
     }
@@ -843,6 +858,7 @@ impl Sim {
         // late the thread runs.
         (status(&shared).console).push_str(if mute { NEVER_DIALS } else { "" });
         status(&shared).freezing = freezing;
+        status(&shared).brief = self.brief == Some(create.name.as_str());
         status(&shared).set_ups.clone_from(&self.set_ups);
         let (ours, model) = (Arc::clone(&shared), create.model);
         let thread = thread::Builder::new()
@@ -952,6 +968,7 @@ impl Subject for Sim {
             once_logged: self.once_logged.clone(),
             step: self.step,
             listens: self.listens,
+            brief: self.brief,
         }))
     }
 
@@ -2111,18 +2128,19 @@ struct Served {
 
 impl Served {
     // Ends a put, which the held set-ups hold once it has come whole, and then leave unanswered,
-    // as the sandbox stalls.
+    // as the sandbox stalls. Returns whether the session ends once the put is answered.
     fn end(
         &mut self,
         stream: u32,
         replies: &mut Vec<(FromSandbox, Vec<u8>)>,
         shared: &Mutex<Status>,
-    ) {
+    ) -> bool {
         if self.set_up.take().is_some_and(|set_ups| set_ups.pass()) {
             status(shared).stalled = true;
-            return;
+            return false;
         }
         self.files.end(stream, replies);
+        std::mem::take(&mut status(shared).brief)
     }
 
     fn start(
@@ -2304,7 +2322,7 @@ fn serve(mut connection: Wire, model: bool, shared: &Mutex<Status>) {
             }
             ToSandbox::Entry { entry, .. } => served.files.entry(entry),
             ToSandbox::Data { .. } => served.files.data(&body),
-            ToSandbox::End { stream } => served.end(stream, &mut replies, shared),
+            ToSandbox::End { stream } => crashed = served.end(stream, &mut replies, shared),
             ToSandbox::Freeze { stream } => {
                 let (reply, froze) = freezing.freeze(stream);
                 frozen |= froze;

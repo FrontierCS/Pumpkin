@@ -4533,6 +4533,41 @@ fn logged_containers() {
         {"actions":[{"kind":"reply","reply":{"kind":"refused","message":"lease 0 holds no container `scheduler`: name `main`, the one container that it holds"}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":3,"request":{"container":"scheduler","from":"/work/out","grant":"gpu","kind":"lease_get","lease":0,"to":"/pumpkin/out/got"}},"observed_ns":"0","seq":7}"#]].assert_eq(&named.join("\n"));
 }
 
+// A runner whose session ends as its lease starts fails the lease, as one whose session ends
+// later does. The lease's first look at its inbox waits for that end.
+#[test]
+fn fails_as_its_session_ended_before_it_was_ready() {
+    let argv = [
+        "ops",
+        "gpu.open",
+        "await_lease gpu 0 failed",
+        "call submit 6 finalize=true",
+    ];
+    let shown = executed(
+        &SimHost::new().awaiting(Duration::ZERO),
+        "fails-as-its-session-ended-before-it-was-ready",
+        &[(PROVIDER, &Sim::new().ending_once_set_up("lease-0"))],
+        &lease_workflow(&argv, 30, RUNNER),
+        SANDBOXD,
+        &[],
+    );
+    expect![[r#"
+        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":4,"cumulative_seconds":null,"instance_seconds":600,"instances":1}}},{"grant":"gpu","holder":"agent-0","instance":0,"kind":"start_lease","lease":0,"start_by_ns":"30000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"gpu","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"0","seq":3}
+        {"actions":[],"at_ns":"0","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"lease-0"},"seq":4}
+        {"actions":[],"at_ns":"0","event":{"kind":"lease_failed","lease":0,"reason":"the runner's session ended: the sandbox ended the session"},"observed_ns":"0","seq":5}"#]].assert_eq(&leased(&shown));
+}
+
+/// What `shown` says of the run's leases: each line that names one, down to the log's last
+/// record, and all that follows it.
+fn leased(shown: &str) -> String {
+    let after = shown.find("\nits last record came").unwrap_or(shown.len());
+    let (logged, files) = shown.split_at(after);
+    let leased = logged.lines().filter(|line| line.contains("lease"));
+    let after = |line: &&str| !line.is_empty() && !line.starts_with("its last record came");
+    let files = files.lines().filter(after);
+    leased.chain(files).collect::<Vec<_>>().join("\n")
+}
+
 #[test]
 fn lease_ends() {
     let argv = [
