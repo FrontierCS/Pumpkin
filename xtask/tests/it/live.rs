@@ -6,10 +6,10 @@ use std::path::Path;
 use expect_test::expect;
 
 use super::settings::{Provider, Settings};
-use super::wait;
+use super::{record, wait};
 
-/// A configuration whose controller has two Modal classes, one of whose GPU two classes share,
-/// beside a controller at an address.
+/// A configuration whose controller has four Modal classes, three of them with a GPU, two of which
+/// share one, beside a controller at an address.
 const CONFIG: &str = r#"[controllers.lab]
 address = "lab.example.org:2222"
 
@@ -21,6 +21,7 @@ profile = "alice"
 classes.a100 = { gpu = "A100-40GB", gpu_model = "NVIDIA A100-SXM4-40GB", cpu_millis = 8000, memory_bytes = 68719476736, startup_seconds = 1800 }
 classes.a100_2 = { gpu = "A100-40GB:2", gpu_model = "NVIDIA A100-SXM4-40GB", cpu_millis = 8000, memory_bytes = 68719476736, startup_seconds = 1800 }
 classes.h100 = { gpu = "H100!", gpu_model = "NVIDIA H100 80GB HBM3", cpu_millis = 8000, memory_bytes = 68719476736, startup_seconds = 1800 }
+classes.cpu = { cpu_millis = 2000, memory_bytes = 4294967296, startup_seconds = 600 }
 "#;
 
 // Each case: what the settings are, or the refusal.
@@ -30,6 +31,7 @@ fn settings() {
     let a100 = Some("NVIDIA A100-SXM4-40GB");
     let without_modal = CONFIG.split("[controllers.alice.modal]").next().unwrap();
     let several = format!("{CONFIG}\n[controllers.bob]\nregion = \"us-east-1\"\n");
+    let gpus_only = CONFIG.replace("classes.cpu", "# classes.cpu");
     let cases = [
         ("ec2", CONFIG, Provider::Ec2, None),
         ("modal", CONFIG, Provider::Modal, a100),
@@ -39,6 +41,12 @@ fn settings() {
             CONFIG,
             Provider::Modal,
             Some("NVIDIA B200"),
+        ),
+        (
+            "modal with a GPU in every class",
+            &gpus_only,
+            Provider::Modal,
+            a100,
         ),
         (
             "modal without its modal",
@@ -69,6 +77,7 @@ fn settings() {
         modal: Settings { name: "alice", region: "us-west-1", modal: Some(Modal { profile: "alice", gpu_model: "NVIDIA A100-SXM4-40GB" }) }
         modal without a GPU: a live run on Modal needs the model of a GPU that a class of `[controllers.alice.modal]` has, the cheapest best: give one of `NVIDIA A100-SXM4-40GB`, `NVIDIA H100 80GB HBM3` with `--gpu-model`
         modal with a GPU no class has: no class of /home/alice/.config/pumpkin/pumpkin.toml's `[controllers.alice.modal]` has the GPU `NVIDIA B200`: give one of `NVIDIA A100-SXM4-40GB`, `NVIDIA H100 80GB HBM3`
+        modal with a GPU in every class: a live run on Modal runs examples/companions on a class without a GPU, and /home/alice/.config/pumpkin/pumpkin.toml's `[controllers.alice.modal]` has none: add one, such as `classes.cpu = { cpu_millis = 2000, memory_bytes = 4294967296, startup_seconds = 600 }`
         modal without its modal: /home/alice/.config/pumpkin/pumpkin.toml names no `[controllers.alice.modal]`, which a live run on Modal needs: name the workspace's profile and classes there, as the README says
         no controller: /home/alice/.config/pumpkin/pumpkin.toml names no `[controllers.<name>]` with a `region`, which a live run goes through: name the one `deploy/aws` made, as the README says
         several with a region: /home/alice/.config/pumpkin/pumpkin.toml names several controllers with a `region`, `alice`, `bob`: keep there the one that a live run goes through"#]].assert_eq(&lines.join("\n"));
@@ -133,4 +142,145 @@ fn others_failed() {
         this run named among others: false
         no run named: false"#]]
     .assert_eq(&shown.join("\n"));
+}
+
+/// The lines of a log, each an event of `kind` of sandbox `sandbox`, with its other fields
+/// `fields`, observed at the time `at` in nanoseconds.
+fn log(events: &[(&str, &str, u64, serde_json::Value)]) -> Vec<serde_json::Value> {
+    (events.iter().enumerate())
+        .map(|(seq, (kind, sandbox, at, fields))| {
+            let mut event = serde_json::json!({"kind": kind, "sandbox": sandbox});
+            event
+                .as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().cloned().unwrap_or_default());
+            serde_json::json!({"seq": seq, "observed_ns": at.to_string(), "event": event})
+        })
+        .collect()
+}
+
+/// A create of `sandbox` that began at 100 ns and returned at 900 ns, with a phase of each name
+/// of `phases`, one after another.
+fn created(sandbox: &str, phases: &[&str]) -> (&'static str, String, u64, serde_json::Value) {
+    let phases: Vec<serde_json::Value> = (phases.iter().zip(0_u64..))
+        .map(|(name, index)| {
+            let began = (200 + 100 * index).to_string();
+            serde_json::json!({"name": name, "began_ns": began, "took_ns": "50"})
+        })
+        .collect();
+    let fields = serde_json::json!({"began_ns": "100", "phases": phases});
+    ("sandbox_created", sandbox.to_owned(), 900, fields)
+}
+
+fn met(container: &str) -> serde_json::Value {
+    serde_json::json!({"container": container})
+}
+
+// Each case: a log, then what is wrong with how its sandbox's containers met.
+#[test]
+fn unmet() {
+    let none = || serde_json::Value::Null;
+    let written = [
+        ("container_met", "lease-0", 1000, met("main")),
+        ("container_met", "lease-0", 1200, met("c1")),
+        ("container_met", "lease-0", 1200, met("c0")),
+        ("container_met", "lease-0", 1500, met("c2")),
+        ("sandbox_met", "lease-0", 1500, none()),
+        ("lease_ready", "", 1600, none()),
+    ];
+    let without = |index: usize| {
+        let mut events = written.to_vec();
+        events.remove(index);
+        events
+    };
+    let mut out_of_order = written.to_vec();
+    out_of_order.swap(1, 3);
+    let cases = [
+        ("as the runtime writes it", written.to_vec()),
+        ("a companion's missing", without(2)),
+        ("out of the order of their times", out_of_order),
+        ("no sandbox_met", without(4)),
+    ];
+    let shown: Vec<String> = (cases.into_iter())
+        .map(|(case, events)| {
+            let unmet = record::unmet(&log(&events), &["main", "c0", "c1", "c2"]);
+            format!("{case}: {unmet:?}")
+        })
+        .collect();
+    expect![[r#"
+        as the runtime writes it: []
+        a companion's missing: ["sandbox `lease-0`'s `container_met` lines name [\"main\", \"c1\", \"c2\"]: expected each of [\"main\", \"c0\", \"c1\", \"c2\"] once"]
+        out of the order of their times: ["sandbox `lease-0`'s `container_met` lines name [\"main\", \"c2\", \"c0\", \"c1\"] at [1000, 1500, 1200, 1200] ns: expected them in the order of their times"]
+        no sandbox_met: ["sandbox `lease-0` has no `sandbox_met` next after its last `container_met`, at 1500 ns or later: expected one once all its containers have met"]"#]].assert_eq(&shown.join("\n"));
+}
+
+// Each case: a log of a create on Modal, then what is wrong with its phases.
+#[test]
+fn unphased() {
+    let deleted = serde_json::json!({"id": "sb-1"});
+    let phases = ["lookup", "create", "tunnels", "list"];
+    let sidecars = ["lookup", "create", "tunnels", "list", "sidecars"];
+    let shown = |(case, phases, companions): (&str, &[&str], bool)| {
+        let (kind, sandbox, at, fields) = created("lease-0", phases);
+        let mut events = vec![(kind, sandbox.as_str(), at, fields)];
+        if companions {
+            events.push(("container_met", "lease-0", 1000, met("main")));
+        }
+        events.push(("sandbox_deleted", "lease-0", 2000, deleted.clone()));
+        let lines = log(&events);
+        // The message holds the create's line, which the case's name says.
+        let unphased = record::unphased(&lines).join("; ");
+        let unphased = unphased.replace(&lines[0].to_string(), "<create>");
+        format!("{case}: {unphased}")
+    };
+    let cases: [(&str, &[&str], bool); 3] = [
+        ("with companions", &sidecars, true),
+        ("with companions, sidecars missing", &phases, true),
+        ("without companions, with sidecars", &sidecars, false),
+    ];
+    let shown: Vec<String> = cases.into_iter().map(shown).collect();
+    expect![[r#"
+        with companions: 
+        with companions, sidecars missing: sandbox "lease-0"'s create on Modal has the phases ["lookup", "create", "tunnels", "list"]: expected ["lookup", "create", "tunnels", "list", "sidecars"], as its sandbox holds companions: <create>
+        without companions, with sidecars: sandbox "lease-0"'s create on Modal has the phases ["lookup", "create", "tunnels", "list", "sidecars"]: expected ["lookup", "create", "tunnels", "list"], as its sandbox holds none: <create>"#]].assert_eq(&shown.join("\n"));
+}
+
+// Each case: a result of `examples/companions`, then what is wrong in it.
+#[test]
+fn uncompanioned() {
+    let result = |users: bool, bridge: serde_json::Value| {
+        let facts = [
+            ("users", users),
+            ("main_reaches", true),
+            ("companions_reach", true),
+            ("internet_unreached", true),
+        ];
+        let mut values: Vec<serde_json::Value> = (facts.into_iter())
+            .map(|(name, fact)| serde_json::json!({"name": name, "value": fact}))
+            .collect();
+        values.push(serde_json::json!({"name": "bridge_ms", "value": bridge}));
+        let unexpected = if users {
+            serde_json::json!({})
+        } else {
+            serde_json::json!({"c3": "0:0\nmain\nc2\n"})
+        };
+        values.push(serde_json::json!({"name": "unexpected", "value": unexpected}));
+        values
+    };
+    let timed =
+        |median: f64| serde_json::json!({"median": median, "slowest": 3.2, "exchanges": 900});
+    let cases = [
+        ("every fact holds", result(true, timed(0.7))),
+        ("a companion ran as root", result(false, timed(0.7))),
+        ("a slow bridge", result(true, timed(300.0))),
+        ("no exchange", result(true, serde_json::json!({"said": ""}))),
+    ];
+    let shown: Vec<String> = (cases.into_iter())
+        .map(|(case, values)| format!("{case}: {:?}", record::uncompanioned(&values)))
+        .collect();
+    expect![[r#"
+        every fact holds: []
+        a companion ran as root: ["a container's command didn't run as the user that it declares: its commands said {\"c3\":\"0:0\\nmain\\nc2\\n\"}"]
+        a slow bridge: ["the median exchange between `main` and a companion took 300 ms: expected under 50 ms, as on a network inside the sandbox"]
+        no exchange: ["the exchanges between `main` and a companion weren't timed: the result's `bridge_ms` is {\"said\":\"\"}"]"#]].assert_eq(&shown.join("\n"));
 }

@@ -91,9 +91,9 @@ mod flags {
             /// `controller` makes a controller with `deploy/docker`, runs `examples/smoke` through
             /// it, and checks its members. `ec2` and `modal` cost money: each runs `pumpkin-admin
             /// check`, then `examples/smoke` on that provider through the controller that
-            /// `~/.config/pumpkin/pumpkin.toml` names. Each runs Pumpkin at `HEAD`. Every probe of
-            /// a sandbox must pass, and every sandbox must be deleted. Anything of the run left on
-            /// EC2, EventBridge Scheduler or Modal fails the check, which cancels the run.
+            /// `~/.config/pumpkin/pumpkin.toml` names. `modal` then runs `examples/companions`.
+            /// Each runs Pumpkin at `HEAD`. Every probe must pass, and every sandbox be deleted. A
+            /// run that leaves anything on EC2, EventBridge Scheduler or Modal fails, and is ended.
             cmd live {
                 /// `docker`, `controller`, `ec2` or `modal`.
                 required target: String

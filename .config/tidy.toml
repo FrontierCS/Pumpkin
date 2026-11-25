@@ -276,7 +276,7 @@
 "xtask/src/aws_certificates/table.rs" = 1
 "xtask/src/diff.rs" = 1
 "xtask/src/figure.rs" = 11
-"xtask/src/live.rs" = 14
+"xtask/src/live.rs" = 13
 "xtask/src/live/controller.rs" = 12
 "xtask/src/main.rs" = 7
 "xtask/src/page.rs" = 1

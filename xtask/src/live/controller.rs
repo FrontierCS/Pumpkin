@@ -19,7 +19,7 @@ use stdx::process::{self, Bound, Echo, Environment, Failure, Run, Stream};
 
 use super::{
     PUMPKIN_TIMEOUT, checked, controlled, copy_tree, followed, head_commit, holding, kill_job,
-    task_repository,
+    probed, task_repository,
 };
 use crate::repo::STEP_TIMEOUT;
 use crate::{BUILD_TIMEOUT, MUSL, Result, ran, root, step, target_dir};
@@ -444,7 +444,7 @@ fn smoke(compose: &Compose, client: &Client) -> Result<()> {
         ));
     }
     let record = client.repo.join(".pumpkin/runs").join(NAME).join(&id);
-    failed.extend(checked(&record, false));
+    failed.extend(checked(&record, |values| probed(values, false)));
     let left = left(compose, &id)?;
     if !left.is_empty() {
         failed.push(format!("left of the run: containers {}", left.join(", ")));

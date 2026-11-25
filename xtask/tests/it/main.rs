@@ -21,6 +21,8 @@ mod diff;
 mod entry;
 mod live;
 mod op_stats;
+#[path = "../../src/live/record.rs"]
+mod record;
 #[path = "../../src/repo.rs"]
 mod repo;
 #[path = "../../src/settings.rs"]

@@ -3,6 +3,7 @@
 //! configuration names.
 
 mod controller;
+mod record;
 
 use std::io::{BufRead as _, BufReader};
 use std::path::{Path, PathBuf};
@@ -94,10 +95,12 @@ pub(crate) fn docker() -> Result<()> {
 }
 
 /// Runs `examples/smoke` at `HEAD` on `provider` through the controller, and fails unless every
-/// probe passed, every sandbox was deleted and nothing of the run is left on the provider. It
-/// first runs `pumpkin-admin check` on the controller's deployment, and fails if that finds a
-/// problem. With `lost`, it loses the run instead, and checks that its sandboxes end by
-/// themselves and that a reap removes the rest. `again` names the command that repeats it.
+/// probe passed, every sandbox was deleted and nothing of the run is left on the provider. On
+/// Modal, it then runs `examples/companions` likewise. That fails too unless each fact that its
+/// result names holds, and its log shows each container's meet. It first runs `pumpkin-admin check`
+/// on the controller's deployment, and fails if that finds a problem. With `lost`, it loses a smoke
+/// run instead, and checks that its sandboxes end by themselves and that a reap removes the rest.
+/// `again` names the command that repeats it.
 pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> Result<()> {
     let again = match provider {
         Provider::Ec2 => "cargo xtask live ec2",
@@ -127,6 +130,46 @@ pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> 
     }
     run.arg("smoke/task.star");
     eprintln!("xtask: running examples/smoke at {commit} through the controller");
+    let gpu = settings.modal.is_some();
+    let mut failed = verified(&settings, &repo, run, |record| {
+        let mut failed = checked(record, |values| probed(values, gpu));
+        if gpu {
+            let unphased = logged(record).map(|log| record::unphased(&log));
+            failed.extend(unphased.unwrap_or_else(|error| vec![error]));
+        }
+        failed
+    })?;
+    if settings.modal.is_some() {
+        let mut run = controlled(&repo, &settings.name, &["run", "--wait"]);
+        // Its defaults: 8 companions, on needs that start them all in a class's startup.
+        run.arg("companions/task.star");
+        eprintln!("xtask: running examples/companions at {commit} through the controller");
+        let companioned = verified(&settings, &repo, run, companioned);
+        let companioned = companioned.unwrap_or_else(|error| vec![error.to_string()]);
+        failed.extend(
+            companioned
+                .into_iter()
+                .map(|failure| format!("companions: {failure}")),
+        );
+    }
+    if failed.is_empty() {
+        println!(
+            "xtask: every probe passed, every sandbox is deleted, and nothing of the runs is left"
+        );
+        return Ok(());
+    }
+    Err(format!("{}: fix it, and run `{again}` again", failed.join("; ")).into())
+}
+
+/// Follows `run`, a `./pumpkin run --wait`, to its end, and returns what is wrong with the run.
+/// That is its failure, what `check` finds wrong in its record, and what of it is left on the
+/// providers. It cancels a run that left something.
+fn verified(
+    settings: &Settings,
+    repo: &Path,
+    run: Command,
+    check: impl FnOnce(&Path) -> Vec<String>,
+) -> Result<Vec<String>> {
     let (id, status) = followed(run)?;
     let mut failed = Vec::new();
     if !status.success() {
@@ -135,32 +178,23 @@ pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> 
         ));
     }
     let record = repo.join(".pumpkin/runs").join(&settings.name).join(&id);
-    failed.extend(checked(&record, settings.modal.is_some()));
-    if settings.modal.is_some() {
-        failed.extend(phased(&record));
-    }
-    let left = left(&settings, &id)?;
+    failed.extend(check(&record));
+    let left = left(settings, &id)?;
     if !left.is_empty() {
         failed.push(format!("left after the run: {}", left.join(", ")));
-        let mut cancel = controlled(&repo, &settings.name, &["cancel", &id]);
+        let mut cancel = controlled(repo, &settings.name, &["cancel", &id]);
         let cancelled = process::run(&mut cancel, step(PUMPKIN_TIMEOUT).named("./pumpkin cancel"));
         match cancelled {
             Ok(_) => eprintln!("xtask: `./pumpkin cancel {id}` passed"),
             Err(failure) => eprintln!("xtask: {failure}"),
         }
-        let still = self::left(&settings, &id)?;
+        let still = self::left(settings, &id)?;
         if !still.is_empty() {
             failed.push(format!("left after `pumpkin cancel`: {}", still.join(", ")));
         }
     }
     println!("xtask: run {id}, its record {}", record.display());
-    if failed.is_empty() {
-        println!(
-            "xtask: every probe passed, every sandbox is deleted, and nothing of the run is left"
-        );
-        return Ok(());
-    }
-    Err(format!("{}: fix it, and run `{again}` again", failed.join("; ")).into())
+    Ok(failed)
 }
 
 /// The longest a lost smoke run's sandboxes may take to end by themselves, from when its job is
@@ -551,17 +585,11 @@ fn started(pumpkin: &mut Command) -> Result<(Child, ChildStderr)> {
     Ok((child, stderr))
 }
 
-/// What is wrong in the record of a smoke run at `record`: a run that didn't finish, a probe that
-/// failed or is missing, and a sandbox that isn't deleted. Each smoke runs as a controller's job,
-/// so a record of what the driver used that names no job's unit, or another, is wrong too. It
-/// prints what the driver used. `gpu` is whether the run has a GPU runner.
-fn checked(record: &Path, gpu: bool) -> Vec<String> {
-    let read = |path: &Path| -> std::result::Result<serde_json::Value, String> {
-        let text = fs::read_to_string(path)
-            .map_err(|error| format!("reading {} failed: {error}", path.display()))?;
-        serde_json::from_str(&text)
-            .map_err(|error| format!("{} isn't JSON: {error}", path.display()))
-    };
+/// What is wrong in the record of a live run at `record`. That is a run that didn't finish, what
+/// `result` finds wrong in its result's values, and a sandbox that isn't deleted. Each live run is
+/// a controller's job, so a record of what the driver used that names no job's unit, or another, is
+/// wrong too. It prints what the driver used.
+fn checked(record: &Path, result: impl FnOnce(&[serde_json::Value]) -> Vec<String>) -> Vec<String> {
     let mut failed = Vec::new();
     // An outcome that can't be read still leaves the sandboxes to check.
     let outcome = read(&record.join("outcome.json")).unwrap_or_else(|error| {
@@ -580,26 +608,12 @@ fn checked(record: &Path, gpu: bool) -> Vec<String> {
             "what the driver used names no job's unit {unit}: {driver}"
         ));
     }
-    let values = outcome["verdict"]["result"]["values"].as_array();
-    let detail = (values.into_iter().flatten())
-        .find(|value| value["name"] == "detail")
-        .and_then(|detail| detail["value"].as_array())
-        .cloned()
-        .unwrap_or_default();
-    let sandboxes = if gpu { 4 } else { 3 };
-    for line in &detail {
-        let line = line.as_str().unwrap_or_default();
-        println!("probe: {line}");
-        if !line.contains(": ok (") {
-            failed.push(format!("a probe failed: {line}"));
-        }
-    }
-    if detail.len() != sandboxes * CHECKS_PER_SANDBOX {
-        failed.push(format!(
-            "the final call returned {} probe lines: expected {} for {sandboxes} sandboxes",
-            detail.len(),
-            sandboxes * CHECKS_PER_SANDBOX
-        ));
+    match outcome["verdict"]["result"]["values"].as_array() {
+        Some(values) => failed.extend(result(values)),
+        None => failed.push(format!(
+            "the run has no result: its verdict is {}",
+            outcome["verdict"]
+        )),
     }
     let mut dirs = vec![record.join("agents/agent")];
     for kind in ["jobs", "leases"] {
@@ -627,81 +641,83 @@ fn checked(record: &Path, gpu: bool) -> Vec<String> {
     failed
 }
 
-/// What is wrong in the log of a smoke run on Modal at `record`. That is each create on Modal
-/// that [`unphased`] finds wrong, or a log without one. A Modal sandbox's id starts with `sb-`,
-/// and its delete in the log names it.
-fn phased(record: &Path) -> Vec<String> {
-    let path = record.join("log.jsonl");
-    let log = match fs::read_to_string(&path) {
-        Ok(log) => log,
-        Err(error) => return vec![format!("reading {} failed: {error}", path.display())],
-    };
-    let lines = log.lines().map(serde_json::from_str::<serde_json::Value>);
-    let lines: Vec<serde_json::Value> = lines.flatten().collect();
-    let on_modal = |sandbox: &serde_json::Value| {
-        lines.iter().any(|line| {
-            let event = &line["event"];
-            event["kind"] == "sandbox_deleted"
-                && event["sandbox"] == *sandbox
-                && event["id"].as_str().is_some_and(|id| id.starts_with("sb-"))
-        })
-    };
-    let created = lines.iter().filter(|line| {
-        let event = &line["event"];
-        event["kind"] == "sandbox_created" && on_modal(&event["sandbox"])
-    });
-    let created: Vec<&serde_json::Value> = created.collect();
-    if created.is_empty() {
-        return vec!["the log records no create of a sandbox on Modal".to_owned()];
-    }
-    created.into_iter().filter_map(unphased).collect()
-}
-
-/// What is wrong with `line`, a create on Modal in the run log, if anything. Its phases are to be
-/// those that the helper times, in order, each within the create. One begins after the create
-/// did, as the helper's interpreter starts first, unless the helper's clock and this one differ.
-fn unphased(line: &serde_json::Value) -> Option<String> {
-    const PHASES: [&str; 4] = ["lookup", "create", "tunnels", "list"];
-    let ns = |value: &serde_json::Value| value.as_str().and_then(|ns| ns.parse::<u64>().ok());
-    let event = &line["event"];
-    let wrong = |what: &str| {
-        format!(
-            "sandbox {}'s create on Modal {what}: {line}",
-            event["sandbox"]
-        )
-    };
-    let phases: &[serde_json::Value] = event["phases"].as_array().map_or(&[], Vec::as_slice);
-    let names: Vec<&str> = phases
-        .iter()
-        .filter_map(|phase| phase["name"].as_str())
-        .collect();
-    if names != PHASES {
-        return Some(wrong(&format!(
-            "has the phases {names:?}: expected {PHASES:?}"
-        )));
-    }
-    let (Some(began), Some(returned)) = (ns(&event["began_ns"]), ns(&line["observed_ns"])) else {
-        return Some(wrong("has no times"));
-    };
-    let mut starts = Vec::new();
-    for phase in phases {
-        let (Some(start), Some(took)) = (ns(&phase["began_ns"]), ns(&phase["took_ns"])) else {
-            return Some(wrong("has a phase without its times"));
-        };
-        if start < began || start.saturating_add(took) > returned {
-            return Some(wrong("has a phase outside the create"));
+/// What is wrong in `values`, the result of a smoke run: a probe that failed or is missing. It
+/// prints each probe's line. `gpu` is whether the run has a GPU runner.
+fn probed(values: &[serde_json::Value], gpu: bool) -> Vec<String> {
+    let detail = (values.iter())
+        .find(|value| value["name"] == "detail")
+        .and_then(|detail| detail["value"].as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut failed = Vec::new();
+    let sandboxes = if gpu { 4 } else { 3 };
+    for line in &detail {
+        let line = line.as_str().unwrap_or_default();
+        println!("probe: {line}");
+        if !line.contains(": ok (") {
+            failed.push(format!("a probe failed: {line}"));
         }
-        starts.push(start);
     }
-    if !starts.is_sorted() {
-        return Some(wrong("has phases that begin out of order"));
-    }
-    if starts.iter().all(|start| *start == began) {
-        return Some(wrong(
-            "has every phase at its start: expected the helper's clock to be this one",
+    if detail.len() != sandboxes * CHECKS_PER_SANDBOX {
+        failed.push(format!(
+            "the final call returned {} probe lines: expected {} for {sandboxes} sandboxes",
+            detail.len(),
+            sandboxes * CHECKS_PER_SANDBOX
         ));
     }
-    None
+    failed
+}
+
+/// What is wrong in the record of a run of `examples/companions` at `record`. That is what
+/// [`checked`] finds, a fact that its result says doesn't hold, and a create whose phases are
+/// wrong. It is also a meet of its containers that the log doesn't show in full. It prints the
+/// result.
+fn companioned(record: &Path) -> Vec<String> {
+    let mut failed = checked(record, |values| {
+        let shown: Vec<String> = (values.iter())
+            .map(|value| {
+                format!(
+                    "{}={}",
+                    value["name"].as_str().unwrap_or_default(),
+                    value["value"]
+                )
+            })
+            .collect();
+        println!("companions: {}", shown.join(" "));
+        record::uncompanioned(values)
+    });
+    let (log, ir) = match (logged(record), read(&record.join("ir.json"))) {
+        (Ok(log), Ok(ir)) => (log, ir),
+        (log, ir) => {
+            failed.extend(log.err().into_iter().chain(ir.err()));
+            return failed;
+        }
+    };
+    let roles = ir["roles"].as_array().map_or(&[][..], Vec::as_slice);
+    let companions = (roles.iter())
+        .filter_map(|role| role["runtime"]["runner"]["companions"].as_array())
+        .flatten()
+        .filter_map(|companion| companion["name"].as_str());
+    let containers: Vec<&str> = std::iter::once("main").chain(companions).collect();
+    failed.extend(record::unphased(&log));
+    failed.extend(record::unmet(&log, &containers));
+    failed
+}
+
+/// The lines of the log of the run at `record`, each parsed.
+fn logged(record: &Path) -> std::result::Result<Vec<serde_json::Value>, String> {
+    let path = record.join("log.jsonl");
+    let log = fs::read_to_string(&path)
+        .map_err(|error| format!("reading {} failed: {error}", path.display()))?;
+    let lines = log.lines().map(serde_json::from_str::<serde_json::Value>);
+    Ok(lines.flatten().collect())
+}
+
+/// The JSON of the file at `path`.
+fn read(path: &Path) -> std::result::Result<serde_json::Value, String> {
+    let text = fs::read_to_string(path)
+        .map_err(|error| format!("reading {} failed: {error}", path.display()))?;
+    serde_json::from_str(&text).map_err(|error| format!("{} isn't JSON: {error}", path.display()))
 }
 
 /// What of run `id` the providers still hold: an instance not terminated, a schedule, a sandbox.
