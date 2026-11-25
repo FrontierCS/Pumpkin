@@ -17,7 +17,7 @@
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
-use std::io::{self, Read};
+use std::io::{self, Read, Write as _};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
@@ -30,16 +30,17 @@ use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 
 use expect_test::{Expect, expect};
-use gateway::{Arrival, Dialer, GatewayAddress, Listener, Process, Put, Sockets};
+use gateway::{Arrival, Dialer, GatewayAddress, Listener, Process, Put, Sockets, Unreached};
 use schema::frame;
 use schema::frame::MAX_BODY_BYTES;
 use schema::ir::{AbsolutePath, Argv, CompanionName, Env, EnvVar, Mode, Name};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
     Endpoint, Entry, ExitStatus, FromSandbox, HELLO_TIMEOUT, HelloReply, Launch, Listening,
-    MAX_ATTESTATION_BYTES, PROTOCOL_VERSION, PrivateDial, RegistrationGrant, RelativePath, Relayed,
-    Root, SANDBOXD_ATTESTATION, SANDBOXD_GIVEN, SANDBOXD_GRANT, SANDBOXD_TLS_CERTIFICATE,
-    SANDBOXD_TLS_KEY, SOCKET_NAME, SocketDial, ToSandbox, dir_mode, file_mode,
+    MAX_ATTESTATION_BYTES, MAX_ROUTE_BYTES, PROTOCOL_VERSION, PrivateDial, RELAYED_PORT,
+    RegistrationGrant, RelativePath, Relayed, Root, SANDBOXD_ATTESTATION, SANDBOXD_GIVEN,
+    SANDBOXD_GRANT, SANDBOXD_TLS_CERTIFICATE, SANDBOXD_TLS_KEY, SOCKET_NAME, SocketDial, ToSandbox,
+    dir_mode, file_mode,
 };
 use serde_json::{Value, json};
 use stdx::Deadline;
@@ -1105,6 +1106,136 @@ fn under_tls() {
     );
 }
 
+#[test]
+fn relay_refusals() {
+    check(
+        Meeting::Socket,
+        |sandbox| {
+            let (apart, relay) = (unlistened(), SocketAddr::from(unlistened()));
+            let (apart_text, relay_text) = (apart.to_string(), relay.to_string());
+            let by = unix_seconds(3600);
+            let listening = ["--listen", &apart_text, "--by", &by];
+            let relaying = [
+                "--relay",
+                &relay_text,
+                "--relayed",
+                "web",
+                "--relayed",
+                "db",
+            ];
+            let args: Vec<&OsStr> = (listening.iter().chain(&relaying))
+                .map(OsStr::new)
+                .collect();
+            let sandboxd = sandbox.sandboxd(&args, &grant());
+            listened(apart);
+            let long = [b'a'; MAX_ROUTE_BYTES];
+            let routes: [(&str, &[u8]); 6] = [
+                ("no route", b""),
+                ("a route cut short", b"we"),
+                ("a companion that --relayed doesn't name", b"cache\n"),
+                ("the sandbox's own container", b"main\n"),
+                ("no name", b"\n"),
+                ("no line feed in the most bytes of a route", &long),
+            ];
+            let mut peers = Vec::new();
+            let mut lines: Vec<String> = (routes.iter())
+                .map(|(case, route)| format!("{case}: {}", routed(relay, route, &mut peers)))
+                .collect();
+            let ours = HelloReply::Accepted {
+                grant: Some(RegistrationGrant::try_from(GRANT.to_owned()).unwrap()),
+            };
+            greeted(apart.into(), &ours, &mut Vec::new());
+            let mut said = ended(sandboxd);
+            for (n, peer) in peers.iter().enumerate() {
+                said = said.replace(peer, &format!("$PEER{n}"));
+            }
+            lines.push(format!("then, its session ended: {said}"));
+            lines.extend(relay_flags(sandbox));
+            lines
+        },
+        &expect![[r#"
+            no route: closed, with no answer
+            a route cut short: closed, with no answer
+            a companion that --relayed doesn't name: closed, with no answer
+            the sandbox's own container: closed, with no answer
+            no name: closed, with no answer
+            no line feed in the most bytes of a route: closed, with no answer
+            then, its session ended: exit status: 0: sandboxd: the relay closed the connection from $PEER0: the connection ended before its route's line feed: expected a companion's name and a line feed
+            sandboxd: the relay closed the connection from $PEER1: the connection ended before its route's line feed: expected a companion's name and a line feed
+            sandboxd: the relay closed the connection from $PEER2: its route names `cache`, which this relay carries nothing to: expected a companion that --relayed names
+            sandboxd: the relay closed the connection from $PEER3: the route names no companion: `main` names the runner's own container: give the companion another name
+            sandboxd: the relay closed the connection from $PEER4: the route names no companion: `` is not a companion's name: use 1 to 63 characters from a-z, 0-9 and `-`, starting with a letter and ending with a letter or a digit
+            sandboxd: the relay closed the connection from $PEER5: the route has no line feed in its first 64 bytes: expected a companion's name and a line feed
+            --relay without --relayed: exit status: 1: sandboxd: --relay carries connections to the companions that --relayed names: name each with a --relayed
+            --relayed without --relay: exit status: 1: sandboxd: --relayed names a companion that --relay carries to: give it with --relay
+            --relayed with no companion's name: exit status: 1: sandboxd: can't parse `--relayed`, `main` names the runner's own container: give the companion another name: see `sandboxd --help`
+            --relay at an address that is taken: exit status: 1: sandboxd: listening as a relay at $TAKEN failed: Address already in use (os error 98)
+            --relay without --listen: exit status: 1: sandboxd: --relay carries the connections of a gateway that dials the sandbox: give it with --listen
+            then Ended { reason: "the owner dropped the session" }
+            sandboxd: exit status: 0
+            left running: 0"#]],
+    );
+}
+
+/// What `sandboxd` says of each set of the relay's flags that it refuses.
+fn relay_flags(sandbox: &Sandbox) -> Vec<String> {
+    let (apart_text, relay_text) = (unlistened().to_string(), unlistened().to_string());
+    let by = unix_seconds(3600);
+    let listening = ["--listen", &apart_text, "--by", &by];
+    let relaying = [
+        "--relay",
+        &relay_text,
+        "--relayed",
+        "web",
+        "--relayed",
+        "db",
+    ];
+    let mut lines = Vec::new();
+    let taken = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let taken_text = taken.local_addr().unwrap().to_string();
+    let flags: [(&str, &[&str]); 5] = [
+        ("--relay without --relayed", &["--relay", &relay_text]),
+        ("--relayed without --relay", &["--relayed", "web"]),
+        ("--relayed with no companion's name", &["--relayed", "main"]),
+        (
+            "--relay at an address that is taken",
+            &["--relay", &taken_text, "--relayed", "web"],
+        ),
+        ("--relay without --listen", &[]),
+    ];
+    for (case, flags) in flags {
+        let listening: &[&str] = if flags.is_empty() {
+            &[&apart_text]
+        } else {
+            &listening
+        };
+        let relaying: &[&str] = if flags.is_empty() { &relaying } else { flags };
+        let args: Vec<&OsStr> = (listening.iter().chain(relaying)).map(OsStr::new).collect();
+        let refused = ended(sandbox.sandboxd(&args, &grant()));
+        lines.push(format!(
+            "{case}: {}",
+            refused.replace(&taken_text, "$TAKEN")
+        ));
+    }
+    lines
+}
+
+/// Connects to the relay at `relay`, which listens, says `route` and no more, and returns what
+/// the relay did. Adds the connection's own address to `peers`.
+fn routed(relay: SocketAddr, route: &[u8], peers: &mut Vec<String>) -> String {
+    // One dial, as the relay listens from before `sandboxd` does.
+    let mut peer = TcpStream::connect(relay).unwrap();
+    peer.set_read_timeout(Some(HUNG)).unwrap();
+    peers.push(peer.local_addr().unwrap().to_string());
+    peer.write_all(route).unwrap();
+    peer.shutdown(Shutdown::Write).unwrap();
+    let mut answer = Vec::new();
+    match peer.read_to_end(&mut answer) {
+        Ok(0) => "closed, with no answer".to_owned(),
+        answered => format!("{answered:?}: {answer:?}"),
+    }
+}
+
 /// `said`, with the reason that TLS's library gave in it, if any, masked.
 fn masked(said: &str) -> String {
     let (start, end) = ("TLS failed: ", ": expected");
@@ -1562,7 +1693,11 @@ fn as_root_with_user() {
     let (sender, arrivals) = mpsc::channel();
     let accepted = registration.accept((&Machine, hung()), None, false, sender, |a| a, || false);
     let mut session = accepted.unwrap();
-    let mut lines = as_user(&mut session, &arrivals, &root.join("collected"));
+    let script = r#"
+        stat -c '/pumpkin: %u:%g %a' /pumpkin
+        grep -E '^(Uid|Gid|Groups|CapInh|CapPrm|CapEff|CapAmb|NoNewPrivs):' /proc/self/status
+        nsenter --setuid=0 id 2>&1 || echo "root refused""#;
+    let mut lines = as_user(&mut session, &arrivals, &root.join("collected"), script);
     lines.extend(left_behind(&mut session, &arrivals, &container));
     drop(session);
     // Gone already, once the session ended, which is as good as removed.
@@ -1605,16 +1740,19 @@ fn start_as_root(dir: &Path, container: &str, user: &str) {
     assert!(started, "the container was to start");
 }
 
-fn as_user(session: &mut Session, arrivals: &Receiver<Arrival>, collected: &Path) -> Vec<String> {
+/// Runs `script` over `session`, in a container whose `sandboxd` became a user, and returns its
+/// exit and what it printed, collected into `collected`.
+fn as_user(
+    session: &mut Session,
+    arrivals: &Receiver<Arrival>,
+    collected: &Path,
+    script: &str,
+) -> Vec<String> {
     let dirs = ["home", "log"].map(relative);
     let put = dirs.map(|dir| Put::Dir(dir, dir_mode()));
     session
         .put(&absolute(Path::new("/pumpkin")), put, hung())
         .unwrap();
-    let script = r#"
-        stat -c '/pumpkin: %u:%g %a' /pumpkin
-        grep -E '^(Uid|Gid|Groups|CapInh|CapPrm|CapEff|CapAmb|NoNewPrivs):' /proc/self/status
-        nsenter --setuid=0 id 2>&1 || echo "root refused""#;
     let exited = sh_as_user(session, arrivals, script);
     let limits = Limits {
         bytes: 1 << 20,
@@ -1694,5 +1832,242 @@ fn contained(container: &str, done: impl Fn(&str) -> bool) -> String {
             return listed;
         }
         thread::sleep(Duration::from_millis(10));
+    }
+}
+
+// Two containers on a Docker network of their own, which resolves the companion's name as a
+// sandbox's network does. The gateway meets the companion through the relay in the other.
+#[test]
+#[ignore = "needs Docker: run cargo xtask live docker"]
+fn relays_to_a_companion() {
+    let scratch = TestDir::new();
+    let pair = Pair::create();
+    let dialer = Dialer::new(test_support::edge::client());
+    let (Listening { grant }, main) = dialer.issue().unwrap();
+    let (relayed, behind) = dialer.relayed(&companion()).unwrap();
+    let by = unix_seconds(3600);
+    // A container that takes a connection, reads nothing of it and never ends it.
+    let deaf = ["nc", "-l", "-p", "7434", "-e", "sleep", "3600"];
+    pair.start("deaf", &["--network-alias=deaf"], &deaf);
+    pair.listening("deaf");
+    let relaying = ["--relay", "0.0.0.0:7435", "--relayed", COMPANION];
+    let unreached = ["--relayed", "ghost", "--relayed", "deaf"];
+    let publish = ["--publish=127.0.0.1::7434", "--publish=127.0.0.1::7435"];
+    let main_given = [(SANDBOXD_GRANT, grant.digits())];
+    let relaying: Vec<&str> = relaying.into_iter().chain(unreached).collect();
+    pair.run("main", (&publish, &main_given), &by, &relaying);
+    let alias = [format!("--network-alias={COMPANION}")];
+    let alias = alias.each_ref().map(String::as_str);
+    pair.run(COMPANION, (&alias, &given(&relayed)), &by, &["--tls"]);
+    let (listens, relay) = (pair.published("main", 7434), pair.published("main", 7435));
+    let (mut within, exits) = met(behind, relay);
+    let script = r#"echo "in $(hostname), with key ${SANDBOXD_TLS_KEY-unset}""#;
+    let collected = scratch.path().join("companion");
+    let mut lines = as_user(&mut within, &exits, &collected, script);
+    let (mut own, own_exits) = met(main, listens);
+    let collected = scratch.path().join("main");
+    lines.extend(as_user(
+        &mut own,
+        &own_exits,
+        &collected,
+        "echo in $(hostname)",
+    ));
+    let again = routed(relay, format!("{COMPANION}\n").as_bytes(), &mut Vec::new());
+    lines.push(format!("a second connection to the companion: {again}"));
+    let ghost = routed(relay, b"ghost\n", &mut Vec::new());
+    lines.push(format!("to a companion that nothing resolves: {ghost}"));
+    let deaf = routed(relay, b"deaf\n", &mut Vec::new());
+    lines.push(format!("ended, to one that never ends its own way: {deaf}"));
+    // The one wait on the real clock, for the 15 s that the relay gives a route.
+    let mut silent = TcpStream::connect(relay).unwrap();
+    silent.set_read_timeout(Some(HUNG)).unwrap();
+    let closed = silent.read(&mut [0]).map_err(|error| error.kind());
+    lines.push(format!("a connection that says no route: {closed:?}"));
+    let still = sh_as_user(&mut within, &exits, "true");
+    lines.push(format!("the companion's session, after them: {still:?}"));
+    lines.extend(pair.told("main"));
+    drop(within);
+    pair.gone(COMPANION);
+    lines.push("the companion's container, once its session ended: gone".to_owned());
+    drop(own);
+    expect![[r#"
+        exited: Code(0)
+        in companion, with key unset
+        exited: Code(0)
+        in main
+        a second connection to the companion: closed, with no answer
+        to a companion that nothing resolves: closed, with no answer
+        ended, to one that never ends its own way: closed, with no answer
+        a connection that says no route: Ok(0)
+        the companion's session, after them: Code(0)
+        sandboxd: the relay closed the connection from $PEER: a connection to companion `companion` is in flight: expected one at a time, as the gateway opens one session with it
+        sandboxd: the relay closed the connection from $PEER: companion `ghost` wasn't reached at ghost:7434: its name didn't resolve: <reason>
+        sandboxd: the relay closed the connection from $PEER: it sent no route within 15 s: expected a companion's name and a line feed, as the connection opens
+        the companion's container, once its session ended: gone"#]].assert_eq(&lines.join("\n"));
+}
+
+/// Meets the `sandboxd` that `unreached` was issued for, behind the stand-in edge in front of
+/// `at`.
+fn met(unreached: Unreached, at: SocketAddr) -> (Session, Receiver<Arrival>) {
+    let port = test_support::edge::front(at);
+    let endpoint = Endpoint::new(test_support::edge::NAME.to_owned(), port).unwrap();
+    let (sender, arrivals) = mpsc::channel();
+    let registration = unreached.at(endpoint);
+    let accepted = registration.accept((&Machine, hung()), None, false, sender, |a| a, || false);
+    (accepted.unwrap(), arrivals)
+}
+
+/// A Docker network of the test's own, and the containers that the test runs on it. Dropping it
+/// removes them all.
+struct Pair {
+    network: String,
+}
+
+impl Pair {
+    fn create() -> Self {
+        let network = format!("sandboxd-{}-relays", std::process::id());
+        let created = (test_support::docker())
+            .args(["network", "create", &network])
+            .stdout(Stdio::null())
+            .status();
+        assert!(created.unwrap().success(), "the network was to be made");
+        Self { network }
+    }
+
+    fn container(&self, host: &str) -> String {
+        format!("{}-{host}", self.network)
+    }
+
+    /// Starts a container named for `host`, its host name, whose `sandboxd` listens until `by`
+    /// as a user, with `flags` more. `options` are `docker run`'s, and `sandboxd`'s environment.
+    fn run(&self, host: &str, options: (&[&str], &[(&str, String)]), by: &str, flags: &[&str]) {
+        let (options, given) = options;
+        let given = given
+            .iter()
+            .map(|(name, value)| format!("--env={name}={value}"));
+        let sandboxd = test_support::sandboxd();
+        let mount = format!(
+            "--mount=type=bind,source={},target=/.pumpkin/sandboxd",
+            sandboxd.display()
+        );
+        let options: Vec<String> = (options.iter().map(|option| (*option).to_owned()))
+            .chain(given)
+            .chain(["--user=0:0".to_owned(), mount])
+            .collect();
+        let options: Vec<&str> = options.iter().map(String::as_str).collect();
+        let at = format!("0.0.0.0:{RELAYED_PORT}");
+        let listening = ["/.pumpkin/sandboxd", &at, "--listen", "--by", by];
+        let command: Vec<&str> = (listening.into_iter())
+            .chain(["--user", "1234:1235"])
+            .chain(flags.iter().copied())
+            .collect();
+        self.start(host, &options, &command);
+    }
+
+    /// Starts a container named for `host`, its host name, that runs `command`, with `options`
+    /// of `docker run`'s.
+    fn start(&self, host: &str, options: &[&str], command: &[&str]) {
+        let mut docker = test_support::docker();
+        docker.args(["run", "--detach", "--rm", "--init"]);
+        docker.arg(format!("--network={}", self.network));
+        docker.arg(format!("--name={}", self.container(host)));
+        docker.arg(format!("--hostname={host}"));
+        docker
+            .args(options)
+            .arg(test_support::BUSYBOX)
+            .args(command);
+        // Not the container's id, which `docker run --detach` prints.
+        let started = docker.stdout(Stdio::null()).status().unwrap().success();
+        assert!(started, "the container was to start");
+    }
+
+    /// Returns once a socket listens at `RELAYED_PORT` in the container named for `host`.
+    fn listening(&self, host: &str) {
+        let by = Deadline::after(HUNG);
+        loop {
+            let listed = (test_support::docker())
+                .args(["exec", &self.container(host), "netstat", "-l", "-t", "-n"])
+                .output()
+                .unwrap();
+            let listed = String::from_utf8(listed.stdout).unwrap();
+            if listed.contains(&format!(":{RELAYED_PORT} ")) {
+                return;
+            }
+            assert!(
+                by.remaining().is_some(),
+                "nothing listens in the container named for {host}: it was to listen"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Where the engine publishes `port` of the container named for `host`, on the loopback.
+    fn published(&self, host: &str, port: u16) -> SocketAddr {
+        let listed = (test_support::docker())
+            .args(["port", &self.container(host), &format!("{port}/tcp")])
+            .output()
+            .unwrap();
+        let listed = String::from_utf8(listed.stdout).unwrap();
+        listed.trim().parse().unwrap()
+    }
+
+    /// Returns once the engine lists no container named for `host`, as it removes one whose
+    /// `sandboxd` has exited.
+    fn gone(&self, host: &str) {
+        let name = format!("name=^{}$", self.container(host));
+        let by = Deadline::after(HUNG);
+        loop {
+            let listed = (test_support::docker())
+                .args(["ps", "--all", "--quiet", "--filter", &name])
+                .output()
+                .unwrap();
+            if listed.stdout.is_empty() {
+                return;
+            }
+            assert!(
+                by.remaining().is_some(),
+                "the container named for {host} still runs: its sandboxd was to exit"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// What the relay in the container named for `host` told of, each peer's address and each
+    /// reason of the resolver's masked.
+    fn told(&self, host: &str) -> Vec<String> {
+        let logs = (test_support::docker())
+            .args(["logs", &self.container(host)])
+            .output()
+            .unwrap();
+        let told = String::from_utf8(logs.stderr).unwrap();
+        let (from, resolved) = ("the connection from ", "didn't resolve: ");
+        let masked = told.lines().map(|line| {
+            let line = match line.split_once(from) {
+                Some((before, rest)) => {
+                    let why = rest.split_once(": ").map_or("", |(_peer, why)| why);
+                    format!("{before}{from}$PEER: {why}")
+                }
+                None => line.to_owned(),
+            };
+            match line.split_once(resolved) {
+                Some((before, _reason)) => format!("{before}{resolved}<reason>"),
+                None => line,
+            }
+        });
+        masked.collect()
+    }
+}
+
+impl Drop for Pair {
+    fn drop(&mut self) {
+        // A container whose session has ended is gone already, which is as good as removed.
+        for host in ["main", COMPANION, "deaf"] {
+            let _ = (test_support::docker())
+                .args(["rm", "--force", &self.container(host)])
+                .output();
+        }
+        let _ = (test_support::docker())
+            .args(["network", "rm", &self.network])
+            .output();
     }
 }

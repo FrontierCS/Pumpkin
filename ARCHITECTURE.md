@@ -38,8 +38,8 @@ EC2 instance or a container on a Docker host, which runs the runs a machine send
 commands. `run` builds a task's images and starts its driver. Read its path through the driver
 first. A machine whose configuration names a controller in `[controllers.<name>]` sends each run
 over `ssh` to the same executable there, whose `controller serve` starts the run as a job in a
-systemd unit of its own. Under the name `pumpkin-admin`, a hard link, the executable installs and
-checks the controller's host.
+systemd unit of its own. Under the name `pumpkin-admin`, the executable installs and checks the
+controller's host.
 
 `sandboxd` (`crates/sandboxd`) is the supervisor in every sandbox, a static binary. Under the name
 `sandboxctl`, it is the shim through which code in the sandbox makes ops. `ec2-boot`
@@ -66,8 +66,7 @@ What `std` lacks and several crates share, such as errors with context (`Context
 **Architecture Invariant:** it knows nothing of Pumpkin.
 
 **Architecture Invariant:** a child process gets only the environment that its caller states, and
-`process::run` ends it at a bound that its caller states. Clippy's configuration bans std's ways
-around `process`.
+`process::run` ends it at a bound that its caller states.
 
 ### `crates/schema`
 
@@ -112,8 +111,7 @@ runtime, the core and the providers never see the language. Only `library` knows
 The two ends of a session. The `gateway` is the host's end: the `Session`'s one owner moves trees,
 runs commands, and hears of each op, model request and exit as an `Arrival`. `sandboxd` serves the
 sandbox's end, carries ops from `sandboxctl` and model requests from its model endpoint, and
-freezes the sandbox. `tls` carries a session that crosses the Internet, below the session's
-protocol.
+freezes the sandbox. `tls` carries a session that crosses the Internet.
 
 **Architecture Invariant:** a sandbox can't harm the host through its session. Anything out of
 protocol ends the session, and a session costs the host only bounded memory and bounded waits.
@@ -122,8 +120,9 @@ protocol ends the session, and a session costs the host only bounded memory and 
 the protocol is all they agree on. `tls` carries bytes below the protocol and knows none of its
 messages. The gateway knows no provider, so every provider's sandboxes have the same sessions.
 
-**Architecture Invariant:** `sandboxd` is no boundary within its sandbox. It has its role's
-privileges, so what it does the role's own code could do too. The session is the boundary.
+**Architecture Invariant:** `sandboxd` is no boundary within its container. It has its role's
+privileges, so what it does the role's own code could do too. The session is the boundary. Neither
+is the relay in `main`: a companion's own TLS is the boundary.
 
 ### `crates/route`
 

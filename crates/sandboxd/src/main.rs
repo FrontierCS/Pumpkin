@@ -5,6 +5,8 @@
 //! `--listen` where the gateway dials it, opens the session ([`schema::sandbox`]) with its hello,
 //! presenting the attestation in [`SANDBOXD_ATTESTATION`] where it dials a TCP address, and serves
 //! it until the gateway closes it. With `--tls`, it serves the session under TLS of its own.
+//! With `--relay`, it also carries the gateway's connections to its sandbox's companions
+//! ([`relay`]).
 //! When the session ends it kills its commands and exits, which stops a sandbox it is first in.
 //!
 //! As a sandbox's first process (PID 1) it reaps the orphans the kernel hands it, and freezing
@@ -32,7 +34,7 @@ use std::process::ExitCode;
 use std::str::FromStr;
 use std::time::Duration;
 
-use schema::ir::User;
+use schema::ir::{CompanionName, User};
 use schema::sandbox::{
     Attestation, HELLO_TIMEOUT, RegistrationGrant, SANDBOXD_ATTESTATION, SANDBOXD_GIVEN,
     SANDBOXD_GRANT, SANDBOXD_TLS_CERTIFICATE, SANDBOXD_TLS_KEY, TlsIdentity, pumpkin_dir,
@@ -51,6 +53,7 @@ mod ctl;
 mod files;
 mod model;
 mod ops;
+mod relay;
 mod session;
 mod sys;
 mod until;
@@ -70,7 +73,9 @@ mod flags {
         reason = "xflags generates `#[allow(dead_code)]`, without a reason, on its parsers"
     )]
 
-    use super::{Address, RoleUser};
+    use std::net::SocketAddr;
+
+    use super::{Address, Companion, RoleUser};
 
     xflags::xflags! {
         src "./src/main.rs"
@@ -96,9 +101,18 @@ mod flags {
             optional --by seconds: u64
             /// With --listen, serves the session under TLS, as a companion behind its sandbox's
             /// relay does. SANDBOXD_TLS_CERTIFICATE and SANDBOXD_TLS_KEY hold the certificate
-            /// and its PKCS #8 key, each as the lowercase hexadecimal digits of its DER. sandboxd
-            /// keeps both from the commands it starts. Refused without --listen.
+            /// and its PKCS #8 key, each as the lowercase hexadecimal digits of its DER. No
+            /// command that sandboxd starts gets either. Refused without --listen.
             optional --tls
+            /// With --listen, relays at this TCP address of the sandbox's own, such as
+            /// `0.0.0.0:7435`, from before it listens for the gateway. A connection there first
+            /// names a companion, in a line. It is then carried to that companion's sandboxd, at
+            /// port 7434, or closed. Needs --relayed. Refused without --listen.
+            optional --relay address: SocketAddr
+            /// A companion that --relay carries connections to, by its name, which must resolve
+            /// within the sandbox. It carries one connection a companion at a time. Repeatable, a
+            /// companion at a time. Refused without --relay.
+            repeated --relayed companion: Companion
             /// Becomes this user, `uid:gid`, each a number but 0, as sandboxd starts, which must be
             /// as root, having given the user /pumpkin, made if absent: no command, nor sandboxd,
             /// then keeps or regains a privilege. Freezing then kills every other process of the
@@ -125,6 +139,8 @@ mod flags {
         pub listen: bool,
         pub by: Option<u64>,
         pub tls: bool,
+        pub relay: Option<SocketAddr>,
+        pub relayed: Vec<Companion>,
         pub user: Option<RoleUser>,
         pub ops: bool,
         pub model: bool,
@@ -167,6 +183,8 @@ fn main() -> ExitCode {
         listen,
         by,
         tls,
+        relay,
+        relayed,
         user,
         ops,
         model,
@@ -194,7 +212,15 @@ fn main() -> ExitCode {
         eprintln!("sandboxd: making the process non-dumpable failed: {error}");
         return ExitCode::FAILURE;
     }
-    let gateway = given.and_then(|given| gateway_of(gateway, listen, by, tls, given));
+    let relaying = relaying(relay, relayed, listen);
+    let gateway = relaying.and_then(|relaying| {
+        let gateway = gateway_of(gateway, listen, by, tls, given?)?;
+        // Before `sandboxd` listens for the gateway, which so finds the relay once it has met it.
+        if let Some((address, relayed)) = relaying {
+            relay::serve(address, relayed)?;
+        }
+        Ok(gateway)
+    });
     match gateway.and_then(|gateway| session::serve(&gateway, ops, model)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -249,6 +275,34 @@ fn gateway_of(
     }
 }
 
+/// Where `--relay` says to relay, and the companions that `--relayed` names, if it relays.
+fn relaying(
+    relay: Option<SocketAddr>,
+    relayed: Vec<Companion>,
+    listen: bool,
+) -> Result<Option<(SocketAddr, Vec<CompanionName>)>, String> {
+    match (relay, relayed.is_empty()) {
+        (None, true) => Ok(None),
+        (None, false) => Err(
+            "--relayed names a companion that --relay carries to: give it with --relay".to_owned(),
+        ),
+        (Some(_), true) => Err(
+            "--relay carries connections to the companions that --relayed names: name each \
+             with a --relayed"
+                .to_owned(),
+        ),
+        (Some(_), false) if !listen => Err(
+            "--relay carries the connections of a gateway that dials the sandbox: give it with \
+             --listen"
+                .to_owned(),
+        ),
+        (Some(address), false) => {
+            let relayed = relayed.into_iter().map(|Companion(name)| name);
+            Ok(Some((address, relayed.collect())))
+        }
+    }
+}
+
 /// Where the command line says the gateway is: at the absolute path of a Unix socket of the
 /// sandbox's own, or at a TCP address.
 #[derive(Debug)]
@@ -289,6 +343,18 @@ impl FromStr for RoleUser {
                 "`{user}` is not a user's `uid:gid`: give two numbers but 0, such as `1000:1000`"
             )),
         }
+    }
+}
+
+/// A companion that `--relayed` names.
+#[derive(Debug)]
+struct Companion(CompanionName);
+
+impl FromStr for Companion {
+    type Err = String;
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        CompanionName::try_from(name.to_owned()).map(Self)
     }
 }
 
