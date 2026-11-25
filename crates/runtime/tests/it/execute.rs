@@ -2228,8 +2228,17 @@ fn deleted_while_torn_down() {
 fn reported_before_the_hard_end() {
     // A deadline later than the agent's ops, so that the agent's exit ends the work phase, and
     // bounds the call's start.
-    let argv = ["ops", "call train 6", "exit", "call train 6"];
-    let mut ir = short_workflow(&argv, 2);
+    let deadline = 2;
+    // The agent exits once its call's sandbox is recorded. So what the call's start hands the
+    // driver comes first, and the hold below counts the next op alone.
+    let argv = [
+        "ops",
+        "call train 6",
+        "await_file jobs/0/sandbox.json",
+        "exit",
+        "call train 6",
+    ];
+    let mut ir = short_workflow(&argv, deadline);
     ir["roles"][1]["image"] = json!(sim::image(HUNG).as_str());
     // Hold the driver as it records the exit. The command already sent its next request:
     // even after the hard end passes the driver must take what arrived in time.
