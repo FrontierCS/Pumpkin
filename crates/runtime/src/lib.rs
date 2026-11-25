@@ -330,7 +330,8 @@ impl Failure for Stopped {
 // A call: its thread's orders, and what the run knows of the role that runs it.
 struct Called {
     orders: Sender<Message<crate::relay::Order>>,
-    // By when what the call left is collected, as a time since the run started; its leases' too.
+    // By when what the call left is collected, as a time since the run started, and its leases'
+    // at the latest.
     collect: Duration,
     // The trees of the call's sandbox that its last op came with; a transfer takes them.
     trees: Option<Trees>,
@@ -758,8 +759,9 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                     grant,
                     instance,
                     start_by,
+                    life,
                 } => {
-                    let start = (lease, instance, start_by);
+                    let start = (lease, instance, start_by, life);
                     self.start_lease(scope, core, start, (holder, grant))?;
                 }
                 Action::RunCommand {

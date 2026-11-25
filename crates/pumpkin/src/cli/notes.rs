@@ -736,7 +736,9 @@ Example, of a machine whose runs go to the person's controllers, one with Modal:
     },
     Part {
         text: "[providers.<name>.<kind>] is a provider that the machine's runs may place roles \
-               on. <name> names it, and <kind> is its kind. Its table holds the kind's settings:",
+               on. <name> names it, and <kind> is its kind. A leased runner has its class's startup \
+               to be frozen and collected once its lease ends. The provider's table holds the \
+               kind's settings:",
         rows: &[
             Row {
                 literal: "docker",

@@ -339,6 +339,7 @@ impl Core<'_> {
             grant: id,
             instance,
             start_by: end,
+            life,
         });
         Ok(self.lease_reply(lease))
     }

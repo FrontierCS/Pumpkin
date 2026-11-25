@@ -264,13 +264,14 @@ pub enum Action {
     ///
     /// Its runner is to have started by `start_by`, a time since the run started: its holder's
     /// work end, past which nothing could use it. Else the start is given up, and the lease
-    /// fails.
+    /// fails. The core closes it once `life` has passed since [`Event::LeaseReady`], or sooner.
     StartLease {
         lease: LeaseId,
         holder: Caller,
         grant: SessionId,
         instance: u32,
         start_by: Duration,
+        life: Duration,
     },
     /// Runs `argv` as lease `lease`'s `command`th command, killing it once it has run for
     /// `timeout`, from its start, if given; without one, it runs until the lease is closed.

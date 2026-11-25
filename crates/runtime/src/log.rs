@@ -799,6 +799,8 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
             grant,
             instance,
             start_by,
+            // The open's reply records the lease's life, as the `instance_seconds` it has left.
+            life: _,
         } => json!({
             "kind": "start_lease",
             "lease": lease.0,

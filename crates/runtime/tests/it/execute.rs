@@ -438,7 +438,7 @@ fn held(
         lines.push(format!("payloads hold: {payloads:?}"));
     }
     lines.extend(declared(name, record, providers));
-    let hard_ends = sandboxes_hard_ends(name, log, providers);
+    let hard_ends = sandboxes_hard_ends(name, record, log, providers);
     if also.contains(&Also::HardEnds) {
         lines.extend(hard_ends);
     }
@@ -769,8 +769,16 @@ fn sandboxes_hold(
 
 /// A lease that the run's log opened, as its record places it.
 struct Opened {
+    /// Its runner's name as a sandbox, `lease-<number>`.
+    runner: String,
+    /// The name of its holder's sandbox: the agent's, a call's own target's or the shared one's.
+    holder: String,
     /// Its runner's provider and class.
     place: (String, String),
+    /// How long it lasts from when its runner is ready, as the open's reply gives it.
+    life: Duration,
+    /// When its runner was ready, since the run's start, if it was.
+    ready: Option<Duration>,
 }
 
 // The leases of the log's `start_lease` actions, each with the runner that its holder's grant
@@ -781,41 +789,67 @@ fn opened(record: &Path, log: &[Value]) -> Vec<Opened> {
     };
     let (ir, placed) = (read("ir.json"), read("provider.json"));
     let roles = ir["roles"].as_array().unwrap();
-    let role = |name: &Value| roles.iter().find(|role| role["name"] == *name).unwrap();
+    let role = |name: &Value| roles.iter().position(|role| role["name"] == *name).unwrap();
     let agent = |caller: &Value| {
         let index = caller.as_str().unwrap().strip_prefix("agent-")?;
         Some(&roles[index.parse::<usize>().unwrap()])
     };
-    // Each job's target, by the job's name in the log.
+    // Each job's target's sessions, and the sandbox the job runs on, by the job's name.
     let mut targets = BTreeMap::new();
-    let mut opened = Vec::new();
-    let actions = (log.iter()).flat_map(|line| line["actions"].as_array().into_iter().flatten());
-    for action in actions {
-        match action["kind"].as_str().unwrap() {
-            "start_call" => {
-                let caller = agent(&action["caller"]).unwrap();
-                let function = granted(&caller["runtime"]["agent"]["grants"], &action["grant"]);
-                let target = role(&function["job"]["target"]);
-                targets.insert(format!("job-{}", action["job"]), target);
+    let mut opened: Vec<Opened> = Vec::new();
+    for line in log {
+        if line["event"]["kind"] == "lease_ready" {
+            let lease = usize::try_from(line["event"]["lease"].as_u64().unwrap()).unwrap();
+            opened[lease].ready = Some(Duration::from_nanos(nanos(&line["at_ns"]).unwrap()));
+        }
+        let actions = line["actions"].as_array().into_iter().flatten();
+        for action in actions.clone() {
+            let job = || format!("job-{}", action["job"]);
+            match action["kind"].as_str().unwrap() {
+                "start_call" => {
+                    let caller = agent(&action["caller"]).unwrap();
+                    let function = granted(&caller["runtime"]["agent"]["grants"], &action["grant"]);
+                    let target = role(&function["job"]["target"]);
+                    let runtime = &roles[target]["runtime"]["target"];
+                    let sandbox = if runtime["lifetime"] == "work" {
+                        format!("shared-{target}")
+                    } else {
+                        job()
+                    };
+                    targets.insert(job(), (&runtime["sessions"], sandbox));
+                }
+                "start_final_call" => {
+                    let target = role(&ir["final"]["target"]);
+                    targets.insert(
+                        job(),
+                        (&roles[target]["runtime"]["target"]["sessions"], job()),
+                    );
+                }
+                "start_lease" => {
+                    let holder = action["holder"].as_str().unwrap();
+                    let (sessions, sandbox) = match agent(&action["holder"]) {
+                        Some(agent) => (&agent["runtime"]["agent"]["grants"], holder.to_owned()),
+                        None => targets[holder].clone(),
+                    };
+                    let runner = &granted(sessions, &action["grant"])["session"]["runner"];
+                    let at = &placed["roles"][runner.as_str().unwrap()];
+                    let field = |key: &str| at[key].as_str().unwrap().to_owned();
+                    let mut replies = actions.clone().map(|action| &action["reply"]);
+                    let reply = replies
+                        .find(|reply| reply["lease"] == action["lease"])
+                        .unwrap();
+                    let life = reply["remaining"]["instance_seconds"].as_u64().unwrap();
+                    assert_eq!(action["lease"], json!(opened.len()), "leases count from 0");
+                    opened.push(Opened {
+                        runner: format!("lease-{}", action["lease"]),
+                        holder: sandbox,
+                        place: (field("provider"), field("class")),
+                        life: Duration::from_secs(life),
+                        ready: None,
+                    });
+                }
+                _ => {}
             }
-            "start_final_call" => {
-                let target = role(&ir["final"]["target"]);
-                targets.insert(format!("job-{}", action["job"]), target);
-            }
-            "start_lease" => {
-                let holder = &action["holder"];
-                let sessions = match agent(holder) {
-                    Some(agent) => &agent["runtime"]["agent"]["grants"],
-                    None => &targets[holder.as_str().unwrap()]["runtime"]["target"]["sessions"],
-                };
-                let runner = &granted(sessions, &action["grant"])["session"]["runner"];
-                let at = &placed["roles"][runner.as_str().unwrap()];
-                let field = |key: &str| at[key].as_str().unwrap().to_owned();
-                opened.push(Opened {
-                    place: (field("provider"), field("class")),
-                });
-            }
-            _ => {}
         }
     }
     opened
@@ -828,14 +862,21 @@ fn granted<'g>(grants: &'g Value, name: &Value) -> &'g Value {
 }
 
 // Each sandbox's hard end, as its create took it, after the run's start, which the log's first
-// record gives with the run's hard end. None is past the run's.
-fn sandboxes_hard_ends(name: &str, log: &[Value], providers: &[(&str, &Sim)]) -> Vec<String> {
+// record gives with the run's hard end. None is past the run's. A runner's is at most its
+// holder's, and at least the earlier of that and its life after its ready.
+fn sandboxes_hard_ends(
+    name: &str,
+    record: &Path,
+    log: &[Value],
+    providers: &[(&str, &Sim)],
+) -> Vec<String> {
     let Some(started) = log.first().map(|first| &first["event"]) else {
         return Vec::new();
     };
     let start = Duration::from_nanos(nanos(&started["unix_ns"]).unwrap());
     let run_hard_end = Duration::from_nanos(nanos(&started["hard_end_ns"]).unwrap());
     let mut lines = Vec::new();
+    let mut hard_ends = BTreeMap::new();
     for (_, provider) in providers {
         for (sandbox, hard_end) in provider.hard_ends() {
             let after = hard_end.since_epoch().saturating_sub(start);
@@ -848,6 +889,33 @@ fn sandboxes_hard_ends(name: &str, log: &[Value], providers: &[(&str, &Sim)]) ->
             lines.push(format!(
                 "{sandbox}'s hard end: {seconds} s after the run's start"
             ));
+            hard_ends.insert(sandbox, after);
+        }
+    }
+    for lease in opened(record, log) {
+        let Opened {
+            runner,
+            holder,
+            life,
+            ready,
+            ..
+        } = lease;
+        let Some(&leased) = hard_ends.get(&runner) else {
+            continue;
+        };
+        let held = hard_ends[&holder];
+        assert!(
+            leased <= held,
+            "{name}: {runner}'s hard end is {leased:?} after the run's start, past its holder \
+             {holder}'s, {held:?}"
+        );
+        if let Some(ready) = ready {
+            let due = held.min(ready + life);
+            assert!(
+                leased >= due,
+                "{name}: {runner}'s hard end is {leased:?} after the run's start, before \
+                 {due:?}, its holder's or its life of {life:?} after its ready at {ready:?}"
+            );
         }
     }
     lines
@@ -4019,26 +4087,54 @@ fn deep_returns() {
     );
 }
 
-// A sandbox of the work phase ends by the agents' teardown's end: the agent's, a call's target's
-// and a runner's that the agent leases. The final call's target ends by the run's hard end.
+// The agent and a call's target end by the agents' teardown's end, the final call's by the hard
+// end. A runner ends a startup after its life from its latest ready, by its holder's end at most.
 #[test]
 fn hard_ends() {
     let argv = [
         "ops",
+        // Each lease opens once the clock has moved.
+        "sleep 7",
+        "gpu.open 10",
+        "await_lease gpu 0 ready",
+        "gpu.open 200",
+        "await_lease gpu 1 ready",
+        "gpu.close 0",
+        "gpu.close 1",
+        "await_lease gpu 0 closed",
+        "await_lease gpu 1 closed",
         "call train 6",
         "await 0 completed",
-        "gpu.open",
-        "await_lease gpu 0 ready",
-        "gpu.close 0",
-        "await_lease gpu 0 closed",
         "call submit 6 finalize=true",
     ];
+    let holder_argv = ["ops", "box.open", "await_lease box 2 ready"];
+    let mut ir = held_lease_workflow(&argv, &holder_argv);
+    // The call's runner may take 30 s to start, past the call's 20 s timeout, which cuts it short.
+    // The others take 1 s, apart from the other roles' 30 s, and each lease's life differs.
+    for (name, image) in [("gpu_runner", RUNNER), ("final_box", RUNNER_TOO)] {
+        let mut runner = ir["roles"][3].clone();
+        runner["name"] = json!(name);
+        runner["image"] = json!(image);
+        runner["needs"]["cpu_model"] = json!(BRIEF);
+        ir["roles"].as_array_mut().unwrap().push(runner);
+    }
+    let gpu = json!({ "name": "gpu", "session": {
+        "runner": "gpu_runner", "instances": 2, "instance_seconds": 600, "transfer_bytes": 64,
+    } });
+    let grants = ir["roles"][0]["runtime"]["agent"]["grants"].as_array_mut();
+    grants.unwrap().push(gpu);
+    ir["roles"][2]["runtime"]["target"]["sessions"] = json!([{ "name": "box", "session": {
+        "runner": "final_box", "instances": 1, "instance_seconds": 45, "commands": 3,
+        "transfer_bytes": 64,
+    } }]);
+    ir["final"]["body"]["def"] = json!("scoped");
+    ir["final"]["keywords"] = json!({ "argv": ["worker", "0"] });
     let also = [Also::HardEnds];
     let shown = executed(
         &SimHost::new(),
         "hard-ends",
         &[(PROVIDER, &Sim::new())],
-        &lease_workflow(&argv, 30, RUNNER),
+        &ir,
         SANDBOXD,
         &also,
     );
@@ -4047,9 +4143,12 @@ fn hard_ends() {
         .collect();
     expect![[r#"
         agent-0's hard end: 150 s after the run's start
+        lease-0's hard end: 19 s after the run's start
+        lease-1's hard end: 150 s after the run's start
         job-0's hard end: 150 s after the run's start
-        lease-0's hard end: 150 s after the run's start
-        job-1's hard end: 300 s after the run's start"#]]
+        lease-2's hard end: 117 s after the run's start
+        job-1's hard end: 300 s after the run's start
+        lease-3's hard end: 54 s after the run's start"#]]
     .assert_eq(&hard_ends.join("\n"));
 }
 
