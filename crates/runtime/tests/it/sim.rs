@@ -45,7 +45,7 @@ use provider::{
     Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted, UnixTime,
 };
 use schema::frame;
-use schema::ir::{AbsolutePath, Argv, CpuModel, Image, Mode, Name, Sha256Digest};
+use schema::ir::{AbsolutePath, Argv, Container, CpuModel, Image, Mode, Name, Sha256Digest};
 use schema::sandbox::op::{
     JobState, Last, LeaseStatusReply, OpCall, OpReply, SessionOp, StatusReply, TransferStatus,
 };
@@ -1680,9 +1680,14 @@ fn lease_status(grant: &str, lease: &str) -> OpCall {
     }
 }
 
+/// A session's op, as a step's `words` give it. A command or a copy in a container other than
+/// `main` names its lease as `<lease>:<container>`.
 fn session_call(words: &[&str]) -> OpCall {
     let (grant, op) = words[0].split_once('.').unwrap();
-    let lease = || words[1].parse().unwrap();
+    let named = words.get(1).copied().unwrap_or_default();
+    let (lease, container) = named.split_once(':').unwrap_or((named, "main"));
+    let lease = || lease.parse().unwrap();
+    let container = || Container::try_from(container.to_owned()).unwrap();
     let op = match (op, &words[1..]) {
         ("open", seconds) => SessionOp::Open {
             instance_seconds: seconds.first().map(|seconds| seconds.parse().unwrap()),
@@ -1694,18 +1699,21 @@ fn session_call(words: &[&str]) -> OpCall {
                 .collect::<Vec<_>>();
             SessionOp::Run {
                 lease: lease(),
+                container: container(),
                 argv: Argv::try_from(command).unwrap(),
                 timeout_seconds: timeout.parse().ok(),
             }
         }
         ("put", [_, tree, to, replace @ ..]) => SessionOp::Put {
             lease: lease(),
+            container: container(),
             tree: AbsolutePath::try_from((*tree).to_owned()).unwrap(),
             to: AbsolutePath::try_from((*to).to_owned()).unwrap(),
             replace: replace == ["replace"],
         },
         ("get", [_, from, to]) => SessionOp::Get {
             lease: lease(),
+            container: container(),
             from: AbsolutePath::try_from((*from).to_owned()).unwrap(),
             to: AbsolutePath::try_from((*to).to_owned()).unwrap(),
         },

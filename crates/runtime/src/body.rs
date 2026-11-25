@@ -15,7 +15,7 @@ use std::{fs, io};
 
 use decision::{Event, JobId, PayloadRef};
 use gateway::{Process, Put, Session};
-use schema::ir::{self, AbsolutePath, Argv, Name, TargetLifetime};
+use schema::ir::{self, AbsolutePath, Argv, Container, Name, TargetLifetime};
 use schema::sandbox::op::{
     CommandEnd, CommandStatus, Last, LeaseStatusReply, RunnerOutput, SessionOp, TransferEnd,
     TransferStatus,
@@ -662,6 +662,7 @@ impl<H: Host> Target for OnTarget<'_, '_, '_, H> {
     ) -> Result<(), String> {
         let op = SessionOp::Put {
             lease,
+            container: Container::Main,
             tree,
             to,
             replace: false,
@@ -676,7 +677,13 @@ impl<H: Host> Target for OnTarget<'_, '_, '_, H> {
         from: AbsolutePath,
         to: AbsolutePath,
     ) -> Result<(), String> {
-        self.runner_copy(grant, SessionOp::Get { lease, from, to })
+        let op = SessionOp::Get {
+            lease,
+            container: Container::Main,
+            from,
+            to,
+        };
+        self.runner_copy(grant, op)
     }
 
     fn runner_run(
@@ -688,6 +695,7 @@ impl<H: Host> Target for OnTarget<'_, '_, '_, H> {
     ) -> Result<RunnerOutput, String> {
         let op = SessionOp::Run {
             lease,
+            container: Container::Main,
             argv,
             timeout_seconds,
         };

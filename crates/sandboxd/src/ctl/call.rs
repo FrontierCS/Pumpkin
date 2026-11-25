@@ -19,6 +19,7 @@ pub(super) fn call(call: flags::Call) -> Result<(OpCall, Vec<u8>), String> {
         timeout,
         seconds,
         replace,
+        container,
         wait,
         arg,
     } = call;
@@ -39,9 +40,17 @@ pub(super) fn call(call: flags::Call) -> Result<(OpCall, Vec<u8>), String> {
             ));
         }
         let flags = (timeout.as_deref(), seconds.as_deref(), replace);
-        return Ok((session::op(op, &args, flags)?, Vec::new()));
+        let op = session::op(op, &args, flags, container.as_deref())?;
+        return Ok((op, Vec::new()));
     }
     let function = parse_grant(&function)?;
+    if container.is_some() {
+        return Err(
+            "a function's call takes no `--container`: give it to a session's `run`, `put` or \
+             `get`"
+                .to_owned(),
+        );
+    }
     match (&args[..], timeout, seconds, replace) {
         (files @ ([] | [_]), None, None, false) => {
             let arguments = arguments(&arg)?;

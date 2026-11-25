@@ -771,11 +771,13 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 Action::RunCommand {
                     lease,
                     command,
+                    container,
                     argv,
                     timeout,
                 } => {
                     let run = lease::Run {
                         command,
+                        container,
                         argv,
                         timeout,
                         required_output: self.waiting.contains_key(&lease),
@@ -786,12 +788,14 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                     lease,
                     holder,
                     transfer: number,
+                    container,
                     direction,
                     max_bytes,
                 } => {
                     let holder = self.holder_trees(lease, holder);
                     let transfer = lease::Transfer {
                         number,
+                        container,
                         direction,
                         max_bytes,
                         holder,

@@ -51,8 +51,11 @@ holder calls it by name. The run checks each call against the grant before anyth
   for its `finalize_grace_seconds`, with its ops refused. The run applies the changes once the body returns, all of them
   or none.
 - A **session** leases runners. Its holder opens a lease, runs commands and copies trees in it one
-  at a time, then closes the lease. A target's body holds the target's sessions, and each call gets
-  them afresh. A call target's commands hold them too.
+  at a time across all its runner's containers, then closes the lease. Work that must overlap
+  starts detached, from a command of its own. Pumpkin neither times such work nor reports its exit.
+  A lease's end collects only the output of the command that still runs, and `main`'s `out`. A
+  target's body holds the target's sessions, and each call gets them afresh. A call target's
+  commands hold them too.
 
 The parts name each other by role. An agent may name a call target in at most one of its job
 functions. Other agents may name the same target too. The final call's target is a call target

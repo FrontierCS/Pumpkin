@@ -28,7 +28,7 @@ use provider::{
 };
 use recipe::Given;
 use schema::frame::MAX_MESSAGE_BYTES;
-use schema::ir::{AbsolutePath, Argv, Env, EnvVar, Image, Mode, Name, Resources};
+use schema::ir::{AbsolutePath, Argv, Container, Env, EnvVar, Image, Mode, Name, Resources};
 use schema::sandbox::op::{
     CallReply, CommandEnd, CommandStatus, Failure, FailureCode, JobReply, JobState, Last,
     LeaseRemaining, LeaseReply, LeaseState, LeaseStatusReply, NowReply, OpReply, OpsReply,
@@ -44,7 +44,7 @@ use stdx::process::Environment;
 use stdx::time::{Clock as _, Machine};
 use stdx::{Context, Deadline};
 use test_support::suite::{Locals, Subject, asked, from_now, ids, reserve_with_room, suite_role};
-use test_support::{BUSYBOX, TestDir, docker, hung};
+use test_support::{BUSYBOX, CTL, TestDir, docker, hung};
 
 // The directory, in this variable, in which this binary, run again by `hung_create`, makes a create
 // through the stand-in `docker` and writes what came of it, to `created`.
@@ -852,9 +852,6 @@ fn mute_sandboxd(dir: &Path) -> PathBuf {
     mute
 }
 
-const CTL: &str = r#"
-    ctl() { out=$(sandboxctl "$@" 2>&1); echo "\$ sandboxctl $*: exit $?"; [ -z "$out" ] || echo "  $out"; }"#;
-
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn sandboxctl_on_path() {
@@ -952,6 +949,9 @@ fn ops() {
                 ctl call gpu.put 0 payload /work/in
                 ctl call gpu.put 0 payload /work/in --replace
                 ctl call gpu.get 0 /work/out ../got
+                ctl call gpu.run 0 --container scheduler -- true
+                ctl call gpu.put 0 payload /work/in --container scheduler
+                ctl call gpu.get 0 /work/out ../got --container scheduler
                 ctl call gpu.put 0 payload work
                 ctl call gpu.close 0
                 ctl call gpu.run 0
@@ -1010,14 +1010,20 @@ fn ops() {
               {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":60,"cumulative_seconds":null,"commands":3}}
             $ sandboxctl call gpu.get 0 /work/out ../got: exit 0
               {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":60,"cumulative_seconds":null,"commands":3}}
+            $ sandboxctl call gpu.run 0 --container scheduler -- true: exit 0
+              {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":60,"cumulative_seconds":null,"commands":3}}
+            $ sandboxctl call gpu.put 0 payload /work/in --container scheduler: exit 0
+              {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":60,"cumulative_seconds":null,"commands":3}}
+            $ sandboxctl call gpu.get 0 /work/out ../got --container scheduler: exit 0
+              {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":60,"cumulative_seconds":null,"commands":3}}
             $ sandboxctl call gpu.put 0 payload work: exit 1
               sandboxctl: `work` is a path in the runner, which needs a whole one: start it with `/`
             $ sandboxctl call gpu.close 0: exit 0
               {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":60,"cumulative_seconds":null,"commands":3}}
             $ sandboxctl call gpu.run 0: exit 1
-              sandboxctl: `gpu.run 0` is no session op: give `gpu.open [--seconds <seconds>]`, `gpu.run <lease> [--timeout <seconds>] -- <program> [<arg>...]`, `gpu.put <lease> <tree> <to> [--replace]`, `gpu.get <lease> <from> <to>`, `gpu.status <lease>` or `gpu.close <lease>`
+              sandboxctl: `gpu.run 0` is no session op: give `gpu.open [--seconds <seconds>]`, `gpu.run <lease> [--container <name>] [--timeout <seconds>] -- <program> [<arg>...]`, `gpu.put <lease> <tree> <to> [--container <name>] [--replace]`, `gpu.get <lease> <from> <to> [--container <name>]`, `gpu.status <lease>` or `gpu.close <lease>`
             $ sandboxctl call gpu.close: exit 1
-              sandboxctl: `gpu.close` is no session op: give `gpu.open [--seconds <seconds>]`, `gpu.run <lease> [--timeout <seconds>] -- <program> [<arg>...]`, `gpu.put <lease> <tree> <to> [--replace]`, `gpu.get <lease> <from> <to>`, `gpu.status <lease>` or `gpu.close <lease>`
+              sandboxctl: `gpu.close` is no session op: give `gpu.open [--seconds <seconds>]`, `gpu.run <lease> [--container <name>] [--timeout <seconds>] -- <program> [<arg>...]`, `gpu.put <lease> <tree> <to> [--container <name>] [--replace]`, `gpu.get <lease> <from> <to> [--container <name>]`, `gpu.status <lease>` or `gpu.close <lease>`
             control socket's directory: drwx------; TCP listeners: 0
             stderr: sh: can't create /.pumpkin/bin/sandboxctl: Read-only file system
             owner: ops
@@ -1040,6 +1046,9 @@ fn ops() {
             owner: gpu.put 0: /pumpkin/home/payload to /work/in, replace false
             owner: gpu.put 0: /pumpkin/home/payload to /work/in, replace true
             owner: gpu.get 0: /work/out to /pumpkin/got
+            owner: gpu.run 0 in scheduler: ["true"], None
+            owner: gpu.put 0 in scheduler: /pumpkin/home/payload to /work/in, replace false
+            owner: gpu.get 0 in scheduler: /work/out to /pumpkin/got
             owner: gpu.close 0"#]],
     );
 }
@@ -1486,6 +1495,14 @@ fn reply(session: &mut Session<Machine>, arrival: Arrival, payload: &[u8]) -> St
     asked
 }
 
+/// Lease `lease`, and the container of its runner that an op names, unless that is `main`.
+fn in_container(lease: u64, container: &Container) -> String {
+    match container {
+        Container::Main => lease.to_string(),
+        Container::Companion(name) => format!("{lease} in {name}"),
+    }
+}
+
 fn session_reply(grant: &Name, op: &SessionOp) -> (String, OpReply) {
     match op {
         SessionOp::Open { instance_seconds } => {
@@ -1493,26 +1510,40 @@ fn session_reply(grant: &Name, op: &SessionOp) -> (String, OpReply) {
         }
         SessionOp::Run {
             lease,
+            container,
             argv,
             timeout_seconds,
         } => {
             let asked = format!(
-                "{grant}.run {lease}: {}, {timeout_seconds:?}",
+                "{grant}.run {}: {}, {timeout_seconds:?}",
+                in_container(*lease, container),
                 serde_json::json!(argv)
             );
             (asked, leased(*lease))
         }
         SessionOp::Put {
             lease,
+            container,
             tree,
             to,
             replace,
         } => (
-            format!("{grant}.put {lease}: {tree} to {to}, replace {replace}"),
+            format!(
+                "{grant}.put {}: {tree} to {to}, replace {replace}",
+                in_container(*lease, container)
+            ),
             leased(*lease),
         ),
-        SessionOp::Get { lease, from, to } => (
-            format!("{grant}.get {lease}: {from} to {to}"),
+        SessionOp::Get {
+            lease,
+            container,
+            from,
+            to,
+        } => (
+            format!(
+                "{grant}.get {}: {from} to {to}",
+                in_container(*lease, container)
+            ),
             leased(*lease),
         ),
         &SessionOp::Status { lease } => {

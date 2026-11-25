@@ -646,6 +646,49 @@ fn op_replies() {
     );
 }
 
+/// An op's call as JSON, which reads as the call shown and writes back as itself, or fails to read.
+struct Call(String);
+
+impl Case for Call {
+    fn outcome(self) -> String {
+        match serde_json::from_str::<op::OpCall>(&self.0) {
+            Err(error) => error.to_string(),
+            Ok(call) => match serde_json::to_string(&call).unwrap() {
+                json if json == self.0 => format!("{call:?}"),
+                json => format!("{call:?}, written back as {json}"),
+            },
+        }
+    }
+}
+
+// An op on `main` is written without its container. An op that takes no container refuses one.
+#[test]
+fn lease_op_containers() {
+    let op = |op: &str| {
+        Call(format!(
+            r#"{{"kind":"session","grant":"gpu","op":{{{op}}}}}"#
+        ))
+    };
+    let run = r#""argv":["true"],"timeout_seconds":null"#;
+    check(
+        [
+            op(&format!(r#""kind":"run","lease":0,{run}"#)),
+            op(&format!(
+                r#""kind":"run","lease":0,"container":"main",{run}"#
+            )),
+            op(&format!(
+                r#""kind":"run","lease":0,"container":"scheduler",{run}"#
+            )),
+            op(r#""kind":"status","lease":0,"container":"scheduler""#),
+        ],
+        &expect![[r#"
+            Session { grant: Name("gpu"), op: Run { lease: 0, container: Main, argv: Argv { program: "true", args: [] }, timeout_seconds: None } }
+            Session { grant: Name("gpu"), op: Run { lease: 0, container: Main, argv: Argv { program: "true", args: [] }, timeout_seconds: None } }, written back as {"kind":"session","grant":"gpu","op":{"kind":"run","lease":0,"argv":["true"],"timeout_seconds":null}}
+            Session { grant: Name("gpu"), op: Run { lease: 0, container: Companion(CompanionName("scheduler")), argv: Argv { program: "true", args: [] }, timeout_seconds: None } }
+            unknown field `container`, expected `lease`"#]],
+    );
+}
+
 /// An output's end, as a lease's status gives it ([`op::output_tail`]): how many characters it
 /// keeps, and how many bytes they take as JSON writes them.
 struct Tail(&'static str, Vec<u8>);
@@ -741,18 +784,18 @@ fn lease_status_bound() {
 fn hellos_and_frames() {
     check(
         [
-            HelloJson(r#"{"version":3}"#),
-            HelloJson(r#"{"version":2,"grant":"00112233445566778899aabbccddeeff"}"#),
+            HelloJson(r#"{"version":4}"#),
             HelloJson(r#"{"version":3,"grant":"00112233445566778899aabbccddeeff"}"#),
-            HelloJson(r#"{"version":3,"gpus":["NVIDIA A100-SXM4-80GB","NVIDIA H100 80GB HBM3"]}"#),
-            HelloJson(r#"{"version":3,"gpus":["NVIDIA A100\u0000"]}"#),
+            HelloJson(r#"{"version":4,"grant":"00112233445566778899aabbccddeeff"}"#),
+            HelloJson(r#"{"version":4,"gpus":["NVIDIA A100-SXM4-80GB","NVIDIA H100 80GB HBM3"]}"#),
+            HelloJson(r#"{"version":4,"gpus":["NVIDIA A100\u0000"]}"#),
         ],
         &expect![[r#"
             Hello { gpus: None }
-            sandboxd speaks sandbox protocol 2: expected 3, which this gateway speaks, as a sandboxd built from the same Pumpkin does
-            the hello isn't of sandbox protocol 3's form: unknown field `grant`, expected `version` or `gpus`
+            sandboxd speaks sandbox protocol 3: expected 4, which this gateway speaks, as a sandboxd built from the same Pumpkin does
+            the hello isn't of sandbox protocol 4's form: unknown field `grant`, expected `version` or `gpus`
             Hello { gpus: Some([GpuModel("NVIDIA A100-SXM4-80GB"), GpuModel("NVIDIA H100 80GB HBM3")]) }
-            the hello isn't of sandbox protocol 3's form: `NVIDIA A100\0` is not a GPU's model: use one as `nvidia-smi` names it, such as `NVIDIA H100 80GB HBM3`"#]],
+            the hello isn't of sandbox protocol 4's form: `NVIDIA A100\0` is not a GPU's model: use one as `nvidia-smi` names it, such as `NVIDIA H100 80GB HBM3`"#]],
     );
     check(
         [
@@ -793,16 +836,16 @@ fn hellos_and_frames() {
 fn hello_bodies_and_answers() {
     check(
         [
-            HelloFrame(r#"{"version":3}"#, 0),
-            HelloFrame(r#"{"version":3}"#, MAX_ATTESTATION_BYTES),
+            HelloFrame(r#"{"version":4}"#, 0),
+            HelloFrame(r#"{"version":4}"#, MAX_ATTESTATION_BYTES),
+            HelloFrame(r#"{"version":4}"#, MAX_ATTESTATION_BYTES + 1),
             HelloFrame(r#"{"version":3}"#, MAX_ATTESTATION_BYTES + 1),
-            HelloFrame(r#"{"version":2}"#, MAX_ATTESTATION_BYTES + 1),
         ],
         &expect![[r#"
-            {"version":3} and 0 bytes: Hello { gpus: None }, None of None bytes
-            {"version":3} and 4096 bytes: Hello { gpus: None }, Some(Attestation(..)) of Some(4096) bytes
-            {"version":3} and 4097 bytes: InvalidData: the hello's body is 4097 bytes: a hello's holds at most 4096
-            {"version":2} and 4097 bytes: InvalidData: sandboxd speaks sandbox protocol 2: expected 3, which this gateway speaks, as a sandboxd built from the same Pumpkin does"#]],
+            {"version":4} and 0 bytes: Hello { gpus: None }, None of None bytes
+            {"version":4} and 4096 bytes: Hello { gpus: None }, Some(Attestation(..)) of Some(4096) bytes
+            {"version":4} and 4097 bytes: InvalidData: the hello's body is 4097 bytes: a hello's holds at most 4096
+            {"version":3} and 4097 bytes: InvalidData: sandboxd speaks sandbox protocol 3: expected 4, which this gateway speaks, as a sandboxd built from the same Pumpkin does"#]],
     );
     check(
         [

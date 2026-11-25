@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use decision::{Direction, Event, LeaseId};
 use gateway::{Arrival, Process, Put, Session, Trees};
-use schema::ir::Argv;
+use schema::ir::{Argv, Container};
 use schema::sandbox::op::{self, CommandEnd, OUTPUT_TAIL_BYTES, TransferEnd};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
@@ -39,6 +39,8 @@ pub(super) enum Order {
 /// `number`th command or transfer.
 pub(super) struct Transfer {
     pub(super) number: u64,
+    /// The runner's container that the tree goes to or comes from.
+    pub(super) container: Container,
     pub(super) direction: Direction,
     /// The most bytes of files it may move.
     pub(super) max_bytes: NonZeroU64,
@@ -49,6 +51,8 @@ pub(super) struct Transfer {
 /// The core's order to run a command in a lease's runner, its `command`th.
 pub(super) struct Run {
     pub(super) command: u64,
+    /// The runner's container that it runs in.
+    pub(super) container: Container,
     pub(super) argv: Argv,
     /// The longest it may run, if it has a bound of its own.
     pub(super) timeout: Option<Duration>,
@@ -57,11 +61,33 @@ pub(super) struct Run {
 
 struct Running {
     command: u64,
+    /// The container that it runs in, whose session started it ([`Sessions::of`]).
+    container: Container,
     process: Process,
     /// When it is to be killed, since the run started, until it has been.
     kill_at: Option<Duration>,
     timed_out: bool,
     required_output: bool,
+}
+
+/// The sessions of a lease's runner, one for each of its containers that met the gateway: `main`
+/// alone.
+struct Sessions<'s, C> {
+    main: &'s mut Session<C>,
+}
+
+impl<C> Sessions<'_, C> {
+    /// The session of `container`, or why it has none.
+    fn of(&mut self, container: &Container) -> Result<&mut Session<C>, String> {
+        match container {
+            Container::Main => Ok(&mut *self.main),
+            Container::Companion(name) => Err(format!(
+                "the runner's companion `{name}` has no session: run commands and copy trees in \
+                 `{}`",
+                Container::Main
+            )),
+        }
+    }
 }
 
 /// A lease, as its thread drives it.
@@ -75,17 +101,17 @@ pub(super) struct Leased<'r> {
 }
 
 pub(super) fn run<H: Host>(leased: &Leased<'_>, child: &mut Child<'_, H, Order>) {
-    super::child::run(child, None, |child, session| {
-        End::Event(drive(leased, child, session))
+    super::child::run(child, None, |child, main| {
+        End::Event(drive(leased, child, &mut Sessions { main }))
     });
 }
 
-/// Runs the commands the core orders in `child`'s sandbox, whose session is `session`, until the
-/// core's stop, and returns the report of the lease's end.
+/// Runs the commands the core orders in `child`'s sandbox, whose sessions are `sessions`, until
+/// the core's stop, and returns the report of the lease's end.
 fn drive<H: Host>(
     leased: &Leased<'_>,
     child: &mut Child<'_, H, Order>,
-    session: &mut Session<H::Clock>,
+    sessions: &mut Sessions<'_, H::Clock>,
 ) -> Event {
     let lease = leased.lease;
     let failed = |reason: String| Event::LeaseFailed { lease, reason };
@@ -99,34 +125,49 @@ fn drive<H: Host>(
     }
     child.event(Event::LeaseReady { lease });
     let mut running = None;
-    let served = serve(leased, child, session, &mut running);
+    let served = serve(leased, child, sessions, &mut running);
     let by = child.deadlines.collect;
-    if let Err(error) = session.freeze(by) {
-        let reason = served
-            .err()
-            .unwrap_or_else(|| format!("freezing the runner's sandbox failed: {error}"));
-        return failed(reason);
+    if let Err(reason) = freeze(sessions, running.as_ref(), by) {
+        return failed(served.err().unwrap_or(reason));
     }
     if let Some(running) = running {
         let dir = command_dir(running.command);
-        if let Err(error) = collect(session, &dir, &child.dir, by) {
+        let session = sessions.of(&running.container);
+        let collected = session.and_then(|session| collect(session, &dir, &child.dir, by));
+        if let Err(error) = collected {
             child.note(format!("lease {}'s {dir} is incomplete: {error}", lease.0));
         }
     }
-    if let Err(error) = collect(session, &out_dir(), &child.dir, by) {
+    if let Err(error) = collect(sessions.main, &out_dir(), &child.dir, by) {
         child.note(format!("lease {}'s out is incomplete: {error}", lease.0));
     }
     served.map_or_else(failed, |()| Event::LeaseEnded { lease })
 }
 
-/// Runs the commands and transfers the core orders in `child`'s sandbox, whose session is
-/// `session`, one at a time, until the core's stop, which leaves in `running` the command that
+/// Freezes, by `by`, the containers whose files the record keeps at a lease's end. They are `main`,
+/// whose `out` it collects, and that of `running`, the command that still runs, if one does.
+fn freeze<C: Clock>(
+    sessions: &mut Sessions<'_, C>,
+    running: Option<&Running>,
+    by: Duration,
+) -> Result<(), String> {
+    let still = running.map(|running| &running.container);
+    let elsewhere = still.filter(|container| **container != Container::Main);
+    for container in iter::once(&Container::Main).chain(elsewhere) {
+        let frozen = sessions.of(container)?.freeze(by);
+        frozen.map_err(|error| format!("freezing the runner's `{container}` failed: {error}"))?;
+    }
+    Ok(())
+}
+
+/// Runs the commands and transfers the core orders in `child`'s sandbox, whose sessions are
+/// `sessions`, one at a time, until the core's stop, which leaves in `running` the command that
 /// still runs then, if one does; or fails with why the runner failed first.
 #[expect(clippy::too_many_lines, reason = "one arm per kind of message")]
 fn serve<H: Host>(
     leased: &Leased<'_>,
     child: &mut Child<'_, H, Order>,
-    session: &mut Session<H::Clock>,
+    sessions: &mut Sessions<'_, H::Clock>,
     running: &mut Option<Running>,
 ) -> Result<(), String> {
     let Leased {
@@ -144,12 +185,12 @@ fn serve<H: Host>(
         match message {
             None => {
                 if let Some(running) = running {
-                    kill(child, by_start, running, session)?;
+                    kill(child, by_start, running, sessions)?;
                 }
             }
             Some(Message::Stop) => return Ok(()),
             Some(Message::Order(Order::Transfer(order))) => {
-                let end = transfer(child, &session.trees(), &order, &mut held);
+                let end = transfer(child, sessions, &order, &mut held);
                 let transfer = order.number;
                 child.event(Event::TransferEnded {
                     lease,
@@ -158,11 +199,12 @@ fn serve<H: Host>(
                 });
             }
             Some(Message::Order(Order::Run(run))) => {
-                match start(runner, (&run, by_start), session) {
+                match start(runner, (&run, by_start), sessions) {
                     Ok(process) => {
                         let kill_at = run.timeout.map(|timeout| child.clock.now() + timeout);
                         *running = Some(Running {
                             command: run.command,
+                            container: run.container,
                             process,
                             kill_at,
                             timed_out: false,
@@ -175,8 +217,12 @@ fn serve<H: Host>(
                     }
                 }
             }
+            // A session's arrival is `main`'s, the one container with a session.
             Some(Message::Session(_, Arrival::Exited { process, status })) => {
-                let Some(ran) = running.take_if(|running| running.process == process) else {
+                let ran = running.take_if(|running| {
+                    running.container == Container::Main && running.process == process
+                });
+                let Some(ran) = ran else {
                     continue;
                 };
                 let end = if ran.timed_out {
@@ -184,6 +230,7 @@ fn serve<H: Host>(
                 } else {
                     CommandEnd::Exited(status)
                 };
+                let session = sessions.of(&ran.container)?;
                 let (stdout, stderr) = outputs(child, ran.command, session, ran.required_output)?;
                 child.event(command_ended(lease, ran.command, (end, stdout, stderr)));
             }
@@ -205,15 +252,16 @@ fn serve<H: Host>(
     }
 }
 
-/// Kills `running`, whose timeout has passed, in the runner's sandbox, whose session is
-/// `session`. A command that isn't killed runs on until it exits, or the lease ends.
+/// Kills `running`, whose timeout has passed, in its container, whose session `sessions` gives. A
+/// command that isn't killed runs on until it exits, or the lease ends.
 fn kill<H: Host>(
     child: &Child<'_, H, Order>,
     by_start: Duration,
     running: &mut Running,
-    session: &mut Session<H::Clock>,
+    sessions: &mut Sessions<'_, H::Clock>,
 ) -> Result<(), String> {
     running.kill_at = None;
+    let session = sessions.of(&running.container)?;
     match session.kill(running.process, by_start) {
         Ok(()) => running.timed_out = true,
         Err(error) => {
@@ -227,12 +275,15 @@ fn kill<H: Host>(
     Ok(())
 }
 
-/// Starts `run` in the runner's `cwd` with its `env`, its output in [`command_dir`].
+/// Starts `run` in its container, whose session `sessions` gives, in the runner's `cwd` with its
+/// `env`, which are `main`'s, the one container with a session. Its output goes in
+/// [`command_dir`].
 fn start(
     runner: &Runner,
     (run, by): (&Run, Duration),
-    session: &mut Session<impl Clock>,
+    sessions: &mut Sessions<'_, impl Clock>,
 ) -> Result<Process, String> {
+    let session = sessions.of(&run.container)?;
     let dir = command_dir(run.command);
     let put = session.put(&pumpkin_dir(), [Put::Dir(dir.clone(), dir_mode())], by);
     put.context(format_args!("making {dir} failed"))?;
@@ -283,15 +334,19 @@ fn outputs<H: Host>(
     Ok((tail("command.stdout")?, tail("command.stderr")?))
 }
 
-/// Copies the tree that `order` names between its holder's sandbox and the runner's, whose trees
-/// are `runner`, through [`STAGING`], which it removes, and returns how it ended. It is cut short
-/// once anything reaches the lease's inbox, which it keeps in `held`.
+/// Copies the tree that `order` names between its holder's sandbox and its container of the
+/// runner's, whose session `sessions` gives, through [`STAGING`], which it removes, and returns
+/// how it ended. It is cut short once anything reaches the lease's inbox, which it keeps in `held`.
 fn transfer<H: Host>(
     child: &mut Child<'_, H, Order>,
-    runner: &Trees,
+    sessions: &mut Sessions<'_, H::Clock>,
     order: &Transfer,
     held: &mut Option<Message<Order>>,
 ) -> TransferEnd {
+    let runner = match sessions.of(&order.container) {
+        Ok(session) => session.trees(),
+        Err(reason) => return TransferEnd::Failed(reason),
+    };
     let staging = child.dir.join(STAGING);
     let mut stopped = || {
         if held.is_none() {
@@ -300,7 +355,7 @@ fn transfer<H: Host>(
         held.is_some()
     };
     let by = (&child.clock, child.deadlines.collect);
-    let moved = staged_move(runner, order, &staging, by, &mut stopped);
+    let moved = staged_move(&runner, order, &staging, by, &mut stopped);
     // The core's stop; the runner's session's end says itself why the transfer failed.
     let cut = matches!(held, Some(Message::Stop));
     if let Err(error) = fs::remove_dir_all(&staging)

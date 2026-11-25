@@ -4462,6 +4462,38 @@ fn hard_ends() {
     .assert_eq(&hard_ends.join("\n"));
 }
 
+// The log keeps the container that a lease's command or copy names, though the core refuses each
+// here, as the runner holds no companions.
+#[test]
+fn logged_containers() {
+    let argv = [
+        "ops",
+        "gpu.open",
+        "await_lease gpu 0 ready",
+        "gpu.run 0:scheduler - print one",
+        "gpu.put 0:scheduler /workspace /work/in",
+        "gpu.get 0:scheduler /work/out /pumpkin/out/got",
+        "gpu.close 0",
+        "await_lease gpu 0 closed",
+        "call submit 6 finalize=true",
+    ];
+    let shown = executed(
+        &SimHost::new(),
+        "logged-containers",
+        &[(PROVIDER, &Sim::new())],
+        &lease_workflow(&argv, 30, RUNNER),
+        SANDBOXD,
+        &[],
+    );
+    let named: Vec<&str> = (shown.lines())
+        .filter(|line| line.contains("\"container\""))
+        .collect();
+    expect![[r#"
+        {"actions":[{"kind":"reply","reply":{"kind":"refused","message":"lease 0 holds no container `scheduler`: name `main`, the one container that it holds"}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":1,"request":{"argv":["print","one"],"container":"scheduler","grant":"gpu","kind":"lease_run","lease":0,"timeout_seconds":null}},"observed_ns":"0","seq":5}
+        {"actions":[{"kind":"reply","reply":{"kind":"refused","message":"lease 0 holds no container `scheduler`: name `main`, the one container that it holds"}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":2,"request":{"container":"scheduler","grant":"gpu","kind":"lease_put","lease":0,"replace":false,"to":"/work/in","tree":"/workspace"}},"observed_ns":"0","seq":6}
+        {"actions":[{"kind":"reply","reply":{"kind":"refused","message":"lease 0 holds no container `scheduler`: name `main`, the one container that it holds"}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":3,"request":{"container":"scheduler","from":"/work/out","grant":"gpu","kind":"lease_get","lease":0,"to":"/pumpkin/out/got"}},"observed_ns":"0","seq":7}"#]].assert_eq(&named.join("\n"));
+}
+
 #[test]
 fn lease_ends() {
     let argv = [

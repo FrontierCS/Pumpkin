@@ -42,7 +42,7 @@ use serde_json::{Value, json};
 use stdx::Deadline;
 use stdx::process::Environment;
 use stdx::time::Machine;
-use test_support::{HUNG, TestDir, hung};
+use test_support::{CTL, HUNG, TestDir, hung};
 
 type Session = gateway::Session<Machine>;
 
@@ -755,6 +755,51 @@ fn refusals() {
             same file twice: in/file: File exists (os error 17)
             link: $ROOT/out/link is neither a directory nor a regular file: collect only those
             missing: $ROOT/missing: No such file or directory (os error 2)
+            then Ended { reason: "the owner dropped the session" }
+            sandboxd: exit status: 0
+            left running: 0"#]],
+    );
+}
+
+// `sandboxctl` parses a container's name before it sends an op, and refuses one on an op that
+// takes none. A name that parses reaches the connection to `sandboxd`, which no local sandbox has.
+#[test]
+fn sandboxctl_containers() {
+    check(
+        Meeting::Socket,
+        |sandbox| {
+            let ctl = Path::new(&sandbox.path).join("sandboxctl");
+            symlink(env!("CARGO_BIN_EXE_sandboxd"), ctl).unwrap();
+            let script = format!(
+                "{CTL}
+                ctl call gpu.run 0 --container scheduler -- true
+                ctl call gpu.get 0 /work/out got --container Scheduler
+                ctl call gpu.status 0 --container scheduler
+                ctl call gpu.close 0 --container main
+                ctl call train payload --container scheduler"
+            );
+            let path = format!("PATH={}", sandbox.path.display());
+            let launch = sandbox.sh(&script, &[&path]);
+            let command = sandbox.session.start(launch, hung()).unwrap();
+            let exited = sandbox.exit(command, Duration::from_secs(10)).unwrap();
+            let mut lines = vec![format!("exited: {exited:?}")];
+            sandbox.session.freeze(hung()).unwrap();
+            lines.extend(sandbox.collect("log").unwrap());
+            lines
+        },
+        &expect![[r#"
+            exited: Code(0)
+            log/1.stderr: 
+            log/1.stdout: $ sandboxctl call gpu.run 0 --container scheduler -- true: exit 1
+              sandboxctl: sandboxd at /pumpkin/sandboxctl/socket can't be reached: No such file or directory (os error 2): run sandboxctl in a sandbox that serves ops
+            $ sandboxctl call gpu.get 0 /work/out got --container Scheduler: exit 1
+              sandboxctl: `Scheduler` is not a companion's name: use 1 to 63 characters from a-z, 0-9 and `-`, starting with a letter and ending with a letter or a digit
+            $ sandboxctl call gpu.status 0 --container scheduler: exit 1
+              sandboxctl: `gpu.status` takes no `--container`, as it acts on the whole lease: give it without one
+            $ sandboxctl call gpu.close 0 --container main: exit 1
+              sandboxctl: `gpu.close` takes no `--container`, as it acts on the whole lease: give it without one
+            $ sandboxctl call train payload --container scheduler: exit 1
+              sandboxctl: a function's call takes no `--container`: give it to a session's `run`, `put` or `get`
             then Ended { reason: "the owner dropped the session" }
             sandboxd: exit status: 0
             left running: 0"#]],

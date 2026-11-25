@@ -10,9 +10,9 @@
 //! | `sandboxctl call <function> <file> --wait <seconds>` | [`OpCall::Call`], [`OpCall::Status`] | [`NowReply`] or [`StatusReply`] |
 //! | `sandboxctl status <job>` | [`OpCall::Status`] | [`StatusReply`] |
 //! | `sandboxctl call <session>.open [--seconds <n>]` | [`SessionOp::Open`] | [`LeaseReply`] |
-//! | `sandboxctl call <session>.run <lease> [--timeout <s>] -- <argv>…` | [`SessionOp::Run`] | [`LeaseReply`] |
-//! | `sandboxctl call <session>.put <lease> <tree> <to> [--replace]` | [`SessionOp::Put`] | [`LeaseReply`] |
-//! | `sandboxctl call <session>.get <lease> <from> <to>` | [`SessionOp::Get`] | [`LeaseReply`] |
+//! | `sandboxctl call <session>.run <lease> [--container <name>] [--timeout <s>] -- <argv>…` | [`SessionOp::Run`] | [`LeaseReply`] |
+//! | `sandboxctl call <session>.put <lease> <tree> <to> [--container <name>] [--replace]` | [`SessionOp::Put`] | [`LeaseReply`] |
+//! | `sandboxctl call <session>.get <lease> <from> <to> [--container <name>]` | [`SessionOp::Get`] | [`LeaseReply`] |
 //! | `sandboxctl call <session>.status <lease>` | [`SessionOp::Status`] | [`LeaseStatusReply`] |
 //! | `sandboxctl call <session>.close <lease>` | [`SessionOp::Close`] | [`LeaseReply`] |
 //!
@@ -34,7 +34,7 @@ use serde_json::{Map, Value};
 
 use super::ExitStatus;
 use crate::frame;
-use crate::ir::{AbsolutePath, Argument, Argv, Name, Resources};
+use crate::ir::{AbsolutePath, Argument, Argv, Container, Name, Resources};
 
 /// The most bytes of why a transfer failed, and of why a runner failed, that a lease's status
 /// gives ([`LeaseStatusReply`]).
@@ -103,27 +103,39 @@ pub enum SessionOp {
     Open {
         instance_seconds: Option<NonZeroU64>,
     },
-    /// Runs `argv` in lease `lease`'s runner, once it is ready and runs no other command, killing
-    /// it once it has run for `timeout_seconds`, if given, which is at most what the lease has
-    /// left; without one, it may run until the lease ends.
+    /// Runs `argv` in `container` of lease `lease`'s runner, once it is ready and runs no other
+    /// command, killing it once it has run for `timeout_seconds`, if given, which is at most what
+    /// the lease has left; without one, it may run until the lease ends.
+    ///
+    /// A lease runs one command or transfer at a time, in whichever of its containers. Its status
+    /// gives the one that it ran last ([`LeaseStatusReply::last`]).
     Run {
         lease: u64,
+        /// One that the runner holds. Absent, `main`.
+        #[serde(default, skip_serializing_if = "is_main")]
+        container: Container,
         argv: Argv,
         timeout_seconds: Option<NonZeroU64>,
     },
-    /// Copies the tree in the caller's directory `tree` to `to` in lease `lease`'s runner, once it
-    /// is ready and runs nothing else: the tree's root becomes `to`, which must not exist, or, if
-    /// `replace`, which is removed first, whatever it is.
+    /// Copies the tree in the caller's directory `tree` to `to` in `container` of lease `lease`'s
+    /// runner, as [`SessionOp::Run`] runs a command: the tree's root becomes `to`, which must not
+    /// exist, or, if `replace`, which is removed first, whatever it is.
     Put {
         lease: u64,
+        /// As [`SessionOp::Run`]'s.
+        #[serde(default, skip_serializing_if = "is_main")]
+        container: Container,
         tree: AbsolutePath,
         to: AbsolutePath,
         replace: bool,
     },
-    /// Copies the tree in lease `lease`'s runner's directory `from` to `to` in the caller's
+    /// Copies the tree at `from` in `container` of lease `lease`'s runner to `to` in the caller's
     /// sandbox, as [`SessionOp::Put`] copies one the other way.
     Get {
         lease: u64,
+        /// As [`SessionOp::Run`]'s.
+        #[serde(default, skip_serializing_if = "is_main")]
+        container: Container,
         from: AbsolutePath,
         to: AbsolutePath,
     },
@@ -131,6 +143,11 @@ pub enum SessionOp {
     Status { lease: u64 },
     /// Closes lease `lease`, ending its runner with whatever runs in it.
     Close { lease: u64 },
+}
+
+// `main` is the container of every op whose runner has no companions, so a message leaves it out.
+fn is_main(container: &Container) -> bool {
+    *container == Container::Main
 }
 
 impl OpCall {

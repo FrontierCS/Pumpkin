@@ -217,7 +217,7 @@ pub fn model_url() -> String {
 
 /// The version of the protocol that both ends of a session speak, which its [`Hello`] gives.
 // `examples/smoke/probe.py` states it too, for the hello that it forges.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// The most bytes a [`Hello`]'s message holds, at any version ([the protocol](crate::sandbox)); its
 /// body holds its [`Attestation`], if any.
