@@ -114,7 +114,8 @@ if it returns anything else. The record keeps why it failed. The caller hears on
 An agent and a call target's commands make ops with `sandboxctl`, which comes first on `PATH`.
 `sandboxctl --help` gives each command's arguments and exit statuses. The `schema` crate's
 [`sandbox::op`](../crates/schema/src/sandbox/op.rs) module gives each reply's fields.
-`sandboxctl ops` lists the role's grants with their `help`, limits and parameters.
+`sandboxctl ops` lists the role's grants with their `help`, limits and parameters, and a session's
+with the companions of its runner.
 `sandboxctl ops --text` prints their usage for a shell.
 
 ![One job function's call, end to end: in the agent's sandbox, sandboxctl call sends the payload over the session; the driver's core checks it against the grant and answers with the job's number; the runtime starts a fresh sandbox of the target and evaluates the body, from the sources the record keeps, whose put, run and get drive the target; the target ends, and the dict the body returned goes to the agent's sandboxctl status and to the record.](figures/call.svg)

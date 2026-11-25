@@ -65,7 +65,7 @@ impl Workflow {
                 name,
                 help,
                 holder: _,
-                runner: _,
+                runner,
                 instances,
                 instance_seconds,
                 cumulative_seconds,
@@ -80,6 +80,9 @@ impl Workflow {
                 cumulative_seconds: *cumulative_seconds,
                 commands: *commands,
                 transfer_bytes: *transfer_bytes,
+                companions: (self.runner(*runner).companions.iter())
+                    .map(|companion| companion.name.clone())
+                    .collect(),
                 remaining: remaining(id, grant),
             })
         });

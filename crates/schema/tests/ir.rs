@@ -1037,6 +1037,57 @@ fn grant_help() {
     );
 }
 
+/// A workflow whose agent leases the runner `gpu`. It shows the session's entry in the agent's ops
+/// reply, then the lines of its guide about the session.
+struct Leasing(Value);
+
+impl Case for Leasing {
+    fn outcome(self) -> String {
+        let workflow = Workflow::parse(&serde_json::from_value(self.0).unwrap()).unwrap();
+        let role = workflow.agents().next().unwrap().id.role();
+        let remaining = |_, _: &_| LeaseRemaining {
+            instances: 2,
+            instance_seconds: 900,
+            cumulative_seconds: None,
+            commands: None,
+        };
+        let ops = workflow.ops(role, 0, remaining);
+        let session = (ops.grants.iter())
+            .find(|grant| matches!(grant, op::Grant::Session(_)))
+            .unwrap();
+        let guide = ops.guide();
+        let about = |line: &&str| line.contains("gpu.") || line.starts_with("Containers");
+        let lines: Vec<&str> = guide.lines().filter(about).collect();
+        format!("{}\n{}", json!(session), lines.join("\n"))
+    }
+}
+
+// An agent learns its runner's companions from its ops reply and its guide, which name none for a
+// runner without companions.
+#[test]
+fn session_containers() {
+    let two = json!([companion("scheduler", '4'), companion("swe-000", '5')]);
+    check(
+        [Leasing(leasing()), Leasing(accompanied(two))],
+        &expect![[r#"
+            {"commands":32,"cumulative_seconds":1200,"instance_seconds":900,"instances":2,"kind":"session","name":"gpu","remaining":{"commands":null,"cumulative_seconds":null,"instance_seconds":900,"instances":2},"transfer_bytes":1048576}
+            sandboxctl call gpu.open [--seconds SECONDS]
+            sandboxctl call gpu.run LEASE [--timeout SECONDS] -- COMMAND [ARG ...]
+            sandboxctl call gpu.put LEASE LOCAL REMOTE [--replace]
+            sandboxctl call gpu.get LEASE REMOTE LOCAL
+            sandboxctl call gpu.status LEASE
+            sandboxctl call gpu.close LEASE
+            {"commands":32,"companions":["scheduler","swe-000"],"cumulative_seconds":1200,"instance_seconds":900,"instances":2,"kind":"session","name":"gpu","remaining":{"commands":null,"cumulative_seconds":null,"instance_seconds":900,"instances":2},"transfer_bytes":1048576}
+            sandboxctl call gpu.open [--seconds SECONDS]
+            sandboxctl call gpu.run LEASE [--container NAME] [--timeout SECONDS] -- COMMAND [ARG ...]
+            sandboxctl call gpu.put LEASE LOCAL REMOTE [--container NAME] [--replace]
+            sandboxctl call gpu.get LEASE REMOTE LOCAL [--container NAME]
+            sandboxctl call gpu.status LEASE
+            sandboxctl call gpu.close LEASE
+            Containers: main (the default), scheduler, swe-000. One command or transfer runs at a time across them."#]],
+    );
+}
+
 #[test]
 fn ops_frame_bound() {
     // JSON writes each NUL as `\u0000`, 6 bytes, so this many fill a frame's message by themselves.

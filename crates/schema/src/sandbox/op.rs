@@ -34,7 +34,7 @@ use serde_json::{Map, Value};
 
 use super::ExitStatus;
 use crate::frame;
-use crate::ir::{AbsolutePath, Argument, Argv, Container, Name, Resources};
+use crate::ir::{AbsolutePath, Argument, Argv, CompanionName, Container, Name, Resources};
 
 /// The most bytes of why a transfer failed, and of why a runner failed, that a lease's status
 /// gives ([`LeaseStatusReply`]).
@@ -266,6 +266,10 @@ pub struct SessionGrant {
     pub cumulative_seconds: Option<NonZeroU64>,
     pub commands: Option<NonZeroU64>,
     pub transfer_bytes: NonZeroU64,
+    /// The companions that each lease's runner holds beside `main`, which a command or a copy
+    /// names as its `container` ([`SessionOp::Run`]). Absent, none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub companions: Vec<CompanionName>,
     /// What it has left, as a lease opened now would have its own time whole.
     pub remaining: LeaseRemaining,
 }
