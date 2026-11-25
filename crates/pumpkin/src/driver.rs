@@ -31,6 +31,10 @@ use rustix::stdio::{dup2_stderr, dup2_stdout};
 use stdx::Context;
 use stdx::process::Environment;
 
+mod used;
+
+pub(crate) use used::used;
+
 /// The name that the driver gives its process, as `ps` and `pgrep` show it.
 pub(crate) const NAME: &CStr = c"pumpkin-driver";
 

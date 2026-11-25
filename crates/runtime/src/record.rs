@@ -18,8 +18,8 @@
 //!   `sandbox.json`: `provider`, `id`, `gpus` once known, and `delete.state`, `deleted` or
 //!   `failed`, once tried; its `out/`, `log/` and a body's `got/` as far as collected.
 //! - `outcome.json`, the run's end: `state` is `finished`, with what `log::outcome_json` gives,
-//!   `failed`, with a `reason`, or `interrupted`, with a `signal`; and `usage`, if the run began
-//!   its log.
+//!   `failed`, with a `reason`, or `interrupted`, with a `signal`; `usage`, if the run began its
+//!   log; and `driver`, what the driver used, unless a reap wrote it of a lost run.
 //! - `reaps.jsonl`, a line for each sandbox a reap deleted; `sockets/`, where private sandboxes
 //!   meet the gateway, which a reap removes.
 

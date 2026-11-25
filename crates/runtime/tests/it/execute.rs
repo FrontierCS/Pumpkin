@@ -24,7 +24,10 @@ use provider::{
     Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
 use route::Serving;
-use runtime::{Host, ModelRoutes, Reaped, Record, Recorded, Run, System, TokenPrices, new_id};
+use runtime::{
+    DriverUse, Host, JobUse, ModelRoutes, Reaped, Record, Recorded, Run, System, TokenPrices,
+    new_id,
+};
 use schema::ir::{self, Image, ModelName};
 use schema::sandbox::{RESULT_MAX_DEPTH, SocketDial};
 use schema::workflow::{ByRole, Placed, Workflow};
@@ -192,6 +195,7 @@ fn interrupted_at(run: Run<'_, impl Host>, sandboxd: &str, also: &[Also]) -> Vec
                 ran = true;
                 Ok(())
             },
+            driver_used,
         )
     });
     let mut lines = vec![match executed {
@@ -204,6 +208,21 @@ fn interrupted_at(run: Run<'_, impl Host>, sandboxd: &str, also: &[Also]) -> Vec
         lines.push(format!("it returned within {WAITED} s: {within}"));
     }
     lines
+}
+
+/// What the tests' driver read of itself: figures of its own and its job's, one of them unread.
+fn driver_used() -> DriverUse {
+    DriverUse {
+        cpu: Some(Duration::from_millis(41_200)),
+        children_cpu: Some(Duration::from_millis(3_100)),
+        peak_memory_bytes: Some(212 << 20),
+        job: Some(JobUse {
+            unit: "pumpkin-job-20261125-120000-00000001.service".to_owned(),
+            cpu: Some(Duration::from_secs(46)),
+            peak_memory_bytes: None,
+            peak_tasks_count: Some(1204),
+        }),
+    }
 }
 
 fn interrupt_once_started(record: &Path) {
@@ -245,6 +264,8 @@ enum Also {
     Interrupted(At),
     Listing,
     Usage,
+    /// The `driver` of `outcome.json`, and what [`Record::driver_use`] reads of it.
+    Driver,
     Exchanges,
     ChangedItem,
     Polls,
@@ -265,6 +286,7 @@ fn interruption(also: &[Also]) -> Option<At> {
         Also::Interrupted(at) => Some(*at),
         Also::Listing
         | Also::Usage
+        | Also::Driver
         | Also::Exchanges
         | Also::ChangedItem
         | Also::Polls
@@ -454,6 +476,17 @@ fn held(
         let usage: Value = serde_json::from_str(&usage).unwrap();
         lines.push(format!("outcome.json's usage: {}", usage["usage"]));
     }
+    let driver = Record::open(record).unwrap().driver_use().unwrap();
+    assert_eq!(
+        driver,
+        Some(driver_used()),
+        "{name}: outcome.json holds another driver's use"
+    );
+    if also.contains(&Also::Driver) {
+        let outcome: Value = serde_json::from_str(&outcome).unwrap();
+        lines.push(format!("outcome.json's driver: {}", outcome["driver"]));
+        lines.push(format!("read back: {driver:?}"));
+    }
     lines
 }
 
@@ -633,6 +666,8 @@ fn outcome_holds(
     let mut outcome: Value = serde_json::from_str(outcome).unwrap();
     let fields = outcome.as_object_mut().unwrap();
     let usage = fields.remove("usage").unwrap_or_default();
+    // Shown apart, as `Also::Driver` asks.
+    fields.remove("driver");
     let ended = if let Some(reason) = returned.strip_prefix("failed: ") {
         json!({ "reason": reason, "state": "failed" })
     } else if let Some(signal) = returned.strip_prefix("was interrupted by ") {
@@ -2649,6 +2684,39 @@ fn start_times() {
         {"actions":[],"at_ns":"8000000000","event":{"kind":"sandbox_met","sandbox":"job-0"},"observed_ns":"8000000000","seq":11}"#]].assert_eq(&starts.collect::<Vec<_>>().join("\n"));
 }
 
+// The record keeps what the driver read of itself, with what its job's unit used. A figure that
+// it couldn't read is `null`.
+#[test]
+fn records_what_the_driver_used() {
+    let shown = executed(
+        &SimHost::new(),
+        "driver-used",
+        &[(PROVIDER, &Sim::new())],
+        &workflow(&["exit", "0"]),
+        SANDBOXD,
+        &[Also::Driver],
+    );
+    expect![[r#"
+        finished, showing [score=0]
+        outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
+        outcome.json's driver: {"children_cpu_ns":"3100000000","cpu_ns":"41200000000","job":{"cpu_ns":"46000000000","peak_memory_bytes":null,"peak_tasks_count":1204,"unit":"pumpkin-job-20261125-120000-00000001.service"},"peak_memory_bytes":222298112}
+        read back: Some(DriverUse { cpu: Some(41.2s), children_cpu: Some(3.1s), peak_memory_bytes: Some(222298112), job: Some(JobUse { unit: "pumpkin-job-20261125-120000-00000001.service", cpu: Some(46s), peak_memory_bytes: None, peak_tasks_count: Some(1204) }) })
+        log.jsonl:
+        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"18270000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+        {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
+        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
+        {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"0","seq":3}
+        {"at_ns":"0","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":4}
+        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_collected"},"seq":5}
+        {"actions":[],"at_ns":"0","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":6}
+        {"actions":[{"job":0,"kind":"start_final_call","selections":[{"role":"agent","selection":null}],"timeout_ns":"120000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"0","seq":7}
+        {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_started"},"observed_ns":"0","seq":8}
+        {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_returned","returned":[{"name":"score","value":0}]},"observed_ns":"0","seq":9}
+        {"actions":[],"at_ns":"0","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":10}
+        {"actions":[{"kind":"finish"}],"at_ns":"0","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"0","seq":11}
+        its last record came before the agent's teardown was to end"#]].assert_eq(&shown);
+}
+
 // The agent's start leads to no act, so it is synced with the next record that does; the note
 // of what its teardown collected, which no such record follows, by the run's end.
 #[test]
@@ -3489,6 +3557,7 @@ fn holds_until_its_end() {
             &Dialer::new(test_support::edge::client()),
             &Bodies { record: &record },
             || Ok(()),
+            driver_used,
         );
         match executed {
             Ok(outcome) => finished(&outcome),
@@ -4354,6 +4423,7 @@ fn execute_agents(
             &Dialer::new(test_support::edge::client()),
             &Bodies { record: &record },
             || Ok(()),
+            driver_used,
         )
     });
     if let Ok(Outcome { agents, .. }) = &outcome {

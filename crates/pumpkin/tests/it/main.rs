@@ -523,8 +523,24 @@ fn steady(said: &[&str]) -> Vec<String> {
     lines.collect()
 }
 
-/// `outcome` with the durations and prices of its usage, which differ between runs, replaced.
+/// `outcome` with the durations and prices of its usage, which differ between runs, replaced. Its
+/// driver's figures, which differ too, are checked as read on this machine, then left out.
 fn steady_outcome(mut outcome: Value) -> Value {
+    if let Some(driver) = outcome
+        .as_object_mut()
+        .and_then(|fields| fields.remove("driver"))
+    {
+        for figure in ["cpu_ns", "children_cpu_ns", "peak_memory_bytes"] {
+            assert!(
+                !driver[figure].is_null(),
+                "the driver's {figure} is unread: {driver}"
+            );
+        }
+        assert!(
+            driver.get("job").is_none(),
+            "a run of no job has a job's figures: {driver}"
+        );
+    }
     if let Some(usage) = outcome.get_mut("usage") {
         usage["ran_ns"] = "<ns>".into();
         for sandboxes in usage["sandboxes"].as_array_mut().unwrap() {

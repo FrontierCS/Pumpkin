@@ -59,9 +59,9 @@ pub use host::{Clock, Durable, Host, Inbox, System};
 pub use interruption::{Signal, Stopped};
 pub use log::{
     AgentEnd, AgentSpan, CallEnd, CallOf, CallSpan, CallStart, CallerName, Closed, Cost, Direction,
-    LeaseSpan, LogFold, ModelUse, Part, Place, PlaceUse, Priced, Progress, Readout, Sandbox,
-    SandboxStart, SharedSpan, StartPhase, StartedOver, TakenLine, Tokens, TokensCost, Unread, Used,
-    Work, returned_values,
+    DriverUse, JobUse, LeaseSpan, LogFold, ModelUse, Part, Place, PlaceUse, Priced, Progress,
+    Readout, Sandbox, SandboxStart, SharedSpan, StartPhase, StartedOver, TakenLine, Tokens,
+    TokensCost, Unread, Used, Work, returned_values,
 };
 use log::{Entry, Log, Targeted};
 use model::Served;
@@ -189,8 +189,8 @@ impl<'r, H: Host> Run<'r, H> {
 
     /// Runs the workflow to its outcome and writes `outcome.json`, whichever way it ends, before it
     /// releases each provider's reservation and the record's lock. The run ends with none of its
-    /// sandboxes left, or fails. `started` is called once, when the run can start its first
-    /// sandbox and before its clock starts.
+    /// sandboxes left, or fails. `started` is called once, when the run can start its first sandbox
+    /// and before its clock starts. `used` is called once, after its last act, for `outcome.json`.
     ///
     /// # Errors
     ///
@@ -203,6 +203,7 @@ impl<'r, H: Host> Run<'r, H> {
         dialer: &Dialer,
         bodies: &dyn Bodies,
         started: impl FnOnce() -> Result<(), String>,
+        used: impl FnOnce() -> DriverUse,
     ) -> Result<Outcome, Stopped> {
         let outcome = self.run_on(sandboxd, (private, dialer), bodies, started);
         // None if the run never began its log.
@@ -214,6 +215,9 @@ impl<'r, H: Host> Run<'r, H> {
         if let Some(usage) = usage {
             recorded["usage"] = usage;
         }
+        // The run's calls, leases and model exchanges have ended, and its providers are swept. So
+        // the figures cover all that the run did but the write of its outcome.
+        recorded["driver"] = log::driver_json(&used());
         let written = record::write_json(self.host, &self.dir, "outcome.json", &recorded);
         // Released before the lock, which `pumpkin wait` follows, so that a run it saw end holds
         // nothing.

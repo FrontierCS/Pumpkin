@@ -1,6 +1,7 @@
 //! What a run used: its sandboxes' time, its model requests and tokens, and what they cost in US
 //! dollars where a price is known, totalled from a [`Progress`]; and the `usage` object of
-//! `outcome.json`, which keeps the totals once the run has ended.
+//! `outcome.json`, which keeps the totals once the run has ended. It also lays out the `driver`
+//! object of `outcome.json`, what the run's driver used ([`DriverUse`]).
 //!
 //! A cost counts only what has a price, and says what hasn't ([`Cost`]), so a total never passes
 //! for more than it covers.
@@ -379,6 +380,115 @@ pub(crate) fn used(usage: &Value) -> Result<Used, String> {
             || !unpriced_models.is_empty()
             || unreported_responses > 0
             || sandboxes.iter().any(|placed| placed.usd_per_hour.is_none()),
+    })
+}
+
+/// What a run's driver used, as it read itself as the run ended. A figure that the driver couldn't
+/// read is `None`, and why it couldn't is not kept.
+#[derive(Debug, PartialEq)]
+pub struct DriverUse {
+    /// The CPU time of the driver's own threads.
+    pub cpu: Option<Duration>,
+    /// The CPU time of the children that the driver waited for, such as the clients it ran. It
+    /// holds that of their own children that they waited for.
+    pub children_cpu: Option<Duration>,
+    /// The most memory that the driver held resident at once.
+    pub peak_memory_bytes: Option<u64>,
+    /// What the run's job used, if the driver ran as a controller's job and found itself in the
+    /// cgroup of the job's unit.
+    pub job: Option<JobUse>,
+}
+
+/// What a controller's job used, as the cgroup of its systemd unit counts it. That counts every
+/// process of the job, and the page cache that they filled.
+#[derive(Debug, PartialEq)]
+pub struct JobUse {
+    /// The unit's name, such as `pumpkin-job-<id>.service`.
+    pub unit: String,
+    /// The CPU time of the job's processes.
+    pub cpu: Option<Duration>,
+    /// The most memory that the job's processes and their page cache held at once.
+    pub peak_memory_bytes: Option<u64>,
+    /// The most processes and threads that the job held at once.
+    pub peak_tasks_count: Option<u64>,
+}
+
+/// The `driver` object of `outcome.json`: each figure of `used`, `null` where it wasn't read, and
+/// `job` only if `used` has it.
+pub(crate) fn driver_json(used: &DriverUse) -> Value {
+    let DriverUse {
+        cpu,
+        children_cpu,
+        peak_memory_bytes,
+        job,
+    } = used;
+    let mut driver = json!({
+        "cpu_ns": cpu.map(nanos),
+        "children_cpu_ns": children_cpu.map(nanos),
+        "peak_memory_bytes": peak_memory_bytes,
+    });
+    if let Some(JobUse {
+        unit,
+        cpu,
+        peak_memory_bytes,
+        peak_tasks_count,
+    }) = job
+    {
+        driver["job"] = json!({
+            "unit": unit,
+            "cpu_ns": cpu.map(nanos),
+            "peak_memory_bytes": peak_memory_bytes,
+            "peak_tasks_count": peak_tasks_count,
+        });
+    }
+    driver
+}
+
+/// The [`DriverUse`] that a `driver` says, or why it isn't one.
+pub(crate) fn driver_use(driver: &Value) -> Result<DriverUse, String> {
+    #[derive(Deserialize)]
+    struct Driver {
+        #[serde(deserialize_with = "logged::optional_nanos")]
+        cpu_ns: Option<Duration>,
+        #[serde(deserialize_with = "logged::optional_nanos")]
+        children_cpu_ns: Option<Duration>,
+        peak_memory_bytes: Option<u64>,
+        #[serde(default)]
+        job: Option<Job>,
+    }
+    #[derive(Deserialize)]
+    struct Job {
+        unit: String,
+        #[serde(deserialize_with = "logged::optional_nanos")]
+        cpu_ns: Option<Duration>,
+        peak_memory_bytes: Option<u64>,
+        peak_tasks_count: Option<u64>,
+    }
+    let Driver {
+        cpu_ns,
+        children_cpu_ns,
+        peak_memory_bytes,
+        job,
+    } = Driver::deserialize(driver).map_err(|error| error.to_string())?;
+    let job = job.map(|job| {
+        let Job {
+            unit,
+            cpu_ns,
+            peak_memory_bytes,
+            peak_tasks_count,
+        } = job;
+        JobUse {
+            unit,
+            cpu: cpu_ns,
+            peak_memory_bytes,
+            peak_tasks_count,
+        }
+    });
+    Ok(DriverUse {
+        cpu: cpu_ns,
+        children_cpu: children_cpu_ns,
+        peak_memory_bytes,
+        job,
     })
 }
 
