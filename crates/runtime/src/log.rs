@@ -7,9 +7,9 @@
 //! written, which never decreases; and then either `note`, a sentence for the operator, or `event`,
 //! an object whose `kind` names it, with `observed_ns`, when it happened, and `actions`, what the
 //! runtime did about it, in order. A thread that observed an event hands it over to be written, so
-//! its `observed_ns` may be before an earlier line's `at_ns`. Events that the runtime tells and the
-//! core never decided, such as a sandbox's deletion, have no `observed_ns`. The first line is
-//! `run_started`, observed at 0.
+//! its `observed_ns` may be before an earlier line's `at_ns`. An event that the runtime tells and
+//! the core never decided, such as a sandbox's create or delete, has no actions. It has an
+//! `observed_ns` only if the runtime timed it. The first line is `run_started`, observed at 0.
 //!
 //! Every `..._ns` is a string of decimal digits: nanoseconds since the run started, but the
 //! `unix_ns` of `run_started`, since the Unix epoch by the driving machine's clock; `u64::MAX`
@@ -277,6 +277,7 @@ impl<'h, H: Host> Log<'h, H> {
         self.observed(ended, event, &[])
     }
 
+    #[expect(clippy::too_many_lines, reason = "one arm per entry")]
     pub(super) fn entry(&mut self, entry: Entry) -> Result<(), String> {
         match entry {
             Entry::Note(note) => self.note(&note),
@@ -300,6 +301,17 @@ impl<'h, H: Host> Log<'h, H> {
                 self.observed(started, event, &[])
             }
             Entry::ModelAnswered(request, answered) => self.model_answered(request, *answered),
+            Entry::Created { sandbox, began, at } => {
+                let event = json!({
+                    "kind": "sandbox_created", "sandbox": sandbox, "began_ns": nanos(began),
+                });
+                self.observed(at, event, &[])
+            }
+            Entry::Met { sandbox, at } => self.observed(
+                at,
+                json!({ "kind": "sandbox_met", "sandbox": sandbox }),
+                &[],
+            ),
             Entry::Gpus(sandbox, gpus) => {
                 self.told(json!({ "kind": "sandbox_gpus", "sandbox": sandbox, "gpus": gpus }))
             }
@@ -421,6 +433,18 @@ pub(super) enum Entry {
     /// route refuses itself never goes upstream, and has none.
     ModelRequestStarted((Caller, u64), Duration),
     ModelAnswered((Caller, u64), Box<ModelAnswer>),
+    /// A sandbox's create that returned, as `sandbox_created`, observed as it returned: the
+    /// sandbox's name in the run, and when the create began, as `began_ns`.
+    Created {
+        sandbox: Name,
+        began: Duration,
+        at: Duration,
+    },
+    /// A sandbox's session that met the gateway, as `sandbox_met`, observed as it met.
+    Met {
+        sandbox: Name,
+        at: Duration,
+    },
     /// The GPUs that a sandbox's `sandboxd` saw as it started, as `sandbox_gpus`: the sandbox's
     /// name in the run, and each GPU's model as `nvidia-smi` names it. A sandbox whose `sandboxd`
     /// saw none, or couldn't tell, has none.

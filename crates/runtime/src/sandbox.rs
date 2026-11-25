@@ -32,6 +32,7 @@ use schema::workflow::{
     Workflow,
 };
 use serde::{Deserialize, Deserializer, de};
+use stdx::time::Clock as _;
 use stdx::{Context, Deadline, time};
 
 use super::{Clock, Host, Input, Stopped, interruption, log, record};
@@ -525,12 +526,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             hard_end,
             by: by_unix.min(hard_end),
         };
-        let by_machine = Deadline::after(time::left(clock, by).unwrap_or_default());
-        let started = hosting.meets.create(&self.sockets, &create, by_machine);
-        let (Created { id }, registration) = started.inspect_err(|_| {
-            let mut inventory = stdx::unpoisoned(self.inventory.lock());
-            inventory.unnamed.insert(&placement.provider);
-        })?;
+        let (id, registration) = self.create(&placement.provider, &create, (clock, by))?;
         let made = Made {
             on: &placement.provider,
             id: id.clone(),
@@ -556,6 +552,10 @@ impl<'p, H: Host> Sandboxes<'p, H> {
                 || looks.ended(self.between_looks, || self.ended(hosting.provider, &id))
         };
         let accepted = registration.accept((clock, by), ops, model, arrivals, wrap, stopped);
+        if accepted.is_ok() {
+            let (sandbox, at) = (create.name.clone(), clock.now());
+            self.send([log::Entry::Met { sandbox, at }]);
+        }
         let accepted = accepted.map_err(|error| match looks.found() {
             (true, _) => "it ended before it met the gateway: expected its `sandboxd` to run \
                           until it connects"
@@ -578,6 +578,33 @@ impl<'p, H: Host> Sandboxes<'p, H> {
                 reason: error,
             }),
         }
+    }
+
+    // Creates the sandbox that `create` describes on provider `on`, by `by` on `clock`, and tells
+    // the log when the create began and returned.
+    fn create(
+        &self,
+        on: &'p Name,
+        create: &Create,
+        (clock, by): (&H::Clock, Duration),
+    ) -> Result<(SandboxId, gateway::Registration), String> {
+        let by_machine = Deadline::after(time::left(clock, by).unwrap_or_default());
+        let began = clock.now();
+        let started = self
+            .providers
+            .get(on)
+            .meets
+            .create(&self.sockets, create, by_machine);
+        let (Created { id }, registration) = started.inspect_err(|_| {
+            let mut inventory = stdx::unpoisoned(self.inventory.lock());
+            inventory.unnamed.insert(on);
+        })?;
+        self.send([log::Entry::Created {
+            sandbox: create.name.clone(),
+            began,
+            at: clock.now(),
+        }]);
+        Ok((id, registration))
     }
 
     fn saw(&self, which: Which, id: &SandboxId, gpus: &[GpuModel]) -> Result<(), String> {
@@ -729,9 +756,9 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         (logged, recorded)
     }
 
-    fn send(&self, logged: Vec<log::Entry>) {
+    fn send(&self, logged: impl IntoIterator<Item = log::Entry>) {
         for entry in logged {
-            // The loop's inbox outlives every thread that deletes a sandbox.
+            // The loop's inbox outlives every thread that starts or deletes a sandbox.
             let _ = self.logged.send(Input::Logged(entry));
         }
     }

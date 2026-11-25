@@ -150,6 +150,8 @@ pub(crate) struct Sim {
     journal: Option<Journal>,
     set_ups: Option<Arc<SetUps>>,
     once_logged: Option<OnceLogged>,
+    // How long each step of a create takes, if any time.
+    step: Option<Duration>,
 }
 
 // What is called once the run log holds each part in a line.
@@ -354,7 +356,16 @@ impl Sim {
             journal: None,
             set_ups: None,
             once_logged: None,
+            step: None,
         }
+    }
+
+    /// Makes each create take `step` three times: before it makes its sandbox, as it makes it, and
+    /// after. On a simulated host, it moves the clock, as a `sleep` step does.
+    #[must_use]
+    pub(crate) fn taking(mut self, step: Duration) -> Self {
+        self.step = Some(step);
+        self
     }
 
     pub(crate) fn priced(mut self, usd_per_hour: f64) -> Self {
@@ -701,11 +712,27 @@ impl Provider for Sim {
 
 impl Creator<SocketDial> for Sim {
     fn create(&self, create: &Create, dial: SocketDial) -> Result<Created, String> {
-        self.made(create, dial.dir.join(SOCKET_NAME))
+        self.took();
+        self.took();
+        let made = self.made(create, dial.dir.join(SOCKET_NAME));
+        self.took();
+        made
     }
 }
 
 impl Sim {
+    // Takes a step of a create's time, if it takes any.
+    fn took(&self) {
+        let Some(step) = self.step else {
+            return;
+        };
+        let time = self.state().time.clone();
+        match time {
+            Some(time) => time.reach(time.now() + step),
+            None => thread::sleep(step),
+        }
+    }
+
     // A sandbox, a thread of this process, ends with it, so the hard end needs nothing more; and
     // the name needs no use, as each sandbox is created once.
     fn made(&self, create: &Create, socket: PathBuf) -> Result<Created, String> {
@@ -850,6 +877,7 @@ impl Subject for Sim {
             journal: self.journal.clone(),
             set_ups: self.set_ups.clone(),
             once_logged: self.once_logged.clone(),
+            step: self.step,
         }))
     }
 

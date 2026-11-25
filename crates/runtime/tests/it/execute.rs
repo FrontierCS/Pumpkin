@@ -251,6 +251,8 @@ enum Also {
     Reaped,
     /// Each sandbox's hard end, after the run's start.
     HardEnds,
+    /// Each sandbox's `sandbox_created` and `sandbox_met`, which the log otherwise drops.
+    Starts,
     /// A part of the records that nothing orders among the others, which the log shows apart
     /// from them, sorted.
     Racing(&'static str),
@@ -268,6 +270,7 @@ fn interruption(also: &[Also]) -> Option<At> {
         | Also::Polls
         | Also::Reaped
         | Also::HardEnds
+        | Also::Starts
         | Also::Racing(_)
         | Also::File(_) => None,
     })
@@ -555,26 +558,42 @@ fn undeleted(name: &str, record: &Path, log: &[Value]) -> Vec<String> {
         .map(|logged| &logged["event"])
         .collect();
     let ir: Value = serde_json::from_slice(&fs::read(record.join("ir.json")).unwrap()).unwrap();
-    let normal = |line: &str| {
+    let index = |role: &str| {
+        let mut roles = ir["roles"].as_array().unwrap().iter();
+        roles
+            .position(|candidate| candidate["name"] == role)
+            .unwrap()
+    };
+    let named = |dir: &str| match dir.split_once('/') {
+        Some(("agents", role)) => format!("agent-{}", index(role)),
+        Some(("shared", role)) => format!("shared-{}", index(role)),
+        Some(("jobs", number)) => format!("job-{number}"),
+        Some(("leases", number)) => format!("lease-{number}"),
+        _ => dir.to_owned(),
+    };
+    // The sandboxes whose records keep them undeleted, by their names.
+    let mut kept = BTreeSet::new();
+    let shared = fs::read_dir(record.join("shared")).into_iter().flatten();
+    for role in shared {
+        let role = role.unwrap().file_name().into_string().unwrap();
+        let sandbox = fs::read(record.join("shared").join(&role).join("sandbox.json"));
+        let sandbox: Option<Value> = sandbox
+            .ok()
+            .map(|json| serde_json::from_slice(&json).unwrap());
+        if sandbox.is_some_and(|sandbox| sandbox["delete"] != json!({ "state": "deleted" })) {
+            kept.insert(named(&format!("shared/{role}")));
+        }
+    }
+    let mut normal = |line: &str| {
         let (whose, sandbox) = line.split_once("/sandbox.json: ")?;
         let sandbox: Value = serde_json::from_str(sandbox).unwrap();
         let gone = sandbox["delete"] == json!({ "state": "deleted" });
+        let (_, dir) = whose.rsplit_once(", ").unwrap();
+        let named = named(dir);
+        if !gone {
+            kept.insert(named.clone());
+        }
         gone.then(|| {
-            let (_, dir) = whose.rsplit_once(", ").unwrap();
-            let named = match dir.split_once('/') {
-                Some(("agents", role)) => {
-                    let index = ir["roles"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .position(|candidate| candidate["name"] == role)
-                        .unwrap();
-                    format!("agent-{index}")
-                }
-                Some(("jobs", number)) => format!("job-{number}"),
-                Some(("leases", number)) => format!("lease-{number}"),
-                _ => dir.to_owned(),
-            };
             let delete = json!({
                 "id": sandbox["id"],
                 "kind": "sandbox_deleted",
@@ -588,7 +607,21 @@ fn undeleted(name: &str, record: &Path, log: &[Value]) -> Vec<String> {
         })
     };
     let lines = sandboxes(record).into_iter();
-    lines.filter(|line| normal(line).is_none()).collect()
+    let lines = lines.filter(|line| normal(line).is_none()).collect();
+    let created = log.iter().map(|logged| &logged["event"]);
+    let created = created.filter(|event| event["kind"] == "sandbox_created");
+    for event in created {
+        let sandbox = &event["sandbox"];
+        let gone = deletes.iter().any(|delete| delete["sandbox"] == *sandbox);
+        let left = sandbox
+            .as_str()
+            .is_some_and(|sandbox| kept.contains(sandbox));
+        assert!(
+            gone || left,
+            "{name}: the log records no delete of {sandbox}, though its record keeps it as deleted"
+        );
+    }
+    lines
 }
 
 fn outcome_holds(
@@ -1034,6 +1067,12 @@ fn logged(
         // A poll answered by its own kind, and a call refused as busy, which the agent makes
         // again, are dropped, as how many an `await` or a call makes depends on timing, and the
         // later op numbers drop with them.
+        // A sandbox's start, which `in_order` checks, is dropped too, as its place depends on
+        // timing.
+        let event = &logged["event"]["kind"];
+        if (event == "sandbox_created" || event == "sandbox_met") && !also.contains(&Also::Starts) {
+            continue;
+        }
         let kind = &logged["event"]["request"]["kind"];
         if kind == "call" && logged.pointer("/actions/0/reply/busy") == Some(&json!(true)) {
             dropped += 1;
@@ -1135,7 +1174,7 @@ fn polls(log: &[Value]) -> Vec<String> {
 
 fn in_order(log: &[Value]) -> Option<Duration> {
     let time = |ns: &Value| Duration::from_nanos(nanos(ns).unwrap());
-    let (mut last, mut started) = (None, BTreeMap::new());
+    let (mut last, mut started, mut created) = (None, BTreeMap::new(), BTreeMap::new());
     for (seq, logged) in log.iter().enumerate() {
         assert_eq!(logged["seq"], json!(seq), "{logged}");
         let at = Some(time(&logged["at_ns"]));
@@ -1155,6 +1194,21 @@ fn in_order(log: &[Value]) -> Option<Duration> {
                 assert!(each.is_sorted(), "{logged}: its times are out of order");
                 let timed = start.is_some() || marks == [None, None];
                 assert!(timed, "{logged}: it has times, but no start");
+            }
+            Some("sandbox_created") => {
+                let began = Some(time(&event["began_ns"]));
+                assert!(began <= observed, "{logged}: it began after it returned");
+                let once = created.insert(event["sandbox"].as_str(), observed);
+                assert!(once.is_none(), "{logged}: its sandbox was created before");
+            }
+            Some("sandbox_met") => {
+                let created = created.get(&event["sandbox"].as_str());
+                let met = created.is_some_and(|created| *created <= observed);
+                assert!(met, "{logged}: no create of its sandbox came before");
+            }
+            Some("sandbox_deleted") if event["sandbox"].is_string() => {
+                let known = created.contains_key(&event["sandbox"].as_str());
+                assert!(known, "{logged}: no create of its sandbox came before");
             }
             _ => {}
         }
@@ -2269,6 +2323,13 @@ fn reported_before_the_hard_end() {
     assert_eq!(log[op]["observed_ns"], "0");
     assert_eq!(log[op]["at_ns"], "6500000000");
     assert_eq!(log[op]["actions"][0]["reply"]["kind"], "refused");
+    // The call's sandbox was created, and never met the gateway, as it never dials.
+    let call = |kind: &str| {
+        let event = |line: &Value| line["event"]["kind"] == kind;
+        log.iter()
+            .any(|line| event(line) && line["event"]["sandbox"] == "job-0")
+    };
+    assert!(call("sandbox_created") && !call("sandbox_met"));
 }
 
 // The final call's start is due by the hard end, which has passed, so its call fails with no
@@ -2553,72 +2614,105 @@ fn refusal_held_by_a_slow_sync() {
     );
 }
 
+// Each create takes 3 s, and its sandbox meets the gateway a second after it returns. The
+// agent's create begins at 0, and the final call's target's at the agent's exit, at 4 s.
+#[test]
+fn start_times() {
+    let agent = Synced::Holding(AGENT_SANDBOX, "sim-1");
+    let target = Synced::Holding("jobs/0/.sandbox.json.partial", "sim-2");
+    let host = SimHost::new()
+        .moving_after_read(agent, Duration::from_secs(4))
+        .moving_after_read(target, Duration::from_secs(8));
+    let shown = executed(
+        &host,
+        "start-times",
+        &[(PROVIDER, &Sim::new().taking(Duration::from_secs(1)))],
+        &ops_workflow(&["ops", "exit"], 30),
+        SANDBOXD,
+        &[Also::Starts],
+    );
+    let starts = (shown.lines())
+        .filter(|line| line.contains("sandbox_created") || line.contains("sandbox_met"));
+    expect![[r#"
+        {"actions":[],"at_ns":"4000000000","event":{"began_ns":"0","kind":"sandbox_created","sandbox":"agent-0"},"observed_ns":"3000000000","seq":2}
+        {"actions":[],"at_ns":"4000000000","event":{"kind":"sandbox_met","sandbox":"agent-0"},"observed_ns":"4000000000","seq":3}
+        {"actions":[],"at_ns":"7000000000","event":{"began_ns":"4000000000","kind":"sandbox_created","sandbox":"job-0"},"observed_ns":"7000000000","seq":10}
+        {"actions":[],"at_ns":"8000000000","event":{"kind":"sandbox_met","sandbox":"job-0"},"observed_ns":"8000000000","seq":11}"#]].assert_eq(&starts.collect::<Vec<_>>().join("\n"));
+}
+
 // The agent's start leads to no act, so it is synced with the next record that does; the note
 // of what its teardown collected, which no such record follows, by the run's end.
 #[test]
 fn syncs() {
     let journal = Journal::default();
-    check(
+    let shown = executed(
         &SimHost::new().journaled(&journal),
         "syncs",
         &[(PROVIDER, &Sim::new().journaled(&journal))],
         &ops_workflow(&["ops", "ops", "call train 17", "exit"], 30),
         SANDBOXD,
-        &expect![[r#"
-            finished, showing [score=0]
-            outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
-            log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
-            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
-            {"actions":[{"kind":"reply","reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"job","name":"train","payload_max_bytes":8},{"arguments":{"finalize":{"default":false,"type":"bool"}},"kind":"now","name":"submit","payload_max_bytes":16}],"kind":"ops","remaining_seconds":30,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"role":"agent"}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"kind":"ops"}},"observed_ns":"0","seq":3}
-            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"op_refused","message":"the payload is 17 bytes, more than the limit of 16: send at most 16","request":{"grant":"train","kind":"call","payload":{"over":16,"size":17}}},"seq":4}
-            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"0","seq":5}
-            {"at_ns":"0","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":6}
-            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_collected"},"seq":7}
-            {"actions":[],"at_ns":"0","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":8}
-            {"actions":[{"job":0,"kind":"start_final_call","selections":[{"role":"agent","selection":null}],"timeout_ns":"120000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"0","seq":9}
-            {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_started"},"observed_ns":"0","seq":10}
-            {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_returned","returned":[{"name":"score","value":0}]},"observed_ns":"0","seq":11}
-            {"actions":[],"at_ns":"0","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":12}
-            {"actions":[{"kind":"finish"}],"at_ns":"0","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"0","seq":13}
-            its last record came before the agent's teardown was to end
-            the journal:
-              fsync <partial>/.record.json.partial
-              fsync <partial>
-              fsync <partial>/driver.pid
-              fsync <partial>
-              fsync <runs>
-              fsync <record>/.ir.json.partial
-              fsync <record>
-              fsync <record>/.provider.json.partial
-              fsync <record>
-              fsync <record>
-              fsync <record>
-              fdatasync <record>/log.jsonl, through record 0
-              created sim-1
-              fsync <record>/agents/agent/.sandbox.json.partial
-              fsync <record>/agents/agent
-              fdatasync <record>/log.jsonl, through record 3
-              a session read op 0's reply: ops
-              fdatasync <record>/log.jsonl, through record 4
-              a session read op 1's reply: refused
-              fdatasync <record>/log.jsonl, through record 5
-              deleted sim-1
-              fsync <record>/agents/agent/.sandbox.json.partial
-              fsync <record>/agents/agent
-              fdatasync <record>/log.jsonl, through record 9
-              created sim-2
-              fsync <record>/jobs/0/.sandbox.json.partial
-              fsync <record>/jobs/0
-              deleted sim-2
-              fsync <record>/jobs/0/.sandbox.json.partial
-              fsync <record>/jobs/0
-              fdatasync <record>/log.jsonl, through record 13
-              fdatasync <record>/log.jsonl, through record 13
-              fsync <record>/.outcome.json.partial
-              fsync <record>"#]],
+        // The journal numbers each line of the log, a start's too.
+        &[Also::Starts],
     );
+    expect![[r#"
+        finished, showing [score=0]
+        outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
+        log.jsonl:
+        {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+        {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
+        {"actions":[],"at_ns":"0","event":{"began_ns":"0","kind":"sandbox_created","sandbox":"agent-0"},"observed_ns":"0","seq":2}
+        {"actions":[],"at_ns":"0","event":{"kind":"sandbox_met","sandbox":"agent-0"},"observed_ns":"0","seq":3}
+        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":4}
+        {"actions":[{"kind":"reply","reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"job","name":"train","payload_max_bytes":8},{"arguments":{"finalize":{"default":false,"type":"bool"}},"kind":"now","name":"submit","payload_max_bytes":16}],"kind":"ops","remaining_seconds":30,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"role":"agent"}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"kind":"ops"}},"observed_ns":"0","seq":5}
+        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"op_refused","message":"the payload is 17 bytes, more than the limit of 16: send at most 16","request":{"grant":"train","kind":"call","payload":{"over":16,"size":17}}},"seq":6}
+        {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"0","seq":7}
+        {"at_ns":"0","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":8}
+        {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_collected"},"seq":9}
+        {"actions":[],"at_ns":"0","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":10}
+        {"actions":[{"job":0,"kind":"start_final_call","selections":[{"role":"agent","selection":null}],"timeout_ns":"120000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"0","seq":11}
+        {"actions":[],"at_ns":"0","event":{"began_ns":"0","kind":"sandbox_created","sandbox":"job-0"},"observed_ns":"0","seq":12}
+        {"actions":[],"at_ns":"0","event":{"kind":"sandbox_met","sandbox":"job-0"},"observed_ns":"0","seq":13}
+        {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_started"},"observed_ns":"0","seq":14}
+        {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_returned","returned":[{"name":"score","value":0}]},"observed_ns":"0","seq":15}
+        {"actions":[],"at_ns":"0","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":16}
+        {"actions":[{"kind":"finish"}],"at_ns":"0","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"0","seq":17}
+        its last record came before the agent's teardown was to end
+        the journal:
+          fsync <partial>/.record.json.partial
+          fsync <partial>
+          fsync <partial>/driver.pid
+          fsync <partial>
+          fsync <runs>
+          fsync <record>/.ir.json.partial
+          fsync <record>
+          fsync <record>/.provider.json.partial
+          fsync <record>
+          fsync <record>
+          fsync <record>
+          fdatasync <record>/log.jsonl, through record 0
+          created sim-1
+          fsync <record>/agents/agent/.sandbox.json.partial
+          fsync <record>/agents/agent
+          fdatasync <record>/log.jsonl, through record 5
+          a session read op 0's reply: ops
+          fdatasync <record>/log.jsonl, through record 6
+          a session read op 1's reply: refused
+          fdatasync <record>/log.jsonl, through record 7
+          deleted sim-1
+          fsync <record>/agents/agent/.sandbox.json.partial
+          fsync <record>/agents/agent
+          fdatasync <record>/log.jsonl, through record 11
+          created sim-2
+          fsync <record>/jobs/0/.sandbox.json.partial
+          fsync <record>/jobs/0
+          deleted sim-2
+          fsync <record>/jobs/0/.sandbox.json.partial
+          fsync <record>/jobs/0
+          fdatasync <record>/log.jsonl, through record 17
+          fdatasync <record>/log.jsonl, through record 17
+          fsync <record>/.outcome.json.partial
+          fsync <record>"#]]
+    .assert_eq(&shown);
 }
 
 // Each API's tools, and the Responses API's instructions, are kept once whole; the Chat
@@ -5229,6 +5323,12 @@ fn unnamed_shared_create_is_deleted_before_the_judge_starts() {
     let dir = TestDir::new();
     let (record, _, _) = judged(&SimHost::new(), failed_shared_create(LOST), &dir);
     let log = read_log(&record);
+    // The failed create logs no create, though its sandbox exists.
+    let created = |line: &Value| line["event"]["kind"] == "sandbox_created";
+    assert!(
+        !log.iter()
+            .any(|line| created(line) && line["event"]["sandbox"] == "shared-1")
+    );
     let orphan = log
         .iter()
         .position(|line| {
