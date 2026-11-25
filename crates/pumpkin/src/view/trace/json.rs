@@ -490,7 +490,7 @@ pub(super) fn exchange_json(record: &Record, exchanges: &Exchanges, request: u64
     let said = &exchanges.by_request[&request];
     let event = &said.event();
     let api = api_of(event);
-    let config = config_json(record, request, api, said.answered.is_some());
+    let config = config_json(record, request, api, said.answered.is_some(), event);
     json!({
         "request": request,
         "caller": said.caller,
@@ -512,24 +512,30 @@ pub(super) fn exchange_json(record: &Record, exchanges: &Exchanges, request: u64
     })
 }
 
-fn config_json(record: &Record, request: u64, api: Option<Api>, answered: bool) -> Value {
+fn config_json(
+    record: &Record,
+    request: u64,
+    api: Option<Api>,
+    answered: bool,
+    event: &Value,
+) -> Value {
     match (api, answered) {
         (Some(api), true) => match record.model_request(request) {
             Ok(body) => {
                 let body = serde_json::from_slice(&body).unwrap_or(Value::Null);
                 let read::Config {
-                    model,
                     reasoning_effort,
                     temperature,
                     max_tokens,
                     stop,
-                    stream,
                     tools,
                 } = read::config(api, &body);
+                // The route read the model and the stream where the API names them, in the body
+                // or the path, and the event names both.
                 json!({
-                    "model": model, "reasoning_effort": reasoning_effort,
+                    "model": event["model"], "reasoning_effort": reasoning_effort,
                     "temperature": temperature, "max_tokens": max_tokens, "stop": stop,
-                    "stream": stream, "tools": tools,
+                    "stream": event["stream"], "tools": tools,
                 })
             }
             Err(error) => json!({ "error": error }),

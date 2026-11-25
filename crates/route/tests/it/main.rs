@@ -37,17 +37,22 @@ mod upstream;
 /// A request as its client sends it: method, path, headers and body.
 type Request = (&'static str, String, Vec<(String, String)>, Vec<u8>);
 
-/// Each of `names`, which goes upstream under its own name.
+/// Each of `names`, which goes upstream under its own name, or, written `name=other`, under the
+/// other.
 fn models(names: &[&str]) -> BTreeMap<ModelName, ModelName> {
     let model = |name: &str| ModelName::try_from(name.to_owned()).unwrap();
     names
         .iter()
-        .map(|&name| (model(name), model(name)))
+        .map(|&name| {
+            let (name, upstream_name) = name.split_once('=').unwrap_or((name, name));
+            (model(name), model(upstream_name))
+        })
         .collect()
 }
 
 /// The headers that the Responses API's entry lists, as Codex's library lists them; the Chat
-/// Completions entry lists none; the Messages entry lists those that Claude Code sends.
+/// Completions entry and the Gemini API's list none; the Messages entry lists those that Claude
+/// Code sends.
 fn listed(api: Api) -> Headers {
     let names = |names: &[&str]| {
         (names.iter())
@@ -92,7 +97,7 @@ fn listed(api: Api) -> Headers {
                 "x-codex-limit-name",
             ]),
         },
-        Api::Chat => Headers::default(),
+        Api::Chat | Api::GenerateContent => Headers::default(),
         Api::Messages => Headers {
             request: names(&["anthropic-beta", "user-agent", "x-app"]),
             response: Vec::new(),
@@ -138,6 +143,7 @@ fn check_apis(entries: &[(Api, &[&str])], cases: &[(&str, Request)], expect: &Ex
             Api::Responses => "responses",
             Api::Chat => "chat/completions",
             Api::Messages => "messages",
+            Api::GenerateContent => "models",
         };
         let url = UpstreamUrl::try_from(format!("http://{address}/v1/{path}")).unwrap();
         let route = Route::new(api, models(allowed), &listed(api));
@@ -501,6 +507,54 @@ fn messages(edit: impl FnOnce(&mut Value)) -> Request {
     edit(&mut body);
     let body = body.to_string().into_bytes();
     ("POST", "/v1/messages".to_owned(), messages_headers(), body)
+}
+
+/// The request headers of a client of the Gemini API, with its key, which must stay behind.
+fn generate_content_headers() -> Vec<(String, String)> {
+    [
+        ("host", "127.0.0.1:11235"),
+        ("content-type", "application/json"),
+        ("accept", "*/*"),
+        ("x-goog-api-key", "the-sandbox's-own"),
+        ("x-goog-api-client", "google-genai-sdk/1.0"),
+        ("user-agent", "antigravity/1.4.7"),
+    ]
+    .map(|(name, value)| (name.to_owned(), value.to_owned()))
+    .to_vec()
+}
+
+/// A client's request of the Gemini API for `m-large`, a stream, with `edit` applied to its
+/// body: with a system instruction, a function declared, whose schema names a `url`, an image
+/// inline, and a function call whose arguments name a URL and tools, which are the client's own,
+/// and its response.
+fn generate_content(edit: impl FnOnce(&mut Value)) -> Request {
+    let schema = json!({ "type": "OBJECT", "properties": { "url": { "type": "STRING" } } });
+    let image = json!({ "inlineData": { "mimeType": "image/png", "data": "AAAA" } });
+    let call = json!({
+        "name": "fetch",
+        "id": "call_1",
+        "args": { "url": "https://example.com", "tools": [{ "googleSearch": {} }] }
+    });
+    let response = json!({
+        "name": "fetch",
+        "id": "call_1",
+        "response": { "url": "https://example.com", "fileData": "none" }
+    });
+    let mut body = json!({
+        "systemInstruction": { "parts": [{ "text": "You are a coding agent." }] },
+        "contents": [
+            { "role": "user", "parts": [{ "text": "hi" }, image] },
+            { "role": "model", "parts": [{ "functionCall": call, "thoughtSignature": "EpIC" }] },
+            { "role": "user", "parts": [{ "functionResponse": response }] }
+        ],
+        "tools": [{ "functionDeclarations": [{ "name": "fetch", "parameters": schema }] }],
+        "toolConfig": { "functionCallingConfig": { "mode": "AUTO" } },
+        "generationConfig": { "maxOutputTokens": 65536, "thinkingConfig": { "thinkingLevel": "HIGH" } }
+    });
+    edit(&mut body);
+    let body = body.to_string().into_bytes();
+    let path = "/v1beta/models/m-large:streamGenerateContent?alt=sse".to_owned();
+    ("POST", path, generate_content_headers(), body)
 }
 
 fn with_header(name: &str, value: &str) -> Request {
@@ -873,5 +927,116 @@ fn messages_closure() {
             a file uploaded to a container: 400 [("content-type", "application/json")] {"error":{"message":"a `container_upload` block puts a file in a container kept on the provider's side, which the route refuses: send the content inline","type":"invalid_request_error"},"type":"error"}
             a URL beside a tool call's input: 400 [("content-type", "application/json")] {"error":{"message":"`url` holds a URL the provider would fetch, which the route refuses: send the content inline, as a `data:` URL","type":"invalid_request_error"},"type":"error"}
             tokens counted: 404 [("content-type", "application/json")] {"error":{"message":"`/v1/messages/count_tokens` is not served: send POST /v1/messages","type":"not_found_error"},"type":"error"}"#]],
+    );
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the cases and their snapshot"
+)]
+fn generate_content_closure() {
+    let part = |part: Value| move |body: &mut Value| body["contents"][0]["parts"][1] = part;
+    let to = |path: &str| {
+        let (method, _, headers, body) = generate_content(|_| {});
+        (method, path.to_owned(), headers, body)
+    };
+    check_apis(
+        &[
+            (Api::GenerateContent, &["m-large"]),
+            (Api::GenerateContent, &["m-small=small-v1", "vendor/m:free"]),
+        ],
+        &[
+            ("the client's", generate_content(|_| {})),
+            ("no stream", to("/v1beta/models/m-large:generateContent")),
+            (
+                "the other entry's model",
+                to("/v1beta/models/m-small:generateContent"),
+            ),
+            (
+                "a model named with a slash and a colon",
+                to("/v1beta/models/vendor/m:free:generateContent"),
+            ),
+            (
+                "a model no entry allows",
+                to("/v1beta/models/m-huge:generateContent"),
+            ),
+            (
+                "a stream of no events",
+                to("/v1beta/models/m-large:streamGenerateContent"),
+            ),
+            (
+                "another query",
+                to("/v1beta/models/m-large:generateContent?key=its-own"),
+            ),
+            ("tokens counted", to("/v1beta/models/m-large:countTokens")),
+            ("the models listed", to("/v1beta/models")),
+            (
+                "a model in the body",
+                generate_content(|body| body["model"] = json!("models/m-huge")),
+            ),
+            (
+                "cached content",
+                generate_content(|body| body["cachedContent"] = json!("cachedContents/c-1")),
+            ),
+            (
+                "cached content, as the protocol buffer names it",
+                generate_content(|body| body["cached_content"] = json!("cachedContents/c-1")),
+            ),
+            (
+                "the provider's search",
+                generate_content(|body| body["tools"][0]["googleSearch"] = json!({})),
+            ),
+            (
+                "code that the provider runs",
+                generate_content(|body| body["tools"] = json!([{ "code_execution": {} }])),
+            ),
+            (
+                "functions, as the protocol buffer names them",
+                generate_content(|body| {
+                    let declared = body["tools"][0]["functionDeclarations"].take();
+                    body["tools"] = json!([{ "function_declarations": declared }]);
+                }),
+            ),
+            (
+                "a file by URI",
+                generate_content(part(json!({
+                    "fileData": { "mimeType": "image/png", "fileUri": "https://example.com/a.png" }
+                }))),
+            ),
+            (
+                "a file by URI in a function's response",
+                generate_content(|body| {
+                    body["contents"][2]["parts"][0]["functionResponse"]["parts"] =
+                        json!([{ "file_data": { "file_uri": "files/f-1" } }]);
+                }),
+            ),
+            (
+                "a function's parameter named as a file",
+                generate_content(|body| {
+                    let declared = &mut body["tools"][0]["functionDeclarations"][0];
+                    declared["parameters"]["properties"]["file_data"] = json!({ "type": "STRING" });
+                }),
+            ),
+        ],
+        &expect![[r#"
+            the client's: went upstream, as POST /v1/models/m-large:streamGenerateContent?alt=sse HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "746"), ("user-agent", "ureq/<version>"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "*/*"), ("x-goog-api-key", "sk-test-0123")] and the body as sent, leaving ["user-agent", "x-goog-api-client"]
+            no stream: went upstream, as POST /v1/models/m-large:generateContent HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "746"), ("user-agent", "ureq/<version>"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "*/*"), ("x-goog-api-key", "sk-test-0123")] and the body as sent, leaving ["user-agent", "x-goog-api-client"]
+            the other entry's model: went upstream, as POST /v1/models/small-v1:generateContent HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "746"), ("user-agent", "ureq/<version>"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "*/*"), ("x-goog-api-key", "sk-test-0123")] and the body as sent, leaving ["user-agent", "x-goog-api-client"]
+            a model named with a slash and a colon: went upstream, as POST /v1/models/vendor/m:free:generateContent HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "746"), ("user-agent", "ureq/<version>"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "*/*"), ("x-goog-api-key", "sk-test-0123")] and the body as sent, leaving ["user-agent", "x-goog-api-client"]
+            a model no entry allows: 400 [("content-type", "application/json")] {"error":{"code":400,"message":"the request names `m-huge`, which the route doesn't allow: name `m-large` or `m-small` or `vendor/m:free`","status":"INVALID_ARGUMENT"}}
+            a stream of no events: 400 [("content-type", "application/json")] {"error":{"code":400,"message":"`/v1beta/models/m-large:streamGenerateContent` is not a method of the endpoint: send POST /v1beta/models/<model>:generateContent or POST /v1beta/models/<model>:streamGenerateContent?alt=sse","status":"INVALID_ARGUMENT"}}
+            another query: 400 [("content-type", "application/json")] {"error":{"code":400,"message":"`/v1beta/models/m-large:generateContent?key=its-own` is not a method of the endpoint: send POST /v1beta/models/<model>:generateContent or POST /v1beta/models/<model>:streamGenerateContent?alt=sse","status":"INVALID_ARGUMENT"}}
+            tokens counted: 400 [("content-type", "application/json")] {"error":{"code":400,"message":"`/v1beta/models/m-large:countTokens` is not a method of the endpoint: send POST /v1beta/models/<model>:generateContent or POST /v1beta/models/<model>:streamGenerateContent?alt=sse","status":"INVALID_ARGUMENT"}}
+            the models listed: 404 [("content-type", "application/json")] {"error":{"code":404,"message":"`/v1beta/models` is not served: send POST /v1beta/models/<model>:generateContent or POST /v1beta/models/<model>:streamGenerateContent?alt=sse","status":"NOT_FOUND"}}
+            a model in the body: 400 [("content-type", "application/json")] {"error":{"code":400,"message":"`model` is in the body, where it could name another model than the path: leave it out","status":"INVALID_ARGUMENT"}}
+            cached content: 400 [("content-type", "application/json")] {"error":{"code":400,"message":"`cachedContent` refers to state kept on the provider's side, which the route refuses: send the whole context instead","status":"INVALID_ARGUMENT"}}
+            cached content, as the protocol buffer names it: 400 [("content-type", "application/json")] {"error":{"code":400,"message":"`cached_content` refers to state kept on the provider's side, which the route refuses: send the whole context instead","status":"INVALID_ARGUMENT"}}
+            the provider's search: 400 [("content-type", "application/json")] {"error":{"code":400,"message":"the tool `googleSearch` is one the provider defines or runs, which the route refuses: declare functions only, in `functionDeclarations`","status":"INVALID_ARGUMENT"}}
+            code that the provider runs: 400 [("content-type", "application/json")] {"error":{"code":400,"message":"the tool `code_execution` is one the provider defines or runs, which the route refuses: declare functions only, in `functionDeclarations`","status":"INVALID_ARGUMENT"}}
+            functions, as the protocol buffer names them: went upstream, as POST /v1/models/m-large:streamGenerateContent?alt=sse HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "747"), ("user-agent", "ureq/<version>"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "*/*"), ("x-goog-api-key", "sk-test-0123")] and the body as sent, leaving ["user-agent", "x-goog-api-client"]
+            a file by URI: 400 [("content-type", "application/json")] {"error":{"code":400,"message":"`fileUri` names a file that the provider would fetch, which the route refuses: send the content inline, as `inlineData`","status":"INVALID_ARGUMENT"}}
+            a file by URI in a function's response: 400 [("content-type", "application/json")] {"error":{"code":400,"message":"`file_uri` names a file that the provider would fetch, which the route refuses: send the content inline, as `inlineData`","status":"INVALID_ARGUMENT"}}
+            a function's parameter named as a file: went upstream, as POST /v1/models/m-large:streamGenerateContent?alt=sse HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "776"), ("user-agent", "ureq/<version>"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "*/*"), ("x-goog-api-key", "sk-test-0123")] and the body as sent, leaving ["user-agent", "x-goog-api-client"]"#]],
     );
 }

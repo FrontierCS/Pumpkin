@@ -105,8 +105,8 @@ checked_string!(
     /// of an HTTP token (RFC 9110).
     ///
     /// None names a header that carries a credential, picks an account, signs a request, frames a
-    /// message or sets its coding, which the route passes for no workflow. The refusal covers the
-    /// three APIs' own headers and HTTP's framing; the headers that a gateway in front of a
+    /// message or sets its coding, which the route passes for no workflow. The refusal covers
+    /// each API's own headers and HTTP's framing; the headers that a gateway in front of a
     /// provider gives meaning to are the operator's to keep off, since no list here can name
     /// every gateway's.
     HeaderName,
@@ -467,6 +467,7 @@ fn check_header_name(name: &str) -> Result<(), String> {
         | "api-key"
         | "x-goog-api-key"
         | "x-goog-user-project"
+        | "x-goog-iam-authorization-token"
         | "ocp-apim-subscription-key"
         | "cookie"
         | "set-cookie"

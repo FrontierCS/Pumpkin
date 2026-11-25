@@ -10,6 +10,7 @@
 //! forms are its own module's; what the reader makes of them is the same for every API.
 
 mod chat;
+mod generate_content;
 mod messages;
 mod responses;
 
@@ -80,7 +81,6 @@ pub struct Reply {
 /// What a request asked of the model, as far as its body says.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
-    pub model: Option<String>,
     /// The reasoning's effort, or, of a Messages request that names no effort, its thinking's
     /// budget in tokens.
     pub reasoning_effort: Option<String>,
@@ -89,7 +89,6 @@ pub struct Config {
     pub max_tokens: Option<u64>,
     /// The sequences that stop the answer.
     pub stop: Vec<String>,
-    pub stream: bool,
     /// The names of the tools it declares, or the type of one that has none.
     pub tools: Vec<String>,
 }
@@ -119,6 +118,7 @@ pub(crate) fn dialect(api: Api) -> &'static Dialect {
         Api::Responses => &responses::DIALECT,
         Api::Chat => &chat::DIALECT,
         Api::Messages => &messages::DIALECT,
+        Api::GenerateContent => &generate_content::DIALECT,
     }
 }
 
@@ -200,7 +200,7 @@ pub fn config(api: Api, body: &Value) -> Config {
 /// The field of a request's body, as `api` writes it, that holds its list of tools.
 pub fn tools_field(api: Api) -> &'static str {
     match api {
-        Api::Responses | Api::Chat | Api::Messages => "tools",
+        Api::Responses | Api::Chat | Api::Messages | Api::GenerateContent => "tools",
     }
 }
 
@@ -210,6 +210,7 @@ pub fn system_field(api: Api) -> Option<&'static str> {
     match api {
         Api::Responses => Some("instructions"),
         Api::Messages => Some("system"),
+        Api::GenerateContent => Some("systemInstruction"),
         Api::Chat => None,
     }
 }
@@ -269,12 +270,10 @@ fn config_of(body: &Map<String, Value>, effort: Option<&Value>, max_tokens: &[&s
         _ => Vec::new(),
     };
     Config {
-        model: body.get("model").and_then(Value::as_str).map(str::to_owned),
         reasoning_effort: effort.and_then(Value::as_str).map(str::to_owned),
         temperature: body.get("temperature").and_then(Value::as_f64),
         max_tokens: (max_tokens.iter()).find_map(|field| body.get(*field)?.as_u64()),
         stop,
-        stream: body.get("stream").and_then(Value::as_bool) == Some(true),
         tools: tool_names(body.get("tools")),
     }
 }

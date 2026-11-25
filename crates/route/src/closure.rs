@@ -1,15 +1,16 @@
 //! The rules of a route: which model requests it admits, and the form in which it sends them on.
 //!
 //! An entry admits a request only if it is a `POST` to its API's endpoint, passes on only the
-//! headers of its API's own and those the entry lists, and holds a JSON object that names a model
-//! the route allows. Nowhere in that object may it keep state on the provider's side, run a tool
-//! there or have the provider fetch a URL that isn't inline data, nor pick a feature of the
-//! provider's beyond the models and tools: `RESPONSES`, `CHAT` and `MESSAGES` name the fields.
-//! Any other request is answered with a [`Refusal`] that says what to send instead.
+//! headers of its API's own and those the entry lists, holds a JSON object, and names a model
+//! the route allows, in that object or in its path as its API has it. Nowhere in that object may
+//! it keep state on the provider's side, run a tool there or have the provider fetch a URL that
+//! isn't inline data, nor pick a feature of the provider's beyond the models and tools: each
+//! API's `Rules` name the fields. Any other request is answered with a [`Refusal`] that says
+//! what to send instead.
 //!
 //! The rules refuse the forms they name and pass every other field. They read the body's JSON
-//! fields, never the text of its context, and the body that goes upstream is the one they read,
-//! its model named as the upstream takes it.
+//! fields, never the text of its context, and the body that goes upstream is the one they read.
+//! The request that goes upstream names its model as the upstream takes it.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -26,6 +27,9 @@ use super::upstream::{Answer, Bar};
 use super::{read, usage};
 use crate::Apart;
 
+mod generate_content;
+mod messages;
+
 // The request headers of each API's own: the form of the request and of its answer. A client's
 // product adds its own, which its entry lists ([`Headers`]). Any other could reach more of the
 // provider than the models the route allows, under the deployment's key: a credential of the
@@ -38,17 +42,12 @@ const RESPONSES_HEADERS: [&str; 2] = ["content-type", "accept"];
 // of the further, such as an SDK's `x-stainless-*`.
 const CHAT_HEADERS: [&str; 3] = ["content-type", "accept", "user-agent"];
 
-// `anthropic-version` is the version of the API that the client writes in.
-const MESSAGES_HEADERS: [&str; 3] = ["content-type", "accept", "anthropic-version"];
-
 // The response headers of each API's own: the form of the body, the provider's id for the
 // request, and when to try again. Any other stays behind unless the entry lists it: one that
 // names the account or the project that the deployment's key belongs to, which are not the
 // agent's to know, and those that frame the body on the upstream's connection, since the session
 // carries it in frames of its own.
 const RESPONSE_HEADERS: [&str; 3] = ["content-type", "x-request-id", "retry-after"];
-
-const MESSAGES_RESPONSE_HEADERS: [&str; 3] = ["content-type", "request-id", "retry-after"];
 
 /// The fields of the Responses API that refer to state kept on the provider's side.
 const STATE_FIELDS: [&str; 4] = [
@@ -74,12 +73,32 @@ pub const MAX_DROPPED_HEADERS: usize = 32;
 // refusal stays small however large the request.
 const MAX_SHOWN_BYTES: usize = 256;
 
+/// Where an API's requests go, and where each names its model.
+#[derive(Debug)]
+enum Endpoint {
+    /// To one path, each naming its model in its body's `model`. The first target is the path,
+    /// and any other is it with a query that goes upstream with it.
+    Fixed(&'static [&'static str]),
+    /// To a path of its model's: `prefix`, the model's name, `:` and one of `methods`, each with
+    /// the query that it takes, which goes upstream with it, and whether it answers with a stream.
+    Models {
+        prefix: &'static str,
+        methods: &'static [(&'static str, Option<&'static str>, bool)],
+    },
+}
+
+/// What a request's target names, as its API's endpoint reads it.
+pub(crate) struct Target<'p> {
+    query: Option<&'static str>,
+    /// The model and the method that the path names, of an endpoint that has a path for each, and
+    /// whether the method answers with a stream.
+    method: Option<(&'p str, &'static str, bool)>,
+}
+
 /// What differs between the APIs: the endpoints, headers and checks of each.
 #[derive(Debug)]
 struct Rules {
-    /// The targets of the API's endpoint: the first is its own, and any other is it with a query
-    /// that goes upstream with it.
-    targets: &'static [&'static str],
+    endpoint: Endpoint,
     headers: &'static [&'static str],
     response_headers: &'static [&'static str],
     apart: Apart,
@@ -100,7 +119,7 @@ type Tool = fn(&Value) -> Result<(), Refusal>;
 type Object = fn(&Map<String, Value>) -> Result<Option<&'static str>, Refusal>;
 
 const RESPONSES: Rules = Rules {
-    targets: &["/responses"],
+    endpoint: Endpoint::Fixed(&["/responses"]),
     headers: &RESPONSES_HEADERS,
     response_headers: &RESPONSE_HEADERS,
     apart: Apart {
@@ -118,7 +137,7 @@ const RESPONSES: Rules = Rules {
 };
 
 const CHAT: Rules = Rules {
-    targets: &["/v1/chat/completions"],
+    endpoint: Endpoint::Fixed(&["/v1/chat/completions"]),
     headers: &CHAT_HEADERS,
     response_headers: &RESPONSE_HEADERS,
     apart: Apart {
@@ -133,26 +152,6 @@ const CHAT: Rules = Rules {
     tool: function_tool,
     choice: chooses_client_tool,
     object: |_| Ok(None),
-};
-
-const MESSAGES: Rules = Rules {
-    // With the API's beta namespace, to which Anthropic's SDKs send a request through their beta
-    // client: the features a beta turns on, the rules refuse by their fields.
-    targets: &["/v1/messages", "/v1/messages?beta=true"],
-    headers: &MESSAGES_HEADERS,
-    response_headers: &MESSAGES_RESPONSE_HEADERS,
-    apart: Apart {
-        conversation: "messages",
-        whole: &["tools", "system"],
-    },
-    usage: usage::messages,
-    failure_code: "type",
-    api: Api::Messages,
-    stored: keeps_no_state,
-    feature: picks_no_server_feature,
-    tool: custom_tool,
-    choice: chooses_declared_tool,
-    object: fetches_nothing,
 };
 
 /// The entry of one API: it admits requests for the models that its workflow allows.
@@ -177,13 +176,18 @@ pub struct Headers {
 /// makes one.
 #[derive(Debug)]
 pub(crate) struct Closed<'r> {
+    /// What the upstream's URL takes after the endpoint's, of an API whose path names the model:
+    /// the model, as the upstream takes it, and the method.
+    path: Option<String>,
     query: Option<&'static str>,
     headers: Vec<(HeaderName, HeaderValue)>,
     dropped_headers: Vec<String>,
     body: Vec<u8>,
     /// The model that the request named, and the name that its upstream takes for it, which
-    /// `body` names.
+    /// `body` or `path` names.
     model: (ModelName, ModelName),
+    /// Whether the answer is a stream, as `body` or `path` asks.
+    stream: bool,
     route: &'r Route,
 }
 
@@ -214,7 +218,8 @@ impl Route {
         let rules = match api {
             Api::Responses => &RESPONSES,
             Api::Chat => &CHAT,
-            Api::Messages => &MESSAGES,
+            Api::Messages => &messages::RULES,
+            Api::GenerateContent => &generate_content::RULES,
         };
         let Headers { request, response } = headers;
         let joined = |own: &'static [&'static str], listed: &[schema::ir::HeaderName]| {
@@ -247,13 +252,63 @@ impl Route {
 
     /// Whether `request` is addressed to one of this route's endpoints, whatever else it holds.
     pub(crate) fn takes(&self, request: &ModelRequest) -> bool {
-        self.target(&request.path).is_some()
+        match self.rules.endpoint {
+            Endpoint::Fixed(_) => self.target(&request.path).is_some(),
+            Endpoint::Models { prefix, .. } => request.path.starts_with(prefix),
+        }
     }
 
-    fn target(&self, path: &str) -> Option<&'static str> {
-        (self.rules.targets.iter())
-            .find(|&&target| target == path)
-            .copied()
+    fn target<'p>(&self, path: &'p str) -> Option<Target<'p>> {
+        match self.rules.endpoint {
+            Endpoint::Fixed(targets) => {
+                let target = targets.iter().find(|&&target| target == path)?;
+                let query = target.split_once('?').map(|(_, query)| query);
+                Some(Target {
+                    query,
+                    method: None,
+                })
+            }
+            Endpoint::Models { prefix, methods } => {
+                let named = path.strip_prefix(prefix)?;
+                let (named, query) = match named.split_once('?') {
+                    Some((named, query)) => (named, Some(query)),
+                    None => (named, None),
+                };
+                // A model's name may hold a `:` of its own.
+                let (model, method) = named.rsplit_once(':')?;
+                let (method, query, stream) = (methods.iter())
+                    .find(|(name, takes, _)| *name == method && *takes == query)
+                    .copied()?;
+                Some(Target {
+                    query,
+                    method: Some((model, method, stream)),
+                })
+            }
+        }
+    }
+
+    /// What `path` names, or the refusal of one below the endpoint that names no method of it.
+    pub(crate) fn addressed<'p>(&self, path: &'p str) -> Result<Target<'p>, Refusal> {
+        self.target(path).ok_or_else(|| {
+            bad(format!(
+                "`{}` is not a method of the endpoint: send {}",
+                shown(path),
+                self.rules.endpoint.forms().join(" or ")
+            ))
+        })
+    }
+
+    /// The model that `request` names, where its API has it: in its path, or in `body`, its
+    /// body's object.
+    pub(crate) fn named<'a>(
+        &self,
+        request: &'a ModelRequest,
+        body: Option<&'a Map<String, Value>>,
+    ) -> Option<&'a str> {
+        match self.rules.endpoint {
+            Endpoint::Fixed(_) => body?.get("model")?.as_str(),
+            Endpoint::Models { .. } => Some(self.target(&request.path)?.method?.0),
+        }
     }
 
     /// The form of `request` that goes upstream, with its model named as its upstream takes it, or
@@ -274,33 +329,42 @@ impl Route {
             return Err(refusal(Status::MethodNotAllowed, message));
         }
         let rules = self.rules;
-        let query = (self.target(path))
-            .and_then(|target| target.split_once('?'))
-            .map(|(_, query)| query);
+        let Target { query, method } = self.addressed(path)?;
         let dropped_headers = self.dropped(headers);
         let headers = passed(&self.request_headers, headers)?;
         let mut body = body?;
         (rules.stored)(&body)?;
-        let named = body.get("model").and_then(Value::as_str);
+        let (named, stream) = match method {
+            Some((model, _, stream)) => (Some(model), stream),
+            None => (
+                body.get("model").and_then(Value::as_str),
+                body.get("stream") == Some(&Value::Bool(true)),
+            ),
+        };
         let allowed = named.and_then(|named| self.allows(named));
         let (model, upstream_name) =
             allowed.ok_or_else(|| Refusal::unallowed(named, self.models.keys()))?;
         (rules.feature)(&body)?;
         (rules.choice)(&body)?;
         closed_fields(rules, &body)?;
-        let named = Value::String(upstream_name.as_str().to_owned());
-        body.insert("model".to_owned(), named);
+        let path = method.map(|(_, method, _)| format!("/{upstream_name}:{method}"));
+        if path.is_none() {
+            let named = Value::String(upstream_name.as_str().to_owned());
+            body.insert("model".to_owned(), named);
+        }
         // What goes upstream is the body as parsed here, not as sent, so that no other parser can
         // read it otherwise: one that keeps the first of a field sent twice, say, where this
         // keeps the last.
         let body = Value::Object(body).to_string().into_bytes();
         let model = (model.clone(), upstream_name.clone());
         Ok(Closed {
+            path,
             query,
             headers,
             dropped_headers,
             body,
             model,
+            stream,
             route: self,
         })
     }
@@ -356,6 +420,11 @@ impl Closed<'_> {
         &self.dropped_headers
     }
 
+    /// What the upstream's URL takes after the endpoint's, before its query, if anything.
+    pub(crate) fn path(&self) -> Option<&str> {
+        self.path.as_deref()
+    }
+
     /// The query that the upstream's URL takes, as the request's target carried it.
     pub(crate) fn query(&self) -> Option<&'static str> {
         self.query
@@ -367,6 +436,10 @@ impl Closed<'_> {
 
     pub(crate) fn model(&self) -> &ModelName {
         &self.model.0
+    }
+
+    pub(crate) fn stream(&self) -> bool {
+        self.stream
     }
 
     /// The request's body, as [`Route::close`] parsed it.
@@ -398,15 +471,32 @@ impl Closed<'_> {
     }
 }
 
+impl Endpoint {
+    /// Each form of request that the endpoint takes, as a refusal names it: its own, without
+    /// the queries that a fixed path may carry.
+    fn forms(&self) -> Vec<String> {
+        match *self {
+            Self::Fixed(targets) => vec![format!("POST {}", targets[0])],
+            Self::Models { prefix, methods } => (methods.iter())
+                .map(|(method, query, _)| {
+                    let query = query.map(|query| format!("?{query}")).unwrap_or_default();
+                    format!("POST {prefix}<model>:{method}{query}")
+                })
+                .collect(),
+        }
+    }
+}
+
 impl Refusal {
     /// The refusal of a request to none of `routes`' endpoints, which names each.
     pub(crate) fn unserved<'a>(path: &str, routes: impl Iterator<Item = &'a Route>) -> Self {
         let mut targets: Vec<String> = Vec::new();
         for route in routes {
             // Several entries may be for one API.
-            let target = format!("POST {}", route.rules.targets[0]);
-            if !targets.contains(&target) {
-                targets.push(target);
+            for target in route.rules.endpoint.forms() {
+                if !targets.contains(&target) {
+                    targets.push(target);
+                }
             }
         }
         let message = format!(
@@ -437,13 +527,13 @@ impl Refusal {
         refusal(Status::BadRequest, message.to_owned())
     }
 
-    /// The refusal of a request once the model provider has refused the route's key with a 401,
-    /// which ends the route.
+    /// The refusal of a request once the model provider has refused the route's key, which ends
+    /// the route.
     pub(crate) fn key_refused() -> Self {
         // A 400, as for the route's end, so that the harness ends its turn rather than try
         // again with the same key, which every later request would carry.
-        let message = "the model provider refused the route's key, with a 401, which ends the \
-                       model route: make no more model requests";
+        let message = "the model provider refused the route's key, which ends the model route: \
+                       make no more model requests";
         refusal(Status::BadRequest, message.to_owned())
     }
 
@@ -466,14 +556,17 @@ impl Refusal {
         refusal(Status::BadRequest, message.to_owned())
     }
 
-    /// How [`Refusal::answer`] answers its client, in place of the upstream's response with the
-    /// status `upstream_status`, if one came.
+    /// How [`Refusal::answer`] answers its client, in place of the upstream's response to `closed`
+    /// with the status `upstream_status`, if one came.
     pub(crate) fn answered(
         &self,
+        closed: &Closed<'_>,
         upstream_status: Option<u16>,
         request_id: Option<String>,
     ) -> Answer {
         Answer::Refused {
+            model: closed.model().clone(),
+            stream: closed.stream(),
             upstream_status,
             request_id,
             status: self.status.code(),
@@ -522,6 +615,22 @@ impl Refusal {
             };
             let error = json!({ "type": kind, "message": self.message });
             return json!({ "type": "error", "error": error }).to_string();
+        }
+        if api == Api::GenerateContent {
+            // As the Gemini API's own errors are, of the statuses its documentation gives for
+            // each code: https://ai.google.dev/gemini-api/docs/troubleshooting
+            let status = match self.status {
+                Status::BadRequest | Status::MethodNotAllowed => "INVALID_ARGUMENT",
+                Status::NotFound => "NOT_FOUND",
+                Status::BadGateway => "UNAVAILABLE",
+                Status::GatewayTimeout => "DEADLINE_EXCEEDED",
+            };
+            let error = json!({
+                "code": self.status.code(),
+                "message": self.message,
+                "status": status,
+            });
+            return json!({ "error": error }).to_string();
         }
         // A 4xx is a request for its client to mend, which a client takes as final rather than
         // trying again; a 5xx, the route's own failure, it may try again.
@@ -786,95 +895,4 @@ fn function_tool(tool: &Value) -> Result<(), Refusal> {
          tools only (function or custom)",
         shown(kind)
     )))
-}
-
-fn keeps_no_state(body: &Map<String, Value>) -> Result<(), Refusal> {
-    let set = |field: &str| body.get(field).is_some_and(|value| !value.is_null());
-    if set("container") {
-        return Err(bad(
-            "`container` names a container kept on the provider's side, which the route refuses: \
-             leave it out, and run code through a custom tool",
-        ));
-    }
-    if set("thread") {
-        return Err(kept_state("thread"));
-    }
-    Ok(())
-}
-
-fn picks_no_server_feature(body: &Map<String, Value>) -> Result<(), Refusal> {
-    let set = |field: &str| body.get(field).is_some_and(|value| !value.is_null());
-    if set("mcp_servers") {
-        return Err(bad(
-            "`mcp_servers` has the provider call MCP servers, which the route refuses: leave it \
-             out, and declare their tools as custom tools",
-        ));
-    }
-    // `"default"` or a list of models, each run on the same request when the one before declines
-    // it: https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback
-    if set("fallbacks") {
-        return Err(bad(
-            "`fallbacks` has the provider answer with another model when the one named declines, \
-             which the route refuses: leave it out, and name a model the route allows",
-        ));
-    }
-    Ok(())
-}
-
-/// Refuses a tool of the Messages API's that is not custom: one the provider runs, such as its
-/// web search, or one whose form it defines, such as its text editor.
-// Even a tool whose calls come back to the client, such as `bash_20250124`, is one the provider
-// gives a schema and a prompt of its own, which the workflow didn't choose.
-fn custom_tool(tool: &Value) -> Result<(), Refusal> {
-    let kind = match tool.get("type") {
-        None => return Ok(()),
-        Some(Value::String(kind)) if kind == "custom" => return Ok(()),
-        Some(Value::String(kind)) => Cow::Borrowed(kind.as_str()),
-        Some(other) => Cow::Owned(other.to_string()),
-    };
-    Err(bad(format!(
-        "the tool `{}` is one the provider defines or runs, which the route refuses: declare \
-         custom tools only, of no `type` or `custom`",
-        shown(&kind)
-    )))
-}
-
-fn chooses_declared_tool(body: &Map<String, Value>) -> Result<(), Refusal> {
-    // A `tool` choice names one of the body's `tools`, which are custom tools alone.
-    let Some(Value::Object(choice)) = body.get("tool_choice") else {
-        return Ok(());
-    };
-    let kind = choice
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if matches!(kind, "auto" | "any" | "none" | "tool") {
-        return Ok(());
-    }
-    Err(bad(format!(
-        "the tool choice `{}` is none the route admits: choose `auto`, `any`, `none`, or a \
-         `tool` that the request declares",
-        shown(kind)
-    )))
-}
-
-/// Refuses a content block of the Messages API's whose content the provider fetches: one whose
-/// `source` is a URL or a file it stores, or a file uploaded to a container. A tool call's
-/// `input` is the client's own data, which the provider never fetches.
-fn fetches_nothing(object: &Map<String, Value>) -> Result<Option<&'static str>, Refusal> {
-    let kind = object.get("type").and_then(Value::as_str);
-    if kind == Some("container_upload") {
-        return Err(bad(
-            "a `container_upload` block puts a file in a container kept on the provider's side, \
-             which the route refuses: send the content inline",
-        ));
-    }
-    let source = object.get("source").and_then(|source| source.get("type"));
-    if let Some(source @ ("url" | "file")) = source.and_then(Value::as_str) {
-        return Err(bad(format!(
-            "a block's `source` is a {source} that the provider would fetch, which the route \
-             refuses: send the content inline, as `base64` or `text`"
-        )));
-    }
-    Ok((kind == Some("tool_use")).then_some("input"))
 }

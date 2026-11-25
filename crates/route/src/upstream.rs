@@ -1,7 +1,7 @@
 //! Sending a closed model request to the model provider, and streaming its response back.
 
 use std::collections::BTreeMap;
-use std::io::{self, Read};
+use std::io::{self, Cursor, Read};
 use std::net::IpAddr;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -42,6 +42,11 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 // request for as long has stalled too. A long response that keeps coming is never cut by it.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// How much of a 400's body the upstream reads before its client hears the head, of an API whose
+/// 400 may refuse the key.
+// A refusal of the key is one short JSON error. A body past this refuses none, and is relayed.
+const MAX_KEY_REFUSAL_BYTES: u64 = 16 * 1024;
+
 /// The model provider's endpoint: an `https` URL that names no user, or an `http` URL to a
 /// loopback IP address. A port, if it names one, is a number up to 65535.
 #[derive(Clone, Debug)]
@@ -61,23 +66,28 @@ pub struct Upstream {
     // Set before `shutdown` ends the exchanges in flight, so that one it ends before the head is
     // refused for the route's end, not as unanswered, and a later one never goes upstream.
     shut_down: OnceLock<()>,
-    // Set once the provider refuses the key with a 401, which no later request can mend: each
-    // carries the same key, read once for the run. Exchanges run on threads of their own, which
-    // share the upstream, so the first to hear the refusal sets it for the others to see.
+    // Set once the provider refuses the key, which no later request can mend: each carries the
+    // same key, read once for the run. Exchanges run on threads of their own, which share the
+    // upstream, so the first to hear the refusal sets it for the others to see.
     refused: OnceLock<()>,
+    // Whether a 400's body refuses the key, of an API that may refuse one so rather than with a
+    // 401.
+    refuses_key: Option<fn(&[u8]) -> bool>,
 }
 
 /// How the route answered a model request: never with what the request or the response held.
 ///
 /// An upstream's response comes with the provider's id for the request, if it gave one, which an
 /// operator names to ask the provider about the request, the usage that its body reported, if it
-/// did ([`Usage`]), and the failure that it stated, if it did ([`Failure`]).
+/// did ([`Usage`]), and the failure that it stated, if it did ([`Failure`]). A request that the
+/// route closed comes with whether it asked for its answer as a `stream`.
 #[derive(Debug)]
 pub enum Answer {
     /// With the upstream's response, whole, which had `status`, from `model`, as the route
     /// allows it.
     Forwarded {
         model: ModelName,
+        stream: bool,
         status: u16,
         request_id: Option<String>,
         usage: Option<Usage>,
@@ -87,6 +97,7 @@ pub enum Answer {
     /// cut short: it broke off, was given up on, or the session stopped taking it.
     Cut {
         model: ModelName,
+        stream: bool,
         status: u16,
         request_id: Option<String>,
         usage: Option<Usage>,
@@ -100,8 +111,10 @@ pub enum Answer {
         message: String,
     },
     /// With a refusal of the route's own, with `status` and `message`, in place of the
-    /// upstream's response with the status `upstream_status`, if one came.
+    /// upstream's response for `model` with the status `upstream_status`, if one came.
     Refused {
+        model: ModelName,
+        stream: bool,
         upstream_status: Option<u16>,
         request_id: Option<String>,
         status: u16,
@@ -109,7 +122,7 @@ pub enum Answer {
     },
     /// With the route's end, after the request for `model` was handed to the upstream's
     /// connection, which may have sent it whole, and before the response's head came.
-    Abandoned { model: ModelName },
+    Abandoned { model: ModelName, stream: bool },
 }
 
 /// Why the route barred a request before it reached the upstream.
@@ -263,14 +276,20 @@ impl Upstream {
                 (AUTHORIZATION, bearer)
             }
             Api::Messages => (HeaderName::from_static("x-api-key"), key.clone()),
+            Api::GenerateContent => (HeaderName::from_static("x-goog-api-key"), key.clone()),
         };
         authorization.1.set_sensitive(true);
+        let refuses_key: Option<fn(&[u8]) -> bool> = match api {
+            Api::Responses | Api::Chat | Api::Messages => None,
+            Api::GenerateContent => Some(generate_content_refuses_key),
+        };
         Self {
             url: url.clone(),
             authorization,
             agent,
             shut_down: OnceLock::new(),
             refused: OnceLock::new(),
+            refuses_key,
         }
     }
 
@@ -293,7 +312,7 @@ impl Upstream {
         let call = match self.url(closed) {
             Ok(url) => self.agent.post(url).config(),
             Err(refusal) => {
-                let answer = refusal.answered(None, None);
+                let answer = refusal.answered(closed, None, None);
                 return refuse(refusal, answer, closed, client, answered);
             }
         };
@@ -312,47 +331,25 @@ impl Upstream {
         };
         let status = response.status().as_u16();
         let request_id = request_id(response.headers());
-        if let Some(refusal) = self.refusal(status, response.headers()) {
-            let mut body = response.into_body().into_reader();
+        let (head, body) = response.into_parts();
+        let (key_refused, mut body) = key_refusal(self.refuses_key, status, body.into_reader());
+        if let Some(refusal) = self.refusal(status, key_refused, &head.headers) {
             let upstream = (status, request_id);
             return replaced(refusal, upstream, closed, &mut body, client, answered);
         }
-        let headers = returned(response.headers(), closed);
+        let headers = returned(&head.headers, closed);
         let Client { request, by, keep } = client;
         let mut client = match request.respond(status, headers, by) {
             Ok(client) => client,
             Err(error) => {
-                answered(Answer::Cut {
-                    model: closed.model().clone(),
-                    status,
-                    request_id,
-                    usage: None,
-                    failed: None,
-                });
+                answered(told(closed, false, (status, request_id), (None, None)));
                 return Err(error);
             }
         };
         let mut scan = closed.scan();
-        let mut body = response.into_body().into_reader();
         let relayed = relay(&mut body, &mut client, &mut scan, keep);
-        let (usage, failed) = scan.finish();
-        let model = closed.model().clone();
-        answered(match relayed {
-            Relayed::Whole => Answer::Forwarded {
-                model,
-                status,
-                request_id,
-                usage,
-                failed,
-            },
-            Relayed::BrokeOff | Relayed::Unsent(_) => Answer::Cut {
-                model,
-                status,
-                request_id,
-                usage,
-                failed,
-            },
-        });
+        let whole = matches!(relayed, Relayed::Whole);
+        answered(told(closed, whole, (status, request_id), scan.finish()));
         match relayed {
             Relayed::Whole => client.end(),
             Relayed::BrokeOff => client.cut(),
@@ -365,23 +362,23 @@ impl Upstream {
     /// which abandoned the request, and else no answer from the provider.
     fn without_head(&self, error: &ureq::Error, closed: &Closed<'_>) -> (Refusal, Answer) {
         if self.was_shut_down() {
-            let model = closed.model().clone();
-            (Refusal::ended(), Answer::Abandoned { model })
+            let (model, stream) = (closed.model().clone(), closed.stream());
+            (Refusal::ended(), Answer::Abandoned { model, stream })
         } else {
             let refusal = unanswered(error);
-            let answer = refusal.answered(None, None);
+            let answer = refusal.answered(closed, None, None);
             (refusal, answer)
         }
     }
 
     /// The refusal that answers in place of the upstream's response with `status` and
-    /// `headers`, if one does: a 401, which refuses the key, and which the upstream keeps, a 403,
-    /// or a coded body.
-    fn refusal(&self, status: u16, headers: &HeaderMap) -> Option<Refusal> {
+    /// `headers`, if one does: a 401 or a body that refuses the key (`key_refused`), which the
+    /// upstream keeps, a 403, or a coded body.
+    fn refusal(&self, status: u16, key_refused: bool, headers: &HeaderMap) -> Option<Refusal> {
         // Passed on, either would be a status that a harness tries again until its deadline. A
-        // 401 refuses the deployment's key, which every later request carries; a 403 may turn on
-        // what the request asked for, which the agent chose, so it ends no route.
-        if status == 401 {
+        // refusal of the key refuses the deployment's key, which every later request carries; a
+        // 403 may turn on what the request asked for, which the agent chose, so it ends no route.
+        if status == 401 || key_refused {
             let _ = self.refused.set(());
             Some(Refusal::key_refused())
         } else if status == 403 {
@@ -433,7 +430,7 @@ impl Upstream {
         };
     }
 
-    /// Whether the model provider has refused the key with a 401, which ends the route.
+    /// Whether the model provider has refused the key, which ends the route.
     pub fn key_was_refused(&self) -> bool {
         self.refused.get().is_some()
     }
@@ -450,15 +447,25 @@ impl Upstream {
         self.agent.clone().shutdown();
     }
 
-    /// The endpoint's URL for `closed`, with the query that its target carried.
+    /// The URL that `closed` goes to: the endpoint's, with the path and the query that `closed`
+    /// gives it.
     fn url(&self, closed: &Closed<'_>) -> Result<Uri, Refusal> {
-        let Some(query) = closed.query() else {
+        let (path, query) = (closed.path(), closed.query());
+        if path.is_none() && query.is_none() {
             return Ok(self.url.clone());
-        };
-        Uri::try_from(format!("{}?{query}", self.url)).map_err(|error| {
+        }
+        let path = path.unwrap_or_default();
+        let query = query.map(|query| format!("?{query}")).unwrap_or_default();
+        // A `?` or a `#` in the path, which holds the model's name as the upstream takes it,
+        // would end the path early.
+        let url = (!path.contains(['?', '#']))
+            .then(|| format!("{}{path}{query}", self.url))
+            .ok_or_else(|| "the model's name holds `?` or `#`".to_owned())
+            .and_then(|url| Uri::try_from(url).map_err(|error| error.to_string()));
+        url.map_err(|error| {
             let message = format!(
-                "the upstream's URL with the request's query is invalid ({error}): \
-                 check the configured upstream URL"
+                "the upstream's URL for the request is invalid ({error}): check the configured \
+                 upstream URL and the model's name"
             );
             refusal(Status::BadGateway, message)
         })
@@ -511,13 +518,15 @@ pub fn serve<'b, C: Clock>(
     let Some((first, _)) = taking().next() else {
         let routes = || entries.iter().map(|(route, _)| route);
         let refusal = Refusal::unserved(&request.path, routes());
-        // In the form of the entries' API, so that a client of the Messages API alone, which may
-        // try its other endpoints, reads it.
-        let messages = routes().all(|route| route.api() == Api::Messages) && !entries.is_empty();
-        let api = if messages {
-            Api::Messages
-        } else {
-            Api::Responses
+        // In the form of the entries' API, if they are of one, so that a client of that API
+        // alone, which may try its other endpoints, reads it.
+        let api = match entries.split_first() {
+            Some(((first, _), rest))
+                if rest.iter().all(|(route, _)| route.api() == first.api()) =>
+            {
+                first.api()
+            }
+            Some(_) | None => Api::Responses,
         };
         let _ = barred((Bar::Rules, refusal), api, client, |answer| {
             answered(None, answer);
@@ -528,16 +537,18 @@ pub fn serve<'b, C: Clock>(
     let index = if taking().nth(1).is_none() {
         first
     } else {
-        let named = (body.as_ref().ok())
-            .and_then(|body| body.get("model"))
-            .and_then(Value::as_str);
+        let named = entries[first].0.named(request, body.as_ref().ok());
         let allows = |route: &Route| named.is_some_and(|named| route.allows(named).is_some());
         let Some((index, _)) = taking().find(|(_, (route, _))| allows(route)) else {
             let allowed = taking().flat_map(|(_, (route, _))| route.models());
-            // A body that is no JSON object names no model: say what is wrong with it instead.
-            let refusal = match body {
+            // A target that names no method, or a body that is no JSON object, names no model:
+            // say what is wrong with it instead.
+            let refusal = match entries[first].0.addressed(&request.path) {
                 Err(refusal) => refusal,
-                Ok(_) => Refusal::unallowed(named, allowed),
+                Ok(_) => match body {
+                    Err(refusal) => refusal,
+                    Ok(_) => Refusal::unallowed(named, allowed),
+                },
             };
             let api = entries[first].0.api();
             let _ = barred((Bar::Rules, refusal), api, client, |answer| {
@@ -618,8 +629,88 @@ fn replaced(
     while let Ok(read @ 1..) = body.read(&mut buffer) {
         keep.response(&buffer[..read]);
     }
-    answered(refusal.answered(Some(status), request_id));
+    answered(refusal.answered(closed, Some(status), request_id));
     refusal.answer(closed.route().api(), request, by)
+}
+
+/// Whether `body`, a response's with `status`, refuses the key by `refuses_key`, which judges a
+/// 400's, and `body` as it came. It reads what it judges before the client hears the head, which
+/// a refusal of the key replaces.
+fn key_refusal(
+    refuses_key: Option<fn(&[u8]) -> bool>,
+    status: u16,
+    mut body: impl Read,
+) -> (bool, impl Read) {
+    let refuses_key = refuses_key.filter(|_| status == 400);
+    let mut opening = Vec::new();
+    let mut broke = None;
+    if refuses_key.is_some() {
+        let read = (&mut body)
+            .take(MAX_KEY_REFUSAL_BYTES)
+            .read_to_end(&mut opening);
+        broke = read.err();
+    }
+    let refused = refuses_key.is_some_and(|refuses| broke.is_none() && refuses(&opening));
+    (
+        refused,
+        Cursor::new(opening).chain(Broken(broke)).chain(body),
+    )
+}
+
+/// Whether `body`, a response's with a 400 from the Gemini API, refuses the key.
+// The Gemini API answers a key that it doesn't take with a 400, as
+// https://ai.google.dev/gemini-api/docs/troubleshooting has it, rather than with a 401. It names
+// why in an `ErrorInfo`, whose reason and domain identify the error: https://google.aip.dev/193
+fn generate_content_refuses_key(body: &[u8]) -> bool {
+    let Ok(body) = serde_json::from_slice::<Value>(body) else {
+        return false;
+    };
+    let details = body.pointer("/error/details").and_then(Value::as_array);
+    details.into_iter().flatten().any(|detail| {
+        let field = |name: &str| detail.get(name).and_then(Value::as_str);
+        field("@type") == Some("type.googleapis.com/google.rpc.ErrorInfo")
+            && field("reason") == Some("API_KEY_INVALID")
+            && field("domain") == Some("googleapis.com")
+    })
+}
+
+/// A reader that fails once with the error, if any, that cut a body's read short, and then ends.
+struct Broken(Option<io::Error>);
+
+impl Read for Broken {
+    fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+        self.0.take().map_or(Ok(0), Err)
+    }
+}
+
+/// The answer that the upstream's response to `closed` gave, with its `status` and `request_id`
+/// and the usage and failure that it reported: `whole`, or cut short.
+fn told(
+    closed: &Closed<'_>,
+    whole: bool,
+    (status, request_id): (u16, Option<String>),
+    (usage, failed): (Option<Usage>, Option<Failure>),
+) -> Answer {
+    let (model, stream) = (closed.model().clone(), closed.stream());
+    if whole {
+        Answer::Forwarded {
+            model,
+            stream,
+            status,
+            request_id,
+            usage,
+            failed,
+        }
+    } else {
+        Answer::Cut {
+            model,
+            stream,
+            status,
+            request_id,
+            usage,
+            failed,
+        }
+    }
 }
 
 enum Relayed {

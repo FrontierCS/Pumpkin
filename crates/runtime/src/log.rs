@@ -143,13 +143,13 @@ impl<'h, H: Host> Log<'h, H> {
 
     /// Writes the `model_answered` event of a request: its `caller`, `request` number, the
     /// `upstream` and `api` of the entry that took it, if one did, `upstream_status`, null if no
-    /// response came, and `model`, `request_id`, `usage` and `failed` (with the `code` of its
-    /// failure, if it gave one), each if there is one. `answer` is named by its `kind`: `forwarded`
-    /// or `cut` short, for an upstream's response; `barred` before an upstream, by its `bar`
-    /// (`rules`, `ended` or `budget`), or `refused` in place of the upstream's response, each with
-    /// `status` and `message`, never a body; `abandoned`, given up on as the route ended, once
-    /// handed to the upstream, with its `model`. `first_byte_ns` is when a response began to
-    /// arrive, `first_token_ns` when its output did, and `kept` what the exchange left in `model/`.
+    /// response came, and `model`, `stream`, `request_id`, `usage` and `failed` (with the `code` of
+    /// its failure, if it gave one), each if there is one. `answer` is named by its `kind`:
+    /// `forwarded` or `cut` short, for an upstream's response; `barred` before an upstream, by its
+    /// `bar` (`rules`, `ended` or `budget`), or `refused` in place of the upstream's response, each
+    /// with `status` and `message`, never a body; `abandoned`, given up on as the route ended, once
+    /// handed to the upstream. `first_byte_ns` is when a response began to arrive,
+    /// `first_token_ns` when its output did, and `kept` what the exchange left in `model/`.
     #[expect(
         clippy::too_many_lines,
         reason = "one place for each field of the record"
@@ -167,15 +167,16 @@ impl<'h, H: Host> Log<'h, H> {
             ended,
         } = answered;
         let answer = &answer;
-        let (model, upstream_status, request_id, (usage, failed), answer) = match answer {
+        let (asked, upstream_status, request_id, (usage, failed), answer) = match answer {
             Answer::Forwarded {
                 model,
+                stream,
                 status,
                 request_id,
                 usage,
                 failed,
             } => (
-                Some(model),
+                Some((model, stream)),
                 Some(*status),
                 request_id,
                 (usage, failed),
@@ -183,12 +184,13 @@ impl<'h, H: Host> Log<'h, H> {
             ),
             Answer::Cut {
                 model,
+                stream,
                 status,
                 request_id,
                 usage,
                 failed,
             } => (
-                Some(model),
+                Some((model, stream)),
                 Some(*status),
                 request_id,
                 (usage, failed),
@@ -213,17 +215,26 @@ impl<'h, H: Host> Log<'h, H> {
                 (None, None, &None, (&None, &None), barred)
             }
             Answer::Refused {
+                model,
+                stream,
                 upstream_status,
                 request_id,
                 status,
                 message,
             } => {
                 let refused = json!({ "kind": "refused", "status": status, "message": message });
-                (None, *upstream_status, request_id, (&None, &None), refused)
+                let asked = Some((model, stream));
+                (asked, *upstream_status, request_id, (&None, &None), refused)
             }
-            Answer::Abandoned { model } => {
+            Answer::Abandoned { model, stream } => {
                 let abandoned = json!({ "kind": "abandoned" });
-                (Some(model), None, &None, (&None, &None), abandoned)
+                (
+                    Some((model, stream)),
+                    None,
+                    &None,
+                    (&None, &None),
+                    abandoned,
+                )
             }
         };
         let mut event = json!({
@@ -237,8 +248,9 @@ impl<'h, H: Host> Log<'h, H> {
             event["upstream"] = json!(upstream);
             event["api"] = json!(api);
         }
-        if let Some(model) = model {
+        if let Some((model, stream)) = asked {
             event["model"] = json!(model);
+            event["stream"] = json!(stream);
         }
         // Where no response came, the bytes kept are the route's refusal's.
         if upstream_status.is_some()

@@ -1719,7 +1719,9 @@ fn traces_a_caller() {
         rest(),
         Some(&answer(json!([said("a.txt is there")]))),
     );
-    log.push(answered(4, "agent-0", 1, 200, kept, Some("responses")));
+    let mut record = answered(4, "agent-0", 1, 200, kept, Some("responses"));
+    record["event"]["stream"] = json!(false);
+    log.push(record);
     // A thread of its own, failed, retried, then sent again.
     log.push(started(5, "agent-0", 2));
     let kept = model.keep(
@@ -1956,7 +1958,7 @@ fn traces_a_caller() {
             added=1 added_entries=2 answer="cut" answers=1 api="responses" back_bytes=121 cache_hit=0.125 cached=50 calls=[] end_ns="10000000000" first_byte_ns="9999999500" first_token_ns="9600000000" input=400 items=1 kept_bytes=289 model_ns=1000000001 output=10 repeat_of=3 request=4 sent_bytes=100 start_ns="8999999999" status=200 stop="completed" thread=2 tools=0 turn=2 upstream="zai" whole=true
             added=2 added_entries=1 answer="forwarded" answers=0 api="responses" back_bytes=0 cache_hit=0.1 cached=50 calls=[] differs=[] end_ns="12000000000" first_byte_ns="11999999500" first_token_ns="11600000000" input=500 items=5 kept_bytes=585 model_ns=1000000001 notes=["its response can't be read: `<scratch>/runs/<id>/model/5.response` is a symbolic link: expected a file of the record's own"] output=10 parent=1 request=5 sent_bytes=100 start_ns="10999999999" status=200 thread=0 tools=0 turn=5 upstream="zai" whole=false
             caller: "agent-0"
-            end: 6273
+            end: 6288
             live: false
             log_epoch: 0
             thread_spans: {"span_ns":[11000000001,5000000001],"thread":[0,2]}
@@ -2019,7 +2021,7 @@ fn traces_a_caller() {
             added=2 added_entries=1 answer="abandoned" answers=0 back_bytes=49 calls=[] differs=[] end_ns="17000000000" items=4 kept_bytes=391 model_ns=1000000001 parent=6 repeat_of=8 request=9 sent_bytes=100 start_ns="15999999999" thread=6 tools=0 turn=6 whole=true
             added_entries=1 answer="barred" answers=0 api="chat" back_bytes=53 calls=[] end_ns="18000000000" kept_bytes=71 notes=["the record kept its body whole, so its conversation is compared with no other"] request=10 sent_bytes=71 thread=10 turn=10 upstream="zai" whole=true
             caller: "job-0"
-            end: 6273
+            end: 6288
             live: false
             log_epoch: 0
             thread_spans: {"span_ns":[1000000001,null],"thread":[6,10]}
@@ -2062,7 +2064,7 @@ fn traces_a_caller() {
             answer: {"kind":"forwarded"}
             api: "responses"
             caller: "agent-0"
-            config: {"max_tokens":null,"model":"glm-5.3","reasoning_effort":null,"stop":[],"stream":false,"temperature":null,"tools":["exec"]}
+            config: {"max_tokens":null,"model":"model-a","reasoning_effort":null,"stop":[],"stream":false,"temperature":null,"tools":["exec"]}
             failed: null
             kept: {"request":{"body_bytes":100,"bytes":437,"items":{"count":3,"field":"input"},"path":"model/1.request","whole":["instructions","tools"]},"response":{"bytes":130,"path":"model/1.response"}}
             request: 1
@@ -2209,6 +2211,7 @@ fn traces_a_messages_exchange() {
     // counts the cache's reads and writes.
     record["event"]["usage"] = json!({ "input_tokens": 36838, "output_tokens": 83,
         "cached_tokens": 36544, "cache_write_tokens": 120 });
+    record["event"]["stream"] = json!(true);
     log.push(record);
     log.push(started(3, "agent-0", 1));
     let kept = model.keep(
@@ -2296,7 +2299,7 @@ fn traces_a_messages_exchange() {
             added=2 added_entries=1 answer="forwarded" answers=1 api="messages" back_bytes=295 cache_hit=0.25 cached=50 calls=[] differs=[] end_ns="6000000000" first_byte_ns="5999999500" first_token_ns="5600000000" input=200 items=6 kept_bytes=705 model_ns=1000000001 output=10 parent=1 request=2 sent_bytes=100 start_ns="4999999999" status=200 thread=0 tools=0 turn=2 upstream="zai" whole=true
             added=2 added_entries=2 answer="forwarded" answers=1 api="messages" back_bytes=295 cache_hit=0.16666666666666666 cached=50 calls=[] differs=["system"] end_ns="8000000000" first_byte_ns="7999999500" first_token_ns="7600000000" input=300 items=8 kept_bytes=853 model_ns=1000000001 output=10 parent=2 request=3 sent_bytes=100 start_ns="6999999999" status=200 thread=0 tools=0 turn=3 upstream="zai" whole=true
             caller: "agent-0"
-            end: 2877
+            end: 2891
             live: false
             log_epoch: 0
             thread_spans: {"span_ns":[7000000001],"thread":[0]}
@@ -2326,7 +2329,7 @@ fn traces_a_messages_exchange() {
             answer: {"kind":"forwarded"}
             api: "messages"
             caller: "agent-0"
-            config: {"max_tokens":32000,"model":"glm-5.3","reasoning_effort":null,"stop":[],"stream":true,"temperature":null,"tools":["Bash"]}
+            config: {"max_tokens":32000,"model":"model-a","reasoning_effort":null,"stop":[],"stream":true,"temperature":null,"tools":["Bash"]}
             failed: null
             kept: {"request":{"body_bytes":100,"bytes":335,"items":{"count":1,"field":"messages"},"path":"model/0.request","whole":["system","tools"]},"response":{"bytes":1376,"path":"model/0.response"}}
             request: 0
@@ -2340,6 +2343,65 @@ fn traces_a_messages_exchange() {
             diff of steps 2 and 3's system: {"a":2,"b":3,"hunks":[{"at":[0,0],"lines":[[" ","You are a Claude agent."],["-","Assist with the task."],["+","Assist with the task, briefly."]]}],"lines":[2,2],"part":"system","same":false}"##]],
     );
 }
+
+#[test]
+fn traces_a_gemini_exchange() {
+    let scratch = Scratch::new();
+    let id = "20261110-191000-00000015";
+    let dir = scratch.0.join("runs").join(id);
+    let mut model = Model::new(&dir);
+    let rest = json!({ "generationConfig": { "maxOutputTokens": 2000 } });
+    let asked = [json!({ "role": "user", "parts": [{ "text": "list the files" }] })];
+    let answer = json!({ "candidates": [{ "index": 0, "finishReason": "STOP",
+        "content": { "role": "model", "parts": [{ "text": "a.txt" }] } }] });
+    let kept = model.keep(
+        0,
+        "contents",
+        &asked,
+        &[],
+        rest.clone(),
+        Some(&answer.to_string()),
+    );
+    let mut record = answered(2, "agent-0", 0, 200, kept, Some("generate_content"));
+    record["event"]["stream"] = json!(true);
+    let mut log = vec![started(1, "agent-0", 0), record];
+    // Barred before it went upstream, which names no model.
+    let kept = model.keep(1, "contents", &asked, &[], rest, Some("{}"));
+    let mut barred = answered(3, "agent-0", 1, 0, kept, Some("generate_content"));
+    let event = barred["event"].as_object_mut().unwrap();
+    for field in ["usage", "model", "first_byte_ns", "first_token_ns"] {
+        event.remove(field);
+    }
+    let answer = json!({ "kind": "barred", "bar": "budget", "status": 400,
+        "message": "the model budget is exhausted" });
+    event.insert("answer".to_owned(), answer);
+    event.insert("upstream_status".to_owned(), Value::Null);
+    log.push(barred);
+    let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    write_run(
+        &scratch,
+        id,
+        since.checked_sub(Duration::from_secs(60)).unwrap(),
+        &log,
+        Some(json!({ "state": "failed", "reason": "stopped" })),
+        &lease_places(Prices::Both),
+    );
+    let served = Served::start(&scratch);
+    let said = (0..2).map(|n| {
+        let exchange = served.get(&format!("/api/runs/{id}/exchange/{n}"));
+        Step::Ran(format!("exchange {n}'s config: {}", exchange["config"]))
+    });
+    check(
+        &scratch,
+        said,
+        false,
+        &[(id, "<id>")],
+        &expect![[r#"
+            exchange 0's config: {"max_tokens":2000,"model":"model-a","reasoning_effort":null,"stop":[],"stream":true,"temperature":null,"tools":[]}
+            exchange 1's config: {"max_tokens":2000,"model":null,"reasoning_effort":null,"stop":[],"stream":null,"temperature":null,"tools":[]}"#]],
+    );
+}
+
 #[test]
 #[expect(
     clippy::too_many_lines,

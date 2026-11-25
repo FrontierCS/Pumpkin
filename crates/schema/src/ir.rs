@@ -433,6 +433,8 @@ pub enum Api {
     Chat,
     /// Anthropic's Messages API.
     Messages,
+    /// Google's Gemini API: its `generateContent` and `streamGenerateContent` methods.
+    GenerateContent,
 }
 
 impl fmt::Display for Api {
@@ -441,6 +443,7 @@ impl fmt::Display for Api {
             Self::Responses => "responses",
             Self::Chat => "chat",
             Self::Messages => "messages",
+            Self::GenerateContent => "generate_content",
         })
     }
 }

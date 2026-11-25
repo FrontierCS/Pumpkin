@@ -169,8 +169,8 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 Caller::Job(job) => format!("job {}'s", job.0),
             };
             let reason = format!(
-                "the upstream `{name}` refused its key, with a 401, which ended {route} \
-                                  model route: give it a key that it takes, and run again"
+                "the upstream `{name}` refused its key, which ended {route} model route: give \
+                 it a key that it takes, and run again"
             );
             let owner = self.owner(caller);
             if let Ok(outcome) = outcome
