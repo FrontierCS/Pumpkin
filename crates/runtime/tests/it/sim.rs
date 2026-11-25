@@ -161,8 +161,8 @@ pub(crate) struct Sim {
     // How long each step of a create takes, if any time.
     step: Option<Duration>,
     listens: bool,
-    // The sandbox, by its name in its run, whose session ends once it is set up.
-    brief: Option<&'static str>,
+    // The sandbox, by its name in its run, and its container, whose session ends once it is set up.
+    brief: Option<(&'static str, &'static str)>,
     // The turns in which the containers of a sandbox that holds companions meet the gateway.
     turns: Option<&'static [(&'static str, u64)]>,
     // The companion that serves a certificate which the gateway didn't issue.
@@ -277,7 +277,9 @@ impl Sandbox {
     }
 
     fn ended(&self) -> bool {
-        self.thread.is_finished() && !status(&self.shared).stalled
+        let status = status(&self.shared);
+        let gone = status.ends.as_ref().is_some_and(|turns| turns.gone());
+        gone || (self.thread.is_finished() && !status.stalled)
     }
 }
 
@@ -311,6 +313,8 @@ struct Status {
     set_ups: Option<Arc<SetUps>>,
     // Its turn to meet the gateway, which its first request ends.
     turn: Option<Turn>,
+    // Its sandbox's turns, one of which may end the sandbox, as its provider lists it.
+    ends: Option<Arc<Turns>>,
 }
 
 /// What a sandbox's freeze meets.
@@ -512,11 +516,11 @@ impl Sim {
     }
 
     #[must_use]
-    /// Makes the session of the sandbox named `name` in its run end once its set-up is answered,
-    /// as a crash then would.
-    pub(crate) fn ending_once_set_up(self, name: &'static str) -> Self {
+    /// Makes the session of `container` of the sandbox named `sandbox` in its run end once its
+    /// set-up is answered, as a crash then would.
+    pub(crate) fn ending_once_set_up(self, sandbox: &'static str, container: &'static str) -> Self {
         Self {
-            brief: Some(name),
+            brief: Some((sandbox, container)),
             ..self
         }
     }
@@ -963,14 +967,13 @@ impl Sim {
         let (mute, hung) = dialing.silent();
         let hello = json!({ "version": PROTOCOL_VERSION });
         let mode = meets.mode();
-        let fresh = self.fresh(!beside.is_empty());
+        let fresh = self.fresh(create.name.as_str(), !beside.is_empty());
         let (given, companions) = self.accompanied(beside, &hello, &fresh)?;
         let shared = fresh("main");
         // Before its thread starts, so that the console shows it once the create returns, however
         // late the thread runs.
         (status(&shared).console).push_str(if mute { NEVER_DIALS } else { "" });
         status(&shared).freezing = freezing;
-        status(&shared).brief = self.brief == Some(create.name.as_str());
         status(&shared).set_ups.clone_from(&self.set_ups);
         let (ours, model) = (Arc::clone(&shared), create.model);
         let thread = thread::Builder::new()
@@ -1013,9 +1016,10 @@ impl Sim {
         Ok(SandboxId::from(id))
     }
 
-    // What makes the status that each container of a new sandbox shares with its thread, by the
-    // container's name. Only a sandbox that holds companions, an `accompanied` one, meets in turns.
-    fn fresh(&self, accompanied: bool) -> impl Fn(&str) -> Arc<Mutex<Status>> {
+    // What makes the status that each container of the new sandbox `name` shares with its thread,
+    // by the container's name. Only a sandbox that holds companions, an `accompanied` one, meets
+    // in turns.
+    fn fresh(&self, name: &str, accompanied: bool) -> impl Fn(&str) -> Arc<Mutex<Status>> {
         let state = self.state();
         let (record, time) = (state.record.clone(), state.time.clone());
         drop(state);
@@ -1023,9 +1027,12 @@ impl Sim {
             self.journal.clone(),
             turns_of(self.turns.filter(|_| accompanied)),
         );
+        let brief = (self.brief).and_then(|(sandbox, brief)| (sandbox == name).then_some(brief));
         move |container| {
             let mut status = Status::new(journal.clone(), record.clone(), time.clone());
             status.turn = turn(container);
+            status.ends = status.turn.as_ref().map(|turn| Arc::clone(&turn.turns));
+            status.brief = brief == Some(container);
             Arc::new(Mutex::new(status))
         }
     }
@@ -1417,6 +1424,10 @@ enum Secured {
     Impostor(tls::Server),
 }
 
+/// The turn at which a sandbox's provider lists it as ended, though its sessions go on. No
+/// container takes it, so it is the last.
+pub(crate) const ENDS: &str = "the sandbox ends";
+
 // The turns in which a sandbox's containers meet the gateway (`Sim::meeting_in_turn`).
 struct Turns {
     // Each turn's container, and the seconds that the clock reads as it says its hello.
@@ -1470,9 +1481,30 @@ impl Turn {
         true
     }
 
-    // Ends the turn, so that the next one comes.
-    fn end(&self) {
-        *stdx::unpoisoned(self.turns.ended_count.lock()) += 1;
+    // Ends the turn, so that the next one comes. If that is `ENDS`, it moves `time` to its
+    // seconds, once the sandbox is listed as ended.
+    fn end(&self, time: Option<&SimTime>) {
+        let mut ended_count = stdx::unpoisoned(self.turns.ended_count.lock());
+        *ended_count += 1;
+        if let (Some(time), Some((ENDS, seconds))) = (time, self.turns.turns.get(*ended_count)) {
+            time.reach(Duration::from_secs(*seconds));
+        }
+    }
+}
+
+// Ends the turn of the container whose status is `shared`, if it still has one.
+fn end_turn(shared: &Mutex<Status>) {
+    let mut status = status(shared);
+    if let Some(turn) = status.turn.take() {
+        turn.end(status.time.as_ref());
+    }
+}
+
+impl Turns {
+    // Whether the turn `ENDS` has come.
+    fn gone(&self) -> bool {
+        let ended_count = *stdx::unpoisoned(self.ended_count.lock());
+        (self.turns.get(ended_count)).is_some_and(|(turn, _)| *turn == ENDS)
     }
 }
 
@@ -1559,7 +1591,7 @@ fn listen(
                 if came() {
                     // The gateway refuses the certificate, which fails the handshake.
                     drop(server.accept(taken, handshake));
-                    turn.iter().for_each(Turn::end);
+                    end_turn(shared);
                 }
                 return;
             }
@@ -2619,9 +2651,7 @@ fn serve(mut connection: Wire, model: bool, shared: &Mutex<Status>) {
     // A connection that ends, cleanly or not, ends the session, as a delete's does.
     while let Ok(Some((request, body))) = frame::read::<ToSandbox>(&mut connection) {
         // Its first request, which the gateway sends once it has noted when the container met.
-        if let Some(turn) = status(shared).turn.take() {
-            turn.end();
-        }
+        end_turn(shared);
         if stalled(shared) {
             // It reads nothing more, as a stuck `sandboxd`, and answers nothing; the connection
             // stays open, by the clone its status keeps until a delete shuts it down, so the

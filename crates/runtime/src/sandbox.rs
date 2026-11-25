@@ -866,8 +866,8 @@ impl<'c, C: Clock> Looks<'c, C> {
         self.ended.get()
     }
 
-    fn found(self) -> (bool, Option<String>) {
-        (self.ended.get(), self.failed.into_inner())
+    fn found(&self) -> (bool, Option<String>) {
+        (self.ended.get(), self.failed.take())
     }
 }
 

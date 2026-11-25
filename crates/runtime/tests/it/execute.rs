@@ -4594,7 +4594,7 @@ fn fails_as_its_session_ended_before_it_was_ready() {
     let shown = executed(
         &SimHost::new().awaiting(Duration::ZERO),
         "fails-as-its-session-ended-before-it-was-ready",
-        &[(PROVIDER, &Sim::new().ending_once_set_up("lease-0"))],
+        &[(PROVIDER, &Sim::new().ending_once_set_up("lease-0", "main"))],
         &lease_workflow(&argv, 30, RUNNER),
         SANDBOXD,
         &[],
@@ -4862,6 +4862,66 @@ fn main_that_ended_stops_its_companions() {
         {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":8,"cumulative_seconds":null,"instance_seconds":600,"instances":1}}},{"grant":"gpu","holder":"agent-0","instance":0,"kind":"start_lease","lease":0,"start_by_ns":"30000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"gpu","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"0","seq":3}
         {"actions":[],"at_ns":"1000000000","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"lease-0"},"seq":4}
         {"actions":[],"at_ns":"1000000000","event":{"kind":"lease_failed","lease":0,"reason":"the runner's sandbox didn't start: sandbox sim-2: its container `main`: it ended before it met the gateway: expected its `sandboxd` to run until it connects; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"1000000000","seq":5}"#]].assert_eq(&leased(&shown));
+}
+
+// What ends while a companion still waits to meet fails the start at once, and ends that wait.
+// The clock stays short of the start's deadline. `swe-0` never says hello.
+fn ends_as_a_companion_waits(name: &str, sim: &Sim) -> String {
+    let argv = [
+        "ops",
+        "gpu.open",
+        "await_lease gpu 0 failed",
+        "call submit 6 finalize=true",
+    ];
+    let ir = companions_workflow(&argv);
+    let (host, met) = (SimHost::new(), &[Also::Met("lease-0")]);
+    leased(&executed(
+        &host,
+        name,
+        &[(PROVIDER, sim)],
+        &ir,
+        SANDBOXD,
+        met,
+    ))
+}
+
+// The provider lists the sandbox as ended once `scheduler` and `main` have met.
+#[test]
+fn fails_as_its_sandbox_ends_while_a_companion_waits() {
+    let turns = &[("scheduler", 0), ("main", 0), (sim::ENDS, 1)];
+    let sim = accompanied().meeting_in_turn(turns);
+    let shown = ends_as_a_companion_waits("sandbox-ends-as-a-companion-waits", &sim);
+    expect![[r#"
+        the meetings of lease-0's containers:
+          {"container":"main","kind":"container_met","sandbox":"lease-0"}, observed at 0ns
+          {"container":"scheduler","kind":"container_met","sandbox":"lease-0"}, observed at 0ns
+        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":8,"cumulative_seconds":null,"instance_seconds":600,"instances":1}}},{"grant":"gpu","holder":"agent-0","instance":0,"kind":"start_lease","lease":0,"start_by_ns":"30000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"gpu","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"0","seq":3}
+        {"actions":[],"at_ns":"1000000000","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"lease-0"},"seq":4}
+        {"actions":[],"at_ns":"1000000000","event":{"kind":"lease_failed","lease":0,"reason":"the runner's sandbox didn't start: sandbox sim-2: it ended before its companions met the gateway: expected it to run until each of them connects"},"observed_ns":"1000000000","seq":5}"#]].assert_eq(&shown);
+}
+
+// The session of a container that has met ends: `main`'s, then a companion's.
+#[test]
+fn fails_as_a_met_session_ends_while_a_companion_waits() {
+    let ended = |container| {
+        let sim = accompanied()
+            .meeting_in_turn(&[("scheduler", 0), ("main", 0)])
+            .ending_once_set_up("lease-0", container);
+        ends_as_a_companion_waits("met-session-ends-as-a-companion-waits", &sim)
+    };
+    expect![[r#"
+        the meetings of lease-0's containers:
+          {"container":"main","kind":"container_met","sandbox":"lease-0"}, observed at 0ns
+          {"container":"scheduler","kind":"container_met","sandbox":"lease-0"}, observed at 0ns
+        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":8,"cumulative_seconds":null,"instance_seconds":600,"instances":1}}},{"grant":"gpu","holder":"agent-0","instance":0,"kind":"start_lease","lease":0,"start_by_ns":"30000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"gpu","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"0","seq":3}
+        {"actions":[],"at_ns":"0","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"lease-0"},"seq":4}
+        {"actions":[],"at_ns":"0","event":{"kind":"lease_failed","lease":0,"reason":"the runner's sandbox didn't start: sandbox sim-2: its container `main`: its session ended: the sandbox ended the session"},"observed_ns":"0","seq":5}
+        the meetings of lease-0's containers:
+          {"container":"main","kind":"container_met","sandbox":"lease-0"}, observed at 0ns
+          {"container":"scheduler","kind":"container_met","sandbox":"lease-0"}, observed at 0ns
+        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":8,"cumulative_seconds":null,"instance_seconds":600,"instances":1}}},{"grant":"gpu","holder":"agent-0","instance":0,"kind":"start_lease","lease":0,"start_by_ns":"30000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"gpu","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"0","seq":3}
+        {"actions":[],"at_ns":"0","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"lease-0"},"seq":4}
+        {"actions":[],"at_ns":"0","event":{"kind":"lease_failed","lease":0,"reason":"the runner's sandbox didn't start: sandbox sim-2: its container `scheduler`: its session ended: the sandbox ended the session"},"observed_ns":"0","seq":5}"#]].assert_eq(&format!("{}\n{}", ended("main"), ended("scheduler")));
 }
 
 // A create that was given companions and names no relay leaves a sandbox that can't be met, which

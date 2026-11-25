@@ -240,6 +240,13 @@ struct Failure {
     first: bool,
 }
 
+/// The meeting of a companion: its thread, or how it went, once the thread has ended.
+type Meeting<'scope, C> = Result<thread::ScopedJoinHandle<'scope, Opened<C>>, Opened<C>>;
+
+// How long a start sleeps between its looks at a sandbox whose companions still wait, as the
+// gateway's accept sleeps between its own.
+const WATCH: Duration = Duration::from_millis(10);
+
 /// What a container's session opens with. That is the limit on an op's payload, if it takes ops,
 /// whether it takes model requests, and where its arrivals go, as what.
 type Opens<T, W> = (Option<OpPayloadLimit>, bool, Sender<T>, W);
@@ -253,6 +260,7 @@ impl<H: Host> Sandboxes<'_, H> {
     /// The containers meet at once, each companion on a thread that has ended when this returns.
     /// The first failure stops the others' waits, and is the one returned, by its container's
     /// name where the sandbox holds companions. Then every session that opened has been dropped.
+    /// The sandbox's end, and that of a session that opened, are such failures until all have met.
     pub(super) fn meet<T: Send + 'static>(
         &self,
         (which, id, provider): (Which, &SandboxId, &dyn Provider),
@@ -271,7 +279,7 @@ impl<H: Host> Sandboxes<'_, H> {
         let stop = &AtomicBool::new(false);
         // One thread for each companion, so at most as many as the runner's class holds
         // (`Companions::Reserved::most`), which placing checked.
-        let (main, companions) = thread::scope(|scope| {
+        let (main, companions, ended) = thread::scope(|scope| {
             let meeting: Vec<_> = (companions.into_iter())
                 .map(|(name, registration)| {
                     let container = Container::Companion(name.clone());
@@ -292,24 +300,23 @@ impl<H: Host> Sandboxes<'_, H> {
                 })
                 .collect();
             let opens = (ops, model, arrivals, of(wrap, Container::Main));
-            let sandbox = (&sandbox, id, provider, alone);
-            let main = self.meet_main(sandbox, main, (clock, by), opens, stop);
-            let companions: Vec<_> = (meeting.into_iter())
-                .map(|(name, spawned)| {
-                    let joined = |thread: thread::ScopedJoinHandle<'_, _>| {
-                        let opened = thread.join();
-                        opened.unwrap_or_else(|panic| panic::resume_unwind(panic))
-                    };
-                    (name, spawned.map_or_else(|unmet| unmet, joined))
-                })
-                .collect();
-            (main, companions)
+            let (looks, sandbox) = (Looks::new(clock), (&sandbox, id, provider, alone));
+            let main = self.meet_main(sandbox, main, (clock, by), opens, (&looks, stop));
+            self.watch((&looks, provider, id), main, meeting, stop)
         });
         if !alone {
             let companions = (companions.iter())
                 .map(|(name, opened)| (Container::Companion(name.clone()), opened.met));
             let met = iter::once((Container::Main, main.met)).chain(companions);
             self.send(met_entries(&sandbox, met.collect()));
+        }
+        // The sandbox's own end fails the start, unless a container's failure came first.
+        if let Some(Failure {
+            reason,
+            first: true,
+        }) = ended
+        {
+            return Err(reason);
         }
         let sessions = gathered(main, companions).map_err(|(container, failure)| {
             if alone {
@@ -333,9 +340,8 @@ impl<H: Host> Sandboxes<'_, H> {
         registration: gateway::Registration,
         (clock, by): (&H::Clock, Duration),
         opens: Opens<T, impl Fn(Arrival) -> T + Send + 'static>,
-        stop: &AtomicBool,
+        (looks, stop): (&Looks<'_, H::Clock>, &AtomicBool),
     ) -> Opened<H::Clock> {
-        let looks = Looks::new(clock);
         // The wait ends at once for a signal and for a companion's failure. It ends too for a
         // sandbox that its provider lists as ended, which will never connect.
         let ended =
@@ -357,6 +363,69 @@ impl<H: Host> Sandboxes<'_, H> {
         });
         set_up(accepted, by, stop)
     }
+
+    /// Waits for each of `meeting`, the meetings of a sandbox's companions, to end, and returns
+    /// how each went, after `main`'s. While one still waits, it watches sandbox `id` of `provider`
+    /// and each session that opened. A session that ended fails its container's meeting. A
+    /// sandbox that its provider lists as ended fails the start, as the failure returned last.
+    /// Either sets `stop`.
+    fn watch<'scope>(
+        &self,
+        (looks, provider, id): (&Looks<'_, H::Clock>, &dyn Provider, &SandboxId),
+        mut main: Opened<H::Clock>,
+        mut meeting: Vec<(CompanionName, Meeting<'scope, H::Clock>)>,
+        stop: &AtomicBool,
+    ) -> (Opened<H::Clock>, Companions<H::Clock>, Option<Failure>) {
+        let mut ended = None;
+        loop {
+            let settled = meeting.into_iter().map(|(name, meeting)| match meeting {
+                Ok(thread) if thread.is_finished() => (name, Err(joined(thread))),
+                meeting => (name, meeting),
+            });
+            meeting = settled.collect();
+            // A failure, or a signal, ends each wait by itself.
+            if meeting.iter().all(|(_, meeting)| meeting.is_err()) || stopped(stop) {
+                break;
+            }
+            if looks.ended(self.between_looks, || self.ended(provider, id)) {
+                let reason = "it ended before its companions met the gateway: expected it to \
+                              run until each of them connects";
+                ended = Some(failed(reason.to_owned(), stop));
+                break;
+            }
+            let opened = meeting
+                .iter_mut()
+                .filter_map(|(_, meeting)| meeting.as_mut().err());
+            for opened in iter::once(&mut main).chain(opened) {
+                let ended = opened.session.as_ref().ok().and_then(Session::ended);
+                if let Some(reason) = ended.map(|reason| format!("its session ended: {reason}")) {
+                    opened.session = Err(failed(reason, stop));
+                }
+            }
+            thread::sleep(WATCH);
+        }
+        // A thread that still runs ends once its wait has read `stop`, or its set-up is answered.
+        let joined = |meeting: Meeting<'scope, _>| meeting.map_or_else(|opened| opened, joined);
+        let companions = meeting
+            .into_iter()
+            .map(|(name, meeting)| (name, joined(meeting)));
+        (main, companions.collect(), ended)
+    }
+}
+
+/// How the meetings of a sandbox's companions went, in the order declared.
+type Companions<C> = Vec<(CompanionName, Opened<C>)>;
+
+/// How the meeting that `thread` ran went, once the thread has ended.
+fn joined<C>(thread: thread::ScopedJoinHandle<'_, Opened<C>>) -> Opened<C> {
+    let opened = thread.join();
+    opened.unwrap_or_else(|panic| panic::resume_unwind(panic))
+}
+
+/// A failure for `reason`, which sets `stop`, and is the first if nothing had set it.
+fn failed(reason: String, stop: &AtomicBool) -> Failure {
+    let first = !stop.swap(true, Ordering::Relaxed);
+    Failure { reason, first }
 }
 
 /// Whether a container's wait to meet the gateway ends now. It ends for a signal, and once the
@@ -378,7 +447,7 @@ fn of<T>(
 /// every session that opened is dropped, which ends it.
 fn gathered<C>(
     main: Opened<C>,
-    companions: Vec<(CompanionName, Opened<C>)>,
+    companions: Companions<C>,
 ) -> Result<Sessions<C>, (Container, Failure)> {
     let mut sessions = (main.session)
         .map(|main| Sessions {
@@ -429,10 +498,7 @@ fn set_up<C: Clock>(
 ) -> Opened<C> {
     let met = accepted.as_ref().ok().map(|(_, at)| *at);
     let session = accepted.and_then(|(mut session, _)| session.set_up(by).map(|()| session));
-    let session = session.map_err(|reason| Failure {
-        reason,
-        first: !stop.swap(true, Ordering::Relaxed),
-    });
+    let session = session.map_err(|reason| failed(reason, stop));
     Opened { met, session }
 }
 
