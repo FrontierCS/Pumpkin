@@ -110,16 +110,14 @@ impl WithCompanions<'_> {
                 name,
                 image: _,
                 user,
-                cwd,
-                env,
+                cwd: _,
+                env: _,
             } = *companion;
             let (relayed, unreached) = dialer.relayed(name).map_err(issued)?;
             dials.push(CompanionDial {
                 name: name.clone(),
                 image: image.clone(),
                 user: *user,
-                cwd: cwd.clone(),
-                env: env.clone(),
                 relayed,
             });
             unrelayed.push((name.clone(), unreached));

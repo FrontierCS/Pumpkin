@@ -5,7 +5,7 @@ use std::fmt;
 use std::num::NonZeroU32;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use schema::ir::{AbsolutePath, CompanionName, Env, Name, Resources, User};
+use schema::ir::{CompanionName, Name, Resources, User};
 use schema::sandbox::{Endpoint, Listening, Relayed};
 use schema::workflow::Class;
 use serde::Serialize;
@@ -190,15 +190,15 @@ pub struct ListenDials {
 }
 
 /// A companion of a runner's sandbox that listens, as the runner declares it
-/// ([`ir::Companion`](schema::ir::Companion)). Its image is as the provider published it, and
-/// `relayed` is what its `sandboxd` is given.
+/// ([`ir::Companion`](schema::ir::Companion)) but for its `cwd` and `env`.
+///
+/// Each command there is given those as it starts. Its image is as the provider published it,
+/// and `relayed` is what its `sandboxd` is given.
 #[derive(Debug)]
 pub struct CompanionDial {
     pub name: CompanionName,
     pub image: ImageRef,
     pub user: User,
-    pub cwd: AbsolutePath,
-    pub env: Env,
     pub relayed: Relayed,
 }
 

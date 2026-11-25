@@ -4695,8 +4695,8 @@ fn meets_every_container_at_once() {
         .filter(|line| line.contains("_met\"") || line.contains("meetings"));
     let held = sim.companions().into_iter();
     expect![[r#"
-        sim-2 holds `scheduler`, of image sha256:5555555555555555555555555555555555555555555555555555555555555555, as 2001:2001, in /srv, with ["ROLE=scheduler"]
-        sim-2 holds `swe-0`, of image sha256:6666666666666666666666666666666666666666666666666666666666666666, as 2002:2002, in /testbed, with ["INSTANCE=0"]
+        sim-2 holds `scheduler`, of image sha256:5555555555555555555555555555555555555555555555555555555555555555, as 2001:2001
+        sim-2 holds `swe-0`, of image sha256:6666666666666666666666666666666666666666666666666666666666666666, as 2002:2002
         the meetings of lease-0's containers:
           {"container":"swe-0","kind":"container_met","sandbox":"lease-0"}, observed at 1s
           {"container":"main","kind":"container_met","sandbox":"lease-0"}, observed at 2s

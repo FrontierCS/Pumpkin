@@ -1069,8 +1069,6 @@ impl Sim {
             name,
             image,
             user,
-            cwd,
-            env,
             relayed: Relayed { grant, identity },
         } = dial;
         let image = self.own("a companion's image", image.as_str())?;
@@ -1079,8 +1077,8 @@ impl Sim {
                 "`{image}` wasn't published as a companion's image: publish it as one"
             ));
         };
-        let (who, env) = (format!("{}:{}", user.uid, user.gid), json!(env));
-        let given = format!("`{name}`, of image {image}, as {who}, in {cwd}, with {env}");
+        let who = format!("{}:{}", user.uid, user.gid);
+        let given = format!("`{name}`, of image {image}, as {who}");
         let server = if self.impostor == Some(name.as_str()) {
             Secured::Impostor(edge::other_server())
         } else {
