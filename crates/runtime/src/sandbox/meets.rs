@@ -5,6 +5,7 @@
 //! ([`Sandboxes::meet`]). `main` meets on the thread that starts the sandbox. Each companion meets
 //! on a thread of its own, which ends before the start returns.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
@@ -19,6 +20,7 @@ use provider::{
 use schema::ir::{Companion, CompanionName, Container, Image, Name};
 use schema::sandbox::{OpPayloadLimit, PrivateDial, SocketDial};
 use schema::workflow::{ByProvider, Placed, RunnerId};
+use stdx::time::Clock as _;
 use stdx::{Context, Deadline};
 
 use super::{Hosting, Looks, Sandboxes, Which};
@@ -268,9 +270,9 @@ impl<H: Host> Sandboxes<'_, H> {
     ) -> Result<Sessions<H::Clock>, String> {
         let Registrations { main, companions } = registrations;
         let (sandbox, alone) = (which.name(), companions.is_empty());
-        // Shared by the containers' threads. The first whose meeting fails sets it. Each one's
-        // wait for its container reads it, and ends once it is set. So the first failure ends the
-        // rest and is the one returned, as the first error of an errgroup's goroutines is:
+        // Shared by the containers' threads. Each failure sets it. Each wait for a container reads
+        // it, and ends once it is set. So the first failure ends the rest, and `gathered` returns
+        // it, as errgroup returns the first error of its goroutines:
         // https://github.com/golang/sync/blob/7fc1605a5dde7535a0fc1770ca44238629ff29ac/errgroup/errgroup.go#L64-L83
         let stop = &AtomicBool::new(false);
         // One thread for each companion, so at most as many as the runner's class holds
@@ -281,16 +283,20 @@ impl<H: Host> Sandboxes<'_, H> {
                     let container = Container::Companion(name.clone());
                     // A companion's session is passive, and serves no model.
                     let opens = (None, false, arrivals.clone(), of(wrap.clone(), container));
-                    let clock = clock.clone();
-                    let meet = move || {
-                        let stopped = || stopped(stop);
-                        let accepted = accepted(registration, (&clock, by), opens, stopped);
-                        set_up(accepted.map_err(|error| error.to_string()), by, stop)
+                    let meet = {
+                        let clock = clock.clone();
+                        move || {
+                            let accepted =
+                                accepted(registration, (&clock, by), opens, (stop, || false));
+                            let accepted =
+                                accepted.map_err(|(error, stopped)| (error.to_string(), stopped));
+                            set_up(accepted, (&clock, by), stop)
+                        }
                     };
                     let thread = thread::Builder::new().name(format!("{sandbox}-{name}"));
                     let spawned = thread.spawn_scoped(scope, meet).map_err(|error| {
                         let unmet = format!("the thread that meets it didn't start: {error}");
-                        set_up(Err(unmet), by, stop)
+                        set_up(Err((unmet, false)), (clock, by), stop)
                     });
                     (name, spawned)
                 })
@@ -298,7 +304,7 @@ impl<H: Host> Sandboxes<'_, H> {
             let opens = (ops, model, arrivals, of(wrap, Container::Main));
             let (looks, sandbox) = (Looks::new(clock), (&sandbox, id, provider, alone));
             let main = self.meet_main(sandbox, main, (clock, by), opens, (&looks, stop));
-            self.watch((&looks, provider, id), main, meeting, stop)
+            self.watch((&looks, provider, id), main, meeting, (clock, stop))
         });
         if !alone {
             let companions = (companions.iter())
@@ -306,21 +312,11 @@ impl<H: Host> Sandboxes<'_, H> {
             let met = iter::once((Container::Main, main.met)).chain(companions);
             self.send(met_entries(&sandbox, met.collect()));
         }
-        // The sandbox's own end fails the start, unless a container's failure came first.
-        if let Some(Failure {
-            reason,
-            first: true,
-        }) = ended
-        {
-            return Err(reason);
-        }
-        let sessions = gathered(main, companions).map_err(|(container, failure)| {
-            if alone {
-                failure.reason
-            } else {
-                format!("its container `{container}`: {}", failure.reason)
-            }
-        })?;
+        let companions = (companions.into_iter())
+            .map(|(name, opened)| (name, opened.session))
+            .collect();
+        let (main, companions) = gathered(main.session, companions, ended)?;
+        let sessions = Sessions { main, companions };
         match sessions.main.gpus() {
             Some(gpus) => self.saw(which, id, gpus).map(|()| sessions),
             None => Ok(sessions),
@@ -338,26 +334,28 @@ impl<H: Host> Sandboxes<'_, H> {
         opens: Opens<T, impl Fn(Arrival) -> T + Send + 'static>,
         (looks, stop): (&Looks<'_, H::Clock>, &AtomicBool),
     ) -> Opened<H::Clock> {
-        // The wait ends at once for a signal and for a companion's failure. It ends too for a
-        // sandbox that its provider lists as ended, which will never connect.
-        let ended =
-            || stopped(stop) || looks.ended(self.between_looks, || self.ended(provider, id));
-        let accepted = accepted(registration, (clock, by), opens, ended);
+        // The wait ends also for a sandbox that its provider lists as ended, which will never
+        // connect.
+        let ended = || looks.ended(self.between_looks, || self.ended(provider, id));
+        let accepted = accepted(registration, (clock, by), opens, (stop, ended));
         // A sandbox that holds `main` alone has met once `main` has.
         if alone && let Ok((_, at)) = &accepted {
             let (sandbox, at) = (sandbox.clone(), *at);
             self.send([log::Entry::Met { sandbox, at }]);
         }
-        let accepted = accepted.map_err(|error| match looks.found() {
-            (true, _) => "it ended before it met the gateway: expected its `sandboxd` to run \
-                          until it connects"
-                .to_owned(),
-            (false, Some(failed)) if error.kind() == io::ErrorKind::TimedOut => {
-                format!("{error}; the last list of its provider failed: {failed}")
-            }
-            (false, _) => error.to_string(),
+        let accepted = accepted.map_err(|(error, stopped)| {
+            let reason = match looks.found() {
+                (true, _) => "it ended before it met the gateway: expected its `sandboxd` to run \
+                              until it connects"
+                    .to_owned(),
+                (false, Some(failed)) if error.kind() == io::ErrorKind::TimedOut => {
+                    format!("{error}; the last list of its provider failed: {failed}")
+                }
+                (false, _) => error.to_string(),
+            };
+            (reason, stopped)
         });
-        set_up(accepted, by, stop)
+        set_up(accepted, (clock, by), stop)
     }
 
     /// Waits for each of `meeting`, the meetings of a sandbox's companions, to end, and returns
@@ -370,7 +368,7 @@ impl<H: Host> Sandboxes<'_, H> {
         (looks, provider, id): (&Looks<'_, H::Clock>, &dyn Provider, &SandboxId),
         mut main: Opened<H::Clock>,
         mut meeting: Vec<(CompanionName, Meeting<'scope, H::Clock>)>,
-        stop: &AtomicBool,
+        (clock, stop): (&H::Clock, &AtomicBool),
     ) -> (Opened<H::Clock>, Companions<H::Clock>, Option<Failure>) {
         let mut ended = None;
         loop {
@@ -386,7 +384,7 @@ impl<H: Host> Sandboxes<'_, H> {
             if looks.ended(self.between_looks, || self.ended(provider, id)) {
                 let reason = "it ended before its companions met the gateway: expected it to \
                               run until each of them connects";
-                ended = Some(failed(reason.to_owned(), stop));
+                ended = Some(failed((reason.to_owned(), false), clock.now(), stop));
                 break;
             }
             let opened = meeting
@@ -395,7 +393,7 @@ impl<H: Host> Sandboxes<'_, H> {
             for opened in iter::once(&mut main).chain(opened) {
                 let ended = opened.session.as_ref().ok().and_then(Session::ended);
                 if let Some(reason) = ended.map(|reason| format!("its session ended: {reason}")) {
-                    opened.session = Err(failed(reason, stop));
+                    opened.session = Err(failed((reason, false), clock.now(), stop));
                 }
             }
             thread::sleep(WATCH);
@@ -418,10 +416,15 @@ fn joined<C>(thread: thread::ScopedJoinHandle<'_, Opened<C>>) -> Opened<C> {
     opened.unwrap_or_else(|panic| panic::resume_unwind(panic))
 }
 
-/// A failure for `reason`, which sets `stop`, and is the first if nothing had set it.
-fn failed(reason: String, stop: &AtomicBool) -> Failure {
-    let first = !stop.swap(true, Ordering::Relaxed);
-    Failure { reason, first }
+/// A failure for `reason` at `at`, which sets `stop`. `stopped` says whether a stop ended the wait
+/// that failed.
+fn failed((reason, stopped): (String, bool), at: Duration, stop: &AtomicBool) -> Failure {
+    stop.store(true, Ordering::Relaxed);
+    Failure {
+        reason,
+        at,
+        stopped,
+    }
 }
 
 /// Whether a container's wait to meet the gateway ends now. It ends for a signal, and once the
@@ -440,7 +443,8 @@ fn of<T>(
 
 /// Waits for a container to meet the gateway at `registration` by `by`, a time on `clock`, and
 /// returns its session with when it met. The session takes ops and model requests as `opens`
-/// says, and hands its arrivals over through `opens`' sender and wrap.
+/// says, and hands its arrivals over through `opens`' sender and wrap. The wait ends as
+/// [`stopped`] says, and once `ended` says so. Its error comes with whether `stopped` ended it.
 fn accepted<C: Clock, T: Send + 'static>(
     registration: gateway::Registration,
     (clock, by): (&C, Duration),
@@ -450,22 +454,35 @@ fn accepted<C: Clock, T: Send + 'static>(
         Sender<T>,
         impl Fn(Arrival) -> T + Send + 'static,
     ),
-    stopped: impl Fn() -> bool,
-) -> io::Result<(Session<C>, Duration)> {
-    let session = registration.accept((clock, by), ops, model, arrivals, wrap, stopped)?;
+    (stop, ended): (&AtomicBool, impl Fn() -> bool),
+) -> Result<(Session<C>, Duration), (io::Error, bool)> {
+    // The accept fails as soon as `ends` says yes, so `told` says whether a stop ended it.
+    let told = Cell::new(false);
+    let ends = || {
+        if stopped(stop) {
+            told.set(true);
+            return true;
+        }
+        ended()
+    };
+    let session = registration.accept((clock, by), ops, model, arrivals, wrap, ends);
+    let session = session.map_err(|error| (error, told.get()))?;
     Ok((session, clock.now()))
 }
 
-/// Sets up, by `by`, the session of a container that was accepted at a time, or keeps why it
-/// wasn't. A failure sets `stop`, and is the first if nothing had set it.
+/// Sets up, by `by`, a time on `clock`, the session of a container that was accepted at a time,
+/// or keeps why it wasn't. A failure sets `stop`.
 fn set_up<C: Clock>(
-    accepted: Result<(Session<C>, Duration), String>,
-    by: Duration,
+    accepted: Result<(Session<C>, Duration), (String, bool)>,
+    (clock, by): (&C, Duration),
     stop: &AtomicBool,
 ) -> Opened<C> {
     let met = accepted.as_ref().ok().map(|(_, at)| *at);
-    let session = accepted.and_then(|(mut session, _)| session.set_up(by).map(|()| session));
-    let session = session.map_err(|reason| failed(reason, stop));
+    let session = accepted.and_then(|(mut session, _)| match session.set_up(by) {
+        Ok(()) => Ok(session),
+        Err(reason) => Err((reason, false)),
+    });
+    let session = session.map_err(|failure| failed(failure, clock.now(), stop));
     Opened { met, session }
 }
 

@@ -4,6 +4,7 @@ mod body;
 mod conformance;
 mod execute;
 mod host;
+mod meets;
 mod price;
 mod reap;
 mod run;
