@@ -284,9 +284,10 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                         match status {
                             Ok(()) if at <= self.placed.startup(target.role()) => {}
                             Ok(()) => {
-                                failures.extend(resident.fail(target, SHARED_EXPIRED.to_owned()));
+                                let expired = SHARED_EXPIRED.to_owned();
+                                failures.extend(resident.fail(target, at, expired));
                             }
-                            Err(reason) => failures.extend(resident.fail(target, reason)),
+                            Err(reason) => failures.extend(resident.fail(target, at, reason)),
                         }
                     }
                 }
@@ -303,7 +304,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         }));
         for target in waiting {
             if let Some(resident) = self.residents.get_mut(&target) {
-                failures.extend(resident.fail(target, SHARED_EXPIRED.to_owned()));
+                failures.extend(resident.fail(target, at, SHARED_EXPIRED.to_owned()));
             }
         }
         self.pending
