@@ -4582,17 +4582,18 @@ fn logged_containers() {
 }
 
 // A runner whose session ends as its lease starts fails the lease, as one whose session ends
-// later does. The lease's first look at its inbox waits for that end.
+// later does. The lease's first look at its inbox, past the agents' start, waits for that end.
 #[test]
 fn fails_as_its_session_ended_before_it_was_ready() {
     let argv = [
         "ops",
+        "sleep 1",
         "gpu.open",
         "await_lease gpu 0 failed",
         "call submit 6 finalize=true",
     ];
     let shown = executed(
-        &SimHost::new().awaiting(Duration::ZERO),
+        &SimHost::new().awaiting(Duration::from_secs(1)),
         "fails-as-its-session-ended-before-it-was-ready",
         &[(PROVIDER, &Sim::new().ending_once_set_up("lease-0", "main"))],
         &lease_workflow(&argv, 30, RUNNER),
@@ -4600,9 +4601,9 @@ fn fails_as_its_session_ended_before_it_was_ready() {
         &[],
     );
     expect![[r#"
-        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":4,"cumulative_seconds":null,"instance_seconds":600,"instances":1}}},{"grant":"gpu","holder":"agent-0","instance":0,"kind":"start_lease","lease":0,"start_by_ns":"30000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"gpu","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"0","seq":3}
-        {"actions":[],"at_ns":"0","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"lease-0"},"seq":4}
-        {"actions":[],"at_ns":"0","event":{"kind":"lease_failed","lease":0,"reason":"the runner's session ended: the sandbox ended the session"},"observed_ns":"0","seq":5}"#]].assert_eq(&leased(&shown));
+        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":4,"cumulative_seconds":null,"instance_seconds":600,"instances":1}}},{"grant":"gpu","holder":"agent-0","instance":0,"kind":"start_lease","lease":0,"start_by_ns":"30000000000"}],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"gpu","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"1000000000","seq":3}
+        {"actions":[],"at_ns":"1000000000","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"lease-0"},"seq":4}
+        {"actions":[],"at_ns":"1000000000","event":{"kind":"lease_failed","lease":0,"reason":"the runner's session ended: the sandbox ended the session"},"observed_ns":"1000000000","seq":5}"#]].assert_eq(&leased(&shown));
 }
 
 /// [`lease_workflow`]'s, whose runner declares the companions `scheduler` and `swe-0`, and whose
