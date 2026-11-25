@@ -837,9 +837,10 @@ Example, of a machine whose runs go to the person's controllers, one with Modal:
                          with a GPU has `gpu`, as Modal names one, such as \"H100!\", or \
                          \"A100-80GB:2\" for two. It then has `gpu_model`, the model as nvidia-smi \
                          names it, such as \"NVIDIA H100 80GB HBM3\". A class with a GPU is \
-                         offered only to roles that need its GPUs. `usd_per_hour` is what a \
-                         sandbox costs an hour. With it, `ls` and a run's summary price the \
-                         class's sandboxes.",
+                         offered only to roles that need its GPUs. A class holds a runner's \
+                         companions: one for each 32 thousandths of a CPU and 32 MiB that the \
+                         role needs, and 250 at most. `usd_per_hour` is what a sandbox costs an \
+                         hour. With it, `ls` and a run's summary price the class's sandboxes.",
                     ),
                 ],
             },

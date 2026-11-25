@@ -53,6 +53,21 @@ Modal's resolver; the driver dials it through Modal's TLS tunnel, which takes co
 from the configuration's `dials_from` address. A class names its GPU as Modal does, such as `A100-80GB`, and Modal ends each sandbox at
 its hard end.
 
+Only a Modal class holds a runner's [`companions`](../crates/schema/src/ir.rs), as sidecars made
+through `_experimental_sidecars` of Modal's SDK. A sandbox holds one for each 32 thousandths of a
+CPU and 32 MiB that its role needs, and 250 at most. A sandbox at that least may not meet them all
+within its class's startup.
+
+Each container has its own files, processes, address and loopback, and reaches the others by name.
+Over their network, every caller arrives from one address. Modal's resolver answers for public
+names, so data can leave inside DNS queries. Memory is one pool: running out of it can end a
+companion alone, or the whole sandbox. A status of 137 doesn't prove it: Modal gives it to a
+container that it ends.
+
+So a task authenticates its services, handing each its secret before the agent's code runs. It binds
+each to every address, waits for each to be ready, and sizes the runner's `needs`. Code in `main`
+can end the relay that carries each companion's session, and so fail the lease.
+
 ## The controller
 
 The controller is the same `pumpkin`, under `pumpkin controller`, on an EC2 instance that
