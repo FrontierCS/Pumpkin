@@ -4692,7 +4692,7 @@ fn a_due_grace_does_not_advance_past_another_agents_queued_submission() {
     // driver resumes at 31, past alpha's grace at 1 and the work deadline at 30.
     let host = SimHost::new()
         .slow_sync(SlowSync {
-            record: Synced::Holding("log.jsonl", r#""kind":"now""#),
+            record: Synced::Holding("log.jsonl", r#""caller":"agent-0","kind":"op_arrived""#),
             at: Duration::from_secs(2),
             queued: 0,
         })
@@ -4709,13 +4709,20 @@ fn a_due_grace_does_not_advance_past_another_agents_queued_submission() {
     assert!(matches!(agents[0].work_end, decision::WorkEnd::Finalized));
     assert_eq!(agents[1].submission.as_ref().unwrap().payload.size, 4);
     let log = read_log(&record);
-    let queued = log
-        .iter()
-        .find(|line| {
-            line["event"]["caller"] == "agent-3" && line["event"]["request"]["kind"] == "now"
-        })
+    let now_op = |caller: &str| {
+        let made = |line: &Value| {
+            line["event"]["caller"] == caller && line["event"]["request"]["kind"] == "now"
+        };
+        log.iter().position(made).unwrap()
+    };
+    let (finalized, queued) = (now_op("agent-0"), now_op("agent-3"));
+    let tick = (log.iter())
+        .position(|line| line["event"]["kind"] == "tick")
         .unwrap();
-    assert_eq!(queued["observed_ns"], "2000000000");
+    assert_eq!(log[finalized]["observed_ns"], "0");
+    assert_eq!(log[tick]["observed_ns"], "1000000000");
+    assert_eq!(log[queued]["observed_ns"], "2000000000");
+    assert!(finalized < tick && tick < queued);
 }
 
 #[test]
