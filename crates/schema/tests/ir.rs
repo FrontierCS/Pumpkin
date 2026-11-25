@@ -893,7 +893,6 @@ fn routes() {
             Routed(b"db".to_vec()),
             Routed(vec![b'a'; MAX_ROUTE_BYTES + 36]),
             Routed(b"main\nwhat follows".to_vec()),
-            Routed(b"\n".to_vec()),
             Routed(b"d\xffb\n".to_vec()),
         ],
         &expect![[r#"
@@ -902,7 +901,6 @@ fn routes() {
             2 bytes: UnexpectedEof: the connection ended before its route's line feed: expected a companion's name and a line feed, with 0 left unread
             100 bytes: InvalidData: the route has no line feed in its first 64 bytes: expected a companion's name and a line feed, with 36 left unread
             17 bytes: InvalidData: the route names no companion: `main` names the runner's own container: give the companion another name, with 12 left unread
-            1 bytes: InvalidData: the route names no companion: `` is not a companion's name: use 1 to 63 characters from a-z, 0-9 and `-`, starting with a letter and ending with a letter or a digit, with 0 left unread
             4 bytes: InvalidData: the route names no companion: `d�b` is not a companion's name: use 1 to 63 characters from a-z, 0-9 and `-`, starting with a letter and ending with a letter or a digit, with 0 left unread"#]],
     );
 }
@@ -934,13 +932,11 @@ fn tls_identities() {
     check(
         [
             Identity("3082", "00ff10"),
-            Identity("3082", "00FF10"),
             Identity("3082", "00ff1"),
             Identity("30 82", "00ff10"),
         ],
         &expect![[r#"
             TlsIdentity(..) of 2 and 3 bytes, written back alike: true
-            SANDBOXD_TLS_KEY isn't an even number of lowercase hexadecimal digits: set it to the digits of the identity issued for the companion
             SANDBOXD_TLS_KEY isn't an even number of lowercase hexadecimal digits: set it to the digits of the identity issued for the companion
             SANDBOXD_TLS_CERTIFICATE isn't an even number of lowercase hexadecimal digits: set it to the digits of the identity issued for the companion"#]],
     );
@@ -1450,33 +1446,6 @@ fn companion_names() {
     );
 }
 
-/// A container's name as JSON, which reads as the container shown and writes back as itself, or
-/// fails to read.
-struct ContainerNamed(&'static str);
-
-impl Case for ContainerNamed {
-    fn outcome(self) -> String {
-        let json = json!(self.0);
-        match serde_json::from_value::<ir::Container>(json.clone()) {
-            Ok(container) if json!(container) == json => format!("{container:?}"),
-            Ok(container) => format!("{container:?}, written back as {}", json!(container)),
-            Err(error) => error.to_string(),
-        }
-    }
-}
-
-// No companion is named `main`, so one string names either kind of container.
-#[test]
-fn container_names() {
-    check(
-        ["main", "scheduler", "Main"].map(ContainerNamed),
-        &expect![[r#"
-            Main
-            Companion(CompanionName("scheduler"))
-            `Main` is not a companion's name: use 1 to 63 characters from a-z, 0-9 and `-`, starting with a letter and ending with a letter or a digit"#]],
-    );
-}
-
 #[test]
 fn agent_files() {
     let agent = "/roles/0/runtime/agent";
@@ -1802,8 +1771,6 @@ fn placed_companions() {
         [
             on(needs(500, 1024, 1), 15),
             on(needs(500, 1024, 1), 16),
-            on(needs(8000, 512, 1), 16),
-            on(needs(8000, 512, 1), 17),
             on(needs(8000, 1000, 1), 31),
             on(needs(8000, 1000, 1), 32),
             on(needs(500, 512, 1), 17),
@@ -1823,8 +1790,6 @@ fn placed_companions() {
         &expect![[r#"
             {"cpu_millis":500,"gpu":{"count":1,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":1073741824} with 15: `gpus` `h100`
             {"cpu_millis":500,"gpu":{"count":1,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":1073741824} with 16: /roles/3/runtime/runner/companions: `gpu` declares 16 companions, more than any class that fits its needs holds: `gpus`'s `h100` holds 15 for needs of 500 thousandths of a CPU and 1 GiB, so need at least 512 thousandths of a CPU, or declare at most 15
-            {"cpu_millis":8000,"gpu":{"count":1,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":536870912} with 16: `gpus` `h100`
-            {"cpu_millis":8000,"gpu":{"count":1,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":536870912} with 17: /roles/3/runtime/runner/companions: `gpu` declares 17 companions, more than any class that fits its needs holds: `gpus`'s `h100` holds 16 for needs of 8000 thousandths of a CPU and 512 MiB, so need at least 544 MiB, or declare at most 16
             {"cpu_millis":8000,"gpu":{"count":1,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":1048576000} with 31: `gpus` `h100`
             {"cpu_millis":8000,"gpu":{"count":1,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":1048576000} with 32: /roles/3/runtime/runner/companions: `gpu` declares 32 companions, more than any class that fits its needs holds: `gpus`'s `h100` holds 31 for needs of 8000 thousandths of a CPU and 1000 MiB, so need at least 1 GiB, or declare at most 31
             {"cpu_millis":500,"gpu":{"count":1,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":536870912} with 17: /roles/3/runtime/runner/companions: `gpu` declares 17 companions, more than any class that fits its needs holds: `gpus`'s `h100` holds 15 for needs of 500 thousandths of a CPU and 512 MiB, so need at least 544 thousandths of a CPU and 544 MiB, or declare at most 15

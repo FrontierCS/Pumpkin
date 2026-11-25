@@ -48,9 +48,7 @@ impl Dialer {
     }
 }
 
-// What reaches one companion within a connection to its sandbox's relay. Its client's one root
-// is the certificate issued for that companion, so it trusts only what that certificate's key
-// signed.
+// What reaches one companion within a connection to its sandbox's relay.
 #[derive(Debug)]
 pub(super) struct Within {
     companion: CompanionName,

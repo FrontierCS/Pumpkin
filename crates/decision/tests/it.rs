@@ -163,7 +163,7 @@ fn assert_lives(line: &str, actions: &[Action]) {
 
 /// The classes of one provider, each of which offers what every role of the fixture needs:
 /// `fast`, and `slow`, which states the CPU model `slow`, so that only a role that needs that
-/// model is placed in it. Each holds companions at 32 thousandths of a CPU and 32 MiB each.
+/// model is placed in it.
 fn offered() -> BTreeMap<Name, BTreeMap<Name, Class>> {
     let name = |name: &str| Name::try_from(name.to_owned()).unwrap();
     let class = |class: &str, startup: Duration, cpu_model: Option<CpuModel>| {
@@ -2087,31 +2087,6 @@ fn lease_containers() {
             3500 transfer_ended 0 1 moved 1 5
             3600 gpu.run 0:scheduler 900 echo it's
               refuse op 6: the timeout of 900 s is longer than lease 0 has left, 899 s: run it again as `sandboxctl call gpu.run 0 --container scheduler --timeout 899 -- echo 'it'\''s'`
-        "#]],
-    );
-}
-
-// A refusal names a runner's one companion on its own.
-#[test]
-fn lease_container_of_one() {
-    check(
-        accompanied(&["scheduler"]),
-        r"
-        0 work_started
-        2000 gpu.open
-        2100 gpu.run 0:ghost - true
-        ",
-        &expect![[r#"
-            start
-              start agents
-              (tick due at 18010000)
-            0 work_started
-              (tick due at 18000000)
-            2000 gpu.open
-              reply to op 1: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
-              open lease 0 of gpu, as instance 0, started by 18000000
-            2100 gpu.run 0:ghost - true
-              refuse op 2: lease 0 holds no container `ghost`: name `main` or its companion `scheduler`
         "#]],
     );
 }

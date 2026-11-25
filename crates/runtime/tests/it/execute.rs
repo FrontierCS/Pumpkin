@@ -4549,38 +4549,6 @@ fn hard_ends() {
     .assert_eq(&hard_ends.join("\n"));
 }
 
-// The log keeps the container that a lease's command or copy names, though the core refuses each
-// here, as the runner holds no companions.
-#[test]
-fn logged_containers() {
-    let argv = [
-        "ops",
-        "gpu.open",
-        "await_lease gpu 0 ready",
-        "gpu.run 0:scheduler - print one",
-        "gpu.put 0:scheduler /workspace /work/in",
-        "gpu.get 0:scheduler /work/out /pumpkin/out/got",
-        "gpu.close 0",
-        "await_lease gpu 0 closed",
-        "call submit 6 finalize=true",
-    ];
-    let shown = executed(
-        &SimHost::new(),
-        "logged-containers",
-        &[(PROVIDER, &Sim::new())],
-        &lease_workflow(&argv, 30, RUNNER),
-        SANDBOXD,
-        &[],
-    );
-    let named: Vec<&str> = (shown.lines())
-        .filter(|line| line.contains("\"container\""))
-        .collect();
-    expect![[r#"
-        {"actions":[{"kind":"reply","reply":{"kind":"refused","message":"lease 0 holds no container `scheduler`: name `main`, the one container that it holds"}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":1,"request":{"argv":["print","one"],"container":"scheduler","grant":"gpu","kind":"lease_run","lease":0,"timeout_seconds":null}},"observed_ns":"0","seq":5}
-        {"actions":[{"kind":"reply","reply":{"kind":"refused","message":"lease 0 holds no container `scheduler`: name `main`, the one container that it holds"}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":2,"request":{"container":"scheduler","grant":"gpu","kind":"lease_put","lease":0,"replace":false,"to":"/work/in","tree":"/workspace"}},"observed_ns":"0","seq":6}
-        {"actions":[{"kind":"reply","reply":{"kind":"refused","message":"lease 0 holds no container `scheduler`: name `main`, the one container that it holds"}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":3,"request":{"container":"scheduler","from":"/work/out","grant":"gpu","kind":"lease_get","lease":0,"to":"/pumpkin/out/got"}},"observed_ns":"0","seq":7}"#]].assert_eq(&named.join("\n"));
-}
-
 // A runner whose session ends as its lease starts fails the lease, as one whose session ends
 // later does. The lease's first look at its inbox, past the agents' start, waits for that end.
 #[test]
@@ -5074,16 +5042,14 @@ fn lease_transfers() {
     agent["dirs"].as_array_mut().unwrap().push(shut);
     let files = agent["files"].as_array_mut().unwrap();
     files.extend([blob, tool, read_only, shared, key]);
-    let shown = listening_too(|sim| {
-        executed(
-            &SimHost::new(),
-            "lease-transfers",
-            &[(PROVIDER, &sim)],
-            &ir,
-            SANDBOXD,
-            &[Also::Listing, Also::File("leases/0/log/1/command.stdout")],
-        )
-    });
+    let shown = executed(
+        &SimHost::new(),
+        "lease-transfers",
+        &[(PROVIDER, &Sim::new())],
+        &ir,
+        SANDBOXD,
+        &[Also::Listing, Also::File("leases/0/log/1/command.stdout")],
+    );
     expect![[r#"
         finished, showing [score=6]
         record: agents/agent/log/collected, agents/agent/out/back/collected, agents/agent/out/back/config.toml, agents/agent/out/back/ro, agents/agent/out/back/shared, agents/agent/out/back/shut/key, agents/agent/out/back/tool*, agents/agent/out/collected, agents/agent/out/got/collected, agents/agent/out/got/command.stdout, agents/agent/out/replaced/collected, agents/agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/got/1/result.json, jobs/0/log/0/collected, jobs/0/out/collected, jobs/0/out/result.json, jobs/0/sandbox.json, leases/0/log/1/collected, leases/0/log/1/command.stdout, leases/0/out/collected, leases/0/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json

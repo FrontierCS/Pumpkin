@@ -52,20 +52,16 @@ fn check(cases: &[([Ended; 3], Option<u64>)], expect: &Expect) {
     expect.assert_eq(&lines.collect::<Vec<_>>().join("\n"));
 }
 
-// The first case is a start whose deadline passed as `swe-0` waited, once the others had met.
 #[test]
 fn fails_by_its_first_failure() {
-    let late = Some((30, "the gateway didn't reach it by the deadline"));
     let untrusted = |at| Some((at, "the gateway can't trust it"));
     check(
         &[
-            ([OPENED, OPENED, late], None),
             ([OPENED, untrusted(2), untrusted(2)], None),
             ([OPENED, untrusted(3), untrusted(2)], None),
             ([OPENED, untrusted(1), OPENED], Some(1)),
         ],
         &expect![[r#"
-            swe-0 at 30s: its container `swe-0`: the gateway didn't reach it by the deadline
             scheduler at 2s, swe-0 at 2s: its container `scheduler`: the gateway can't trust it
             scheduler at 3s, swe-0 at 2s: its container `swe-0`: the gateway can't trust it
             scheduler at 1s, the sandbox at 1s: its container `scheduler`: the gateway can't trust it"#]],

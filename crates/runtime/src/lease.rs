@@ -43,7 +43,6 @@ pub(super) enum Order {
 /// `number`th command or transfer.
 pub(super) struct Transfer {
     pub(super) number: u64,
-    /// The runner's container that the tree goes to or comes from.
     pub(super) container: Container,
     pub(super) direction: Direction,
     /// The most bytes of files it may move.
@@ -55,7 +54,6 @@ pub(super) struct Transfer {
 /// The core's order to run a command in a lease's runner, its `command`th.
 pub(super) struct Run {
     pub(super) command: u64,
-    /// The runner's container that it runs in.
     pub(super) container: Container,
     pub(super) argv: Argv,
     /// The longest it may run, if it has a bound of its own.

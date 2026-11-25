@@ -448,12 +448,7 @@ fn of<T>(
 fn accepted<C: Clock, T: Send + 'static>(
     registration: gateway::Registration,
     (clock, by): (&C, Duration),
-    (ops, model, arrivals, wrap): (
-        Option<OpPayloadLimit>,
-        bool,
-        Sender<T>,
-        impl Fn(Arrival) -> T + Send + 'static,
-    ),
+    (ops, model, arrivals, wrap): Opens<T, impl Fn(Arrival) -> T + Send + 'static>,
     (stop, ended): (&AtomicBool, impl Fn() -> bool),
 ) -> Result<(Session<C>, Duration), (io::Error, bool)> {
     // The accept fails as soon as `ends` says yes, so `told` says whether a stop ended it.

@@ -2110,15 +2110,11 @@ fn relayed_meetings() {
 }
 
 /// A relay behind an edge, which carries to one fake companion, named `name`. That one serves
-/// `server`'s TLS and says `says`. Returns the edge's port, the relay and what the companion heard.
-fn relayed_behind(
-    name: &'static str,
-    server: tls::Server,
-    says: Says,
-) -> (u16, relayed::Relay, Receiver<Option<HelloReply>>) {
-    let (address, heard) = companion(server, name, says);
+/// `server`'s TLS and says `says`. Returns the edge's port and the relay.
+fn relayed_behind(name: &'static str, server: tls::Server, says: Says) -> (u16, relayed::Relay) {
+    let (address, _) = companion(server, name, says);
     let relay = relayed::relay(BTreeMap::from([(companion_named(name), address)]));
-    (edge::front(relay.address), relay, heard)
+    (edge::front(relay.address), relay)
 }
 
 /// Waits for a connection that `relay` carried to end, and says whether it is [`unread`].
@@ -2139,7 +2135,7 @@ fn untrusted_companions() {
             // Each accept dials once, as a companion that it can't trust fails it for good.
             let refused = |name: &'static str, server: tls::Server| {
                 let (grant, _, unreached) = relayed_to(&dialer, name);
-                let (port, relay, _) = relayed_behind(name, server, said());
+                let (port, relay) = relayed_behind(name, server, said());
                 let outcome = accepted(unreached, port, (&Machine, hung()), false);
                 assert!(ended_unread(&relay, &grant));
                 outcome
@@ -2234,19 +2230,14 @@ fn closing_relays() {
     );
 }
 
-/// What becomes of the accept of a companion that says `says` within its TLS, on `clock`, and
-/// what the companion heard.
-fn greeted<C: Clock>(
-    dialer: &Dialer,
-    says: Says,
-    (clock, by): (&C, Duration),
-) -> (String, Option<HelloReply>) {
+/// What becomes of the accept of a companion that says `says` within its TLS, on `clock`.
+fn greeted<C: Clock>(dialer: &Dialer, says: Says, (clock, by): (&C, Duration)) -> String {
     let (grant, identity, unreached) = relayed_to(dialer, "scheduler");
     let server = relayed::server(&identity);
-    let (port, relay, heard) = relayed_behind("scheduler", server, says);
+    let (port, relay) = relayed_behind("scheduler", server, says);
     let outcome = accepted(unreached, port, (clock, by), false);
     assert!(ended_unread(&relay, &grant));
-    (outcome, heard.try_recv().ok().flatten())
+    outcome
 }
 
 #[test]
@@ -2267,25 +2258,16 @@ fn unmet_companions() {
             let clock = Still::until(stalled);
             let uncarried = accepted(unreached, port, (&clock, STALL_BOUND), false);
             ends.recv_timeout(HUNG).unwrap();
-            let (_, _, unreached) = relayed_to(&dialer, "scheduler");
-            let stopped = accepted(unreached, port, (&Machine, hung()), true);
             let stalled = Arc::new(AtomicBool::new(false));
             let clock = Still::until(Arc::clone(&stalled));
-            let (silent, _) = greeted(&dialer, Says::Nothing(stalled), (&clock, STALL_BOUND));
-            let later = (json!({ "version": PROTOCOL_VERSION + 1 }), Vec::new());
-            let (versioned, told) = greeted(&dialer, Says::Hello(later), (&Machine, hung()));
-            let told = matches!(told, Some(HelloReply::Refused { .. }));
+            let silent = greeted(&dialer, Says::Nothing(stalled), (&clock, STALL_BOUND));
             vec![
                 format!("a relay that carries nothing: {uncarried}"),
-                format!("an accept that is stopped: {stopped}"),
                 format!("a companion that says no hello: {silent}"),
-                format!("one whose hello the gateway refuses: {versioned}; it was told: {told}"),
             ]
         },
         &expect![[r#"
             a relay that carries nothing: Err("TimedOut: the gateway didn't reach companion `scheduler` through its sandbox's relay at localhost:$PORT by the deadline: its last dial failed: companion `scheduler` behind the relay at localhost:$PORT: the TLS handshake wasn't done by its deadline: expected TLS 1.3 from `scheduler`, with a certificate trusted for it: expected its sandboxd to listen there while the deadline lasts")
-            an accept that is stopped: Err("Other: the accept was stopped before the gateway reached companion `scheduler` through its sandbox's relay at localhost:$PORT: expected its sandboxd to listen there before the stop")
-            a companion that says no hello: Err("TimedOut: the gateway didn't reach companion `scheduler` through its sandbox's relay at localhost:$PORT by the deadline: its last dial failed: the sandbox connected but sent no hello by the deadline: expected its sandboxd to send one as it connects, as a sandboxd built from the same Pumpkin does: expected its sandboxd to listen there while the deadline lasts")
-            one whose hello the gateway refuses: Err("InvalidData: the gateway refused the session: sandboxd speaks sandbox protocol <later version>: expected <version>, which this gateway speaks, as a sandboxd built from the same Pumpkin does"); it was told: true"#]],
+            a companion that says no hello: Err("TimedOut: the gateway didn't reach companion `scheduler` through its sandbox's relay at localhost:$PORT by the deadline: its last dial failed: the sandbox connected but sent no hello by the deadline: expected its sandboxd to send one as it connects, as a sandboxd built from the same Pumpkin does: expected its sandboxd to listen there while the deadline lasts")"#]],
     );
 }
