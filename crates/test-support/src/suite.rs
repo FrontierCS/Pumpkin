@@ -470,8 +470,8 @@ impl<'a> Suite<'a> {
             }
             Meeting::Listen(creator) => {
                 let (dial, unreached) = self.dialer.issue().unwrap();
-                let (created, endpoint) = creator.create(&create, alone(dial))?;
-                Ok((created.id, unreached.at(endpoint)))
+                let (created, endpoints) = creator.create(&create, alone(dial))?;
+                Ok((created.id, unreached.at(endpoints.main)))
             }
             Meeting::Private(_) => panic!(
                 "the suite meets no sandbox that dials a private address: run it on a provider \
@@ -640,7 +640,7 @@ pub fn asked(
 }
 
 /// The dials of a sandbox that holds no companions.
-fn alone<D>(main: D) -> Dials<D> {
+fn alone<D, R>(main: D) -> Dials<D, R> {
     Dials {
         main,
         companions: Vec::new(),

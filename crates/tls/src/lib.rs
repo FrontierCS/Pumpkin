@@ -1,6 +1,8 @@
 //! TLS 1.3 below a session whose connection crosses the Internet: a [`Client`]'s end, which
 //! trusts a server only by its certificate, checked against the roots it trusts and the name it
-//! dialed, and a [`Server`]'s, which shows its certificate chain.
+//! dialed, and a [`Server`]'s, which shows its certificate chain. A client may also run TLS inside
+//! another's [`Stream`], to a server behind the first one's ([`Client::connect_within`]), whose
+//! certificate [`issue`] makes, for that client alone to trust.
 //!
 //! Each end hands its session a [`Stream`]: a Unix socket of its own, whose other end a relay
 //! thread carries to and from the TLS connection, so the session reads, writes, times out and
@@ -12,11 +14,11 @@
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, OnceLock};
-use std::thread;
 use std::time::Duration;
+use std::{fmt, thread};
 
 use rustix::event::{self, PollFd, PollFlags, Timespec};
 use rustix::io::Errno;
@@ -82,20 +84,72 @@ impl Client {
     /// trusted root, or if the handshake fails otherwise or isn't done by `by`: TLS's own
     /// failures are [`InvalidData`](io::ErrorKind::InvalidData) alone.
     pub fn connect(&self, stream: TcpStream, name: &str, by: Deadline) -> io::Result<Stream> {
-        let Ok(server @ ServerName::DnsName(_)) = ServerName::try_from(name.to_owned()) else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "`{}` is not a DNS name: give a server's",
-                    name.escape_debug()
-                ),
-            ));
-        };
+        let server = server_name(name)?;
         let connection =
             ClientConnection::new(Arc::clone(&self.config), server).map_err(|error| tls(&error))?;
         let expected = format!("expected TLS 1.3 from `{name}`, with a certificate trusted for it");
         carry(Connection::Client(connection), stream, by, &expected)
     }
+
+    /// Runs TLS inside `outer`, another TLS connection's [`Stream`], to the server `name` that the
+    /// server at its other end carries it to, as [`connect`](Self::connect) does on a TCP
+    /// connection, failing alike. The returned stream ends `outer` as it ends.
+    pub fn connect_within(&self, outer: Stream, name: &str, by: Deadline) -> io::Result<Stream> {
+        let server = server_name(name)?;
+        let connection =
+            ClientConnection::new(Arc::clone(&self.config), server).map_err(|error| tls(&error))?;
+        let expected = format!("expected TLS 1.3 from `{name}`, with a certificate trusted for it");
+        // The outer connection's reason for ending is its own, which the inner one's reads can't
+        // tell apart from a break in their own TLS, so it goes with `outer`.
+        carry(Connection::Client(connection), outer.socket, by, &expected)
+    }
+}
+
+/// `name` as the server name that a client dials, or why it isn't one: a DNS name alone.
+fn server_name(name: &str) -> io::Result<ServerName<'static>> {
+    match ServerName::try_from(name.to_owned()) {
+        Ok(server @ ServerName::DnsName(_)) => Ok(server),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "`{}` is not a DNS name: give a server's",
+                name.escape_debug()
+            ),
+        )),
+    }
+}
+
+/// A certificate for one server and its key, which [`issue`] makes.
+pub struct Issued {
+    /// The certificate, in DER: self-signed, so a client that trusts it as its one root
+    /// ([`Client::trusting`]) trusts this server alone.
+    pub certificate: Vec<u8>,
+    /// Its private key, a PKCS #8 key in DER, which [`Server::new`] takes.
+    pub key: Vec<u8>,
+}
+
+impl fmt::Debug for Issued {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The key's bytes are the server's secret, so no message or log carries them.
+        f.write_str("Issued(..)")
+    }
+}
+
+/// Makes a new key, and a certificate of it for the server `name`, a DNS name.
+///
+/// No client trusts the certificate but one given it. Fails if `name` isn't a DNS name, or the key
+/// can't be made, as when the system's random source fails.
+pub fn issue(name: &str) -> io::Result<Issued> {
+    server_name(name)?;
+    let made = rcgen::generate_simple_self_signed([name.to_owned()]).map_err(|error| {
+        io::Error::other(format!(
+            "the certificate for `{name}` can't be made: {error}"
+        ))
+    })?;
+    Ok(Issued {
+        certificate: made.cert.der().to_vec(),
+        key: made.signing_key.serialize_der(),
+    })
 }
 
 /// A TLS server, and the certificate chain it shows, which its clones share.
@@ -196,6 +250,28 @@ impl Stream {
     }
 }
 
+impl AsFd for Stream {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.socket.as_fd()
+    }
+}
+
+impl Read for Stream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        (&*self).read(buf)
+    }
+}
+
+impl Write for Stream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        (&*self).write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 impl Read for &Stream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let read = (&self.socket).read(buf)?;
@@ -219,13 +295,44 @@ impl Write for &Stream {
     }
 }
 
+/// What a TLS connection runs on: a TCP connection, or the session's end of another's.
+trait Wire: AsFd + Send + 'static {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
+    fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()>;
+    fn shutdown(&self, how: Shutdown) -> io::Result<()>;
+}
+
+macro_rules! wire {
+    ($socket:ty) => {
+        impl Wire for $socket {
+            fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+                <$socket>::set_read_timeout(self, timeout)
+            }
+
+            fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+                <$socket>::set_write_timeout(self, timeout)
+            }
+
+            fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+                <$socket>::set_nonblocking(self, nonblocking)
+            }
+
+            fn shutdown(&self, how: Shutdown) -> io::Result<()> {
+                <$socket>::shutdown(self, how)
+            }
+        }
+    };
+}
+
+wire!(TcpStream);
+wire!(UnixStream);
+
 /// Completes the handshake by `by`, or fails saying what was `expected`, then starts the relay.
-fn carry(
-    mut tls: Connection,
-    mut tcp: TcpStream,
-    by: Deadline,
-    expected: &str,
-) -> io::Result<Stream> {
+fn carry<W: Wire>(mut tls: Connection, tcp: W, by: Deadline, expected: &str) -> io::Result<Stream>
+where
+    for<'a> &'a W: Read + Write,
+{
     let late = || {
         io::Error::new(
             io::ErrorKind::TimedOut,
@@ -244,7 +351,7 @@ fn carry(
         let left = by.remaining().ok_or_else(late)?;
         tcp.set_read_timeout(Some(left))?;
         tcp.set_write_timeout(Some(left))?;
-        tls.complete_io(&mut tcp).map_err(failed)?;
+        tls.complete_io(&mut &tcp).map_err(failed)?;
     }
     tcp.set_read_timeout(None)?;
     tcp.set_write_timeout(None)?;
@@ -261,12 +368,14 @@ fn carry(
 
 /// Relays between `tcp`, under `tls`, and `carried` until either ends, then closes both, having
 /// set `ended` unless the peer ended the TLS with its `close_notify`.
-fn relay(
+fn relay<W: Wire>(
     mut tls: Connection,
-    tcp: &TcpStream,
+    tcp: &W,
     carried: &UnixStream,
     ended: &OnceLock<(io::ErrorKind, String)>,
-) {
+) where
+    for<'a> &'a W: Read + Write,
+{
     let mut closing = None;
     if let Err(error) = moved(&mut tls, tcp, carried, &mut closing) {
         // Set once, here, before the socket ends, so that the session's read of its end sees it.
@@ -284,12 +393,15 @@ fn relay(
 /// its socket closes, or the peer's `close_notify` arrives and what came before it has gone to
 /// the session: `Ok` then; or the error that ended the TLS connection. Once the session's end
 /// hangs up, `closing` is set [`CLOSE_TIMEOUT`] on, and the moves end by then.
-fn moved(
+fn moved<W: Wire>(
     tls: &mut Connection,
-    mut tcp: &TcpStream,
+    mut tcp: &W,
     mut carried: &UnixStream,
     closing: &mut Option<Deadline>,
-) -> io::Result<()> {
+) -> io::Result<()>
+where
+    for<'a> &'a W: Read + Write,
+{
     let mut chunk = vec![0; CHUNK_BYTES];
     // Plaintext for the session, of which `sent` bytes have gone to it.
     let (mut inbound, mut sent) = (Vec::new(), 0);
@@ -358,7 +470,10 @@ fn moved(
 
 /// Reads what has arrived on `tcp` into `tls`, and moves its plaintext to `inbound`: whether the
 /// peer's `close_notify` has arrived.
-fn received(tls: &mut Connection, mut tcp: &TcpStream, inbound: &mut Vec<u8>) -> io::Result<bool> {
+fn received<W>(tls: &mut Connection, mut tcp: &W, inbound: &mut Vec<u8>) -> io::Result<bool>
+where
+    for<'a> &'a W: Read,
+{
     match tls.read_tls(&mut tcp) {
         Ok(0) => Err(io::Error::new(
             io::ErrorKind::UnexpectedEof,
@@ -385,7 +500,10 @@ fn drain(tls: &mut Connection, inbound: &mut Vec<u8>) -> io::Result<bool> {
 }
 
 /// Sends what `tls` holds to send on `tcp`, which doesn't block, by `by`.
-fn flushed(tls: &mut Connection, mut tcp: &TcpStream, by: Deadline) -> io::Result<()> {
+fn flushed<W: AsFd>(tls: &mut Connection, mut tcp: &W, by: Deadline) -> io::Result<()>
+where
+    for<'a> &'a W: Write,
+{
     while tls.wants_write() && by.remaining().is_some() {
         match tls.write_tls(&mut tcp) {
             Ok(_) => {}

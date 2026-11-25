@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use relayed::Within;
 use schema::frame;
 use schema::ir::{GpuModel, Name};
 use schema::sandbox::{
@@ -28,6 +29,8 @@ use stdx::Deadline;
 use stdx::time::{Clock, Machine};
 
 use crate::{Arrival, Bound, Connection, Place, Session, Until, context, lock, passed};
+
+mod relayed;
 
 // Names each file this process holds open by its descriptor's number: a path through one resolves
 // as through the file, a directory included. A socket's path holds 107 bytes at most, which a deep
@@ -485,6 +488,7 @@ impl Dialer {
         let unreached = Unreached {
             client: self.client.clone(),
             grant: grant.clone(),
+            within: None,
         };
         Ok((Listening { grant }, unreached))
     }
@@ -495,17 +499,23 @@ impl Dialer {
 pub struct Unreached {
     client: tls::Client,
     grant: RegistrationGrant,
+    within: Option<Within>,
 }
 
 impl Unreached {
-    /// Registers the endpoint where the sandbox listens.
+    /// Registers the endpoint where the sandbox listens, or its relay, for a companion.
     pub fn at(self, endpoint: Endpoint) -> Registration {
-        let Self { client, grant } = self;
+        let Self {
+            client,
+            grant,
+            within,
+        } = self;
         Registration {
             meeting: Meeting::Dial(Dialed {
                 client,
                 grant,
                 endpoint,
+                within,
             }),
         }
     }
@@ -516,13 +526,18 @@ struct Dialed {
     client: tls::Client,
     grant: RegistrationGrant,
     endpoint: Endpoint,
+    /// For a companion behind its sandbox's relay, what reaches it within.
+    within: Option<Within>,
 }
 
 const LISTENING: &str = "its sandboxd to listen there";
 
 impl Dialed {
     fn awaited(&self) -> impl fmt::Display {
-        format!("the gateway reached the sandbox at {}", self.endpoint)
+        match &self.within {
+            None => format!("the gateway reached the sandbox at {}", self.endpoint),
+            Some(within) => within.awaited(&self.endpoint),
+        }
     }
 
     fn connected(&self, by: Bound<'_, impl Clock>, stopped: &dyn Fn() -> bool) -> io::Result<Met> {
@@ -572,17 +587,17 @@ impl Dialed {
         let deadline = by.deadline();
         let stream = self.connect(deadline, stopped)?;
         unstopped(stopped, self.awaited(), LISTENING).map_err(DialError::Never)?;
-        let secured = self.client.connect(stream, endpoint.host(), deadline);
-        let connection = match secured {
-            Ok(stream) => Connection::Tls(stream),
-            // TLS's own failures are `InvalidData`, a certificate that isn't the endpoint's among
-            // them: another dial would meet the same.
-            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+        let secured = self
+            .client
+            .connect(stream, endpoint.host(), deadline)
+            .map_err(|error| {
                 let what =
                     format_args!("the gateway can't trust the sandbox's endpoint {endpoint}");
-                return Err(DialError::Never(context(what, &error)));
-            }
-            Err(error) => return Err(DialError::Again(error)),
+                untrusted(error, &what)
+            })?;
+        let connection = match &self.within {
+            None => Connection::Tls(secured),
+            Some(within) => Connection::Tls(within.connect(secured, endpoint, deadline)?),
         };
         match read_hello(&connection, by, stopped) {
             Ok((Hello { gpus }, None)) => Ok(Met { connection, gpus }),
@@ -629,6 +644,15 @@ impl Dialed {
             }
         }
         Err(DialError::Again(failed))
+    }
+}
+
+/// Why a dial failed, as `error`, TLS's own failures `Never`, as another dial would meet the same:
+/// a certificate that the client doesn't trust among them.
+fn untrusted(error: io::Error, what: &dyn fmt::Display) -> DialError {
+    match error.kind() {
+        io::ErrorKind::InvalidData => DialError::Never(context(what, &error)),
+        _ => DialError::Again(error),
     }
 }
 

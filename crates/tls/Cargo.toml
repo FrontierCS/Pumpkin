@@ -12,6 +12,7 @@ doctest = false
 [dependencies]
 stdx = { path = "../stdx" }
 rustix = { workspace = true, features = ["event"] }
+rcgen.workspace = true
 rustls.workspace = true
 webpki-roots.workspace = true
 

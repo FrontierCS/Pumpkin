@@ -9,6 +9,12 @@
 //! no connection out, though Modal's resolver still answers its DNS queries; it runs under gVisor
 //! with its class's GPU, if any, and its role's CPU and memory as both its request and its limit;
 //! and Modal ends it at its hard end, if nothing ends it first.
+//!
+//! A runner's companions are the sandbox's sidecars, each from its image with `sandboxd` built in,
+//! as Modal starts a sidecar only from an image it has built. Each `sandboxd` listens as the
+//! sandbox's own does, with no connection out but to the sandbox's other containers, which reach
+//! it by its name, and behind no tunnel: the sandbox's own `sandboxd` relays to it
+//! (`schema::sandbox::Relayed`), behind a tunnel of its own.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -16,15 +22,16 @@ use std::path::Path;
 use std::time::Duration;
 
 use provider::{
-    Console, Create, Created, Listed, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
+    CompanionCreate, Console, Create, Created, Dials, ImageRef, Listed, RunTag, SandboxId,
+    SandboxdRef, Sweep, Undeleted,
 };
-use schema::ir::Sha256Digest;
-use schema::sandbox::{Endpoint, Listening};
+use schema::ir::{Member, Sha256Digest};
+use schema::sandbox::{Endpoint, Listening, Relayed};
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 use stdx::Deadline;
 
-use crate::helper::{ASK_TIMEOUT, Request, Sandboxd};
+use crate::helper::{ASK_TIMEOUT, Companion, Request, Sandboxd};
 use crate::{Gpu, Modal, Reached, memory_mib};
 
 /// How long a delete may run before it is killed: Modal stops a sandbox in seconds, and the
@@ -37,11 +44,20 @@ const DIGEST: &str = "@sha256:";
 /// What every id of a sandbox of Modal's starts with, so an id without it names none.
 const ID_PREFIX: &str = "sb-";
 
-/// What the helper's `create` returns.
+/// What the helper's `create` returns: the sandbox's id, and its tunnel's host and port, and its
+/// relay's, if it holds companions.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Made {
     id: String,
+    host: String,
+    port: u16,
+    relay: Option<Tunnel>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Tunnel {
     host: String,
     port: u16,
 }
@@ -82,41 +98,52 @@ pub(crate) fn publish_sandboxd(path: &Path) -> Result<SandboxdRef, String> {
 }
 
 impl Modal<'_> {
-    /// Creates the sandbox that `create` describes, listening as `dial` says, as
-    /// `provider::Creator::create` asks, giving up at its deadline, when the helper is killed;
-    /// with the endpoint of its tunnel.
+    /// Creates the sandbox that `create` describes, each of its containers listening as `dials`
+    /// says, as `provider::Creator::create` asks, giving up at its deadline, when the helper is
+    /// killed; with the endpoint of its tunnel, and its relay's for each companion.
     pub(crate) fn create_sandbox(
         &self,
         create: &Create,
-        dial: &Listening,
-    ) -> Result<(Created, Endpoint), String> {
+        dials: &Dials<Listening, Relayed>,
+    ) -> Result<(Created, Dials<Endpoint>), String> {
         let Some(class) = self.classes.get(&create.class) else {
             return Err(format!(
                 "the provider has no class `{}`: expected one of those it declared",
                 create.class
             ));
         };
-        let Some((image, _)) = create.image.as_str().split_once('@') else {
-            return Err(format!(
-                "`{}` is no image this provider published: publish one first",
-                create.image.as_str()
-            ));
-        };
-        let request = self.creating(create, dial, class.gpu.as_ref(), image)?;
+        let image = imported(&create.image)?;
+        let request = self.creating(create, dials, class.gpu.as_ref(), image)?;
         let made = self
             .reached
             .helper
             .call::<Made>(&request, Deadline::at_unix(create.by.since_epoch()));
-        let Made { id, host, port } = made.map_err(|error| {
+        let Made {
+            id,
+            host,
+            port,
+            relay,
+        } = made.map_err(|error| {
             format!("{error}; what Modal made by then, if anything, the run's list finds")
         })?;
-        let endpoint = Endpoint::new(host, port).map_err(|error| {
-            format!("Modal's tunnel to sandbox {id} isn't an endpoint: {error}")
-        })?;
+        let endpoint = |what: &str, host, port| {
+            Endpoint::new(host, port).map_err(|error| {
+                format!("Modal's tunnel to sandbox {id}'s {what} isn't an endpoint: {error}")
+            })
+        };
+        let main = endpoint("sandboxd", host, port)?;
+        // The helper makes a relay for a sandbox that holds companions alone.
+        let companions = match relay {
+            Some(Tunnel { host, port }) => {
+                let relay = endpoint("relay", host, port)?;
+                vec![relay; create.companions.len()]
+            }
+            None => Vec::new(),
+        };
         let created = Created {
             id: SandboxId::from(id),
         };
-        Ok((created, endpoint))
+        Ok((created, Dials { main, companions }))
     }
 
     /// The helper's request that creates the sandbox `create` describes, of a class with `gpu`,
@@ -124,7 +151,7 @@ impl Modal<'_> {
     fn creating<'a>(
         &'a self,
         create: &'a Create,
-        dial: &'a Listening,
+        dials: &'a Dials<Listening, Relayed>,
         gpu: Option<&'a Gpu>,
         image: &'a str,
     ) -> Result<Request<'a>, String> {
@@ -144,12 +171,11 @@ impl Modal<'_> {
             model,
             hard_end,
             by,
-            // Its classes offer no companions, so placing gives a sandbox none, nor links, which
-            // join a companion.
-            companions: _,
+            companions,
+            // Each container's `sandboxd` takes those from it (`Create::link_args`).
             links: _,
         } = create;
-        let Listening { grant } = dial;
+        let Listening { grant } = &dials.main;
         let Some((path, sha256)) = sandboxd.as_str().rsplit_once(DIGEST) else {
             return Err(format!(
                 "`{}` is no sandboxd this provider published: publish one first",
@@ -157,6 +183,21 @@ impl Modal<'_> {
             ));
         };
         let memory_mib = memory_mib(role)?;
+        let mut sidecars = Vec::new();
+        for (companion, relayed) in companions.iter().zip(&dials.companions) {
+            let CompanionCreate { name, image, user } = companion;
+            let Relayed { grant, identity } = relayed;
+            let member = Member::Companion(name.clone());
+            sidecars.push(Companion {
+                links: create.link_args(&member),
+                name: name.as_str(),
+                image: imported(image)?,
+                user: format!("{}:{}", user.uid, user.gid),
+                grant,
+                certificate: identity.certificate_digits(),
+                key: identity.key_digits(),
+            });
+        }
         Ok(Request::Create {
             run: run.as_str(),
             role: role.name.as_str(),
@@ -172,6 +213,8 @@ impl Modal<'_> {
             hard_end: hard_end.since_epoch().as_secs(),
             by: by.since_epoch().as_secs(),
             source: format!("{}/32", self.dials_from),
+            companions: sidecars,
+            links: create.link_args(&Member::Main),
         })
     }
 
@@ -195,6 +238,17 @@ impl Modal<'_> {
             .helper
             .call::<String>(&request, Deadline::after(ASK_TIMEOUT))?;
         Ok(Console { text })
+    }
+}
+
+/// The id in Modal of `image`, which [`Modal`] published, as its reference holds it.
+fn imported(image: &ImageRef) -> Result<&str, String> {
+    match image.as_str().split_once('@') {
+        Some((imported, _)) => Ok(imported),
+        None => Err(format!(
+            "`{}` is no image this provider published: publish one first",
+            image.as_str()
+        )),
     }
 }
 

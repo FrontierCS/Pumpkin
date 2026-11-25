@@ -5,7 +5,7 @@ use std::io;
 use gateway::{Dialer, Listener, Sockets};
 use provider::{Admits, Create, Created, Creator, Dials};
 use schema::ir::Name;
-use schema::sandbox::{Endpoint, Listening, PrivateDial, SocketDial};
+use schema::sandbox::{Endpoint, Listening, PrivateDial, Relayed, SocketDial};
 use stdx::Deadline;
 
 /// How a provider's sandboxes and the gateway meet ([`Meeting`](provider::Meeting)), with what the
@@ -17,7 +17,10 @@ pub(super) enum Meets<'p> {
         &'p dyn Creator<PrivateDial, (Created, Admits)>,
         &'p Listener,
     ),
-    Dials(&'p dyn Creator<Listening, (Created, Endpoint)>, &'p Dialer),
+    Dials(
+        &'p dyn Creator<Listening, (Created, Dials<Endpoint>), Relayed>,
+        &'p Dialer,
+    ),
 }
 
 impl Meets<'_> {
@@ -59,14 +62,28 @@ impl Meets<'_> {
                 Ok((created, (unattested.admitting(admits), Vec::new())))
             }
             Self::Dials(creator, dialer) => {
-                assert!(
-                    create.companions.is_empty(),
-                    "a provider whose sandboxes listen was asked for a sandbox that holds \
-                     companions, though none offers them (`Offers::companions`)"
+                let (main, unreached) = dialer.issue().map_err(issued)?;
+                let (mut relayed, mut unrelayed) = (Vec::new(), Vec::new());
+                for companion in &create.companions {
+                    let (dial, unreached) = dialer.relayed(&companion.name).map_err(issued)?;
+                    relayed.push(dial);
+                    unrelayed.push(unreached);
+                }
+                let dials = Dials {
+                    main,
+                    companions: relayed,
+                };
+                let (created, endpoints) = creator.create(create, dials)?;
+                assert_eq!(
+                    endpoints.companions.len(),
+                    unrelayed.len(),
+                    "a provider whose sandboxes listen gave other than one endpoint for each \
+                     companion of a sandbox it created"
                 );
-                let (dial, unreached) = dialer.issue().map_err(issued)?;
-                let (created, endpoint) = creator.create(create, alone(dial))?;
-                Ok((created, (unreached.at(endpoint), Vec::new())))
+                let companions = (unrelayed.into_iter().zip(endpoints.companions))
+                    .map(|(unreached, endpoint)| unreached.at(endpoint));
+                let registrations = (unreached.at(endpoints.main), companions.collect());
+                Ok((created, registrations))
             }
         }
     }

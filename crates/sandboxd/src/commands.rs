@@ -26,6 +26,7 @@ use schema::ir::Env;
 use schema::sandbox::op::REASON_BYTES;
 use schema::sandbox::{
     ExitStatus, FromSandbox, Launch, SANDBOXCTL_PATH, SANDBOXD_ATTESTATION, SANDBOXD_GRANT,
+    SANDBOXD_TLS_CERTIFICATE, SANDBOXD_TLS_KEY,
 };
 use stdx::process::Environment;
 use stdx::{Context, unpoisoned};
@@ -203,6 +204,8 @@ fn spawn(launch: &Launch, serve_ops: bool) -> Result<i32, String> {
         .args(argv.args())
         .env_remove(SANDBOXD_GRANT)
         .env_remove(SANDBOXD_ATTESTATION)
+        .env_remove(SANDBOXD_TLS_CERTIFICATE)
+        .env_remove(SANDBOXD_TLS_KEY)
         .envs(env.as_slice().iter().map(|var| (var.name(), var.value())));
     if serve_ops {
         command.env("PATH", ops_path(env));

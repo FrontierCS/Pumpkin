@@ -89,8 +89,14 @@ pub(crate) enum Request<'a> {
         /// When the sandbox's start is due by, in whole seconds since the Unix epoch, which its
         /// `sandboxd` takes as `--by`, so that one no start claims ends itself.
         by: u64,
-        /// The only source, a CIDR, that the sandbox's tunnel takes connections from.
+        /// The only source, a CIDR, that the sandbox's tunnels take connections from.
         source: String,
+        /// The sandbox's companions, each a sidecar, behind its relay, which the helper makes
+        /// only for a sandbox that holds some, and whose tunnel it answers too.
+        companions: Vec<Companion<'a>>,
+        /// The arguments that have the sandbox's own `sandboxd` take the connections of the links
+        /// from it.
+        links: Vec<String>,
     },
     /// The sandboxes of `run` that haven't finished, each with whether it has ended.
     List { run: &'a str },
@@ -98,6 +104,20 @@ pub(crate) enum Request<'a> {
     Delete { run: &'a str, ids: Vec<&'a str> },
     /// The end of what sandbox `id` of `run` has printed.
     Console { run: &'a str, id: &'a str },
+}
+
+/// A companion of a sandbox to create: its name, its image's id, its user as `uid:gid`, what its
+/// `sandboxd` listens with, as the digits that its environment holds, and the arguments that have
+/// it take the connections of the links from it.
+#[derive(Serialize)]
+pub(crate) struct Companion<'a> {
+    pub(crate) links: Vec<String>,
+    pub(crate) name: &'a str,
+    pub(crate) image: &'a str,
+    pub(crate) user: String,
+    pub(crate) grant: &'a RegistrationGrant,
+    pub(crate) certificate: String,
+    pub(crate) key: String,
 }
 
 #[derive(Serialize)]

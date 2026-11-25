@@ -3,10 +3,11 @@
 //!
 //! A session is one connection, which lasts as long as its sandbox and identifies it: to a socket
 //! of the sandbox's own, by a hello that presents its [`Attestation`], or the gateway's to its
-//! endpoint ([`Listening`]). `sandboxd` sends a [`Hello`] first, and the gateway answers with a
-//! [`HelloReply`], accepting its own [`PROTOCOL_VERSION`] alone. Every version keeps that order,
-//! the [`frame`] encoding, a hello's `version` and the size of its message ([`MAX_HELLO_BYTES`]),
-//! read before its body, a reply's `type` and a refusal's `message`.
+//! endpoint ([`Listening`]), or through its sandbox's relay ([`Relayed`]). `sandboxd` sends a
+//! [`Hello`] first, and the gateway answers with a [`HelloReply`], accepting its own
+//! [`PROTOCOL_VERSION`] alone. Every version keeps that order, the [`frame`] encoding, a hello's
+//! `version` and the size of its message ([`MAX_HELLO_BYTES`]), read before its body, a reply's
+//! `type` and a refusal's `message`.
 //!
 //! Both sides send [`frame`]s: [`ToSandbox`] from the gateway, [`FromSandbox`] from `sandboxd`; a
 //! reply names its request's stream, a number the gateway uses once. Files move as trees of
@@ -31,7 +32,8 @@ use serde_json::Value;
 
 use crate::frame;
 pub use crate::ir::values::RelativePath;
-use crate::ir::{AbsolutePath, Argv, Env, EnvVar, GpuModel, LinkPort, Member, Mode};
+use crate::ir::values::{hex, unhex};
+use crate::ir::{AbsolutePath, Argv, CompanionName, Env, EnvVar, GpuModel, LinkPort, Member, Mode};
 
 pub mod op;
 pub mod tree;
@@ -224,6 +226,10 @@ pub const MODEL_PORT: u16 = 11235;
 /// sandbox's containers, which no link takes.
 pub const LISTEN_PORT: u16 = 7434;
 
+/// The port where a sandbox's own `sandboxd` relays to its companions ([`Relayed`]), which no link
+/// takes.
+pub const RELAY_PORT: u16 = 7435;
+
 /// The URL of the model endpoint, `http://127.0.0.1:<MODEL_PORT>`.
 ///
 /// A harness in the sandbox makes model requests ([`FromSandbox::ModelRequest`]) there: by that
@@ -410,29 +416,15 @@ impl TryFrom<String> for RegistrationGrant {
                 2 * REGISTRATION_GRANT_BYTES
             )
         };
-        let value = |digit: u8| match digit {
-            b'0'..=b'9' => Some(digit - b'0'),
-            b'a'..=b'f' => Some(digit - b'a' + 10),
-            _ => None,
-        };
-        if digits.len() != 2 * REGISTRATION_GRANT_BYTES {
-            return Err(refused());
-        }
-        let mut bytes = [0; REGISTRATION_GRANT_BYTES];
-        for (byte, &[high, low]) in bytes.iter_mut().zip(digits.as_bytes().as_chunks().0) {
-            let (Some(high), Some(low)) = (value(high), value(low)) else {
-                return Err(refused());
-            };
-            *byte = (high << 4) | low;
-        }
-        Ok(Self(bytes))
+        let bytes = unhex(&digits).and_then(|bytes| bytes.try_into().ok());
+        bytes.map(Self).ok_or_else(refused)
     }
 }
 
 impl RegistrationGrant {
     /// Its digits, as [`SANDBOXD_GRANT`] holds them, and its JSON form writes them.
     pub fn digits(&self) -> String {
-        crate::ir::values::hex(&self.0)
+        hex(&self.0)
     }
 }
 
@@ -499,6 +491,79 @@ pub struct PrivateDial {
 #[derive(Debug)]
 pub struct Listening {
     pub grant: RegistrationGrant,
+}
+
+/// What a companion whose `sandboxd` listens behind its sandbox's relay is given: the grant that
+/// the gateway's answer to its hello presents, as for a [`Listening`], and its TLS identity.
+///
+/// It listens as a [`Listening`] one does, at its sandbox's port, with `--tls` and `identity` in
+/// [`SANDBOXD_TLS_CERTIFICATE`] and [`SANDBOXD_TLS_KEY`]. The gateway dials the endpoint that the
+/// create gives for it, the relay's, behind the provider's TLS edge, sends a [`route`] there, and
+/// runs TLS within, for the companion's name, trusting `identity`'s certificate alone, so neither
+/// the edge nor the sandbox's own container, which carry it, can read the session or take it.
+#[derive(Debug)]
+pub struct Relayed {
+    pub grant: RegistrationGrant,
+    pub identity: TlsIdentity,
+}
+
+/// The most bytes of a route that a relay reads ([`Relayed`]): a companion's name and a line feed.
+pub const MAX_ROUTE_BYTES: usize = 64;
+
+/// A certificate in DER, for one server, and its private key, a PKCS #8 key in DER.
+///
+/// Each is written as lowercase hexadecimal digits in the environment of the `sandboxd` that
+/// serves with it ([`Relayed`]). Its `Debug` shows neither, nor does the error that refuses digits
+/// quote any.
+pub struct TlsIdentity {
+    pub certificate: Vec<u8>,
+    pub key: Vec<u8>,
+}
+
+impl TlsIdentity {
+    /// The identity whose certificate's digits are `certificate` and key's are `key`, as
+    /// [`SANDBOXD_TLS_CERTIFICATE`] and [`SANDBOXD_TLS_KEY`] hold them. Fails, naming the variable
+    /// whose digits aren't, if either isn't an even number of lowercase hexadecimal digits.
+    pub fn from_digits(certificate: &str, key: &str) -> Result<Self, String> {
+        let bytes = |digits: &str, variable: &str| {
+            unhex(digits).ok_or_else(|| {
+                format!(
+                    "{variable} isn't an even number of lowercase hexadecimal digits: set it to \
+                     the digits of the identity issued for the sandbox"
+                )
+            })
+        };
+        Ok(Self {
+            certificate: bytes(certificate, SANDBOXD_TLS_CERTIFICATE)?,
+            key: bytes(key, SANDBOXD_TLS_KEY)?,
+        })
+    }
+
+    /// The digits of its certificate, as [`SANDBOXD_TLS_CERTIFICATE`] holds them.
+    pub fn certificate_digits(&self) -> String {
+        hex(&self.certificate)
+    }
+
+    /// The digits of its key, as [`SANDBOXD_TLS_KEY`] holds them.
+    pub fn key_digits(&self) -> String {
+        hex(&self.key)
+    }
+}
+
+impl fmt::Debug for TlsIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Neither, so that no message or log carries the key by accident.
+        f.write_str("TlsIdentity(..)")
+    }
+}
+
+/// The route that a relay reads before what it carries to `companion` ([`Relayed`]).
+///
+/// It is the companion's name and a line feed, at most [`MAX_ROUTE_BYTES`]. The relay, its
+/// sandbox's own `sandboxd` (`--relay`), carries what follows to the companion, which its
+/// provider makes that name resolve to there, at the port where it listens.
+pub fn route(companion: &CompanionName) -> String {
+    format!("{companion}\n")
 }
 
 /// Where the gateway dials a sandbox whose `sandboxd` listens ([`Listening`]): a DNS name, which
@@ -576,6 +641,18 @@ pub const SOCKET_NAME: &str = "s";
 // name the sandbox's GPUs, without this variable, once it is non-dumpable; and the provider starts
 // nothing else as the role's user before it (`Listening`).
 pub const SANDBOXD_GRANT: &str = "SANDBOXD_GRANT";
+
+/// The environment variables that hold, as their digits, the certificate and the key of the
+/// [`TlsIdentity`] that a `sandboxd` behind its sandbox's relay serves its session's TLS with.
+///
+/// A provider that starts `sandboxd` for a [`Relayed`] sets them, and `sandboxd` keeps them from
+/// every command it starts.
+// Kept as `SANDBOXD_GRANT` is, for the same reason: a role's code that had the key before the
+// session opened could serve the gateway's TLS in place of `sandboxd`, and take the grant.
+pub const SANDBOXD_TLS_CERTIFICATE: &str = "SANDBOXD_TLS_CERTIFICATE";
+
+/// See [`SANDBOXD_TLS_CERTIFICATE`].
+pub const SANDBOXD_TLS_KEY: &str = "SANDBOXD_TLS_KEY";
 
 /// The environment variable that holds, as its bytes, the [`Attestation`] that a `sandboxd`
 /// presents in its hello where it dials its gateway at a TCP address.

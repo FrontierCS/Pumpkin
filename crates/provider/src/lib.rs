@@ -7,7 +7,7 @@ use std::net::IpAddr;
 use std::path::Path;
 
 use schema::ir::Image;
-use schema::sandbox::{Attestation, Endpoint, Listening, PrivateDial, SocketDial};
+use schema::sandbox::{Attestation, Endpoint, Listening, PrivateDial, Relayed, SocketDial};
 pub use values::{
     CompanionCreate, Console, Create, Created, Dials, ImageRef, Listed, Ready, Role, RunTag,
     SandboxId, SandboxdRef, Undeleted, UnixTime,
@@ -92,8 +92,8 @@ pub enum Meeting<'p> {
     /// has there, and presenting an attestation that the check its create gives admits.
     Private(&'p dyn Creator<PrivateDial, (Created, Admits)>),
     /// Across the Internet, each listening, and the gateway dialing it at the endpoint its create
-    /// gives.
-    Listen(&'p dyn Creator<Listening, (Created, Endpoint)>),
+    /// gives: a companion's is its sandbox's relay ([`Relayed`]).
+    Listen(&'p dyn Creator<Listening, (Created, Dials<Endpoint>), Relayed>),
 }
 
 /// Whether a hello over a private network ([`Meeting::Private`]) is from the sandbox that a create
@@ -104,9 +104,9 @@ pub enum Meeting<'p> {
 /// told to the hello's sender, so it names nothing of its sandbox's that the hello doesn't.
 pub type Admits = Box<dyn Fn(&Attestation, IpAddr) -> Result<(), String> + Send>;
 
-/// The create of a provider's sandboxes whose containers are each given `D` to meet the gateway
-/// by, which returns `C`.
-pub trait Creator<D, C = Created>: Sync {
+/// The create of a provider's sandboxes whose own containers are given `D` to meet the gateway
+/// by, and their companions `R`, which returns `C`.
+pub trait Creator<D, C = Created, R = D>: Sync {
     /// Creates the sandbox that `create` describes, given `dials`, once per [name](Create::name),
     /// and starts each of its containers' `sandboxd`, by [`create.by`](Create::by). Should the
     /// driver die before deleting it, it ends by [`create.hard_end`](Create::hard_end), or with
@@ -116,7 +116,7 @@ pub trait Creator<D, C = Created>: Sync {
     ///
     /// Fails if it can't be created or started by `create.by`, deleting what it made or saying
     /// what is left; [`list`](Sweep::list) finds what it can't name once the platform holds it.
-    fn create(&self, create: &Create, dials: Dials<D>) -> Result<C, String>;
+    fn create(&self, create: &Create, dials: Dials<D, R>) -> Result<C, String>;
 }
 
 /// What a provider holds for a run ([`Provider::reserve`]), until it is dropped.

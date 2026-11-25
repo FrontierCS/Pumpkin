@@ -1339,7 +1339,7 @@ fn links() {
             /roles/3/runtime/runner/links/0/to: the link joins `scheduler` to itself, whose own loopback reaches its port: link two of the pod's containers
             /roles/3/runtime/runner/links/1: the link is given already, at /roles/3/runtime/runner/links/0: give each link once
             port 80 is below 1024, where no `sandboxd`, which has no privileges, can listen: link a port from 1024
-            port 11235 is one of Pumpkin's own in a sandbox, 11235 and 7434: link another"#]],
+            port 11235 is one of Pumpkin's own in a sandbox, 11235, 7434 and 7435: link another"#]],
     );
 }
 

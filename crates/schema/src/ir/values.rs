@@ -298,6 +298,22 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// The bytes that `digits` writes as [`hex`] does, two lowercase hexadecimal digits each, or none
+/// if it doesn't.
+pub(crate) fn unhex(digits: &str) -> Option<Vec<u8>> {
+    let value = |digit: u8| match digit {
+        b'0'..=b'9' => Some(digit - b'0'),
+        b'a'..=b'f' => Some(digit - b'a' + 10),
+        _ => None,
+    };
+    let (pairs, []) = digits.as_bytes().as_chunks() else {
+        return None;
+    };
+    (pairs.iter())
+        .map(|&[high, low]| Some((value(high)? << 4) | value(low)?))
+        .collect()
+}
+
 /// Whether `path` is a [`RelativePath`]: one or more `/`-separated components, none of them
 /// empty, `.` or `..`, and no NUL byte.
 const fn is_relative_path(path: &[u8]) -> bool {
@@ -908,11 +924,12 @@ impl fmt::Display for Member {
 }
 
 /// The port of a link ([`Link`](super::Link)): from 1024, which `sandboxd`, without privileges,
-/// can listen at, other than those of Pumpkin's own in a sandbox: [`MODEL_PORT`] and
-/// [`LISTEN_PORT`].
+/// can listen at, other than those of Pumpkin's own in a sandbox: [`MODEL_PORT`],
+/// [`LISTEN_PORT`] and [`RELAY_PORT`].
 ///
 /// [`MODEL_PORT`]: crate::sandbox::MODEL_PORT
 /// [`LISTEN_PORT`]: crate::sandbox::LISTEN_PORT
+/// [`RELAY_PORT`]: crate::sandbox::RELAY_PORT
 #[derive(
     Clone,
     Copy,
@@ -932,17 +949,17 @@ impl TryFrom<u16> for LinkPort {
     type Error = String;
 
     fn try_from(port: u16) -> Result<Self, Self::Error> {
-        use crate::sandbox::{LISTEN_PORT, MODEL_PORT};
+        use crate::sandbox::{LISTEN_PORT, MODEL_PORT, RELAY_PORT};
         if port < 1024 {
             return Err(format!(
                 "port {port} is below 1024, where no `sandboxd`, which has no privileges, can \
                  listen: link a port from 1024"
             ));
         }
-        if [MODEL_PORT, LISTEN_PORT].contains(&port) {
+        if [MODEL_PORT, LISTEN_PORT, RELAY_PORT].contains(&port) {
             return Err(format!(
-                "port {port} is one of Pumpkin's own in a sandbox, {MODEL_PORT} and {LISTEN_PORT}: \
-                 link another"
+                "port {port} is one of Pumpkin's own in a sandbox, {MODEL_PORT}, {LISTEN_PORT} and \
+                 {RELAY_PORT}: link another"
             ));
         }
         Ok(Self(port))

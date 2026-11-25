@@ -29,15 +29,18 @@ use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 
 use expect_test::{Expect, expect};
-use gateway::{Arrival, Dialer, GatewayAddress, Listener, Place, Pod, Process, Put, Sockets};
+use gateway::{
+    Arrival, Dialer, GatewayAddress, Listener, Place, Pod, Process, Put, Registration, Sockets,
+};
 use schema::frame;
 use schema::frame::MAX_BODY_BYTES;
 use schema::ir::{AbsolutePath, Argv, CompanionName, Env, EnvVar, LinkPort, Member, Mode, Name};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
     Endpoint, Entry, ExitStatus, FromSandbox, HELLO_TIMEOUT, HelloReply, Launch, Listening,
-    MAX_ATTESTATION_BYTES, PROTOCOL_VERSION, PrivateDial, RegistrationGrant, RelativePath, Root,
-    SANDBOXD_ATTESTATION, SANDBOXD_GRANT, SOCKET_NAME, SocketDial, ToSandbox, dir_mode, file_mode,
+    MAX_ATTESTATION_BYTES, PROTOCOL_VERSION, PrivateDial, RegistrationGrant, RelativePath, Relayed,
+    Root, SANDBOXD_ATTESTATION, SANDBOXD_GRANT, SANDBOXD_TLS_CERTIFICATE, SANDBOXD_TLS_KEY,
+    SOCKET_NAME, SocketDial, ToSandbox, dir_mode, file_mode,
 };
 use serde_json::{Value, json};
 use stdx::Deadline;
@@ -66,6 +69,11 @@ enum Meeting {
     Socket,
     Tcp,
     Listen,
+    /// Listening on 127.0.0.2, relaying at the address given.
+    Relaying(SocketAddr),
+    /// A companion, `localhost`, behind the relay at the address given, listening on 127.0.0.1 at
+    /// the port given, its sandbox's.
+    Relayed(SocketAddr, u16),
 }
 
 #[expect(
@@ -99,7 +107,6 @@ impl Sandbox {
         Self::start_placed(meeting, sandboxd, None)
     }
 
-    #[expect(clippy::too_many_lines, reason = "it sets up each meeting")]
     fn start_placed(meeting: Meeting, mut sandboxd: Command, place: Option<Place>) -> Self {
         let dir = TestDir::new();
         // Without symbolic links, as the kernel names the working directories that `processes`
@@ -133,22 +140,9 @@ impl Sandbox {
                     .env(SANDBOXD_ATTESTATION, ATTESTATION);
                 (Gateway::Tcp(listener, gateway), registration)
             }
-            Meeting::Listen => {
-                let dialer = Dialer::new(test_support::edge::client());
-                let (Listening { grant }, unreached) = dialer.issue().unwrap();
-                let address = unlistened();
-                sandboxd
-                    .args([
-                        "--listen",
-                        &address.to_string(),
-                        "--by",
-                        &unix_seconds(3600),
-                    ])
-                    .env(SANDBOXD_GRANT, grant.digits());
-                let port = test_support::edge::front(address.into());
-                let endpoint = Endpoint::new(test_support::edge::NAME.to_owned(), port).unwrap();
-                (Gateway::Listen(address), unreached.at(endpoint))
-            }
+            Meeting::Listen => listens(&mut sandboxd, None),
+            Meeting::Relaying(relay) => listens(&mut sandboxd, Some(relay)),
+            Meeting::Relayed(relay, port) => relayed(&mut sandboxd, relay, port),
         };
         let sandboxd = sandboxd.spawn().unwrap();
         // Dialed only once `sandboxd` listens, as a dial before would wait a redial out.
@@ -429,7 +423,7 @@ fn puts_runs_and_collects() {
             out/result.json: {"bytes": 2109497}
             payload collected intact: true
             log/1.stderr: warning
-            log/1.stdout: home=/pumpkin/home mode=train grant=unset attestation=unset path=/usr/bin:/bin in $ROOT/home
+            log/1.stdout: home=/pumpkin/home mode=train grant=unset attestation=unset key=unset path=/usr/bin:/bin in $ROOT/home
             then Ended { reason: "the owner dropped the session" }
             sandboxd: exit status: 0
             left running: 0"#]],
@@ -450,7 +444,7 @@ fn put_run_collect(sandbox: &mut Sandbox) -> Vec<String> {
         printf '{"bytes": %s}' "$(wc --bytes < ../in/payload/raw)" > ../out/result.json
         mkdir ../out/evidence && cp ../in/payload/raw ../out/evidence/payload
         mkdir ../out/empty
-        echo "home=$HOME mode=$MODE grant=${SANDBOXD_GRANT-unset} attestation=${SANDBOXD_ATTESTATION-unset} path=$PATH in $(pwd)"
+        echo "home=$HOME mode=$MODE grant=${SANDBOXD_GRANT-unset} attestation=${SANDBOXD_ATTESTATION-unset} key=${SANDBOXD_TLS_KEY-unset} path=$PATH in $(pwd)"
         echo warning >&2
         exit 3"#;
     let launch = sandbox.sh(
@@ -958,8 +952,97 @@ fn listening() {
     );
 }
 
+/// Has `sandboxd` listen, relaying at `relay` if given, and registers it where it listens.
+fn listens(sandboxd: &mut Command, relay: Option<SocketAddr>) -> (Gateway, Registration) {
+    let dialer = Dialer::new(test_support::edge::client());
+    let (Listening { grant }, unreached) = dialer.issue().unwrap();
+    // For `sandboxd` to listen at; until it does, the gateway dials again.
+    let mut address = unlistened();
+    if let Some(relay) = relay {
+        // Apart from 127.0.0.1, where its companion listens at the same port.
+        address.set_ip(Ipv4Addr::new(127, 0, 0, 2));
+        sandboxd.args(["--relay", &relay.to_string()]);
+    }
+    let by = unix_seconds(3600);
+    sandboxd
+        .args(["--listen", &address.to_string(), "--by", &by])
+        .env(SANDBOXD_GRANT, grant.digits());
+    let port = test_support::edge::front(address.into());
+    let endpoint = Endpoint::new(test_support::edge::NAME.to_owned(), port).unwrap();
+    (Gateway::Listen(address), unreached.at(endpoint))
+}
+
+/// Has `sandboxd` listen as the companion `localhost` behind the relay at `relay`, at `port` on
+/// 127.0.0.1, and registers it there.
+fn relayed(sandboxd: &mut Command, relay: SocketAddr, port: u16) -> (Gateway, Registration) {
+    let dialer = Dialer::new(test_support::edge::client());
+    let localhost = CompanionName::try_from("localhost".to_owned()).unwrap();
+    let (Relayed { grant, identity }, unreached) = dialer.relayed(&localhost).unwrap();
+    let address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
+    let by = unix_seconds(3600);
+    sandboxd
+        .args([&address.to_string(), "--listen", "--by", &by, "--tls"])
+        .env(SANDBOXD_GRANT, grant.digits())
+        .env(SANDBOXD_TLS_CERTIFICATE, identity.certificate_digits())
+        .env(SANDBOXD_TLS_KEY, identity.key_digits());
+    let port = test_support::edge::front(relay);
+    let endpoint = Endpoint::new(test_support::edge::NAME.to_owned(), port).unwrap();
+    (Gateway::Listen(address), unreached.at(endpoint))
+}
+
 // A case of flags that `sandboxd` refuses: its name, its arguments and its environment.
 type Refused<'a> = (&'a str, &'a [&'a str], &'a [(&'a str, &'a OsStr)]);
+
+#[test]
+fn relays() {
+    let relay = SocketAddr::from(unlistened());
+    let sandbox = Sandbox::start(Meeting::Relaying(relay));
+    let Gateway::Listen(address) = sandbox.gateway else {
+        panic!("the sandbox was to listen");
+    };
+    let port = address.port();
+    // On a thread named apart, which a test directory of its own is named after.
+    let companion = thread::Builder::new().name("relays: the companion".to_owned());
+    let checked = companion.spawn(move || check(
+        Meeting::Relayed(relay, port),
+        |companion| {
+            let mut lines = put_run_collect(companion);
+            let mut unrouted = dialed(relay);
+            unrouted.write_all(b"not a companion's name\n").unwrap();
+            let read = unrouted.read(&mut [0]).map_err(|error| error.kind());
+            lines.push(format!("a route that names no companion: {read:?}"));
+            let by = unix_seconds(3600);
+            let cases: [Refused<'_>; 3] = [
+                ("--tls without --listen", &["127.0.0.1:1", "--tls"], &[]),
+                ("--relay without --listen", &["127.0.0.1:1", "--relay", "0.0.0.0:7435"], &[]),
+                ("--tls with no identity", &["127.0.0.1:1", "--listen", "--by", &by, "--tls"], &grant()),
+            ];
+            for (case, args, env) in cases {
+                let args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
+                lines.push(format!("{case}: {}", ended(companion.sandboxd(&args, env))));
+            }
+            lines
+        },
+        &expect![[r#"
+            exited: Code(3)
+            out/empty/
+            out/evidence/payload: 2109497 bytes
+            out/result.json: {"bytes": 2109497}
+            payload collected intact: true
+            log/1.stderr: warning
+            log/1.stdout: home=/pumpkin/home mode=train grant=unset attestation=unset key=unset path=/usr/bin:/bin in $ROOT/home
+            a route that names no companion: Ok(0)
+            --tls without --listen: exit status: 1: sandboxd: --tls serves the session to a gateway that dials sandboxd: give it with --listen
+            --relay without --listen: exit status: 1: sandboxd: --relay carries connections to companions that listen as their sandbox's own sandboxd does: give it with --listen
+            --tls with no identity: exit status: 1: sandboxd: SANDBOXD_TLS_CERTIFICATE is not set: set it to the digits of the TLS identity issued for the sandbox, which a sandboxd that listens with --tls serves with
+            then Ended { reason: "the owner dropped the session" }
+            sandboxd: exit status: 0
+            left running: 0"#]],
+    ));
+    checked.unwrap().join().unwrap();
+    let ended = sandbox.end();
+    assert_eq!(ended.last().map(String::as_str), Some("left running: 0"));
+}
 
 // The loopback addresses where the links' connections to the companions are taken, as a provider
 // would give them: ones that no other test listens on.

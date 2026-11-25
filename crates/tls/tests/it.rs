@@ -288,3 +288,40 @@ fn refused_peers() {
         ]],
     );
 }
+
+#[test]
+fn within() {
+    // TLS within the stand-in edge's, to a server behind it whose certificate `tls::issue` made:
+    // a client that trusts another server's is refused, as TLS's own failure.
+    let issued = tls::issue("companion").unwrap();
+    let server = tls::Server::new(&[&issued.certificate], &issued.key).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = edge::front(listener.local_addr().unwrap());
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(secured) = server.accept(stream.unwrap(), Deadline::after(HUNG)) else {
+                continue;
+            };
+            (&secured).write_all(b"the companion's").unwrap();
+        }
+    });
+    let other = tls::issue("companion").unwrap();
+    let shown = [("its own", &issued), ("another's", &other)].map(|(whose, trusted)| {
+        let client = Client::trusting(&trusted.certificate).unwrap();
+        let outer = edge::client().connect(
+            TcpStream::connect(("127.0.0.1", port)).unwrap(),
+            edge::NAME,
+            Deadline::after(HUNG),
+        );
+        let within = client.connect_within(outer.unwrap(), "companion", Deadline::after(HUNG));
+        let said = within.and_then(|stream| {
+            let mut said = String::new();
+            (&stream).read_to_string(&mut said).map(|_| said)
+        });
+        let said = said.map_err(|error| (error.kind(), error.to_string()));
+        format!("trusting {whose} certificate: {said:?}")
+    });
+    expect![[r#"
+        trusting its own certificate: Ok("the companion's")
+        trusting another's certificate: Err((InvalidData, "the TLS handshake failed: invalid peer certificate: BadSignature: expected TLS 1.3 from `companion`, with a certificate trusted for it"))"#]].assert_eq(&shown.join("\n"));
+}

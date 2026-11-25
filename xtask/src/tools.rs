@@ -115,8 +115,8 @@ const RELEASES: [Release; 7] = [
 /// The name of the link to xtask that cc-rs runs as the musl C compiler ([`musl_cc`]).
 const MUSL_CC: &str = "x86_64-linux-musl-cc";
 
-/// Sets the musl C compiler for a build of `pumpkin`, the pinned Zig's. The host compiler
-/// still links the binary.
+/// Sets the musl C compiler for a static build, the pinned Zig's. The host compiler still links
+/// the binary.
 pub(crate) fn musl_cc(build: &mut Command) -> Result<()> {
     let zig = fetched(ZIG)?;
     // The directory belongs to the checkout, as the link to xtask does. The cache holds each

@@ -33,7 +33,7 @@ use provider::{
     Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
 use schema::ir::{self, GpuModel, Image, Name};
-use schema::sandbox::{Endpoint, Listening};
+use schema::sandbox::{Endpoint, Listening, Relayed};
 use schema::workflow::{Class, Offers, UsdPerHour};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -116,6 +116,12 @@ struct ClassTable {
     usd_per_hour: Option<UsdPerHour>,
 }
 
+/// The most companions that a sandbox of any class holds, as [`Offers::companions`] declares it:
+/// Modal's most sidecars in one sandbox, which share its CPU, memory and lifetime. Modal also
+/// refuses, at the create, a container past one for each 32 thousandths of a CPU and 32 MiB that
+/// the sandbox has.
+const COMPANIONS: usize = 250;
+
 /// A class of sandbox: what a run may rely on of it, and its GPU, if any. It reads and writes as
 /// a table of the provider's settings' `classes`.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -192,7 +198,7 @@ impl TryFrom<ClassTable> for SandboxClass {
             gpu: offered,
             cpu_features: BTreeSet::new(),
             cpu_model: None,
-            companions: 0,
+            companions: COMPANIONS,
         };
         let class = Class {
             offers,
@@ -211,7 +217,8 @@ impl From<SandboxClass> for ClassTable {
             startup_seconds,
             usd_per_hour,
         } = class;
-        // Its GPU's count is `gpu`'s, and a class of the settings names no CPU's flags or model.
+        // Its GPU's count is `gpu`'s, a class of the settings names no CPU's flags or model, and
+        // every class offers as many companions.
         let Offers {
             cpu_millis,
             memory_bytes,
@@ -398,13 +405,12 @@ impl Provider for Modal<'_> {
     }
 }
 
-impl Creator<Listening, (Created, Endpoint)> for Modal<'_> {
+impl Creator<Listening, (Created, Dials<Endpoint>), Relayed> for Modal<'_> {
     fn create(
         &self,
         create: &Create,
-        dials: Dials<Listening>,
-    ) -> Result<(Created, Endpoint), String> {
-        // Its classes offer no companions, so placing gives a sandbox none.
-        self.create_sandbox(create, &dials.main)
+        dials: Dials<Listening, Relayed>,
+    ) -> Result<(Created, Dials<Endpoint>), String> {
+        self.create_sandbox(create, &dials)
     }
 }

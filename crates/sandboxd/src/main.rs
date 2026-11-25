@@ -2,10 +2,11 @@
 //! `sandboxctl`, the shim through which callers in the sandbox make ops ([`ctl`]).
 //!
 //! It meets the gateway, at a Unix socket of the sandbox's own, at a TCP address, or with
-//! `--listen` where the gateway dials it, opens the session ([`schema::sandbox`]) with its hello,
-//! presenting the attestation in [`SANDBOXD_ATTESTATION`] where it dials a TCP address, and serves
-//! it until the gateway closes it. With `--link` it takes connections to another container of its
-//! pod, which the gateway carries ([`links`]).
+//! `--listen` where the gateway dials it, over TLS of its own with `--tls`, opens the session
+//! ([`schema::sandbox`]) with its hello, presenting the attestation in [`SANDBOXD_ATTESTATION`]
+//! where it dials a TCP address, and serves it until the gateway closes it. With `--relay` it
+//! carries the gateway's connections to its sandbox's companions ([`relay`]), and with `--link` it
+//! takes connections to another container of its pod, which the gateway carries ([`links`]).
 //! When the session ends it kills its commands and exits, which stops a sandbox it is first in.
 //!
 //! As a sandbox's first process (PID 1) it reaps the orphans the kernel hands it, and freezing
@@ -37,7 +38,7 @@ use std::time::Duration;
 use schema::ir::User;
 use schema::sandbox::{
     Attestation, HELLO_TIMEOUT, RegistrationGrant, SANDBOXD_ATTESTATION, SANDBOXD_GRANT,
-    pumpkin_dir,
+    SANDBOXD_TLS_CERTIFICATE, SANDBOXD_TLS_KEY, TlsIdentity, pumpkin_dir,
 };
 use stdx::{Context, Deadline};
 
@@ -54,6 +55,7 @@ mod files;
 mod links;
 mod model;
 mod ops;
+mod relay;
 mod session;
 mod sys;
 mod until;
@@ -64,10 +66,16 @@ mod flags {
         reason = "xflags declares the types it generates `pub`"
     )]
     #![expect(
+        clippy::struct_excessive_bools,
+        reason = "xflags generates a field of its own for each switch"
+    )]
+    #![expect(
         clippy::allow_attributes,
         clippy::allow_attributes_without_reason,
         reason = "xflags generates `#[allow(dead_code)]`, without a reason, on its parsers"
     )]
+
+    use std::net::SocketAddr;
 
     use super::{Address, RoleUser};
     use crate::links::Link;
@@ -108,6 +116,15 @@ mod flags {
             /// requests, at http://127.0.0.1:11235. The gateway must accept the session to take
             /// them, or the first ends it. Without it, nothing in the sandbox can make one.
             optional --model
+            /// With --listen, which needs it, serves the session over TLS, with the certificate
+            /// and the key, each in DER, whose lowercase hexadecimal digits
+            /// SANDBOXD_TLS_CERTIFICATE and SANDBOXD_TLS_KEY hold, which it keeps from the
+            /// commands it starts.
+            optional --tls
+            /// With --listen, which needs it, relays each connection at this TCP address of the
+            /// sandbox's own, such as `0.0.0.0:7435`, once the session is open, to the companion
+            /// that the line it starts with names, at the port of the gateway's address.
+            optional --relay address: SocketAddr
             /// Takes connections to a port of another container of the pod, given as
             /// `<to>:<port>@<address>`, such as `main:8000@127.0.0.2`: listens at the port on the
             /// loopback address, where the pod's containers reach that container, once the
@@ -128,6 +145,8 @@ mod flags {
         pub user: Option<RoleUser>,
         pub ops: bool,
         pub model: bool,
+        pub tls: bool,
+        pub relay: Option<SocketAddr>,
         pub link: Vec<Link>,
     }
 
@@ -169,6 +188,8 @@ fn main() -> ExitCode {
         user,
         ops,
         model,
+        tls,
+        relay,
         link,
     } = match flags::Sandboxd::from_vec(args) {
         Ok(flags) => flags,
@@ -194,36 +215,72 @@ fn main() -> ExitCode {
         eprintln!("sandboxd: making the process non-dumpable failed: {error}");
         return ExitCode::FAILURE;
     }
-    let by = by.map(|seconds| Deadline::at_unix(Duration::from_secs(seconds) + UNCLAIMED_SLACK));
-    let gateway = match (gateway, listen, by) {
-        (Address::Socket(socket), false, None) => Ok(Gateway::Socket(socket)),
-        (Address::Socket(_), true, _) => Err(
-            "--listen takes a TCP address of the sandbox's own: give one, such as `0.0.0.0:7434`, \
-             or no --listen with a socket"
-                .to_owned(),
-        ),
-        (Address::Tcp(address), false, None) => {
-            attestation().map(|attestation| Gateway::Tcp(address, attestation))
-        }
-        (Address::Tcp(address), true, Some(by)) => {
-            grant().map(|grant| Gateway::Listen(address, grant, by))
-        }
-        (Address::Tcp(_), true, None) => Err(
-            "--listen waits until the start's deadline: give it as --by, in seconds since the Unix \
-             epoch"
-                .to_owned(),
-        ),
-        (Address::Socket(_) | Address::Tcp(_), false, Some(_)) => Err(
-            "--by bounds how long a sandboxd that listens waits: give it with --listen".to_owned(),
-        ),
-    };
-    match gateway.and_then(|gateway| session::serve(&gateway, ops, model, link)) {
+    let served = meeting((gateway, listen, by), tls, relay)
+        .and_then(|(gateway, relay)| session::serve(&gateway, ops, model, (relay, link)));
+    match served {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("sandboxd: {error}");
             ExitCode::FAILURE
         }
     }
+}
+
+/// How sandboxd meets the gateway, as its flags `--listen`, `--by` and `--tls` say, given the
+/// gateway's address; and where `--relay` relays, if it does, and to what port.
+fn meeting(
+    (gateway, listen, by): (Address, bool, Option<u64>),
+    tls: bool,
+    relay: Option<SocketAddr>,
+) -> Result<(Gateway, Option<(SocketAddr, u16)>), String> {
+    if tls && !listen {
+        return Err(
+            "--tls serves the session to a gateway that dials sandboxd: give it with --listen"
+                .to_owned(),
+        );
+    }
+    if relay.is_some() && !listen {
+        return Err(
+            "--relay carries connections to companions that listen as their sandbox's \
+                    own sandboxd does: give it with --listen"
+                .to_owned(),
+        );
+    }
+    let by = by.map(|seconds| Deadline::at_unix(Duration::from_secs(seconds) + UNCLAIMED_SLACK));
+    let gateway = match (gateway, listen, by) {
+        (Address::Socket(socket), false, None) => Gateway::Socket(socket),
+        (Address::Socket(_), true, _) => {
+            return Err(
+                "--listen takes a TCP address of the sandbox's own: give one, such as \
+                        `0.0.0.0:7434`, or no --listen with a socket"
+                    .to_owned(),
+            );
+        }
+        (Address::Tcp(address), false, None) => Gateway::Tcp(address, attestation()?),
+        (Address::Tcp(address), true, Some(by)) => {
+            let server = tls.then(server).transpose()?;
+            Gateway::Listen(address, grant()?, by, server)
+        }
+        (Address::Tcp(_), true, None) => {
+            return Err(
+                "--listen waits until the start's deadline: give it as --by, in seconds \
+                        since the Unix epoch"
+                    .to_owned(),
+            );
+        }
+        (Address::Socket(_) | Address::Tcp(_), false, Some(_)) => {
+            return Err(
+                "--by bounds how long a sandboxd that listens waits: give it with --listen"
+                    .to_owned(),
+            );
+        }
+    };
+    // A relay's companions listen at the port where this sandboxd does.
+    let relay = match &gateway {
+        Gateway::Listen(address, ..) => relay.map(|relay| (relay, address.port())),
+        Gateway::Socket(_) | Gateway::Tcp(..) => None,
+    };
+    Ok((gateway, relay))
 }
 
 /// Where the command line says the gateway is: at the absolute path of a Unix socket of the
@@ -308,6 +365,23 @@ fn grant() -> Result<RegistrationGrant, String> {
     // value that isn't a grant's digits.
     let digits = grant.into_string().unwrap_or_default();
     RegistrationGrant::try_from(digits).context(SANDBOXD_GRANT)
+}
+
+/// The TLS server that shows the identity that the environment holds.
+fn server() -> Result<tls::Server, String> {
+    let digits = |variable: &str| {
+        // A value that isn't UTF-8 isn't hexadecimal digits either.
+        let value = env::var_os(variable).ok_or_else(|| {
+            format!(
+                "{variable} is not set: set it to the digits of the TLS identity issued for the \
+                 sandbox, which a sandboxd that listens with --tls serves with"
+            )
+        })?;
+        Ok::<_, String>(value.into_string().unwrap_or_default())
+    };
+    let (certificate, key) = (digits(SANDBOXD_TLS_CERTIFICATE)?, digits(SANDBOXD_TLS_KEY)?);
+    let TlsIdentity { certificate, key } = TlsIdentity::from_digits(&certificate, &key)?;
+    tls::Server::new(&[&certificate], &key).context("the TLS identity")
 }
 
 fn attestation() -> Result<Attestation, String> {

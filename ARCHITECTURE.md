@@ -118,8 +118,8 @@ protocol.
 **Architecture Invariant:** a sandbox can't harm the host through its session. Anything out of
 protocol ends the session, and a session costs the host only bounded memory and bounded waits.
 
-**Architecture Invariant:** the two ends share no Pumpkin crate but `schema` and `stdx`, so the
-protocol is all they agree on. The gateway knows no provider, so every provider's sandboxes have
+**Architecture Invariant:** the two ends share no Pumpkin crate but `schema`, `stdx` and `tls`, so
+they agree on the protocol alone. The gateway knows no provider, so every provider's sandboxes have
 the same sessions.
 
 **Architecture Invariant:** `sandboxd` is no boundary within its sandbox. It has its role's

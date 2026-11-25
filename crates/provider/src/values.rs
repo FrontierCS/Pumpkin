@@ -156,12 +156,14 @@ pub struct CompanionCreate {
 /// What each container of a sandbox has to meet the gateway by ([`Creator::create`]).
 ///
 /// It is its own container's, and each of its [companions'](Create::companions), in their order.
+/// A create is given what each dials, or is to listen with; one whose sandboxes listen returns
+/// where the gateway dials each.
 ///
 /// [`Creator::create`]: crate::Creator::create
 #[derive(Debug)]
-pub struct Dials<D> {
+pub struct Dials<D, R = D> {
     pub main: D,
-    pub companions: Vec<D>,
+    pub companions: Vec<R>,
 }
 
 /// A time by a machine's clock, as the time since the Unix epoch, never before it: apart from

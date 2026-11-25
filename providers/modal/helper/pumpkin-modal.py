@@ -19,6 +19,7 @@ import json
 import math
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 # The App that holds the images Pumpkin imports, which Modal builds once for each definition, and
 # every run's sandboxes. Nothing stops it: an App that holds no sandbox costs nothing.
@@ -34,8 +35,17 @@ ROLE_TAG = "pumpkin-role"
 SANDBOXD_PATH = "/.pumpkin/sandboxd"
 SANDBOXCTL_PATH = "/.pumpkin/bin/sandboxctl"
 
-# The port `sandboxd` listens at in its sandbox, which Modal's tunnel exposes behind its TLS.
+# The port `sandboxd` listens at in its sandbox, which Modal's tunnel exposes behind its TLS, and
+# in each of its sidecars, where its relay reaches it (`schema::sandbox::LISTEN_PORT`).
 PORT = 7434
+
+# The port of the relay of a sandbox that holds sidecars, which its own `sandboxd` serves
+# (`schema::sandbox::RELAY_PORT`), behind a tunnel of its own.
+RELAY_PORT = 7435
+
+# How many of a sandbox's sidecars, and of their images, are made at once: Modal makes each in
+# about a third of a second, so a hundred take seconds.
+AT_ONCE = 8
 
 # How often a create lists its run until the list finds its sandbox: as often as Modal's SDK asks
 # about a sandbox it has just created.
@@ -94,12 +104,13 @@ def imported(modal, request: dict) -> str:
 
 
 def create(modal, request: dict) -> dict:
-    """Creates the run's sandbox of the request's role, and returns its ID and its tunnel's host
-    and port.
+    """Creates the run's sandbox of the request's role, and its companions, and returns its ID,
+    its tunnel's host and port, and its relay's tunnel's, if it holds companions.
 
     Modal ends it at its `hard_end`, in seconds since the Unix epoch, if nothing ends it
-    first. Its `sandboxd` ends it too if no gateway has claimed it a minute after its start's
-    deadline, `by`, as when Modal makes it after the create was given up."""
+    first, and its sidecars with it. Its `sandboxd` ends it too if no gateway has claimed it a
+    minute after its start's deadline, `by`, as when Modal makes it after the create was given
+    up; a companion's `sandboxd` ends only itself so."""
     # Modal counts the timeout from its create, which this is just before.
     timeout = request["hard_end"] - int(time.time())
     if timeout <= 0:
@@ -123,6 +134,12 @@ def create(modal, request: dict) -> dict:
         args.append("--ops")
     if request["model"]:
         args.append("--model")
+    args += request["links"]
+    companions = request["companions"]
+    ports = [PORT]
+    if companions:
+        args += ["--relay", f"0.0.0.0:{RELAY_PORT}"]
+        ports.append(RELAY_PORT)
     cpu, memory = cores(request["cpu_millis"]), request["memory_mib"]
     sandbox = modal.Sandbox.create(
         *args,
@@ -137,12 +154,56 @@ def create(modal, request: dict) -> dict:
         runtime="gvisor",
         outbound_cidr_allowlist=[],
         inbound_cidr_allowlist=[request["source"]],
-        encrypted_ports=[PORT],
+        encrypted_ports=ports,
     )
-    tunnel = sandbox.tunnels()[PORT]
+    tunnels = sandbox.tunnels()
     while sandbox.object_id not in ids(modal, app, run) and sandbox.poll() is None:
         time.sleep(LISTED_EVERY)
-    return {"id": sandbox.object_id, "host": tunnel.host, "port": tunnel.port}
+    relay = None
+    if companions:
+        sidecars(modal, app, sandbox, request)
+        relay = {"host": tunnels[RELAY_PORT].host, "port": tunnels[RELAY_PORT].port}
+    tunnel = tunnels[PORT]
+    return {"id": sandbox.object_id, "host": tunnel.host, "port": tunnel.port, "relay": relay}
+
+
+def sidecars(modal, app, sandbox, request: dict) -> None:
+    """Starts each of the request's companions as a sidecar of `sandbox`, its `sandboxd` built into
+    its image, as Modal starts a sidecar only from an image it has built, each image built once.
+
+    Each `sandboxd` listens at `PORT`, with the TLS identity it is given, until the start's deadline,
+    and reaches nothing outside the sandbox. Modal names each in the others' `/etc/hosts`, where the
+    sandbox's own container's relay finds it."""
+    path = request["sandboxd"]["path"]
+
+    def built(image: str):
+        image = modal.Image.from_id(image).add_local_file(path, SANDBOXD_PATH, copy=True)
+        image.build(app)
+        return image
+
+    companions = request["companions"]
+    distinct = sorted({companion["image"] for companion in companions})
+    with ThreadPoolExecutor(AT_ONCE) as pool:
+        images = dict(zip(distinct, pool.map(built, distinct)))
+
+    def start(companion: dict):
+        args = [SANDBOXD_PATH, f"0.0.0.0:{PORT}", "--listen", "--by", str(request["by"])]
+        args += ["--user", companion["user"], "--tls", *companion["links"]]
+        return sandbox._experimental_sidecars.create(
+            *args,
+            name=companion["name"],
+            image=images[companion["image"]],
+            env={
+                "SANDBOXD_GRANT": companion["grant"],
+                "SANDBOXD_TLS_CERTIFICATE": companion["certificate"],
+                "SANDBOXD_TLS_KEY": companion["key"],
+            },
+            outbound_cidr_allowlist=[],
+        )
+
+    with ThreadPoolExecutor(AT_ONCE) as pool:
+        # Each start's failure, if any, is raised here, the first one's.
+        list(pool.map(start, companions))
 
 
 def cores(millis: int) -> float:

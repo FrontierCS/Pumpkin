@@ -17,7 +17,7 @@ inputs. A role's `needs` says what one sandbox of it needs: its CPUs, its memory
 a GPU or a CPU feature if any. A runner's sandbox also holds its companions. The run places each
 role in the smallest class of sandbox, of every provider's in the configuration, that offers that,
 and refuses a role that fits none, saying why of each class, before any image is built. The Docker
-provider's class offers companions. An EC2 or a Modal class offers none. Of the
+provider's class and every Modal class offer companions. An EC2 class offers none. Of the
 providers but the engine's own, it reaches only those that it places a role on. A provider whose
 sandboxes pull their images, EC2 or Modal, first pushes them to where they pull from. Every sandbox carries its run's tag, so runs
 that share a provider never reach each other's sandboxes.
@@ -55,6 +55,13 @@ no AWS credential of the operator's reaches Modal. A sandbox opens no connection
 Modal's resolver; the driver dials it through Modal's TLS tunnel, which takes connections only
 from the configuration's `dials_from` address. A class names its GPU as Modal does, such as `A100-80GB`, and Modal ends each sandbox at
 its hard end.
+
+Every class offers 250 companions, each a sidecar of the sandbox. Sidecars share the sandbox's
+CPU, memory and lifetime, and only the sandbox's own container gets the GPU. A sidecar has no
+tunnel: the sandbox's own `sandboxd` relays the driver's connection to it, over TLS that only the
+sidecar ends. A pod's links run through the gateway, at loopback addresses. Sidecars also share a
+network, where a service that listens on every address is open to the whole pod. Sidecars are an
+experimental feature of Modal's SDK.
 
 ## The controller
 
