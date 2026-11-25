@@ -1,4 +1,4 @@
-<svg width="740px" height="3980px" xmlns="http://www.w3.org/2000/svg">
+<svg width="740px" height="3998px" xmlns="http://www.w3.org/2000/svg">
   <style>
     .fg { fill: #AAAAAA }
     .bg { fill: #000000 }
@@ -174,289 +174,291 @@
 </tspan>
     <tspan x="10px" y="1414px"><tspan>[providers.&lt;name&gt;.&lt;kind&gt;] is a provider that the machine's runs may place roles</tspan>
 </tspan>
-    <tspan x="10px" y="1432px"><tspan>on. &lt;name&gt; names it, and &lt;kind&gt; is its kind. Its table holds the kind's</tspan>
+    <tspan x="10px" y="1432px"><tspan>on. &lt;name&gt; names it, and &lt;kind&gt; is its kind. A leased runner has its class's</tspan>
 </tspan>
-    <tspan x="10px" y="1450px"><tspan>settings:</tspan>
+    <tspan x="10px" y="1450px"><tspan>startup to be frozen and collected once its lease ends. The provider's table</tspan>
 </tspan>
-    <tspan x="10px" y="1468px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">docker</tspan><tspan>         Sandboxes on the engine of [docker]. This kind takes no</tspan>
+    <tspan x="10px" y="1468px"><tspan>holds the kind's settings:</tspan>
 </tspan>
-    <tspan x="10px" y="1486px"><tspan>                 settings. A docker provider must be the configuration's only</tspan>
+    <tspan x="10px" y="1486px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">docker</tspan><tspan>         Sandboxes on the engine of [docker]. This kind takes no</tspan>
 </tspan>
-    <tspan x="10px" y="1504px"><tspan>                 provider: a machine runs its roles either on its own engine or</tspan>
+    <tspan x="10px" y="1504px"><tspan>                 settings. A docker provider must be the configuration's only</tspan>
 </tspan>
-    <tspan x="10px" y="1522px"><tspan>                 on providers of kind ec2 and modal. Its one class, `container`,</tspan>
+    <tspan x="10px" y="1522px"><tspan>                 provider: a machine runs its roles either on its own engine or</tspan>
 </tspan>
-    <tspan x="10px" y="1540px"><tspan>                 offers the machine's online CPUs and its memory. It offers the</tspan>
+    <tspan x="10px" y="1540px"><tspan>                 on providers of kind ec2 and modal. Its one class, `container`,</tspan>
 </tspan>
-    <tspan x="10px" y="1558px"><tspan>                 CPU flags that /proc/cpuinfo lists for every CPU, no CPU model</tspan>
+    <tspan x="10px" y="1558px"><tspan>                 offers the machine's online CPUs and its memory. It offers the</tspan>
 </tspan>
-    <tspan x="10px" y="1576px"><tspan>                 and no GPU.</tspan>
+    <tspan x="10px" y="1576px"><tspan>                 CPU flags that /proc/cpuinfo lists for every CPU, no CPU model</tspan>
 </tspan>
-    <tspan x="10px" y="1594px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">ec2</tspan><tspan>            Sandboxes on EC2 instances of their own, in the envelope that</tspan>
+    <tspan x="10px" y="1594px"><tspan>                 and no GPU.</tspan>
 </tspan>
-    <tspan x="10px" y="1612px"><tspan>                 its settings name. The instances pull their images from the</tspan>
+    <tspan x="10px" y="1612px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">ec2</tspan><tspan>            Sandboxes on EC2 instances of their own, in the envelope that</tspan>
 </tspan>
-    <tspan x="10px" y="1630px"><tspan>                 envelope, which the engine of [docker] pushes them to. They</tspan>
+    <tspan x="10px" y="1630px"><tspan>                 its settings name. The instances pull their images from the</tspan>
 </tspan>
-    <tspan x="10px" y="1648px"><tspan>                 dial the private address of [gateway]. The provider runs AWS</tspan>
+    <tspan x="10px" y="1648px"><tspan>                 envelope, which the engine of [docker] pushes them to. They</tspan>
 </tspan>
-    <tspan x="10px" y="1666px"><tspan>                 CLI v2 as `aws` from PATH. It uses the credentials that `aws`</tspan>
+    <tspan x="10px" y="1666px"><tspan>                 dial the private address of [gateway]. The provider runs AWS</tspan>
 </tspan>
-    <tspan x="10px" y="1684px"><tspan>                 finds, such as the instance's role. Its settings:</tspan>
+    <tspan x="10px" y="1684px"><tspan>                 CLI v2 as `aws` from PATH. It uses the credentials that `aws`</tspan>
 </tspan>
-    <tspan x="10px" y="1702px"><tspan>    </tspan><tspan class="fg-bright-cyan bold">region</tspan><tspan>         The envelope's AWS region, which every call names.</tspan>
+    <tspan x="10px" y="1702px"><tspan>                 finds, such as the instance's role. Its settings:</tspan>
 </tspan>
-    <tspan x="10px" y="1720px"><tspan>    </tspan><tspan class="fg-bright-cyan bold">classes</tspan><tspan>        The classes of sandbox, by name. There is at least one. Each</tspan>
+    <tspan x="10px" y="1720px"><tspan>    </tspan><tspan class="fg-bright-cyan bold">region</tspan><tspan>         The envelope's AWS region, which every call names.</tspan>
 </tspan>
-    <tspan x="10px" y="1738px"><tspan>                   class has these keys: `template` is the ID of its launch</tspan>
+    <tspan x="10px" y="1738px"><tspan>    </tspan><tspan class="fg-bright-cyan bold">classes</tspan><tspan>        The classes of sandbox, by name. There is at least one. Each</tspan>
 </tspan>
-    <tspan x="10px" y="1756px"><tspan>                   template, and `version` the template's version that its</tspan>
+    <tspan x="10px" y="1756px"><tspan>                   class has these keys: `template` is the ID of its launch</tspan>
 </tspan>
-    <tspan x="10px" y="1774px"><tspan>                   instances launch from. `vcpus` and `memory_mib` are its</tspan>
+    <tspan x="10px" y="1774px"><tspan>                   template, and `version` the template's version that its</tspan>
 </tspan>
-    <tspan x="10px" y="1792px"><tspan>                   instance type's CPUs and memory in MiB. A role gets all the</tspan>
+    <tspan x="10px" y="1792px"><tspan>                   instances launch from. `vcpus` and `memory_mib` are its</tspan>
 </tspan>
-    <tspan x="10px" y="1810px"><tspan>                   CPUs, and all the memory but a share that the instance keeps.</tspan>
+    <tspan x="10px" y="1810px"><tspan>                   instance type's CPUs and memory in MiB. A role gets all the</tspan>
 </tspan>
-    <tspan x="10px" y="1828px"><tspan>                   `cpu_features` are its CPU's flags, and `cpu_model` is its</tspan>
+    <tspan x="10px" y="1828px"><tspan>                   CPUs, and all the memory but a share that the instance keeps.</tspan>
 </tspan>
-    <tspan x="10px" y="1846px"><tspan>                   CPU's model, as /proc/cpuinfo names them. Without</tspan>
+    <tspan x="10px" y="1846px"><tspan>                   `cpu_features` are its CPU's flags, and `cpu_model` is its</tspan>
 </tspan>
-    <tspan x="10px" y="1864px"><tspan>                   `cpu_features`, the class states no flag. Without</tspan>
+    <tspan x="10px" y="1864px"><tspan>                   CPU's model, as /proc/cpuinfo names them. Without</tspan>
 </tspan>
-    <tspan x="10px" y="1882px"><tspan>                   `cpu_model`, it states no model. A class that states a model</tspan>
+    <tspan x="10px" y="1882px"><tspan>                   `cpu_features`, the class states no flag. Without</tspan>
 </tspan>
-    <tspan x="10px" y="1900px"><tspan>                   is offered only to roles that need it. `usd_per_hour` is what</tspan>
+    <tspan x="10px" y="1900px"><tspan>                   `cpu_model`, it states no model. A class that states a model</tspan>
 </tspan>
-    <tspan x="10px" y="1918px"><tspan>                   an instance costs an hour. With it, `ls` and a run's summary</tspan>
+    <tspan x="10px" y="1918px"><tspan>                   is offered only to roles that need it. `usd_per_hour` is what</tspan>
 </tspan>
-    <tspan x="10px" y="1936px"><tspan>                   price the class's sandboxes. `startup_seconds` is the most</tspan>
+    <tspan x="10px" y="1936px"><tspan>                   an instance costs an hour. With it, `ls` and a run's summary</tspan>
 </tspan>
-    <tspan x="10px" y="1954px"><tspan>                   seconds that an instance's start may take, its images' pulls</tspan>
+    <tspan x="10px" y="1954px"><tspan>                   price the class's sandboxes. `startup_seconds` is the most</tspan>
 </tspan>
-    <tspan x="10px" y="1972px"><tspan>                   included. Without it, the start may take 1740 seconds.</tspan>
+    <tspan x="10px" y="1972px"><tspan>                   seconds that an instance's start may take, its images' pulls</tspan>
 </tspan>
-    <tspan x="10px" y="1990px"><tspan>    </tspan><tspan class="fg-bright-cyan bold">repositories</tspan><tspan>   The envelope's ECR repositories: `roles` holds the roles'</tspan>
+    <tspan x="10px" y="1990px"><tspan>                   included. Without it, the start may take 1740 seconds.</tspan>
 </tspan>
-    <tspan x="10px" y="2008px"><tspan>                   images, and `sandboxd` the images that hold sandboxd.</tspan>
+    <tspan x="10px" y="2008px"><tspan>    </tspan><tspan class="fg-bright-cyan bold">repositories</tspan><tspan>   The envelope's ECR repositories: `roles` holds the roles'</tspan>
 </tspan>
-    <tspan x="10px" y="2026px"><tspan>    </tspan><tspan class="fg-bright-cyan bold">timer</tspan><tspan>          The sandboxes' timer, which terminates each instance at its</tspan>
+    <tspan x="10px" y="2026px"><tspan>                   images, and `sandboxd` the images that hold sandboxd.</tspan>
 </tspan>
-    <tspan x="10px" y="2044px"><tspan>                   run's hard end. `group` is its EventBridge Scheduler schedule</tspan>
+    <tspan x="10px" y="2044px"><tspan>    </tspan><tspan class="fg-bright-cyan bold">timer</tspan><tspan>          The sandboxes' timer, which terminates each instance at its</tspan>
 </tspan>
-    <tspan x="10px" y="2062px"><tspan>                   group. `role_arn` is the ARN of the role that its schedules</tspan>
+    <tspan x="10px" y="2062px"><tspan>                   run's hard end. `group` is its EventBridge Scheduler schedule</tspan>
 </tspan>
-    <tspan x="10px" y="2080px"><tspan>                   terminate instances with.</tspan>
+    <tspan x="10px" y="2080px"><tspan>                   group. `role_arn` is the ARN of the role that its schedules</tspan>
 </tspan>
-    <tspan x="10px" y="2098px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">modal</tspan><tspan>          Sandboxes in a Modal workspace. Modal imports their images from</tspan>
+    <tspan x="10px" y="2098px"><tspan>                   terminate instances with.</tspan>
 </tspan>
-    <tspan x="10px" y="2116px"><tspan>                 an ECR repository, which the engine of [docker] pushes them to.</tspan>
+    <tspan x="10px" y="2116px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">modal</tspan><tspan>          Sandboxes in a Modal workspace. Modal imports their images from</tspan>
 </tspan>
-    <tspan x="10px" y="2134px"><tspan>                 Each sandbox listens behind Modal's TLS tunnel, which the run</tspan>
+    <tspan x="10px" y="2134px"><tspan>                 an ECR repository, which the engine of [docker] pushes them to.</tspan>
 </tspan>
-    <tspan x="10px" y="2152px"><tspan>                 dials. The provider runs Modal's helper, pumpkin-modal.py,</tspan>
+    <tspan x="10px" y="2152px"><tspan>                 Each sandbox listens behind Modal's TLS tunnel, which the run</tspan>
 </tspan>
-    <tspan x="10px" y="2170px"><tspan>                 beside `pumpkin`, with `uv` from PATH. It runs `aws`, AWS CLI</tspan>
+    <tspan x="10px" y="2170px"><tspan>                 dials. The provider runs Modal's helper, pumpkin-modal.py,</tspan>
 </tspan>
-    <tspan x="10px" y="2188px"><tspan>                 v2, as ec2 does. Its settings:</tspan>
+    <tspan x="10px" y="2188px"><tspan>                 beside `pumpkin`, with `uv` from PATH. It runs `aws`, AWS CLI</tspan>
 </tspan>
-    <tspan x="10px" y="2206px"><tspan>    </tspan><tspan class="fg-bright-cyan bold">profile</tspan><tspan>        The profile of Modal's configuration whose token reaches the</tspan>
+    <tspan x="10px" y="2206px"><tspan>                 v2, as ec2 does. Its settings:</tspan>
 </tspan>
-    <tspan x="10px" y="2224px"><tspan>                   workspace.</tspan>
+    <tspan x="10px" y="2224px"><tspan>    </tspan><tspan class="fg-bright-cyan bold">profile</tspan><tspan>        The profile of Modal's configuration whose token reaches the</tspan>
 </tspan>
-    <tspan x="10px" y="2242px"><tspan>    </tspan><tspan class="fg-bright-cyan bold">config</tspan><tspan>         The absolute path of Modal's configuration file that holds</tspan>
+    <tspan x="10px" y="2242px"><tspan>                   workspace.</tspan>
 </tspan>
-    <tspan x="10px" y="2260px"><tspan>                   the profile. Without it, the file is ~/.modal.toml.</tspan>
+    <tspan x="10px" y="2260px"><tspan>    </tspan><tspan class="fg-bright-cyan bold">config</tspan><tspan>         The absolute path of Modal's configuration file that holds</tspan>
 </tspan>
-    <tspan x="10px" y="2278px"><tspan>    </tspan><tspan class="fg-bright-cyan bold">dials_from</tspan><tspan>     This machine's public IPv4 address. The sandboxes' tunnels</tspan>
+    <tspan x="10px" y="2278px"><tspan>                   the profile. Without it, the file is ~/.modal.toml.</tspan>
 </tspan>
-    <tspan x="10px" y="2296px"><tspan>                   take connections from it alone.</tspan>
+    <tspan x="10px" y="2296px"><tspan>    </tspan><tspan class="fg-bright-cyan bold">dials_from</tspan><tspan>     This machine's public IPv4 address. The sandboxes' tunnels</tspan>
 </tspan>
-    <tspan x="10px" y="2314px"><tspan>    </tspan><tspan class="fg-bright-cyan bold">images</tspan><tspan>         Where Modal imports images from. `region` is an AWS region,</tspan>
+    <tspan x="10px" y="2314px"><tspan>                   take connections from it alone.</tspan>
 </tspan>
-    <tspan x="10px" y="2332px"><tspan>                   and `repository` an ECR repository there. `role_arn` is the</tspan>
+    <tspan x="10px" y="2332px"><tspan>    </tspan><tspan class="fg-bright-cyan bold">images</tspan><tspan>         Where Modal imports images from. `region` is an AWS region,</tspan>
 </tspan>
-    <tspan x="10px" y="2350px"><tspan>                   ARN of the AWS role that Modal pulls with, which trusts</tspan>
+    <tspan x="10px" y="2350px"><tspan>                   and `repository` an ECR repository there. `role_arn` is the</tspan>
 </tspan>
-    <tspan x="10px" y="2368px"><tspan>                   Modal's identity.</tspan>
+    <tspan x="10px" y="2368px"><tspan>                   ARN of the AWS role that Modal pulls with, which trusts</tspan>
 </tspan>
-    <tspan x="10px" y="2386px"><tspan>    </tspan><tspan class="fg-bright-cyan bold">classes</tspan><tspan>        The classes of sandbox, by name. There is at least one. Each</tspan>
+    <tspan x="10px" y="2386px"><tspan>                   Modal's identity.</tspan>
 </tspan>
-    <tspan x="10px" y="2404px"><tspan>                   class has `cpu_millis`, `memory_bytes` in whole MiB and</tspan>
+    <tspan x="10px" y="2404px"><tspan>    </tspan><tspan class="fg-bright-cyan bold">classes</tspan><tspan>        The classes of sandbox, by name. There is at least one. Each</tspan>
 </tspan>
-    <tspan x="10px" y="2422px"><tspan>                   `startup_seconds`. A class with a GPU has `gpu`, as Modal</tspan>
+    <tspan x="10px" y="2422px"><tspan>                   class has `cpu_millis`, `memory_bytes` in whole MiB and</tspan>
 </tspan>
-    <tspan x="10px" y="2440px"><tspan>                   names one, such as "H100!", or "A100-80GB:2" for two. It then</tspan>
+    <tspan x="10px" y="2440px"><tspan>                   `startup_seconds`. A class with a GPU has `gpu`, as Modal</tspan>
 </tspan>
-    <tspan x="10px" y="2458px"><tspan>                   has `gpu_model`, the model as nvidia-smi names it, such as</tspan>
+    <tspan x="10px" y="2458px"><tspan>                   names one, such as "H100!", or "A100-80GB:2" for two. It then</tspan>
 </tspan>
-    <tspan x="10px" y="2476px"><tspan>                   "NVIDIA H100 80GB HBM3". A class with a GPU is offered only</tspan>
+    <tspan x="10px" y="2476px"><tspan>                   has `gpu_model`, the model as nvidia-smi names it, such as</tspan>
 </tspan>
-    <tspan x="10px" y="2494px"><tspan>                   to roles that need its GPUs. `usd_per_hour` is what a sandbox</tspan>
+    <tspan x="10px" y="2494px"><tspan>                   "NVIDIA H100 80GB HBM3". A class with a GPU is offered only</tspan>
 </tspan>
-    <tspan x="10px" y="2512px"><tspan>                   costs an hour. With it, `ls` and a run's summary price the</tspan>
+    <tspan x="10px" y="2512px"><tspan>                   to roles that need its GPUs. `usd_per_hour` is what a sandbox</tspan>
 </tspan>
-    <tspan x="10px" y="2530px"><tspan>                   class's sandboxes.</tspan>
+    <tspan x="10px" y="2530px"><tspan>                   costs an hour. With it, `ls` and a run's summary price the</tspan>
 </tspan>
-    <tspan x="10px" y="2548px">
+    <tspan x="10px" y="2548px"><tspan>                   class's sandboxes.</tspan>
 </tspan>
-    <tspan x="10px" y="2566px"><tspan>[gateway] is where the gateway meets the sandboxes that dial it over a network:</tspan>
+    <tspan x="10px" y="2566px">
 </tspan>
-    <tspan x="10px" y="2584px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">private</tspan><tspan>        The address, ip:port, that the sandboxes of an ec2 provider</tspan>
+    <tspan x="10px" y="2584px"><tspan>[gateway] is where the gateway meets the sandboxes that dial it over a network:</tspan>
 </tspan>
-    <tspan x="10px" y="2602px"><tspan>                 dial. It is one of this machine's addresses on the envelope's</tspan>
+    <tspan x="10px" y="2602px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">private</tspan><tspan>        The address, ip:port, that the sandboxes of an ec2 provider</tspan>
 </tspan>
-    <tspan x="10px" y="2620px"><tspan>                 network, at a port that the envelope's security group admits. A</tspan>
+    <tspan x="10px" y="2620px"><tspan>                 dial. It is one of this machine's addresses on the envelope's</tspan>
 </tspan>
-    <tspan x="10px" y="2638px"><tspan>                 run listens there while it places a role on such a provider, so</tspan>
+    <tspan x="10px" y="2638px"><tspan>                 network, at a port that the envelope's security group admits. A</tspan>
 </tspan>
-    <tspan x="10px" y="2656px"><tspan>                 only one such run can go at a time.</tspan>
+    <tspan x="10px" y="2656px"><tspan>                 run listens there while it places a role on such a provider, so</tspan>
 </tspan>
-    <tspan x="10px" y="2674px">
+    <tspan x="10px" y="2674px"><tspan>                 only one such run can go at a time.</tspan>
 </tspan>
-    <tspan x="10px" y="2692px"><tspan>[upstreams.&lt;name&gt;] is an upstream that a workflow's model route may reach:</tspan>
+    <tspan x="10px" y="2692px">
 </tspan>
-    <tspan x="10px" y="2710px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">url</tspan><tspan>            The base URL of its API: the URL of the API's endpoint without</tspan>
+    <tspan x="10px" y="2710px"><tspan>[upstreams.&lt;name&gt;] is an upstream that a workflow's model route may reach:</tspan>
 </tspan>
-    <tspan x="10px" y="2728px"><tspan>                 the endpoint's own path, such as https://api.anthropic.com/v1</tspan>
+    <tspan x="10px" y="2728px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">url</tspan><tspan>            The base URL of its API: the URL of the API's endpoint without</tspan>
 </tspan>
-    <tspan x="10px" y="2746px"><tspan>                 for Anthropic's Messages API. It is https, or http to a</tspan>
+    <tspan x="10px" y="2746px"><tspan>                 the endpoint's own path, such as https://api.anthropic.com/v1</tspan>
 </tspan>
-    <tspan x="10px" y="2764px"><tspan>                 loopback IP address, such as 127.0.0.1 but not localhost.</tspan>
+    <tspan x="10px" y="2764px"><tspan>                 for Anthropic's Messages API. It is https, or http to a</tspan>
 </tspan>
-    <tspan x="10px" y="2782px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">key_file</tspan><tspan>       The file that holds its key, below this file's directory unless</tspan>
+    <tspan x="10px" y="2782px"><tspan>                 loopback IP address, such as 127.0.0.1 but not localhost.</tspan>
 </tspan>
-    <tspan x="10px" y="2800px"><tspan>                 the path is absolute. The route sends the key in the header</tspan>
+    <tspan x="10px" y="2800px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">key_file</tspan><tspan>       The file that holds its key, below this file's directory unless</tspan>
 </tspan>
-    <tspan x="10px" y="2818px"><tspan>                 that its API takes for it.</tspan>
+    <tspan x="10px" y="2818px"><tspan>                 the path is absolute. The route sends the key in the header</tspan>
 </tspan>
-    <tspan x="10px" y="2836px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">models</tspan><tspan>         The models it serves. Each has the `name` that a route allows</tspan>
+    <tspan x="10px" y="2836px"><tspan>                 that its API takes for it.</tspan>
 </tspan>
-    <tspan x="10px" y="2854px"><tspan>                 and the `upstream_name` that the upstream takes for it.</tspan>
+    <tspan x="10px" y="2854px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">models</tspan><tspan>         The models it serves. Each has the `name` that a route allows</tspan>
 </tspan>
-    <tspan x="10px" y="2872px"><tspan>                 `usd_per_mtok` is optional. It says what the model's tokens</tspan>
+    <tspan x="10px" y="2872px"><tspan>                 and the `upstream_name` that the upstream takes for it.</tspan>
 </tspan>
-    <tspan x="10px" y="2890px"><tspan>                 cost in US dollars a million: `input` and `output`, and</tspan>
+    <tspan x="10px" y="2890px"><tspan>                 `usd_per_mtok` is optional. It says what the model's tokens</tspan>
 </tspan>
-    <tspan x="10px" y="2908px"><tspan>                 `cached` and `cache_write`, the input that the upstream read</tspan>
+    <tspan x="10px" y="2908px"><tspan>                 cost in US dollars a million: `input` and `output`, and</tspan>
 </tspan>
-    <tspan x="10px" y="2926px"><tspan>                 from its cache and wrote to it. Reasoning counts as output. A</tspan>
+    <tspan x="10px" y="2926px"><tspan>                 `cached` and `cache_write`, the input that the upstream read</tspan>
 </tspan>
-    <tspan x="10px" y="2944px"><tspan>                 model without `usd_per_mtok` has no cost. Neither has a model</tspan>
+    <tspan x="10px" y="2944px"><tspan>                 from its cache and wrote to it. Reasoning counts as output. A</tspan>
 </tspan>
-    <tspan x="10px" y="2962px"><tspan>                 whose responses report a kind of token that its prices lack. No</tspan>
+    <tspan x="10px" y="2962px"><tspan>                 model without `usd_per_mtok` has no cost. Neither has a model</tspan>
 </tspan>
-    <tspan x="10px" y="2980px"><tspan>                 model is listed twice, under one upstream or two.</tspan>
+    <tspan x="10px" y="2980px"><tspan>                 whose responses report a kind of token that its prices lack. No</tspan>
 </tspan>
-    <tspan x="10px" y="2998px">
+    <tspan x="10px" y="2998px"><tspan>                 model is listed twice, under one upstream or two.</tspan>
 </tspan>
-    <tspan x="10px" y="3016px"><tspan>Each entry of a workflow's model route reaches the one upstream that serves</tspan>
+    <tspan x="10px" y="3016px">
 </tspan>
-    <tspan x="10px" y="3034px"><tspan>every model it allows.</tspan>
+    <tspan x="10px" y="3034px"><tspan>Each entry of a workflow's model route reaches the one upstream that serves</tspan>
 </tspan>
-    <tspan x="10px" y="3052px">
+    <tspan x="10px" y="3052px"><tspan>every model it allows.</tspan>
 </tspan>
-    <tspan x="10px" y="3070px"><tspan>On a controller, each job reads its configuration from the controller's</tspan>
+    <tspan x="10px" y="3070px">
 </tspan>
-    <tspan x="10px" y="3088px"><tspan>settings, which deploy/aws writes, or the admin of a controller on Docker. The</tspan>
+    <tspan x="10px" y="3088px"><tspan>On a controller, each job reads its configuration from the controller's</tspan>
 </tspan>
-    <tspan x="10px" y="3106px"><tspan>job sets [gateway] itself. The client sends [upstreams] and the controller's</tspan>
+    <tspan x="10px" y="3106px"><tspan>settings, which deploy/aws writes, or the admin of a controller on Docker. The</tspan>
 </tspan>
-    <tspan x="10px" y="3124px"><tspan>modal. The settings name `envelope`, the version of the envelope that wrote</tspan>
+    <tspan x="10px" y="3124px"><tspan>job sets [gateway] itself. The client sends [upstreams] and the controller's</tspan>
 </tspan>
-    <tspan x="10px" y="3142px"><tspan>them. deploy/aws's README says which versions a job takes. The admin sets</tspan>
+    <tspan x="10px" y="3142px"><tspan>modal. The settings name `envelope`, the version of the envelope that wrote</tspan>
 </tspan>
-    <tspan x="10px" y="3160px"><tspan>`draining = true` for a cutover. Each job is then refused as it starts, and the</tspan>
+    <tspan x="10px" y="3160px"><tspan>them. deploy/aws's README says which versions a job takes. The admin sets</tspan>
 </tspan>
-    <tspan x="10px" y="3178px"><tspan>jobs that run go on to their ends.</tspan>
+    <tspan x="10px" y="3178px"><tspan>`draining = true` for a cutover. Each job is then refused as it starts, and the</tspan>
 </tspan>
-    <tspan x="10px" y="3196px">
+    <tspan x="10px" y="3196px"><tspan>jobs that run go on to their ends.</tspan>
 </tspan>
-    <tspan x="10px" y="3214px"><tspan>[controllers.&lt;name&gt;] is a controller of the person's, which deploy/aws or</tspan>
+    <tspan x="10px" y="3214px">
 </tspan>
-    <tspan x="10px" y="3232px"><tspan>deploy/docker makes. &lt;name&gt; is its name, as its settings' [deployment] name it.</tspan>
+    <tspan x="10px" y="3232px"><tspan>[controllers.&lt;name&gt;] is a controller of the person's, which deploy/aws or</tspan>
 </tspan>
-    <tspan x="10px" y="3250px"><tspan>`run`, `wait`, `ls`, `cancel`, `view` and `reap` go to the one that --controller</tspan>
+    <tspan x="10px" y="3250px"><tspan>deploy/docker makes. &lt;name&gt; is its name, as its settings' [deployment] name it.</tspan>
 </tspan>
-    <tspan x="10px" y="3268px"><tspan>names, as each one's help says. Without --controller, they go to the</tspan>
+    <tspan x="10px" y="3268px"><tspan>`run`, `wait`, `ls`, `cancel`, `view` and `reap` go to the one that --controller</tspan>
 </tspan>
-    <tspan x="10px" y="3286px"><tspan>configuration's one controller, and refuse if it names several. Copies of a</tspan>
+    <tspan x="10px" y="3286px"><tspan>names, as each one's help says. Without --controller, they go to the</tspan>
 </tspan>
-    <tspan x="10px" y="3304px"><tspan>controller's runs' records are in &lt;name&gt; in the runs directory. Each run is sent</tspan>
+    <tspan x="10px" y="3304px"><tspan>configuration's one controller, and refuse if it names several. Copies of a</tspan>
 </tspan>
-    <tspan x="10px" y="3322px"><tspan>the [upstreams.&lt;name&gt;] tables, their keys, the controller's modal and Modal's</tspan>
+    <tspan x="10px" y="3322px"><tspan>controller's runs' records are in &lt;name&gt; in the runs directory. Each run is sent</tspan>
 </tspan>
-    <tspan x="10px" y="3340px"><tspan>configuration file. They go into a directory of the run's own in the</tspan>
+    <tspan x="10px" y="3340px"><tspan>the [upstreams.&lt;name&gt;] tables, their keys, the controller's modal and Modal's</tspan>
 </tspan>
-    <tspan x="10px" y="3358px"><tspan>controller's tmpfs, which the run's end removes. The job runs the client's</tspan>
+    <tspan x="10px" y="3358px"><tspan>configuration file. They go into a directory of the run's own in the</tspan>
 </tspan>
-    <tspan x="10px" y="3376px"><tspan>install with the controller's settings and modal. The client uses ssh,</tspan>
+    <tspan x="10px" y="3376px"><tspan>controller's tmpfs, which the run's end removes. The job runs the client's</tspan>
 </tspan>
-    <tspan x="10px" y="3394px"><tspan>ssh-keygen and git from PATH, and AWS CLI v2 for `region`. It sends the task's</tspan>
+    <tspan x="10px" y="3394px"><tspan>install with the controller's settings and modal. The client uses ssh,</tspan>
 </tspan>
-    <tspan x="10px" y="3412px"><tspan>files and starts its job over SSH. It uses up to four connections for large task</tspan>
+    <tspan x="10px" y="3412px"><tspan>ssh-keygen and git from PATH, and AWS CLI v2 for `region`. It sends the task's</tspan>
 </tspan>
-    <tspan x="10px" y="3430px"><tspan>uploads. The first command creates a key. The controller admits the key once its</tspan>
+    <tspan x="10px" y="3430px"><tspan>files and starts its job over SSH. It uses up to four connections for large task</tspan>
 </tspan>
-    <tspan x="10px" y="3448px"><tspan>admin lists it under the person's name in the controller's members' list. Until</tspan>
+    <tspan x="10px" y="3448px"><tspan>uploads. The first command creates a key. The controller admits the key once its</tspan>
 </tspan>
-    <tspan x="10px" y="3466px"><tspan>then, each command is refused with the line to send the admin. The client keeps</tspan>
+    <tspan x="10px" y="3466px"><tspan>admin lists it under the person's name in the controller's members' list. Until</tspan>
 </tspan>
-    <tspan x="10px" y="3484px"><tspan>that key and the pinned host key in $HOME/.config/pumpkin/ssh/.</tspan>
+    <tspan x="10px" y="3484px"><tspan>then, each command is refused with the line to send the admin. The client keeps</tspan>
 </tspan>
-    <tspan x="10px" y="3502px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">region</tspan><tspan>         The region that deploy/aws was applied in, for a controller</tspan>
+    <tspan x="10px" y="3502px"><tspan>that key and the pinned host key in $HOME/.config/pumpkin/ssh/.</tspan>
 </tspan>
-    <tspan x="10px" y="3520px"><tspan>                 that deploy/aws made. The client finds it there by its tag,</tspan>
+    <tspan x="10px" y="3520px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">region</tspan><tspan>         The region that deploy/aws was applied in, for a controller</tspan>
 </tspan>
-    <tspan x="10px" y="3538px"><tspan>                 starts it if it is stopped, and reaches it at the address that</tspan>
+    <tspan x="10px" y="3538px"><tspan>                 that deploy/aws made. The client finds it there by its tag,</tspan>
 </tspan>
-    <tspan x="10px" y="3556px"><tspan>                 `ssh_interface` names.</tspan>
+    <tspan x="10px" y="3556px"><tspan>                 starts it if it is stopped, and reaches it at the address that</tspan>
 </tspan>
-    <tspan x="10px" y="3574px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">ssh_interface</tspan><tspan>  Which address of a controller that deploy/aws made the client</tspan>
+    <tspan x="10px" y="3574px"><tspan>                 `ssh_interface` names.</tspan>
 </tspan>
-    <tspan x="10px" y="3592px"><tspan>                 reaches its sshd at, as each command reads it from EC2.</tspan>
+    <tspan x="10px" y="3592px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">ssh_interface</tspan><tspan>  Which address of a controller that deploy/aws made the client</tspan>
 </tspan>
-    <tspan x="10px" y="3610px"><tspan>                 `private_ip`, the default, is its private address, which a</tspan>
+    <tspan x="10px" y="3610px"><tspan>                 reaches its sshd at, as each command reads it from EC2.</tspan>
 </tspan>
-    <tspan x="10px" y="3628px"><tspan>                 machine in the controller's VPC reaches, or one behind a VPN</tspan>
+    <tspan x="10px" y="3628px"><tspan>                 `private_ip`, the default, is its private address, which a</tspan>
 </tspan>
-    <tspan x="10px" y="3646px"><tspan>                 that translates its addresses into the VPC's. `public_ip` is</tspan>
+    <tspan x="10px" y="3646px"><tspan>                 machine in the controller's VPC reaches, or one behind a VPN</tspan>
 </tspan>
-    <tspan x="10px" y="3664px"><tspan>                 the public IPv4 address that EC2 gives it at each start, which</tspan>
+    <tspan x="10px" y="3664px"><tspan>                 that translates its addresses into the VPC's. `public_ip` is</tspan>
 </tspan>
-    <tspan x="10px" y="3682px"><tspan>                 a machine reaches from an address that deploy/aws's `ssh_from`</tspan>
+    <tspan x="10px" y="3682px"><tspan>                 the public IPv4 address that EC2 gives it at each start, which</tspan>
 </tspan>
-    <tspan x="10px" y="3700px"><tspan>                 lists. A configuration that names `address` names no</tspan>
+    <tspan x="10px" y="3700px"><tspan>                 a machine reaches from an address that deploy/aws's `ssh_from`</tspan>
 </tspan>
-    <tspan x="10px" y="3718px"><tspan>                 `ssh_interface`.</tspan>
+    <tspan x="10px" y="3718px"><tspan>                 lists. A configuration that names `address` names no</tspan>
 </tspan>
-    <tspan x="10px" y="3736px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">address</tspan><tspan>        The host and port, host:port, of a controller's sshd at a fixed</tspan>
+    <tspan x="10px" y="3736px"><tspan>                 `ssh_interface`.</tspan>
 </tspan>
-    <tspan x="10px" y="3754px"><tspan>                 address, such as the port that deploy/docker publishes. The</tspan>
+    <tspan x="10px" y="3754px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">address</tspan><tspan>        The host and port, host:port, of a controller's sshd at a fixed</tspan>
 </tspan>
-    <tspan x="10px" y="3772px"><tspan>                 client never starts it. A configuration names `region` or</tspan>
+    <tspan x="10px" y="3772px"><tspan>                 address, such as the port that deploy/docker publishes. The</tspan>
 </tspan>
-    <tspan x="10px" y="3790px"><tspan>                 `address`, not both.</tspan>
+    <tspan x="10px" y="3790px"><tspan>                 client never starts it. A configuration names `region` or</tspan>
 </tspan>
-    <tspan x="10px" y="3808px">
+    <tspan x="10px" y="3808px"><tspan>                 `address`, not both.</tspan>
 </tspan>
-    <tspan x="10px" y="3826px"><tspan>[controllers.&lt;name&gt;.modal] is the Modal provider that the controller's runs may</tspan>
+    <tspan x="10px" y="3826px">
 </tspan>
-    <tspan x="10px" y="3844px"><tspan>place roles on, if any, on a controller that deploy/aws made. It takes the</tspan>
+    <tspan x="10px" y="3844px"><tspan>[controllers.&lt;name&gt;.modal] is the Modal provider that the controller's runs may</tspan>
 </tspan>
-    <tspan x="10px" y="3862px"><tspan>settings of a provider of kind modal, but `images`, which the module's settings</tspan>
+    <tspan x="10px" y="3862px"><tspan>place roles on, if any, on a controller that deploy/aws made. It takes the</tspan>
 </tspan>
-    <tspan x="10px" y="3880px"><tspan>give, and `dials_from`, which each run sets:</tspan>
+    <tspan x="10px" y="3880px"><tspan>settings of a provider of kind modal, but `images`, which the module's settings</tspan>
 </tspan>
-    <tspan x="10px" y="3898px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">profile</tspan><tspan>        As modal's. The profile is in Modal's configuration file,</tspan>
+    <tspan x="10px" y="3898px"><tspan>give, and `dials_from`, which each run sets:</tspan>
 </tspan>
-    <tspan x="10px" y="3916px"><tspan>                 ~/.modal.toml. Each run is sent that file if it is there. Its</tspan>
+    <tspan x="10px" y="3916px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">profile</tspan><tspan>        As modal's. The profile is in Modal's configuration file,</tspan>
 </tspan>
-    <tspan x="10px" y="3934px"><tspan>                 workspace is one that deploy/aws's `modal_workspaces` lists.</tspan>
+    <tspan x="10px" y="3934px"><tspan>                 ~/.modal.toml. Each run is sent that file if it is there. Its</tspan>
 </tspan>
-    <tspan x="10px" y="3952px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">classes</tspan><tspan>        As modal's.</tspan>
+    <tspan x="10px" y="3952px"><tspan>                 workspace is one that deploy/aws's `modal_workspaces` lists.</tspan>
 </tspan>
-    <tspan x="10px" y="3970px">
+    <tspan x="10px" y="3970px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">classes</tspan><tspan>        As modal's.</tspan>
+</tspan>
+    <tspan x="10px" y="3988px">
 </tspan>
   </text>
 

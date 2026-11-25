@@ -116,6 +116,7 @@ fn check(edit: impl FnOnce(&mut Value), script: &str, expect: &Expect) {
                 };
                 let actions = core.handle(at, event);
                 assert_replies(line, asked, &actions);
+                assert_lives(line, &actions);
                 run.note(line, &actions, core.tick_due());
             }
         }
@@ -135,6 +136,27 @@ fn assert_replies(line: &str, asked: Option<OpId>, actions: &[Action]) {
         Vec::from_iter(asked),
         "`{line}`: an op gets exactly one reply, and no other event gets one"
     );
+}
+
+// Each lease that `actions` start lasts the life that its open's reply gives as its time left. The
+// core counts that life from the lease's ready.
+fn assert_lives(line: &str, actions: &[Action]) {
+    let left = (actions.iter()).find_map(|action| match action {
+        Action::Reply {
+            reply: OpReply::Lease(reply),
+            ..
+        } => Some(Duration::from_secs(reply.remaining.instance_seconds)),
+        _ => None,
+    });
+    for action in actions {
+        if let Action::StartLease { life, .. } = action {
+            assert_eq!(
+                Some(*life),
+                left,
+                "`{line}`: a lease starts with a life other than the time its open's reply gives"
+            );
+        }
+    }
 }
 
 /// The classes of one provider, each of which offers what every role of the fixture needs:
@@ -436,6 +458,7 @@ impl Run<'_> {
                 grant,
                 instance,
                 start_by,
+                life: _,
             } => format!(
                 "open lease {} of {}{}, as instance {instance}, started by {}",
                 lease.0,

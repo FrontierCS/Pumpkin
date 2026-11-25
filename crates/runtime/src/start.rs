@@ -150,7 +150,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         &mut self,
         scope: &'s Scope<'s, 'r>,
         core: &Core<'_>,
-        (lease, instance, start_by): (LeaseId, u32, Duration),
+        (lease, instance, start_by, life): (LeaseId, u32, Duration, Duration),
         (holder, grant): (Caller, SessionId),
     ) -> Result<(), String> {
         let session = self.workflow().session(grant);
@@ -164,23 +164,31 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             + holder_instance * session.instances.get()
             + instance;
         let runner = self.workflow().runner(runner_id);
-        let (start, collect) = match holder {
+        let (start, holder_collect) = match holder {
             // A lease of the agent's ends with the work phase, which ends by the core's next end of
-            // a phase, and what it left is collected by the agent's teardown's end, as a call's
-            // is.
+            // a phase. The agent's teardown's end bounds its runner's collect, as it does a call's.
             Caller::Agent(_) => (core.phase_due(), self.teardown_end()),
-            // A call's ends with the call's body, and what it left is collected by when the
-            // call's is.
+            // A call's ends with the call's body, and its runner is collected by when the call's
+            // target is.
             Caller::Job(job) => {
                 let collect = self.call(job).collect;
                 (collect, collect)
             }
         };
+        let runner_startup = self.placed.startup(runner_id.role());
         // A sandbox's start ends by when the lease must start and by the core's `start_by`.
         let startup = (self.clock.now())
-            .saturating_add(self.placed.startup(runner_id.role()))
+            .saturating_add(runner_startup)
             .min(start)
             .min(start_by);
+        // The core closes the lease once `life` has passed since `LeaseReady`. The runner's thread
+        // reports that after the sandbox is set up, by `startup`, and after local writes to the
+        // record. A class's startup is also the time that a leased runner has to be frozen and
+        // collected after its lease ends, less those writes and the loop's delays. `lasts` likewise
+        // gives the agents' teardown one more startup.
+        let collect = (startup.saturating_add(life))
+            .saturating_add(runner_startup)
+            .min(holder_collect);
         let deadlines = Deadlines { startup, collect };
         let which = Which::Lease(lease, runner_id, instance);
         let leased = lease::Leased {
