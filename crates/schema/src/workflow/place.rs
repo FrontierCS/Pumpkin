@@ -6,6 +6,7 @@ use std::num::NonZeroU64;
 use super::errors::{Errors, Reported};
 use super::{ByProvider, ByRole, Class, Offers, ParseErrors, Placed, Placement, Sandbox, Workflow};
 use crate::ir::Name;
+use crate::words;
 
 mod misfit;
 
@@ -15,10 +16,11 @@ impl Workflow {
     /// name; and gives back each provider it places a role on, dropping the others. A class fits
     /// a role whose CPU and memory it offers at least, every CPU flag it needs, and exactly the
     /// GPUs and CPU model it needs, so a class with GPUs, or a stated CPU model, goes only to roles
-    /// that need them.
+    /// that need them. No class holds a runner's companions.
     ///
-    /// Fails with each role that fits no class, [at](super::ParseError::at) its needs. Each error
-    /// says what each class offers short of them, and the changes that would place the role.
+    /// Fails with each role that fits no class, [at](super::ParseError::at) its needs, or at its
+    /// companions if it declares any. Each error at its needs says what each class offers short of
+    /// them, and the changes that would place the role.
     pub fn place<P>(
         self,
         offered: BTreeMap<Name, P>,
@@ -36,8 +38,12 @@ impl Workflow {
         let mut errors = Errors::default();
         // Every role is placed before any error is returned, so that each role that fits no
         // class is reported.
-        let fitted: Vec<Result<&Placement, Reported>> = (self.roles.iter())
-            .map(|sandbox| smallest(&mut errors, sandbox, &offers))
+        let fitted: Vec<Result<&Placement, Reported>> = (self.roles())
+            .map(|(role, sandbox)| {
+                let runner = self.runners.get(&role);
+                let companions = runner.map_or(0, |runner| runner.companions.len());
+                smallest(&mut errors, sandbox, companions, &offers)
+            })
             .collect();
         let fitted: Vec<&Placement> = errors.finish(fitted.into_iter().collect())?;
         let placed_on: BTreeSet<&Name> =
@@ -54,16 +60,26 @@ impl Workflow {
     }
 }
 
-/// The smallest of `offered` that `sandbox`'s role fits, as [`Workflow::place`] says; otherwise
-/// reports why each doesn't fit it, at the role's needs in the IR.
+/// The smallest of `offered` that `sandbox`'s role, with its `companions`, fits, as
+/// [`Workflow::place`] says; otherwise reports why it fits none.
 fn smallest<'p>(
     errors: &mut Errors,
     sandbox: &Sandbox,
+    companions: usize,
     offered: &'p [Placement],
 ) -> Result<&'p Placement, Reported> {
     let Sandbox {
         name, needs, at, ..
     } = sandbox;
+    if companions > 0 {
+        return Err(errors.report(
+            at.token("runtime").token("runner").token("companions"),
+            format!(
+                "`{name}` declares {}, and no class of sandbox holds companions: declare none",
+                words::counted(companions, "companion")
+            ),
+        ));
+    }
     let (mut fits, mut misfits) = (Vec::new(), Vec::new());
     for placement in offered {
         let unmet = misfit::unmet(needs, &placement.declared.offers);

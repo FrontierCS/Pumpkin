@@ -24,7 +24,9 @@ The run places the role by those needs ([providers](providers.md#placing-a-run))
   A work target's commands make no ops and no model requests. A process there can outlive its
   call, so nothing could tell its requests apart by job.
 - A **runner** is a sandbox that a session leases. The lease's holder drives it. A runner holds no
-  egress and no grants.
+  egress and no grants. A runner may declare `companions`: containers beside its own in each of
+  its sandboxes, which share its `needs`. Placing refuses such a runner, as no provider's class
+  offers companions.
 
 Every sandbox has `/pumpkin`, which holds Pumpkin's own files. The `schema` crate's
 [`sandbox`](../crates/schema/src/sandbox.rs) module lays them out:
@@ -55,8 +57,8 @@ holder calls it by name. The run checks each call against the grant before anyth
 The parts name each other by role. An agent may name a call target in at most one of its job
 functions. Other agents may name the same target too. The final call's target is a call target
 that no job function names. A target's session names a runner that no other session names. An
-agent's runner has an image that no target has, so the agent never runs what a target's image
-holds. Another part names each target and each runner.
+agent's runner, and each of its companions, has an image that no target has, so the agent never
+runs what a target's image holds. Another part names each target and each runner.
 
 ## The final call
 

@@ -1477,6 +1477,62 @@ fn broken_leases() {
     );
 }
 
+/// [`leasing`]'s workflow, its runner `gpu` with `companions`.
+fn accompanied(companions: Value) -> Value {
+    let mut ir = leasing();
+    ir["roles"][3]["runtime"]["runner"]["companions"] = companions;
+    ir
+}
+
+/// A companion named `name`, of the image whose digest repeats `digit`.
+fn companion(name: &str, digit: char) -> Value {
+    json!({
+        "name": name, "image": format!("sha256:{}", digit.to_string().repeat(64)),
+        "user": { "uid": 65532, "gid": 65532 }, "cwd": "/testbed", "env": ["PORT=8001"],
+    })
+}
+
+#[test]
+fn companions() {
+    let two = json!([
+        companion("scheduler", '4'),
+        companion("swe-000-candidate", '5')
+    ]);
+    let mut commanded = companion("scheduler", '4');
+    commanded["command"] = json!(["serve"]);
+    let mut target_leased = target_leasing();
+    target_leased["roles"][4]["runtime"]["runner"]["companions"] = json!([companion("judge", '2')]);
+    check(
+        [
+            accompanied(two.clone()),
+            accompanied(json!([
+                companion("scheduler", '4'),
+                companion("scheduler", '5')
+            ])),
+            accompanied(json!([commanded])),
+            accompanied(json!([
+                companion("scheduler", '4'),
+                companion("scorer", '2'),
+                companion("judge", '2')
+            ])),
+            target_leased,
+        ],
+        &expect![[r#"
+            parsed
+            /roles/3/runtime/runner/companions/1/name: `scheduler` also names /roles/3/runtime/runner/companions/0: give each a unique name
+            unknown field `command`, expected one of `name`, `image`, `user`, `cwd`, `env`
+            /roles/0/runtime/agent/grants/1/session/runner: `gpu`'s companion `scorer` runs target `trainer`'s image, sha256:2222222222222222222222222222222222222222222222222222222222222222: give the companion an image no target has
+            /roles/0/runtime/agent/grants/1/session/runner: `gpu`'s companion `judge` runs target `trainer`'s image, sha256:2222222222222222222222222222222222222222222222222222222222222222: give the companion an image no target has
+            parsed"#]],
+    );
+    check(
+        [Placing(accompanied(two))],
+        &expect![
+            "/roles/3/runtime/runner/companions: `gpu` declares 2 companions, and no class of sandbox holds companions: declare none"
+        ],
+    );
+}
+
 /// [`leasing`]'s workflow, with a target, `verifier`, of an image of its own, of the agent's job
 /// function `check`.
 fn calling() -> Value {

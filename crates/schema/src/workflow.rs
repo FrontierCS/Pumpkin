@@ -14,8 +14,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::ir::{
-    AbsolutePath, Command, CpuFlag, CpuModel, Dir, Env, File, Gpu, Image, JsonPointer, ModelRoute,
-    Name, Needs, TargetLifetime, User, WorkflowName,
+    AbsolutePath, Command, Companion, CpuFlag, CpuModel, Dir, Env, File, Gpu, Image, JsonPointer,
+    ModelRoute, Name, Needs, TargetLifetime, User, WorkflowName,
 };
 use crate::sandbox::OpPayloadLimit;
 
@@ -413,6 +413,8 @@ pub struct Target {
 pub struct Runner {
     pub cwd: AbsolutePath,
     pub env: Env,
+    /// Each named once among them, as parsing checks.
+    pub companions: Vec<Companion>,
 }
 
 /// A job function of the agent's; see [`ir::JobFunction`](crate::ir::JobFunction).

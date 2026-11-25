@@ -228,6 +228,29 @@ pub struct RunnerRuntime {
     /// Variables added to each command's environment, as [`Command::env`]'s are.
     #[serde(default, skip_serializing_if = "Env::is_empty")]
     pub env: Env,
+    /// The containers that each of the runner's sandboxes holds beside its own, each named once
+    /// among them. They share the sandbox's [`Needs`] and its lifetime. No class of sandbox holds
+    /// them, so [placing](crate::workflow::Workflow::place) refuses a runner that declares
+    /// any. Absent, none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub companions: Vec<Companion>,
+}
+
+/// A container beside a runner's own in each of its sandboxes ([`RunnerRuntime::companions`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Companion {
+    pub name: CompanionName,
+    /// An image no target has, if an agent leases the runner, as for the runner's own
+    /// ([`Session::runner`]).
+    pub image: Image,
+    /// The user the companion's commands run as.
+    pub user: User,
+    /// The directory each command starts in.
+    pub cwd: AbsolutePath,
+    /// Variables added to each command's environment, as [`Command::env`]'s are.
+    #[serde(default, skip_serializing_if = "Env::is_empty")]
+    pub env: Env,
 }
 
 /// The lifetime of a target sandbox.
