@@ -3740,9 +3740,10 @@ fn times_out_between_commands() {
         "await 0 errored",
         "call submit 6 finalize=true",
     ];
-    // The clock reaches the 1 s timeout once the first command has ended.
+    // The clock passes the 1 s timeout once the body has got the first command's output. Its
+    // one ask left, the held get, then times out before it asks or while it waits on the sandbox.
     let timed_out = SlowSync {
-        record: Synced::Holding("log.jsonl", r#""job":0,"kind":"command_ended""#),
+        record: Synced::Holding("log.jsonl", r#""job":0,"kind":"target_get""#),
         queued: 0,
         at: Duration::from_secs(1),
     };
@@ -3764,24 +3765,25 @@ fn times_out_between_commands() {
             {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_started"},"observed_ns":"0","seq":4}
             {"actions":[],"at_ns":"0","event":{"argv":["print","one"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"0","seq":5}
             {"actions":[],"at_ns":"0","event":{"command":0,"end":{"exited":{"code":0}},"job":0,"kind":"command_ended"},"observed_ns":"0","seq":6}
-            {"actions":[],"at_ns":"1000000000","event":{"job":0,"kind":"call_timed_out"},"observed_ns":"1000000000","seq":7}
-            {"actions":[],"at_ns":"1000000000","event":{"job":0,"kind":"call_failed","reason":"the call's timeout passed"},"observed_ns":"1000000000","seq":8}
-            {"actions":[],"at_ns":"1000000000","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":9}
-            {"actions":[],"at_ns":"1000000000","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"1000000000","seq":10}
-            {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":29,"returned":{"state":"accepted"}}}],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"op_arrived","op":1,"request":{"evaluated":{"effects":["set_submission","end_work"],"returned":[{"name":"state","value":"accepted"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"1000000000","seq":11}
-            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"1000000000","seq":12}
-            {"at_ns":"1000000000","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":13}
-            {"actions":[],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"agent_collected"},"seq":14}
-            {"actions":[],"at_ns":"1000000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":15}
-            {"actions":[{"job":1,"kind":"start_final_call","selections":[{"role":"agent","selection":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}],"timeout_ns":"120000000000"}],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"1000000000","seq":16}
-            {"actions":[],"at_ns":"1000000000","event":{"job":1,"kind":"call_started"},"observed_ns":"1000000000","seq":17}
-            {"actions":[],"at_ns":"1000000000","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":1,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"1000000000","seq":18}
-            {"actions":[],"at_ns":"1000000000","event":{"argv":["judge","/pumpkin/in/payload/raw"],"command":0,"job":1,"kind":"target_run"},"observed_ns":"1000000000","seq":19}
-            {"actions":[],"at_ns":"1000000000","event":{"command":0,"end":{"exited":{"code":0}},"job":1,"kind":"command_ended"},"observed_ns":"1000000000","seq":20}
-            {"actions":[],"at_ns":"1000000000","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":1,"kind":"target_get","path":"/pumpkin/out/result.json"},"observed_ns":"1000000000","seq":21}
-            {"actions":[],"at_ns":"1000000000","event":{"job":1,"kind":"call_returned","returned":[{"name":"score","value":6}]},"observed_ns":"1000000000","seq":22}
-            {"actions":[],"at_ns":"1000000000","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":23}
-            {"actions":[{"kind":"finish"}],"at_ns":"1000000000","event":{"job":1,"kind":"call_torn_down"},"observed_ns":"1000000000","seq":24}
+            {"actions":[],"at_ns":"0","event":{"bytes":3,"digest":"sha256:7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add73ff431ed","job":0,"kind":"target_get","path":"/pumpkin/log/0/command.stdout"},"observed_ns":"0","seq":7}
+            {"actions":[],"at_ns":"1000000000","event":{"job":0,"kind":"call_timed_out"},"observed_ns":"1000000000","seq":8}
+            {"actions":[],"at_ns":"1000000000","event":{"job":0,"kind":"call_failed","reason":"the call's timeout passed"},"observed_ns":"1000000000","seq":9}
+            {"actions":[],"at_ns":"1000000000","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":10}
+            {"actions":[],"at_ns":"1000000000","event":{"job":0,"kind":"call_torn_down"},"observed_ns":"1000000000","seq":11}
+            {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":29,"returned":{"state":"accepted"}}}],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"op_arrived","op":1,"request":{"evaluated":{"effects":["set_submission","end_work"],"returned":[{"name":"state","value":"accepted"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"1000000000","seq":12}
+            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"1000000000","seq":13}
+            {"at_ns":"1000000000","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":14}
+            {"actions":[],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"agent_collected"},"seq":15}
+            {"actions":[],"at_ns":"1000000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":16}
+            {"actions":[{"job":1,"kind":"start_final_call","selections":[{"role":"agent","selection":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}],"timeout_ns":"120000000000"}],"at_ns":"1000000000","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"1000000000","seq":17}
+            {"actions":[],"at_ns":"1000000000","event":{"job":1,"kind":"call_started"},"observed_ns":"1000000000","seq":18}
+            {"actions":[],"at_ns":"1000000000","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":1,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"1000000000","seq":19}
+            {"actions":[],"at_ns":"1000000000","event":{"argv":["judge","/pumpkin/in/payload/raw"],"command":0,"job":1,"kind":"target_run"},"observed_ns":"1000000000","seq":20}
+            {"actions":[],"at_ns":"1000000000","event":{"command":0,"end":{"exited":{"code":0}},"job":1,"kind":"command_ended"},"observed_ns":"1000000000","seq":21}
+            {"actions":[],"at_ns":"1000000000","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":1,"kind":"target_get","path":"/pumpkin/out/result.json"},"observed_ns":"1000000000","seq":22}
+            {"actions":[],"at_ns":"1000000000","event":{"job":1,"kind":"call_returned","returned":[{"name":"score","value":6}]},"observed_ns":"1000000000","seq":23}
+            {"actions":[],"at_ns":"1000000000","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":24}
+            {"actions":[{"kind":"finish"}],"at_ns":"1000000000","event":{"job":1,"kind":"call_torn_down"},"observed_ns":"1000000000","seq":25}
             its last record came before the agent's teardown was to end
             job 0's command 0's standard output:
             one"#]],
