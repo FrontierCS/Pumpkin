@@ -33,7 +33,8 @@ resource "aws_vpc_security_group_egress_rule" "sandbox_gateway" {
   referenced_security_group_id = aws_security_group.controller.id
 }
 
-# The controller's `sshd` is reached only from its VPC, and its gateway only from the sandboxes.
+# The controller's `sshd` is reached only from its VPC and from `ssh_from`, and its gateway only
+# from the sandboxes.
 # The group's description stays as it is, since the provider replaces a group whose description
 # changes, with every rule in it.
 resource "aws_security_group" "controller" {
@@ -67,6 +68,18 @@ resource "aws_vpc_security_group_ingress_rule" "controller_ssh" {
   for_each          = toset([for block in data.aws_vpc.this.cidr_block_associations : block.cidr_block if block.state == "associated"])
   security_group_id = aws_security_group.controller.id
   description       = "ssh from the VPC"
+  ip_protocol       = "tcp"
+  from_port         = 22
+  to_port           = 22
+  cidr_ipv4         = each.value
+}
+
+# A machine outside the VPC reaches the controller's public address from a block of its own. Its
+# description has no apostrophe, as the VPC rule's has none.
+resource "aws_vpc_security_group_ingress_rule" "controller_ssh_from" {
+  for_each          = toset(var.ssh_from)
+  security_group_id = aws_security_group.controller.id
+  description       = "ssh from the blocks that ssh_from names"
   ip_protocol       = "tcp"
   from_port         = 22
   to_port           = 22

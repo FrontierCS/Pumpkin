@@ -58,12 +58,13 @@ its run's hard end.
 The controller is the same `pumpkin`, under `pumpkin controller`, on an EC2 instance that
 `deploy/aws` makes or in the container that `deploy/docker` makes. On EC2, its jobs read their
 settings, such as the EC2 provider's launch templates, from the module's SSM parameter, and the
-machine finds and starts it through EC2. The machine reaches it at its private address alone. It
-is in the controller's VPC, or reaches it through a VPN that translates its addresses into the
-VPC's. On Docker, its jobs read their settings from a file that the admin writes, and run on the
-Docker provider alone, on the container's own engine. The machine reaches it at the address that
-its configuration names, and it never stops. Either admits only the keys that its members' list
-holds, and names each member's jobs.
+machine finds and starts it through EC2. The machine reaches it at its private address from the
+controller's VPC, or through a VPN that translates its addresses into the VPC's. A machine
+elsewhere reaches it at its public address, from a block that the module admits. On Docker, its
+jobs read their settings from a file that the admin writes, and run on the Docker provider alone,
+on the container's own engine. The machine reaches it at the address that its configuration
+names, and it never stops. Either admits only the keys that its members' list holds, and names
+each member's jobs.
 A machine whose configuration names
 `[controllers.<name>]` sends it each run, over ssh: `pumpkin run` sends the files below the paths that
 the task reaches in its repository, whether git tracks or ignores them, then starts the run's job, which builds the images and runs the driver there, in a

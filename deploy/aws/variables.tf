@@ -126,6 +126,17 @@ variable "members" {
   }
 }
 
+variable "ssh_from" {
+  description = "The IPv4 CIDR blocks outside the controller's VPC whose machines reach its `sshd`, on port 22, at its public address, such as a member's Elastic IP as a `/32`. Machines in the VPC reach it without one. None by default."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for cidr in var.ssh_from : can(cidrnetmask(cidr))])
+    error_message = "An entry of `ssh_from` is not an IPv4 CIDR block: give one such as `203.0.113.7/32`."
+  }
+}
+
 variable "draining" {
   description = "Whether the controller's settings say `draining = true`, for a cutover. Each job that starts is then refused, and those that run go on to their ends."
   type        = bool

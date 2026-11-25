@@ -147,8 +147,12 @@ impl Viewing {
     fn answerable(&mut self) -> Result<(), Unviewed> {
         let Self { reached, cli, .. } = self;
         let name = &reached.name;
-        let (instance, address) = match &self.located {
-            Located::Ec2 { instance, address } => (instance, *address),
+        let (instance, address, interface) = match &self.located {
+            Located::Ec2 {
+                instance,
+                address,
+                interface,
+            } => (instance, *address, *interface),
             Located::Address(address) => {
                 return probed(address).map_err(|error| {
                     Unviewed::Down(format!(
@@ -165,7 +169,7 @@ impl Viewing {
                 Err(error) => format!(
                     "controller `{name}` runs, but its `sshd` doesn't answer at {address}: \
                      {error}: one just started answers within a minute; past that, {}",
-                    unanswered(&error)
+                    unanswered(&error, interface)
                 ),
             },
             "stopped" => return Err(Unviewed::Stopped),
@@ -224,7 +228,7 @@ fn connected<'a>(cli: &'a mut Option<Cli>, reached: &Reached) -> Result<&'a Cli,
     if let Some(made) = cli {
         return Ok(made);
     }
-    let Find::Ec2 { region } = &reached.find else {
+    let Find::Ec2 { region, .. } = &reached.find else {
         return Err(format!(
             "controller `{}` is at the address that the configuration names, which EC2 knows \
              nothing of: remove the workspace's `.pumpkin/controller`, which holds where an EC2 \

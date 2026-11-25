@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use stdx::Context as _;
 
 use super::{Address, Name, locked};
+use crate::config::Interface;
 
 /// How long commands share a failed repair before trying again, the first nonzero retry pause.
 // As git's automatic gc shares the recent error through gc.log and tries again when it expires:
@@ -20,13 +21,19 @@ use super::{Address, Name, locked};
 const FAILURE_KEPT: Duration = super::AGAIN[1];
 
 /// Where a controller was found.
-// Untagged, so that an EC2 controller's is the object `{instance, address}` that a workspace's
-// `found` holds.
+// Untagged, so that an EC2 controller's is the object `{instance, address, interface}` that a
+// workspace's `found` holds. A `found` that lacks a field doesn't parse, so the controller is
+// found anew.
 #[derive(Deserialize, Serialize)]
 #[serde(untagged)]
 pub(super) enum Located {
-    /// Its EC2 instance, and the private address at which its `sshd` answered, at port 22.
-    Ec2 { instance: String, address: IpAddr },
+    /// Its EC2 instance, and the address at which its `sshd` answered, at port 22, which is the
+    /// instance's that `interface` names.
+    Ec2 {
+        instance: String,
+        address: IpAddr,
+        interface: Interface,
+    },
     /// The address that the configuration names.
     Address(Address),
 }

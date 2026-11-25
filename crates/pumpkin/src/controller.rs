@@ -217,7 +217,7 @@ impl Reached {
         let alias = match find {
             // By the controller's name, rather than the instance that the tag finds, so that the
             // tag that names the controller can't lead this machine's key to another instance.
-            Find::Ec2 { region } => format!("{name}.{}", region.as_str()),
+            Find::Ec2 { region, .. } => format!("{name}.{}", region.as_str()),
             // As `ssh` names a host at a port other than 22 in `known_hosts`.
             Find::Address(address) => format!("[{}]:{}", address.host, address.port),
         };
@@ -245,7 +245,7 @@ impl Reached {
     /// stopped, or the address that the configuration names.
     fn locate(&self) -> Result<Located, String> {
         match &self.find {
-            Find::Ec2 { region } => find(region, &self.name),
+            Find::Ec2 { region, interface } => find(region, &self.name, *interface),
             Find::Address(address) => Ok(Located::Address(address.clone())),
         }
     }
@@ -279,11 +279,13 @@ impl Reached {
 
     fn repair(&self, previous: &Found, said: &str) -> Result<Found, String> {
         self.location.repair(&self.name, Some(previous), || match &previous.at {
-            Located::Ec2 { address, .. } => {
+            Located::Ec2 {
+                address, interface, ..
+            } => {
                 let probe = aws::answers(*address);
                 self.locate().map_err(|error| match probe {
                     Ok(()) => format!("{said}; finding the controller again: {error}"),
-                    Err(probe) => format!("{said}; SSH at its last private address: {probe}: {}; finding the controller again: {error}", aws::unanswered(&probe)),
+                    Err(probe) => format!("{said}; SSH at its last {}: {probe}: {}; finding the controller again: {error}", interface.address(), aws::unanswered(&probe, *interface)),
                 })
             }
             Located::Address(_) => self.locate(),

@@ -31,11 +31,11 @@ comment says (`variables.tf` says each of the module's values and its default). 
 `pumpkin_release`, the release's `pumpkinversion` line, in a `terraform.tfvars` beside it, or write
 the line in place of the variable: `terraform plan` refuses to run without it. Give an `output`, as
 the example does, for each other output that "What the outputs feed" or "Versions" names and the
-admin reads. `pumpkin` reaches the controller at its private address. Machines in the
-controller's VPC reach its port 22, and `sshd` admits for `pumpkin` only the keys that `members`
-lists. A machine elsewhere needs a route into the VPC that gives its traffic one of the VPC's
-addresses, such as a VPN that translates its addresses into the VPC's. A team of one lists its own
-key. A team that enrols no one yet gives `members = {}`, and the controller admits no key.
+admin reads. A machine reaches the controller's port 22 from its VPC, at its private address, or
+from a block that `ssh_from` lists, at its public address. Such a machine's `[controllers.<name>]`
+names `ssh_interface = "public_ip"`. `sshd` admits for `pumpkin` only the keys that `members`
+lists. A team of one lists its own key. A team that enrols no one yet gives `members = {}`, and the
+controller admits no key.
 
 Then, in that directory:
 
@@ -120,7 +120,7 @@ an `output` of its own.
   needs. The team's root attaches it to the machine's role or user, or an administrator attaches it
   by hand, as `aws iam attach-role-policy --role-name <role> --policy-arn <arn>` (or
   `attach-user-policy`). `policies/client.json.tftpl` says what it allows. The machine reaches
-  port 22 at the controller's private address from the controller's VPC.
+  port 22 from the controller's VPC or from `ssh_from`.
 - `terraform output -raw contributor_policy_arn` is the managed IAM policy that a contributor's
   machine needs for `cargo xtask live`, which the root attaches to it as it does any policy.
   `policies/contributor.json.tftpl` says what it allows: the client's, what `pumpkin-admin
