@@ -68,6 +68,15 @@ $ ./pumpkin wait --outcome 234cd166 2> /dev/null | jq '{agents: [.agents[] | {ro
 `usage` holds the run's duration, the sandboxes counted by provider and class with their lifetimes,
 both in nanoseconds written as strings, and the model requests and tokens.
 
+`driver` holds what the run's driver used, as it read itself as the run ended. `cpu_ns` and
+`children_cpu_ns` give its CPU time and that of the children it waited for, as strings.
+`peak_memory_bytes` gives the most memory it held at once. A controller's job adds `job`: its
+systemd `unit`, and what the unit's cgroup counted, CPU time, peak memory and `peak_tasks_count`.
+A figure that the driver couldn't read is `null`, and the record doesn't keep why. The
+`outcome.json` that a reap writes of a lost run has no `driver`. `wait`'s summary says it on its
+`driver:` line. The page says it in the same words, in its figure of the driver's CPU and that
+figure's card.
+
 The log identifies agent callers by their role index (`agent-<n>`). Jobs and leases have
 run-wide numbers. Calls on a shared sandbox keep their command output and the files their
 bodies read under `jobs/<n>/`. Usage counts the shared sandbox once across all its calls. If a sweep deletes an

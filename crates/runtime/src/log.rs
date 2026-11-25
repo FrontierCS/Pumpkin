@@ -67,8 +67,8 @@ pub use progress::{
     SharedSpan, StartPhase, Unread, Work,
 };
 pub(super) use roles::ir_in;
-pub use usage::{Cost, PlaceUse, Priced, TokensCost, Used};
-pub(super) use usage::{usage_of, used};
+pub use usage::{Cost, DriverUse, JobUse, PlaceUse, Priced, TokensCost, Used};
+pub(super) use usage::{driver_json, driver_use, usage_of, used};
 
 pub(super) struct Log<'h, H: Host> {
     path: PathBuf,

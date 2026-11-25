@@ -558,7 +558,7 @@ pub(super) fn nanos<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Durati
     Ok(Duration::from_nanos(nanos))
 }
 
-fn optional_nanos<'de, D: Deserializer<'de>>(
+pub(super) fn optional_nanos<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<Duration>, D::Error> {
     #[derive(Deserialize)]

@@ -25,6 +25,7 @@ mod agent;
 mod child;
 mod clip;
 pub(crate) mod cost;
+pub(crate) mod driver;
 mod model;
 mod row;
 
@@ -855,6 +856,7 @@ pub(crate) fn summary_of(record: &Record, readout: &Readout) -> Option<String> {
         }
     }
     let _ = writeln!(summary, "  sandboxes: {}", sandboxes(progress));
+    driver::summarize(&mut summary, record);
     if let Some(cost) = &cost {
         let _ = writeln!(summary, "  cost: {}", cost::line(cost));
     }

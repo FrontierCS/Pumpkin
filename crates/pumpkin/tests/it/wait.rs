@@ -556,9 +556,14 @@ fn states() {
 fn summarizes() {
     let scratch = Scratch::new();
     // A run that went the whole way, priced but for its box's class, whose train call was stopped,
-    // with model requests over budget.
+    // with model requests over budget. It ran as a controller's job.
     let whole = "20261110-100000-0000000a";
-    let outcome = returned(49.36);
+    let mut outcome = returned(49.36);
+    outcome["driver"] = json!({
+        "cpu_ns": "41200000000", "children_cpu_ns": "3100000000", "peak_memory_bytes": 222_298_112,
+        "job": { "unit": format!("pumpkin-job-{whole}.service"), "cpu_ns": "46000000000",
+            "peak_memory_bytes": 723_517_440, "peak_tasks_count": 1204 },
+    });
     let priced = lease_places(Prices::Both);
     write_run(
         &scratch,
@@ -606,7 +611,11 @@ fn summarizes() {
             json!([{ "kind": "finish" }]),
         ),
     ]);
-    let unjudged = super::unsubmitted();
+    // Its driver couldn't read what its children used.
+    let mut unjudged = super::unsubmitted();
+    unjudged["driver"] = json!({
+        "cpu_ns": "850000000", "children_cpu_ns": null, "peak_memory_bytes": 13_002_342,
+    });
     let unpriced = lease_places(Prices::Nothing);
     write_run(
         &scratch,
@@ -672,7 +681,12 @@ fn summarizes() {
         ],
     );
     for (((id, _), log), places) in others.iter().zip(logs).zip(places) {
-        let outcome = returned(49.36);
+        let mut outcome = returned(49.36);
+        // The last keeps what its driver used in a form that no build writes. Its summary says so,
+        // rather than leave the figures out unsaid, or fail whole.
+        if *id == others[2].0 {
+            outcome["driver"] = json!({ "cpu_ns": 850_000_000 });
+        }
         write_run(&scratch, id, asked(id, 30), &log, Some(outcome), &places);
     }
     let mut budgeted = lease_task();
@@ -684,12 +698,12 @@ fn summarizes() {
     scratch.write(&format!("runs/{}/ir.json", others[0].0), &budgeted);
     let wait = |id: &str| waited(&scratch, id);
     let mut steps: Vec<Step> = [whole, late].map(|id| Step::Ran(wait(id))).into();
-    // Of those, the command and the lines that say a cost or a budget.
+    // Of those, the command and the lines that say a cost, a budget or what the driver used.
     for (id, _) in others {
         let said = wait(id);
         let mut lines = said.lines();
         let shown = |line: &&str| {
-            ["model:", "budget ", "cost:"]
+            ["model:", "budget ", "cost:", "driver"]
                 .iter()
                 .any(|word| line.contains(word))
         };
@@ -722,6 +736,7 @@ fn summarizes() {
               budget solver (model-a, model-b): at least $0.66 of $0.50, exhausted
               budget trainer (model-a): $0.45 of $0.10, exhausted
               sandboxes: 1 on aws/box, 52s in all, leases charged 45s, 5s of it busy, 1 created, all deleted; 2 on aws/judge, 31m27s in all, leases charged 14m10s, 30s of it busy, $0.19 at $0.3672 an hour, 2 created, all deleted; 7 on modal/a100_80, 6m09s in all, leases charged 1m14s, 3s of it busy, $0.26 at $2.5 an hour, 6 created, all deleted
+              driver: CPU 41.20s, children's CPU 3.10s, peak memory 212.0 MiB; job: CPU 46.00s, peak memory 690.0 MiB, peak tasks 1204
               cost: $1.56, $1.11 of it for tokens and $0.45 for sandboxes, and more without a price, and for 1 response's unreported tokens
             pumpkin: run 20261110-100000-0000000a finished with a result (score=49.36 metrics={"solved":3}); its record is <scratch>/runs/20261110-100000-0000000a
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
@@ -732,6 +747,7 @@ fn summarizes() {
                         model: 5 requests, answered 4 200, 1 refused; 3 failed upstream: 1 with no code, 2 rate_limit_exceeded; dropped request headers: x-a, x-h00, x-h01, x-h02, x-h03, x-h04, x-h05, x-h06, x-h07, x-h08, x-h09, x-h10, x-h11, x-h12, x-h13, x-h14, x-h15, x-h16, x-h17, x-h18, x-h19, x-h20, x-h21, x-h22, x-h23, x-h24, x-h25, x-h26, x-h27, x-h28, x-h29, x-h30, and more; no response reported its tokens
               model: 5 requests, answered 4 200, 1 refused; 3 failed upstream: 1 with no code, 2 rate_limit_exceeded; dropped request headers: x-a, x-h00, x-h01, x-h02, x-h03, x-h04, x-h05, x-h06, x-h07, x-h08, x-h09, x-h10, x-h11, x-h12, x-h13, x-h14, x-h15, x-h16, x-h17, x-h18, x-h19, x-h20, x-h21, x-h22, x-h23, x-h24, x-h25, x-h26, x-h27, x-h28, x-h29, x-h30, and more; no response reported its tokens
               sandboxes: 1 on aws/judge, 30m06s in all, 1 created, all deleted
+              driver: CPU 0.85s, children's CPU unread, peak memory 12.3 MiB
             pumpkin: run 20261110-110000-0000000b finished without a result: the final call gave none (error: solver submitted nothing); its commands' logs can't be found: <scratch>/runs/20261110-110000-0000000b/log.jsonl names no final call: expected a `start_final_call`; its record is <scratch>/runs/20261110-110000-0000000b
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
             $ pumpkin wait --runs runs 20261110-120000-0000000c
@@ -748,7 +764,8 @@ fn summarizes() {
             $ pumpkin wait --runs runs 20261110-120000-0000000e
                         model: 3 requests, all answered 200; tokens 3000 in (2600 cached, 150 written to the cache), 300 out (40 reasoning), as 2 responses reported them; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end
                         model: 1 request, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 500 in, 50 out
-              model: 4 requests, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 3500 in (2600 cached, 150 written to the cache), 350 out (40 reasoning), as 3 responses reported them; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end"#]],
+              model: 4 requests, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 3500 in (2600 cached, 150 written to the cache), 350 out (40 reasoning), as 3 responses reported them; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end
+              what its driver used can't be read: <scratch>/runs/20261110-120000-0000000e/outcome.json: invalid type: integer `850000000`, expected a string"#]],
     );
 }
 

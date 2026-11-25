@@ -29,7 +29,7 @@ use crate::sandboxd::Sandboxd;
 use crate::workspace::Workspace;
 use crate::{
     Reader, absolute_utf8, advise, arg_flags, cli, closing_problems, config, config_path,
-    controller, driver, modal_helper, next, print, runs_dir, say, star, task_problems,
+    controller, driver, job, modal_helper, next, print, runs_dir, say, star, task_problems,
 };
 
 pub(crate) fn run(flags: cli::Run) -> Result<Exit, String> {
@@ -185,6 +185,8 @@ pub(crate) fn driver_run(driver: cli::Driver) -> Result<Exit, String> {
     let pushed = placed_on.iter().filter(|(_, connected)| connected.pushes());
     let names: Vec<String> = pushed.map(|(name, _)| format!("`{name}`")).collect();
     let on = placed_on.as_ref().map(Connected::provider);
+    // A follower follows a controller's job, whose driver runs in the job's unit.
+    let unit = (reader == Reader::Follower).then(|| format!("{}.service", job::unit_name(&id)));
     let kept = Recorded {
         args: &words,
         prices: &prices,
@@ -203,9 +205,14 @@ pub(crate) fn driver_run(driver: cli::Driver) -> Result<Exit, String> {
     // Binds nothing, so every run has one, whether or not a role's sandboxes listen.
     let dialer = Dialer::new(tls::Client::web_pki());
     let bodies = Bodies::new(&sources, &args);
-    let executed = run.execute(sandboxd.path(), private.as_ref(), &dialer, &bodies, || {
-        driver::announce(&dir)
-    });
+    let executed = run.execute(
+        sandboxd.path(),
+        private.as_ref(),
+        &dialer,
+        &bodies,
+        || driver::announce(&dir),
+        || driver::used(unit.as_deref()),
+    );
     if let Err(stopped) = executed {
         if let Some(again) = &again {
             say(closing(&id, &stopped.to_string(), &dir));

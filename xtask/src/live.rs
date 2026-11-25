@@ -552,8 +552,9 @@ fn started(pumpkin: &mut Command) -> Result<(Child, ChildStderr)> {
 }
 
 /// What is wrong in the record of a smoke run at `record`: a run that didn't finish, a probe that
-/// failed or is missing, and a sandbox that isn't deleted. `gpu` is whether the run has a GPU
-/// runner.
+/// failed or is missing, and a sandbox that isn't deleted. Each smoke runs as a controller's job,
+/// so a record of what the driver used that names no job's unit, or another, is wrong too. It
+/// prints what the driver used. `gpu` is whether the run has a GPU runner.
 fn checked(record: &Path, gpu: bool) -> Vec<String> {
     let read = |path: &Path| -> std::result::Result<serde_json::Value, String> {
         let text = fs::read_to_string(path)
@@ -569,6 +570,15 @@ fn checked(record: &Path, gpu: bool) -> Vec<String> {
     });
     if outcome["state"] != "finished" {
         failed.push(format!("the run didn't finish: {}", outcome["state"]));
+    }
+    let driver = &outcome["driver"];
+    println!("driver used: {driver}");
+    let id = record.file_name().unwrap_or_default().to_string_lossy();
+    let unit = format!("pumpkin-job-{id}.service");
+    if driver["job"]["unit"] != unit.as_str() {
+        failed.push(format!(
+            "what the driver used names no job's unit {unit}: {driver}"
+        ));
     }
     let values = outcome["verdict"]["result"]["values"].as_array();
     let detail = (values.into_iter().flatten())

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use runtime::{
-    CallerName, Cost, Ending, ModelUse, Progress, Readout, SandboxStart, StartPhase, Tokens,
+    CallerName, Cost, Ending, ModelUse, Progress, Readout, Record, SandboxStart, StartPhase, Tokens,
 };
 use serde_json::{Value, json};
 
@@ -231,6 +231,7 @@ pub(super) fn run_json(held: &Held, at: &next::At, again: bool) -> Value {
         "talk": held.talk.as_ref().map(Talk::json),
         "model": progress.as_ref().map(|progress| model_json(&progress.model)),
         "cost": progress.as_ref().and_then(Progress::cost).as_ref().map(cost_json),
+        "driver": driver_json(record),
         "summary": summary,
         "unread": unread,
         "end": held.fold.taken(),
@@ -250,6 +251,22 @@ fn cost_json(cost: &Cost) -> Value {
         "shown": progress::usd(cost.usd(), cost.partial()),
         "said": progress::cost::line(cost),
     })
+}
+
+/// What the run's driver used, in the words of the summary's `driver:` line. `shown` is the
+/// driver's CPU time, and `rows` each figure by its name, the job's after the driver's. It is
+/// `null` while the run is live, if its record keeps none, or if the record can't be read, which
+/// the summary says.
+fn driver_json(record: &Record) -> Value {
+    let Ok(Some(used)) = record.driver_use() else {
+        return Value::Null;
+    };
+    let (driver, job) = progress::driver::figures(&used);
+    let job = (job.into_iter().flatten()).map(|(name, value)| (format!("job's {name}"), value));
+    let rows: Vec<Value> = (driver.into_iter().chain(job))
+        .map(|(name, value)| json!([name, value]))
+        .collect();
+    json!({ "shown": progress::driver::cpu(&used), "rows": rows })
 }
 
 fn model_json(model: &ModelUse) -> Value {

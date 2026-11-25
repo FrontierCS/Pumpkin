@@ -483,7 +483,8 @@ fn report(invoked: String, output: &Output, dir: &Path, rootful: bool) -> String
 }
 
 /// The lines of `said` with each duration and clock time in a run's summary and its milestones
-/// replaced by `<t>`.
+/// replaced by `<t>`. The summary's line of what the driver used, whose figures differ between
+/// runs, is checked as read on this machine, then left out.
 fn steady(said: &[&str]) -> Vec<String> {
     let timed = |word: &str| {
         let word = word.trim_end_matches([',', ';', ':']);
@@ -499,16 +500,21 @@ fn steady(said: &[&str]) -> Vec<String> {
         (clock && word.contains(':')) || span
     };
     let mut summary = false;
-    let lines = said.iter().map(|line| {
+    let lines = said.iter().filter_map(|line| {
         let first =
             line.starts_with("pumpkin: run ") && line.ends_with(':') && line.contains(" ran ");
         summary = first || (summary && line.starts_with("  "));
+        if summary && line.starts_with("  driver: ") {
+            let read = !line.contains("unread") && !line.contains("job:");
+            assert!(read, "the driver's figures are unread, or a job's: {line}");
+            return None;
+        }
         // A milestone, which `wait` says as it follows a run, starts with its time.
         let milestone = (line.strip_prefix("pumpkin:"))
             .and_then(|rest| rest.split_whitespace().next())
             .is_some_and(|word| timed(word) && word.contains(':'));
         if !summary && !milestone {
-            return (*line).to_owned();
+            return Some((*line).to_owned());
         }
         let words = line.split(' ').map(|word| {
             if timed(word) {
@@ -518,13 +524,29 @@ fn steady(said: &[&str]) -> Vec<String> {
                 word.to_owned()
             }
         });
-        words.collect::<Vec<String>>().join(" ")
+        Some(words.collect::<Vec<String>>().join(" "))
     });
     lines.collect()
 }
 
-/// `outcome` with the durations and prices of its usage, which differ between runs, replaced.
+/// `outcome` with the durations and prices of its usage, which differ between runs, replaced. Its
+/// driver's figures, which differ too, are checked as read on this machine, then left out.
 fn steady_outcome(mut outcome: Value) -> Value {
+    if let Some(driver) = outcome
+        .as_object_mut()
+        .and_then(|fields| fields.remove("driver"))
+    {
+        for figure in ["cpu_ns", "children_cpu_ns", "peak_memory_bytes"] {
+            assert!(
+                !driver[figure].is_null(),
+                "the driver's {figure} is unread: {driver}"
+            );
+        }
+        assert!(
+            driver.get("job").is_none(),
+            "a run of no job has a job's figures: {driver}"
+        );
+    }
     if let Some(usage) = outcome.get_mut("usage") {
         usage["ran_ns"] = "<ns>".into();
         for sandboxes in usage["sandboxes"].as_array_mut().unwrap() {

@@ -18,8 +18,8 @@
 //!   `sandbox.json`: `provider`, `id`, `gpus` once known, and `delete.state`, `deleted` or
 //!   `failed`, once tried; its `out/`, `log/` and a body's `got/` as far as collected.
 //! - `outcome.json`, the run's end: `state` is `finished`, with what `log::outcome_json` gives,
-//!   `failed`, with a `reason`, or `interrupted`, with a `signal`; and `usage`, if the run began
-//!   its log.
+//!   `failed`, with a `reason`, or `interrupted`, with a `signal`; `usage`, if the run began its
+//!   log; and `driver`, what the driver used, unless a reap wrote it of a lost run.
 //! - `reaps.jsonl`, a line for each sandbox a reap deleted; `sockets/`, where private sandboxes
 //!   meet the gateway, which a reap removes.
 
@@ -44,7 +44,7 @@ use schema::workflow::{ByProvider, ByRole, Class, Placed, Placement, Workflow};
 use serde_json::{Map, Value, json};
 use stdx::Context;
 
-use super::log::{self, LogFold, Place, Readout, Used};
+use super::log::{self, LogFold, Place, Readout};
 use super::model::{KeptPart, KeptRequest};
 use super::read_error::{ReadError, failed, form, open_required, read_optional};
 use super::sandbox::sweep;
@@ -52,10 +52,11 @@ use super::{Durable, Host, System, TokenPrices};
 
 mod ending;
 mod payload;
+mod used;
 mod writer;
 
 pub use ending::Ending;
-use ending::{State, read_outcome};
+use ending::State;
 pub(super) use payload::reference;
 pub use writer::{Writer, writer};
 use writer::{read_record_json, writer_of};
@@ -785,19 +786,6 @@ impl Record {
                 .map(|(role, entries)| (role, entries.collect()))
                 .collect()
         }))
-    }
-
-    /// What the run used, as its `outcome.json` records it; `None` while it has none, or if it has
-    /// one without what the run used, as a reap writes of a lost run.
-    pub fn used(&self) -> Result<Option<Used>, ReadError> {
-        let path = self.dir.join("outcome.json");
-        let Some(outcome) = read_outcome(&path)? else {
-            return Ok(None);
-        };
-        match outcome.get("usage") {
-            None => Ok(None),
-            Some(usage) => log::used(usage).map(Some).map_err(form(path.display())),
-        }
     }
 
     fn pid_file(&self) -> Result<(File, PathBuf), ReadError> {

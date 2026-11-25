@@ -34,7 +34,7 @@ clap.workspace = true
 jiff.workspace = true
 libc.workspace = true
 miniz_oxide.workspace = true
-rustix = { workspace = true, features = ["event", "fs", "process", "stdio", "thread"] }
+rustix = { workspace = true, features = ["event", "fs", "param", "process", "stdio", "thread", "time"] }
 serde.workspace = true
 serde_ignored.workspace = true
 serde_json.workspace = true
