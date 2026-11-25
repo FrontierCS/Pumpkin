@@ -380,13 +380,17 @@ export function count(count, unit) {
   return (scaled < 100 ? scaled.toFixed(1) : scaled.toFixed(0)) + prefix + " " + unit;
 }
 
-// Bytes in three digits at most: `840 B`, `21.4 KB`, `4.72 MB`.
+// Bytes in the largest binary unit that holds at least one of them, to a tenth cut short, as
+// `pumpkin`'s `size` says them: `840 bytes`, `21.4 KiB`, `4.7 MiB`.
 /** @param {number | null | undefined} bytes */
 export function bytes(bytes) {
   if (bytes === null || bytes === undefined) return "-";
-  if (bytes < 1000) return bytes + " B";
-  const [scaled, unit] = bytes < 1e6 ? [bytes / 1e3, "KB"] : bytes < 1e9 ? [bytes / 1e6, "MB"] : [bytes / 1e9, "GB"];
-  return scaled.toPrecision(3) + " " + unit;
+  /** @type {[number, string][]} */
+  const units = [[2 ** 30, "GiB"], [2 ** 20, "MiB"], [2 ** 10, "KiB"]];
+  const unit = units.find(([size]) => bytes >= size);
+  if (unit === undefined) return bytes + (bytes === 1 ? " byte" : " bytes");
+  const tenths = Math.floor((bytes * 10) / unit[0]);
+  return Math.floor(tenths / 10) + "." + (tenths % 10) + " " + unit[1];
 }
 
 // A duration in the unit that keeps three digits: `840 ms`, `3.76 s`, `12.4 min`.

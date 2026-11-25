@@ -769,6 +769,50 @@ fn summarizes() {
     );
 }
 
+#[test]
+fn says_sizes_in_binary_units() {
+    let scratch = Scratch::new();
+    // A driver's peak memory and its job's, at the edges of each binary unit, and 1,500,000 bytes,
+    // which are 1.5 in decimal megabytes.
+    let peaks = [
+        (1023, 1024),
+        (1_048_575, 1_048_576),
+        (1_500_000, 1_073_741_823),
+    ];
+    let mut steps = Vec::new();
+    for (index, (driver, job)) in peaks.into_iter().enumerate() {
+        let id = format!("20261110-130000-0000000{index}");
+        let mut outcome = returned(1.0);
+        outcome["driver"] = json!({
+            "cpu_ns": "1", "children_cpu_ns": null, "peak_memory_bytes": driver,
+            "job": { "unit": "pumpkin-job.service", "cpu_ns": "1", "peak_memory_bytes": job,
+                "peak_tasks_count": 1 },
+        });
+        let places = lease_places(Prices::Nothing);
+        write_run(
+            &scratch,
+            &id,
+            asked(&id, 30),
+            &whole_log(),
+            Some(outcome),
+            &places,
+        );
+        let said = waited(&scratch, &id);
+        let driver = said.lines().filter(|line| line.contains("driver:"));
+        steps.push(Step::Ran(driver.map(str::trim_start).collect()));
+    }
+    check(
+        &scratch,
+        steps,
+        false,
+        &[],
+        &expect![[r#"
+            driver: CPU 0.00s, children's CPU unread, peak memory 1023 bytes; job: CPU 0.00s, peak memory 1.0 KiB, peak tasks 1
+            driver: CPU 0.00s, children's CPU unread, peak memory 1023.9 KiB; job: CPU 0.00s, peak memory 1.0 MiB, peak tasks 1
+            driver: CPU 0.00s, children's CPU unread, peak memory 1.4 MiB; job: CPU 0.00s, peak memory 1023.9 MiB, peak tasks 1"#]],
+    );
+}
+
 /// Runs `wait` on run `id` of `scratch`'s `runs` and shows its invocation, its exit status and
 /// what it said, without the outcome it printed.
 ///
