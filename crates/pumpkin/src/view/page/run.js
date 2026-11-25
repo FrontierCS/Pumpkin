@@ -36,6 +36,7 @@ import { drawLanes, inspectLane } from "./lanes.js";
  * @property {Talk | null} talk
  * @property {ModelUse | null} model
  * @property {Cost | null} cost null if nothing of it has a price
+ * @property {Driver | null} driver null while the run is live, if its record keeps none, or if the record can't be read, which `summary` says
  * @property {{ count: number, said: string } | null} unread
  * @property {string | null} summary what `pumpkin summary` prints of it
  * @property {number} end the byte of the log that the run was read to
@@ -49,6 +50,9 @@ import { drawLanes, inspectLane } from "./lanes.js";
  * @typedef {object} Cost what the run cost so far, at the prices its record keeps
  * @property {string} shown the whole, as `ls`'s Cost column shows it: `$1.13`, `$1.13+`
  * @property {string} said what the summary's cost line says of it, after `cost: `
+ * @typedef {object} Driver what the run's driver used, in the words of the summary's `driver:` line
+ * @property {string} shown the driver's CPU time
+ * @property {Array<[string, string]>} rows each figure by its name, the job's after the driver's
  * @typedef {object} ModelUse
  * @property {number} requests
  * @property {Array<{ code: string, count: number }>} failed
@@ -675,6 +679,13 @@ function drawFacts(facts, data) {
         ])
       : null,
     data.cost ? fact("Cost", data.cost.shown, [["Cost", data.cost.said]]) : null,
+    data.driver
+      ? fact(
+          "Driver's CPU",
+          data.driver.shown,
+          data.driver.rows.map(([name, value]) => [sentence(name), value]),
+        )
+      : null,
   );
 }
 

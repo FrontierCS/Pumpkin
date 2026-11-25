@@ -182,6 +182,11 @@ fn write_served(scratch: &Scratch) -> File {
             "usd_per_hour": 0.3672, "usd": 0.11 }],
         "usd": 0.77, "unpriced_models": ["model-b"],
     });
+    outcome["driver"] = json!({
+        "cpu_ns": "41200000000", "children_cpu_ns": "3100000000", "peak_memory_bytes": 222_298_112,
+        "job": { "unit": format!("pumpkin-job-{ended}.service"), "cpu_ns": null,
+            "peak_memory_bytes": 723_517_440, "peak_tasks_count": 1204 },
+    });
     write_run(
         scratch,
         ended,
@@ -480,6 +485,7 @@ fn serves_runs() {
             GET /api/runs/<ended>
             again: {"command":"pumpkin run --runs <scratch>/runs <scratch>/task.star"}
             cost: {"said":"$1.11, $0.66 of it for tokens and $0.45 for sandboxes, and more without a price, and for 1 response's unreported tokens","shown":"$1.11+"}
+            driver: {"rows":[["CPU","41.20s"],["children's CPU","3.10s"],["peak memory","212.0 MiB"],["job's CPU","unread"],["job's peak memory","690.0 MiB"],["job's peak tasks","1204"]],"shown":"41.20s"}
             end: 10332
             failure: null
             failures: [{"at":260.0,"evidence":[],"mark":{"at":260.0,"between":["solver","trainer"],"lane":"job 1","record":5592,"role":"trainer"},"reason":"the job's sandbox didn't start: Modal refused the helper's `create`: ResourceExhaustedError: Insufficient capacity to create sandbox: fix what Modal reports","state":"failed","subject":{"job":1,"kind":"call"}},{"at":1020.0,"evidence":[],"mark":{"at":1020.0,"between":["scorer","model"],"lane":"job 4","record":9561,"role":"scorer"},"reason":null,"state":"failed","subject":{"caller":"job-4","kind":"request","request":3,"upstream":null}}]

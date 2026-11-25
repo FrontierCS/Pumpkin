@@ -106,7 +106,7 @@ pub(crate) fn median(spans: &[Duration]) -> Option<Duration> {
 
 /// `span` to the hundredth of a second, as `0.85s`, below a minute, where a model's times fall,
 /// and else as [`span`] says it.
-fn seconds(span: Duration) -> String {
+pub(super) fn seconds(span: Duration) -> String {
     if span < Duration::from_mins(1) {
         format!("{:.2}s", span.as_secs_f64())
     } else {
