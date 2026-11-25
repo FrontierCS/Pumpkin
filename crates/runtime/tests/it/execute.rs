@@ -2625,10 +2625,13 @@ fn refusal_held_by_a_slow_sync() {
 #[test]
 fn start_times() {
     let agent = Synced::Holding(AGENT_SANDBOX, "sim-1");
-    let target = Synced::Holding("jobs/0/.sandbox.json.partial", "sim-2");
+    let target = || Synced::Holding("jobs/0/.sandbox.json.partial", "sim-2");
+    // The loop logs the agent's create only once the agent is set up. The target's record waits
+    // for its create's line, so that the loop logs it before the clock moves.
     let host = SimHost::new()
         .moving_after_read(agent, Duration::from_secs(4))
-        .moving_after_read(target, Duration::from_secs(8));
+        .moving_after_read(target(), Duration::from_secs(8))
+        .held_sync(target(), r#""sandbox":"job-0""#);
     let shown = executed(
         &host,
         "start-times",
