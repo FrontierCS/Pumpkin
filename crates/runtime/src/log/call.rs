@@ -8,7 +8,8 @@ use serde::{Deserialize as _, Serialize};
 use serde_json::Value;
 
 use super::logged::{Action, CallerName};
-use super::progress::{ModelUse, Sandbox};
+use super::model_use::ModelUse;
+use super::progress::Sandbox;
 
 /// A call: the final call, which judges the submissions, or an agent's call of a job function.
 #[derive(Clone, Debug)]
