@@ -1,7 +1,7 @@
 //! The checks of the rules that a machine can check, which `cargo xtask ci` runs: of comments and
-//! docs, of a source file's lines and a document's words and sentences, of links, of the figures
-//! and of the layout of `tests/`. `docs/dev/` doesn't restate a rule that a check holds, so each
-//! problem says what is wrong and what to do.
+//! docs, of a source file's lines and a document's words, of the sentences of documents and
+//! comments, of links, of the figures and of the layout of `tests/`. `docs/dev/` doesn't restate a
+//! rule that a check holds, so each problem says what is wrong and what to do.
 //!
 //! Each file is read as proc-macro2's tokens, so a string literal is never taken for a comment: a
 //! doc comment is a token, and any other comment lies between two. Code in a comment is told from
@@ -76,6 +76,7 @@ const WORDS: Cap = Cap {
 pub(crate) fn check(repo: &Repo<'_>) -> Result<()> {
     let mut problems = Vec::new();
     let mut names = BTreeSet::new();
+    let (mut in_comments, mut unparsed) = (Vec::new(), Vec::new());
     for path in files(repo, "rs")? {
         let text = repo.read(&path)?;
         let tokens: TokenStream = match text.parse() {
@@ -88,54 +89,33 @@ pub(crate) fn check(repo: &Repo<'_>) -> Result<()> {
                     "{path}:{line}:{column}: the file is not valid Rust here, so it can't be \
                      checked: make it valid Rust"
                 ));
+                unparsed.push(path);
                 continue;
             }
         };
         figures::defined(tokens.clone(), &mut names);
         let comments = comments(&text, tokens.clone());
-        let mut found = Found::default();
-        for comment in &comments {
-            found.banned.extend(comment.problems(&text));
-        }
-        scan(&text, tokens, &mut found);
-        let Found {
-            docs,
-            mut banned,
-            tests,
-        } = found;
-        banned.extend(test_comments(&text, &comments, &tests));
-        let docs = docs.into_iter().map(|doc| {
-            let Doc {
-                line,
-                what,
-                lines,
-                cap,
-            } = doc;
-            let problem = format!(
-                "{path}:{line}: {what} is {lines} lines, over the cap of {cap}: shorten it to \
-                 {cap} or fewer, moving each fact to its home"
-            );
-            (line, problem)
-        });
-        let banned = banned
-            .into_iter()
-            .map(|(LineColumn { line, column }, what)| {
-                let column = column + 1;
-                (line, format!("{path}:{line}:{column}: {what}"))
-            });
-        let mut found: Vec<(usize, String)> = docs.chain(banned).collect();
-        found.sort_by_key(|(line, _)| *line);
-        problems.extend(found.into_iter().map(|(_, problem)| problem));
+        let to_split = sentences::in_comments(&path, &comments);
+        in_comments.push((path.clone(), to_split.len(), to_split));
+        problems.extend(rust_problems(&path, &text, tokens, &comments));
     }
     problems.extend(architecture(repo)?);
     let listed = listed(repo)?;
     problems.extend(test_data(&listed));
     problems.extend(test_binaries(&listed));
-    let ceilings = ceilings(repo)?;
+    let mut ceilings = ceilings(repo)?;
     problems.extend(capped(&ceilings, &LINES, line_counts(repo, &listed)?)?);
     let documents = documents(repo)?;
     problems.extend(capped(&ceilings, &WORDS, word_counts(&documents))?);
-    let to_split = sentences::counts(&documents);
+    let mut to_split = sentences::counts(&documents);
+    to_split.extend(in_comments);
+    // A file that isn't valid Rust has no count of its sentences to set against its ceiling.
+    let table = ceilings.get_mut(sentences::CAP.table);
+    if let Some(table) = table.and_then(toml::Value::as_table_mut) {
+        for path in &unparsed {
+            table.remove(path);
+        }
+    }
     problems.extend(capped(&ceilings, &sentences::CAP, to_split)?);
     problems.extend(links::check(repo, &listed)?);
     names.extend(figures::packages(repo, &listed)?);
@@ -145,6 +125,49 @@ pub(crate) fn check(repo: &Repo<'_>) -> Result<()> {
     } else {
         Err(problems.join("\n").into())
     }
+}
+
+/// The problems of `text`, the Rust file at `path`, whose tokens are `tokens` and whose comments
+/// are `comments`, but for its sentences, in the order of their lines.
+fn rust_problems(
+    path: &str,
+    text: &str,
+    tokens: TokenStream,
+    comments: &[Comment<'_>],
+) -> Vec<String> {
+    let mut found = Found::default();
+    for comment in comments {
+        found.banned.extend(comment.problems(text));
+    }
+    scan(text, tokens, &mut found);
+    let Found {
+        docs,
+        mut banned,
+        tests,
+    } = found;
+    banned.extend(test_comments(text, comments, &tests));
+    let docs = docs.into_iter().map(|doc| {
+        let Doc {
+            line,
+            what,
+            lines,
+            cap,
+        } = doc;
+        let problem = format!(
+            "{path}:{line}: {what} is {lines} lines, over the cap of {cap}: shorten it to \
+             {cap} or fewer, moving each fact to its home"
+        );
+        (line, problem)
+    });
+    let banned = banned
+        .into_iter()
+        .map(|(LineColumn { line, column }, what)| {
+            let column = column + 1;
+            (line, format!("{path}:{line}:{column}: {what}"))
+        });
+    let mut found: Vec<(usize, String)> = docs.chain(banned).collect();
+    found.sort_by_key(|(line, _)| *line);
+    found.into_iter().map(|(_, problem)| problem).collect()
 }
 
 /// The files that Git lists, see [`check`], whose extension is `extension`.
@@ -709,11 +732,7 @@ fn test_comments(
 ) -> Vec<(LineColumn, String)> {
     let own_line: BTreeMap<usize, LineColumn> = comments
         .iter()
-        .filter(|comment| !comment.doc && comment.text.starts_with("//"))
-        .filter(|comment| {
-            let before = file[..comment.at].rsplit('\n').next();
-            before.is_some_and(|before| before.trim().is_empty())
-        })
+        .filter(|comment| !comment.doc && comment.text.starts_with("//") && comment.alone)
         .map(|comment| {
             let start = position(file, comment.at);
             (start.line, start)
@@ -754,6 +773,10 @@ struct Comment<'a> {
     at: usize,
     text: &'a str,
     doc: bool,
+    /// The line it starts on, from 1.
+    line: usize,
+    /// Whether it starts its line, but for indentation.
+    alone: bool,
 }
 
 impl Comment<'_> {
@@ -832,6 +855,21 @@ fn comments(text: &str, tokens: TokenStream) -> Vec<Comment<'_>> {
     // first and its parts after it are passed over.
     spans.sort_by_key(|span| (span.start, Reverse(span.end)));
     let mut comments = Vec::new();
+    let (mut line, mut seen) = (1, 0);
+    // The comments come in the order of where they start.
+    let mut comment = |span: Range<usize>, doc: bool| {
+        let at = span.start;
+        line += text[seen..at].matches('\n').count();
+        seen = at;
+        let before = text[..at].rsplit('\n').next();
+        Comment {
+            at,
+            text: &text[span],
+            doc,
+            line,
+            alone: before.is_some_and(|before| before.trim().is_empty()),
+        }
+    };
     let mut end = 0;
     for span in spans {
         if span.start < end {
@@ -846,20 +884,12 @@ fn comments(text: &str, tokens: TokenStream) -> Vec<Comment<'_>> {
                 rest.find('\n').unwrap_or(rest.len())
             };
             let at = span.start - between.len() + start;
-            comments.push(Comment {
-                at,
-                text: &rest[..len],
-                doc: false,
-            });
+            comments.push(comment(at..at + len, false));
             between = &rest[len..];
         }
         let token = &text[span.clone()];
         if token.starts_with("//") || token.starts_with("/*") {
-            comments.push(Comment {
-                at: span.start,
-                text: token,
-                doc: true,
-            });
+            comments.push(comment(span.clone(), true));
         }
         end = span.end;
     }

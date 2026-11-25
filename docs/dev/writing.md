@@ -13,8 +13,9 @@ request's text answers `.github/PULL_REQUEST_TEMPLATE.md`.
   one of them a doc or a `//` only for what its type can't say, or for a why. The limit doesn't
   apply to a doc that clap or xflags shows as help
 - WRITE one idea per sentence, subject and verb first. Split a sentence that chains clauses with
-  commas or semicolons. In each tracked Markdown document, `cargo xtask ci` caps a sentence at 25
-  words and rejects a semicolon that chains clauses
+  commas or semicolons. `cargo xtask ci` caps a sentence at 25 words and rejects a semicolon
+  that chains clauses. It checks each tracked Markdown document and each Rust `//`, `///` or `//!`
+  comment
 - SAY an action with its verb, not a noun made from it
 - DROP a qualifier that changes nothing the reader does
 - NEVER write history or hedges
