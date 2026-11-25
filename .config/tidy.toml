@@ -3,7 +3,7 @@
 
 # The source files over `FILE_CAP` lines.
 [long_files]
-"crates/gateway/src/lib.rs" = 1210
+"crates/gateway/src/lib.rs" = 1169
 "crates/runtime/src/record.rs" = 1213
 
 # The Markdown documents over `WORD_CAP` words, as `wc -w` counts them.

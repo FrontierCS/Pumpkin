@@ -3,7 +3,7 @@
 //! [`Docker`], a [`Provider`], makes each sandbox a container on the operator's [`Engine`], with:
 //!
 //! - no network but loopback; the dial's socket, in a host directory mounted read-only, is the
-//!   only way out, and files move only over the session;
+//!   only way out, and files move only over the session, as do a pod's links ([`Create::links`]);
 //! - the role's [`confinement`], and CPUs of its run's own (`cpus`);
 //! - `sandboxd`, read-only, as its first process, dialing its [`SocketDial`], its log's only
 //!   writer;
@@ -25,7 +25,7 @@ use provider::{
     CompanionCreate, Console, Create, Created, Creator, Dials, ImageRef, Listed, Meeting, Provider,
     Ready, Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
-use schema::ir::{Image, Name, User};
+use schema::ir::{Image, Member, Name, User};
 use schema::sandbox::{SANDBOXCTL_PATH, SANDBOXD_PATH, SOCKET_NAME, SocketDial};
 use schema::workflow::{Class, Offers};
 use serde_json::json;
@@ -288,6 +288,8 @@ fn create_args(create: &Create, dial: &SocketDial, cpus: &Cpus) -> Result<Vec<St
         by: _,
         // Each has a container of its own (`companion_args`).
         companions: _,
+        // Each container's `sandboxd` takes those from it (`Create::link_args`).
+        links: _,
     } = create;
     let SocketDial { dir } = dial;
     let mut args = vec![
@@ -301,7 +303,13 @@ fn create_args(create: &Create, dial: &SocketDial, cpus: &Cpus) -> Result<Vec<St
     if *ops {
         args.push(bind_mount(Path::new(sandboxd.as_str()), SANDBOXCTL_PATH)?);
     }
-    args.extend(container_args(create, (image, role.user), dir, cpus)?);
+    args.extend(container_args(
+        create,
+        &Member::Main,
+        (image, role.user),
+        dir,
+        cpus,
+    )?);
     if *ops {
         args.push("--ops".to_owned());
     }
@@ -311,11 +319,13 @@ fn create_args(create: &Create, dial: &SocketDial, cpus: &Cpus) -> Result<Vec<St
     Ok(args)
 }
 
-/// What `docker create` takes for any container of `create`'s pod, after its name: its role's
-/// label, no network, the role's confinement as `user`, on its run's share of `cpus`, and `image`
-/// running `sandboxd`, which dials the socket in `dir`.
+/// What `docker create` takes for any container of `create`'s pod, `member`, after its name: its
+/// role's label, no network, the role's confinement as `user`, on its run's share of `cpus`, and
+/// `image` running `sandboxd`, which dials the socket in `dir` and takes the links from the
+/// container.
 fn container_args(
     create: &Create,
+    member: &Member,
     (image, user): (&ImageRef, User),
     dir: &Path,
     cpus: &Cpus,
@@ -343,6 +353,7 @@ fn container_args(
         image.as_str().to_owned(),
         format!("{GATEWAY_DIR}/{SOCKET_NAME}"),
     ]);
+    args.extend(create.link_args(member));
     Ok(args)
 }
 
@@ -361,7 +372,14 @@ fn companion_args(
         format!("--name={}.{}.{name}", create.run.as_str(), create.name),
         format!("--label={POD_LABEL}={pod}"),
     ];
-    args.extend(container_args(create, (image, *user), &dial.dir, cpus)?);
+    let member = Member::Companion(name.clone());
+    args.extend(container_args(
+        create,
+        &member,
+        (image, *user),
+        &dial.dir,
+        cpus,
+    )?);
     Ok(args)
 }
 

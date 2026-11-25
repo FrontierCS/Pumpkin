@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ir::{
     AbsolutePath, Command, Companion, CpuFlag, CpuModel, Dir, Env, File, Gpu, Image, JsonPointer,
-    ModelRoute, Name, Needs, TargetLifetime, User, WorkflowName,
+    Link, ModelRoute, Name, Needs, TargetLifetime, User, WorkflowName,
 };
 use crate::sandbox::OpPayloadLimit;
 
@@ -84,6 +84,13 @@ impl Workflow {
         self.runners
             .get(&role)
             .map_or(&[], |runner| runner.companions.as_slice())
+    }
+
+    /// The links of the pod of `role`, a runner's: none for another role.
+    pub fn links(&self, role: RoleId) -> &[Link] {
+        self.runners
+            .get(&role)
+            .map_or(&[], |runner| runner.links.as_slice())
     }
 
     pub fn sandbox(&self, role: RoleId) -> &Sandbox {
@@ -427,6 +434,8 @@ pub struct Runner {
     pub env: Env,
     /// Each with a name of its own among them.
     pub companions: Vec<Companion>,
+    /// Each joining two of the pod's containers, given once.
+    pub links: Vec<Link>,
 }
 
 /// A job function of the agent's; see [`ir::JobFunction`](crate::ir::JobFunction).

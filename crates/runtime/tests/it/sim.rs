@@ -2120,6 +2120,10 @@ fn stall_after(caller: Option<&Caller>, shared: &Mutex<Status>) {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "it has an arm for each frame that the gateway sends"
+)]
 fn serve(mut connection: UnixStream, model: bool, shared: &Mutex<Status>) {
     let (mut replies, mut crashed) = (Vec::<(FromSandbox, Vec<u8>)>::new(), false);
     let mut served = Served::default();
@@ -2182,6 +2186,13 @@ fn serve(mut connection: UnixStream, model: bool, shared: &Mutex<Status>) {
                 let Some(Some(next)) = heard else { return };
                 crashed = next;
             }
+            // The sim takes no link's connections: a link's frame ends the session.
+            ToSandbox::LinkOpened { .. }
+            | ToSandbox::LinkRefused { .. }
+            | ToSandbox::LinkConnect { .. }
+            | ToSandbox::LinkData { .. }
+            | ToSandbox::LinkCredit { .. }
+            | ToSandbox::LinkEnd { .. } => return,
         }
         if served.caller.as_ref().is_some_and(|caller| caller.released)
             && let Some((stream, dir)) = served.held.take()

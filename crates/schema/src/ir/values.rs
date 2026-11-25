@@ -52,10 +52,10 @@ checked_string!(
 );
 
 checked_string!(
-    /// The name of a runner's companion, which a command or a copy names it by.
+    /// The name of a runner's companion, which a link, a command or a copy names it by.
     ///
     /// It is a host name of 1 to 63 characters from a-z, 0-9 and `-`, starting with a letter and
-    /// ending with a letter or a digit.
+    /// ending with a letter or a digit, other than `main`, which names the runner's own container.
     CompanionName,
     check_companion_name
 );
@@ -205,6 +205,11 @@ fn check_companion_name(name: &str) -> Result<(), String> {
     let rest = name
         .chars()
         .all(|char| char.is_ascii_lowercase() || char.is_ascii_digit() || char == '-');
+    if name == MAIN_CONTAINER {
+        return Err(format!(
+            "`{MAIN_CONTAINER}` names the runner's own container: give its companion another name"
+        ));
+    }
     if first && last && rest && name.len() <= 63 {
         Ok(())
     } else {
@@ -215,6 +220,9 @@ fn check_companion_name(name: &str) -> Result<(), String> {
         ))
     }
 }
+
+/// The name of the runner's own container, as a link names it ([`CompanionName`]).
+pub const MAIN_CONTAINER: &str = "main";
 
 fn check_workflow_name(name: &str) -> Result<(), String> {
     let valid = (1..=128).contains(&name.len())
@@ -843,5 +851,118 @@ impl TryFrom<Vec<ModelName>> for Models {
 impl From<Models> for Vec<ModelName> {
     fn from(models: Models) -> Self {
         models.0
+    }
+}
+
+/// A container of a runner's pod, by its name: the runner's own, [`MAIN_CONTAINER`], or a
+/// companion's.
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize
+)]
+#[serde(try_from = "String", into = "String")]
+pub enum Member {
+    Main,
+    Companion(CompanionName),
+}
+
+impl TryFrom<String> for Member {
+    type Error = String;
+
+    fn try_from(name: String) -> Result<Self, Self::Error> {
+        if name == MAIN_CONTAINER {
+            return Ok(Self::Main);
+        }
+        CompanionName::try_from(name).map(Self::Companion)
+    }
+}
+
+impl std::str::FromStr for Member {
+    type Err = String;
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        Self::try_from(name.to_owned())
+    }
+}
+
+impl From<Member> for String {
+    fn from(member: Member) -> Self {
+        member.to_string()
+    }
+}
+
+impl fmt::Display for Member {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Main => f.write_str(MAIN_CONTAINER),
+            Self::Companion(name) => name.fmt(f),
+        }
+    }
+}
+
+/// The port of a link ([`Link`](super::Link)): from 1024, which `sandboxd`, without privileges,
+/// can listen at, other than those of Pumpkin's own in a sandbox: [`MODEL_PORT`] and
+/// [`LISTEN_PORT`].
+///
+/// [`MODEL_PORT`]: crate::sandbox::MODEL_PORT
+/// [`LISTEN_PORT`]: crate::sandbox::LISTEN_PORT
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize
+)]
+#[serde(try_from = "u16", into = "u16")]
+pub struct LinkPort(u16);
+
+impl TryFrom<u16> for LinkPort {
+    type Error = String;
+
+    fn try_from(port: u16) -> Result<Self, Self::Error> {
+        use crate::sandbox::{LISTEN_PORT, MODEL_PORT};
+        if port < 1024 {
+            return Err(format!(
+                "port {port} is below 1024, where no `sandboxd`, which has no privileges, can \
+                 listen: link a port from 1024"
+            ));
+        }
+        if [MODEL_PORT, LISTEN_PORT].contains(&port) {
+            return Err(format!(
+                "port {port} is one of Pumpkin's own in a sandbox, {MODEL_PORT} and {LISTEN_PORT}: \
+                 link another"
+            ));
+        }
+        Ok(Self(port))
+    }
+}
+
+impl From<LinkPort> for u16 {
+    fn from(port: LinkPort) -> Self {
+        port.0
+    }
+}
+
+impl LinkPort {
+    pub fn get(self) -> u16 {
+        self.0
+    }
+}
+
+impl fmt::Display for LinkPort {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
     }
 }

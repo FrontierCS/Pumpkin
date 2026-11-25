@@ -29,7 +29,7 @@ loopback, on whole cores that no other run's containers get while the run lasts.
 need more cores than other runs leave is refused, and can be run again once they end. It has one
 class, `container`, that offers the machine's CPUs and memory, no GPU, and up to 250 companions. A
 companion is a container of its own, confined as the sandbox's own is, on the sandbox's CPUs. A
-machine that uses it
+pod's links run through the gateway, as its containers have no network. A machine that uses it
 uses no other provider, so where a run's roles are placed never depends on how much memory the
 machine has. Rootless Docker is the recommended engine: `pumpkin run` warns of one that runs as
 root.

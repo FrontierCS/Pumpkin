@@ -27,7 +27,7 @@ use schema::sandbox::{
 use stdx::Deadline;
 use stdx::time::{Clock, Machine};
 
-use crate::{Arrival, Bound, Connection, Session, Until, context, lock, passed};
+use crate::{Arrival, Bound, Connection, Place, Session, Until, context, lock, passed};
 
 // Names each file this process holds open by its descriptor's number: a path through one resolves
 // as through the file, a directory included. A socket's path holds 107 bytes at most, which a deep
@@ -673,9 +673,9 @@ impl Registration {
     /// Waits for the sandbox to meet the gateway by `by`, a time on `clock`, accepts its hello, and
     /// returns its session, which times its requests by `clock`.
     ///
-    /// `ops` is the session's limit on an op's payload, none for a session that takes no ops, and
-    /// `models` whether it takes model requests. The session's reader thread sends each arrival, as
-    /// `wrap` makes it, to `arrivals`, and drops it once `arrivals`' receiver has gone.
+    /// `ops` is the session's limit on an op's payload, none for a session that takes no ops,
+    /// `models` whether it takes model requests, and `links` its place in its pod, if it carries
+    /// links. Its reader sends each arrival, as `wrap` makes it, to `arrivals`, until their end.
     /// `stopped` is asked while the call waits, and once it says yes the call fails. A sandbox that
     /// has not met the gateway by `by` fails it with `TimedOut`, and a hello that is wrong, which
     /// the sandbox is told of, with `InvalidData`.
@@ -683,7 +683,7 @@ impl Registration {
         self,
         (clock, by): (&C, Duration),
         ops: Option<OpPayloadLimit>,
-        models: bool,
+        (models, links): (bool, Option<Place>),
         arrivals: Sender<T>,
         wrap: impl Fn(Arrival) -> T + Send + 'static,
         stopped: impl Fn() -> bool,
@@ -703,7 +703,15 @@ impl Registration {
         let send = move |arrival| {
             let _ = arrivals.send(wrap(arrival));
         };
-        Session::new(clock.clone(), connection, gpus, ops, models, Box::new(send))
+        Session::new(
+            clock.clone(),
+            connection,
+            gpus,
+            ops,
+            models,
+            links,
+            Box::new(send),
+        )
     }
 }
 

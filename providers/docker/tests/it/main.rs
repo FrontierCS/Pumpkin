@@ -22,7 +22,9 @@ use std::{env, fs, thread};
 use docker::Docker;
 use engine::{BuildContext, ContextName, Engine, Recipe, Security};
 use expect_test::{Expect, expect};
-use gateway::{Arrival, IncomingModelRequest, Op, Process, Put, Registration, Session, Sockets};
+use gateway::{
+    Arrival, IncomingModelRequest, Op, Pod, Process, Put, Registration, Session, Sockets,
+};
 use provider::{
     CompanionCreate, Create, Created, Creator, Dials, Provider, Reservation, Role, RunTag,
     SandboxId, Sweep, UnixTime,
@@ -30,7 +32,8 @@ use provider::{
 use recipe::Given;
 use schema::frame::MAX_MESSAGE_BYTES;
 use schema::ir::{
-    AbsolutePath, Argv, CompanionName, Env, EnvVar, Image, Mode, Name, Resources, User,
+    AbsolutePath, Argv, CompanionName, Env, EnvVar, Image, Link, Member, Mode, Name, Resources,
+    User,
 };
 use schema::sandbox::op::{
     CallReply, CommandEnd, CommandStatus, Failure, FailureCode, JobReply, JobState, Last,
@@ -115,7 +118,8 @@ impl Fixture {
         let by = startup();
         let Created { id } = provider().create(create, alone(dial))?;
         let (sender, arrivals) = mpsc::channel();
-        let accepted = registration.accept((&Machine, by), ops, model, sender, |a| a, || false);
+        let accepted =
+            registration.accept((&Machine, by), ops, (model, None), sender, |a| a, || false);
         let set_up = accepted
             .map_err(|error| error.to_string())
             .and_then(|mut session| {
@@ -142,8 +146,8 @@ impl Fixture {
     }
 
     // Starts a sandbox of the role `pod` with `companions` beside its own container, each as
-    // the user 5151:5152; returns its own container's session and theirs.
-    fn start_pod(&self, companions: &[&str]) -> (Started, Vec<Started>) {
+    // the user 5151:5152, and `links`; returns its own container's session and theirs.
+    fn start_pod(&self, companions: &[&str], links: &[Link]) -> (Started, Vec<Started>) {
         let published = self.publish(&self.run, "pod", &self.sandboxd, &image(), false, false);
         let (mut create, dial, registration) = published.unwrap();
         let (mut dials, mut registrations) = (Vec::new(), Vec::new());
@@ -158,16 +162,29 @@ impl Fixture {
                 user: serde_json::from_str::<User>(r#"{"uid": 5151, "gid": 5152}"#).unwrap(),
             });
         }
+        create.links = links.to_vec();
         let dials = Dials {
             main: dial,
             companions: dials,
         };
         let Created { id } = provider().create(&create, dials).unwrap();
         let by = startup();
-        let accept = |registration: Registration| {
+        let pod = Pod::default();
+        let accept = |(registration, member): (Registration, Member)| {
             let (sender, arrivals) = mpsc::channel();
-            let accepted =
-                registration.accept((&Machine, by), None, false, sender, |a| a, || false);
+            let reaches = (links.iter())
+                .filter(|link| link.from == member)
+                .map(|link| (link.to.clone(), link.port))
+                .collect();
+            let place = (!links.is_empty()).then(|| pod.place(member, reaches));
+            let accepted = registration.accept(
+                (&Machine, by),
+                None,
+                (false, place),
+                sender,
+                |a| a,
+                || false,
+            );
             let mut session = accepted.unwrap();
             session.set_up(by).unwrap();
             Started {
@@ -176,8 +193,13 @@ impl Fixture {
                 arrivals,
             }
         };
-        let companions = registrations.into_iter().map(&accept).collect();
-        (accept(registration), companions)
+        let members = (create.companions.iter()).map(|c| Member::Companion(c.name.clone()));
+        let companions = registrations
+            .into_iter()
+            .zip(members)
+            .map(&accept)
+            .collect();
+        (accept((registration, Member::Main)), companions)
     }
 
     fn publish(
@@ -507,6 +529,64 @@ fn freezes_what_it_left() {
     );
 }
 
+// A link reaches the service on its container's loopback through the gateway, at the loopback
+// address that stands for that container; the pod's containers have no network, and no names.
+#[test]
+#[ignore = "needs Docker: run cargo xtask live docker"]
+fn links() {
+    check(
+        "links",
+        |fixture| {
+            let link = serde_json::json!({"from": "scheduler", "to": "main", "port": 8000});
+            let link = serde_json::from_value::<Link>(link).unwrap();
+            let (mut main, companions) = fixture.start_pod(&["scheduler", "worker"], &[link]);
+            let [mut scheduler, mut worker] = <[Started; 2]>::try_from(companions).unwrap();
+            let id = main.id.clone();
+            let serve = "mkdir /pumpkin/home/www && echo linked > /pumpkin/home/www/index.html \
+                         && httpd -p 127.0.0.1:8000 -h /pumpkin/home/www 2>&1; \
+                         echo \"serving: exit $?\"";
+            sh(&mut main, 1, serve);
+            let tries = r#"
+                echo "interfaces: $(ls /sys/class/net | tr '\n' ' ')"
+                wget -q -T 5 -O - http://127.0.0.2:8000/ 2>&1; echo "to 127.0.0.2:8000: exit $?"
+                wget -q -T 3 -O - http://127.0.0.2:8002/ 2>&1; echo "to 127.0.0.2:8002: exit $?"
+                wget -q -T 3 -O - http://main:8000/ 2>&1; echo "to main:8000: exit $?"
+                wget -q -T 3 -O - http://1.1.1.1/ 2>&1; echo "to 1.1.1.1: exit $?""#;
+            sh(&mut scheduler, 1, tries);
+            sh(&mut worker, 1, tries);
+            let mut lines = Vec::new();
+            let containers = [
+                ("main", &mut main),
+                ("scheduler", &mut scheduler),
+                ("worker", &mut worker),
+            ];
+            for (name, sandbox) in containers {
+                let into = fixture.dir.join(format!("{name}-log"));
+                let limits = Limits {
+                    bytes: 1 << 20,
+                    entries: 100,
+                };
+                let from = absolute("/pumpkin/log");
+                let collected = sandbox.session().collect(&from, &into, limits, hung());
+                collected.unwrap();
+                let mut collected = Vec::new();
+                list(&into, &into, &mut collected);
+                lines.extend(collected.iter().map(|line| format!("{name}: {line}")));
+            }
+            drop((main, scheduler, worker));
+            provider().delete(&fixture.run, &[id]).unwrap();
+            lines
+        },
+        &expect![[r#"
+            main: 1.stderr: 
+            main: 1.stdout: serving: exit 0
+            scheduler: 1.stderr: 
+            scheduler: 1.stdout: interfaces: lo ; linked; to 127.0.0.2:8000: exit 0; wget: can't connect to remote host (127.0.0.2): Connection refused; to 127.0.0.2:8002: exit 1; wget: bad address 'main:8000'; to main:8000: exit 1; wget: can't connect to remote host (1.1.1.1): Network is unreachable; to 1.1.1.1: exit 1
+            worker: 1.stderr: 
+            worker: 1.stdout: interfaces: lo ; wget: can't connect to remote host (127.0.0.2): Connection refused; to 127.0.0.2:8000: exit 1; wget: can't connect to remote host (127.0.0.2): Connection refused; to 127.0.0.2:8002: exit 1; wget: bad address 'main:8000'; to main:8000: exit 1; wget: can't connect to remote host (1.1.1.1): Network is unreachable; to 1.1.1.1: exit 1"#]],
+    );
+}
+
 // A companion is a container of its own, with its own user and no network, on its sandbox's CPUs:
 // the run's list finds the sandbox alone, and its delete removes the companion too.
 #[test]
@@ -515,7 +595,7 @@ fn pods() {
     check(
         "pods",
         |fixture| {
-            let (mut sandbox, companions) = fixture.start_pod(&["scheduler"]);
+            let (mut sandbox, companions) = fixture.start_pod(&["scheduler"], &[]);
             let [mut companion] = <[Started; 1]>::try_from(companions).unwrap();
             let id = sandbox.id.clone();
             let script = r#"
@@ -1209,7 +1289,14 @@ fn refused_calls() {
             let (status, arrived) = thread::scope(|scope| {
                 let second = scope.spawn(move || {
                     let (arrivals, _) = mpsc::channel();
-                    second.accept((&Machine, hung()), None, false, arrivals, |a| a, || false)
+                    second.accept(
+                        (&Machine, hung()),
+                        None,
+                        (false, None),
+                        arrivals,
+                        |a| a,
+                        || false,
+                    )
                 });
                 let served = serve(&mut sandbox, process, &[]);
                 drop(second.join().unwrap().unwrap());

@@ -254,7 +254,8 @@ fn exchanged(cases: &[Case]) -> String {
     }
     let sandbox = thread::spawn(move || fake_sandbox(&socket, requests, Some(&parts), hangs_up));
     let (sender, arrivals) = mpsc::channel();
-    let accepted = registration.accept((&Machine, hung()), None, true, sender, |a| a, || false);
+    let by = (&Machine, hung());
+    let accepted = registration.accept(by, None, (true, None), sender, |a| a, || false);
     let session = accepted.unwrap();
     let mut outcomes = Vec::new();
     for (case, entry) in cases.iter().zip(&made) {

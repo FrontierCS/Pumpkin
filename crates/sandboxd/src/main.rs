@@ -4,7 +4,8 @@
 //! It meets the gateway, at a Unix socket of the sandbox's own, at a TCP address, or with
 //! `--listen` where the gateway dials it, opens the session ([`schema::sandbox`]) with its hello,
 //! presenting the attestation in [`SANDBOXD_ATTESTATION`] where it dials a TCP address, and serves
-//! it until the gateway closes it.
+//! it until the gateway closes it. With `--link` it takes connections to another container of its
+//! pod, which the gateway carries ([`links`]).
 //! When the session ends it kills its commands and exits, which stops a sandbox it is first in.
 //!
 //! As a sandbox's first process (PID 1) it reaps the orphans the kernel hands it, and freezing
@@ -50,6 +51,7 @@ const UNCLAIMED_SLACK: Duration = HELLO_TIMEOUT.saturating_mul(4);
 mod commands;
 mod ctl;
 mod files;
+mod links;
 mod model;
 mod ops;
 mod session;
@@ -68,6 +70,7 @@ mod flags {
     )]
 
     use super::{Address, RoleUser};
+    use crate::links::Link;
 
     xflags::xflags! {
         src "./src/main.rs"
@@ -105,6 +108,12 @@ mod flags {
             /// requests, at http://127.0.0.1:11235. The gateway must accept the session to take
             /// them, or the first ends it. Without it, nothing in the sandbox can make one.
             optional --model
+            /// Takes connections to a port of another container of the pod, given as
+            /// `<to>:<port>@<address>`, such as `main:8000@127.0.0.2`: listens at the port on the
+            /// loopback address, where the pod's containers reach that container, once the
+            /// session is open, and asks the gateway to carry each connection to the port on
+            /// that container's 127.0.0.1. Repeatable, a link at a time.
+            repeated --link link: Link
         }
     }
     // generated start
@@ -119,6 +128,7 @@ mod flags {
         pub user: Option<RoleUser>,
         pub ops: bool,
         pub model: bool,
+        pub link: Vec<Link>,
     }
 
     impl Sandboxd {
@@ -159,6 +169,7 @@ fn main() -> ExitCode {
         user,
         ops,
         model,
+        link,
     } = match flags::Sandboxd::from_vec(args) {
         Ok(flags) => flags,
         Err(error) if error.is_help() => {
@@ -206,7 +217,7 @@ fn main() -> ExitCode {
             "--by bounds how long a sandboxd that listens waits: give it with --listen".to_owned(),
         ),
     };
-    match gateway.and_then(|gateway| session::serve(&gateway, ops, model)) {
+    match gateway.and_then(|gateway| session::serve(&gateway, ops, model, link)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("sandboxd: {error}");

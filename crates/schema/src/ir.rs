@@ -36,7 +36,8 @@ pub use now::NowFunction;
 pub use session::{NamedSession, Session};
 pub use values::{
     AbsolutePath, Argv, CompanionName, CpuFlag, CpuModel, Env, EnvVar, GpuModel, HeaderName, Image,
-    JsonPointer, Mode, ModelName, Models, Name, RolePath, Sha256Digest, WorkflowName,
+    JsonPointer, LinkPort, MAIN_CONTAINER, Member, Mode, ModelName, Models, Name, RolePath,
+    Sha256Digest, WorkflowName,
 };
 
 /// The IR's root: a workflow as written, which [`crate::workflow::Workflow::parse`] checks.
@@ -231,6 +232,25 @@ pub struct RunnerRuntime {
     /// lifetime, and the holder's commands and copies may name any of them. Absent, none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub companions: Vec<Companion>,
+    /// The connections that the pod's containers may make to one another, each once. A
+    /// container's services listen on its `127.0.0.1` alone, and the pod's containers have no
+    /// other way to one another. Absent, none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<Link>,
+}
+
+/// A connection that a runner's pod admits ([`RunnerRuntime::links`]): from the container `from`
+/// to `port` of the container `to`, where `to`'s service listens on `127.0.0.1`.
+///
+/// `from` connects to `port` at the loopback address where every container of the pod reaches
+/// `to`: `127.0.0.2` for the runner's own container, `127.0.0.3` for its first companion, and the
+/// next for each companion after, in their order. No name of a container resolves there.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Link {
+    pub from: Member,
+    pub to: Member,
+    pub port: LinkPort,
 }
 
 /// A container of a runner's pod beside the runner's own ([`RunnerRuntime::companions`]), which

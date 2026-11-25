@@ -2,10 +2,11 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::net::Ipv4Addr;
 use std::num::NonZeroU32;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use schema::ir::{CompanionName, Name, Resources, User};
+use schema::ir::{CompanionName, Link, Member, Name, Resources, User};
 use schema::workflow::Class;
 use serde::Serialize;
 use serde_json::Value;
@@ -93,7 +94,55 @@ pub struct Create {
     /// at most as many as its [class](Create::class) offers. They share the sandbox's resources
     /// and its lifetime, so the sandbox's delete ends them too.
     pub companions: Vec<CompanionCreate>,
+    /// The connections that the sandbox's containers may make to one another, each joining two
+    /// of them, which the gateway carries between their sessions: a provider starts each
+    /// container's `sandboxd` with [`link_args`](Self::link_args), and gives the pod's containers
+    /// no other way to one another.
+    pub links: Vec<Link>,
 }
+
+impl Create {
+    /// The arguments that have container `member`'s `sandboxd` take the connections of the links
+    /// from it: `--link` and each, as `<to>:<port>@<address>`, at the loopback address where every
+    /// container of the pod reaches `to` ([`ir::Link`](Link)): `127.0.0.2` for the role's own
+    /// container, and the next for each companion in turn. None for a container that no link is
+    /// from.
+    pub fn link_args(&self, member: &Member) -> Vec<String> {
+        let from = self.links.iter().filter(|link| link.from == *member);
+        from.flat_map(|link| {
+            let link = format!("{}:{}@{}", link.to, link.port, self.address(&link.to));
+            ["--link".to_owned(), link]
+        })
+        .collect()
+    }
+
+    fn address(&self, member: &Member) -> Ipv4Addr {
+        let index = match member {
+            Member::Main => 0,
+            Member::Companion(name) => {
+                let Some(index) = self.companions.iter().position(|c| c.name == *name) else {
+                    unreachable!(
+                        "a link of the sandbox leads to `{name}`, which is none of its companions, \
+                         though a workflow's check refuses a link that names no container of its \
+                         runner's pod"
+                    )
+                };
+                index + 1
+            }
+        };
+        let Some(address) = u32::try_from(index)
+            .ok()
+            .and_then(|index| u32::from(FIRST_HOST).checked_add(index))
+        else {
+            unreachable!("a sandbox's {index}th container overflows an IPv4 address")
+        };
+        Ipv4Addr::from(address)
+    }
+}
+
+/// The loopback address where links to a pod's first container, the role's own, lead
+/// ([`Create::link_args`]): past `127.0.0.1`, where each container's own services listen.
+const FIRST_HOST: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 2);
 
 /// A container of a sandbox's beside its own ([`Create::companions`]).
 #[derive(Debug)]

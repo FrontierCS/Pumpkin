@@ -516,7 +516,8 @@ impl<'a> Suite<'a> {
         let (id, registration) = (self.create(role, image, sandboxd, from_now(startup))).unwrap();
         // Nothing stops the start, whose `sandboxd` dials.
         let (sender, arrivals) = mpsc::channel();
-        let accepted = registration.accept((&Machine, by), None, false, sender, |a| a, || false);
+        let accepted =
+            registration.accept((&Machine, by), None, (false, None), sender, |a| a, || false);
         let accepted = accepted.map_err(|error| error.to_string());
         let session = accepted.and_then(|mut session| {
             session
@@ -634,6 +635,7 @@ pub fn asked(
         hard_end: from_now(Duration::from_hours(1)),
         by,
         companions: Vec::new(),
+        links: Vec::new(),
     }
 }
 

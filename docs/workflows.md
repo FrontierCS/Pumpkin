@@ -40,6 +40,12 @@ runs the commands that the holder sends it. The companions share the sandbox's `
 lifetime. Only a class that offers companions takes such a runner ([providers](providers.md)). A
 lease's record keeps the runner's own `out` alone.
 
+A runner's `links` are the connections that its pod's containers may make to one another
+([`Link`](../crates/schema/src/ir.rs)). A service listens on `127.0.0.1`. Another container reaches
+it at a loopback address that stands for the service's container. That is `127.0.0.2` for the
+runner's own, `127.0.0.3` for its first companion, and so on. The gateway carries each connection,
+so a link costs a round trip through the run's host.
+
 ## Grants
 
 A grant is a name and one function, under its kind's key: `{"name": "count", "job": {…}}`. Its

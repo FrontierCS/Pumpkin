@@ -22,7 +22,7 @@ use provider::{
     CompanionCreate, Create, Created, ImageRef, Listed, Meeting, Provider, Role, RunTag, SandboxId,
     SandboxdRef, Sweep, Undeleted, UnixTime,
 };
-use schema::ir::{Command, GpuModel, Image, Name};
+use schema::ir::{Command, GpuModel, Image, LinkPort, Member, Name};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
     Launch, OpPayloadLimit, PUMPKIN_BYTES, RelativePath, command_env, command_stderr,
@@ -523,6 +523,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
                     user: companion.user,
                 })
                 .collect(),
+            links: self.workflow().links(role).to_vec(),
         };
         let by_machine = Deadline::after(time::left(clock, by).unwrap_or_default());
         let started = hosting.meets.create(&self.sockets, &create, by_machine);
@@ -566,7 +567,8 @@ impl<'p, H: Host> Sandboxes<'p, H> {
 
     /// Accepts and sets up, by `by`, the sessions of sandbox `id`'s containers, whose
     /// registrations these are, as [`Sandboxes::start`] says: its own container's, which takes ops
-    /// as `ops` says and serves the model if `model`, and its companions', which are passive.
+    /// as `ops` says and serves the model if `model`, and its companions', which are passive. Where
+    /// the role has links, each takes its place in the sandbox's pod, which carries them.
     fn accept<T: Send + 'static>(
         &self,
         (which, id, hosting): (Which, &SandboxId, &Hosting<'p>),
@@ -583,13 +585,33 @@ impl<'p, H: Host> Sandboxes<'p, H> {
                 || looks.ended(self.between_looks, || self.ended(hosting.provider, id))
         };
         let companions_of = self.workflow().companions(which.role());
+        let links = self.workflow().links(which.role());
+        let pod = gateway::Pod::default();
         let accept = |registration: gateway::Registration, container: Option<usize>| {
-            // A companion's session is passive, and serves no model.
-            let (ops, model) = container.map_or((ops, model), |_| (None, false));
+            let (ops, model, member) = match container {
+                None => (ops, model, Member::Main),
+                // A companion's session is passive, and serves no model.
+                Some(index) => (
+                    None,
+                    false,
+                    Member::Companion(companions_of[index].name.clone()),
+                ),
+            };
+            let reaches: BTreeSet<(Member, LinkPort)> = (links.iter())
+                .filter(|link| link.from == member)
+                .map(|link| (link.to.clone(), link.port))
+                .collect();
+            let place = (!links.is_empty()).then(|| pod.place(member, reaches));
             let wrap = wrap.clone();
             let wrap = move |arrival| wrap(container, arrival);
-            let accepted =
-                registration.accept((clock, by), ops, model, arrivals.clone(), wrap, stopped);
+            let accepted = registration.accept(
+                (clock, by),
+                ops,
+                (model, place),
+                arrivals.clone(),
+                wrap,
+                stopped,
+            );
             let accepted = accepted.map_err(|error| match looks.found() {
                 (true, _) => "it ended before it met the gateway: expected its `sandboxd` to run \
                               until it connects"

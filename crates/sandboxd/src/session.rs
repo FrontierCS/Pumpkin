@@ -24,6 +24,7 @@ use stdx::{Context, Deadline, unpoisoned};
 
 use crate::commands::Commands;
 use crate::files::{self, Puts};
+use crate::links::{Link, Links};
 use crate::model::{Model, Part};
 use crate::ops::Ops;
 use crate::until::Until;
@@ -73,11 +74,19 @@ const GPUS_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Meets the gateway and serves its session until the gateway ends it, with a hello that names
 /// the sandbox's GPUs. With `serve_ops` it also serves ops, and with `serve_model` the model
-/// endpoint, both from before the first request. It fails, with the gateway's reason, if the
-/// gateway refuses the session, having started nothing.
-pub(crate) fn serve(gateway: &Gateway, serve_ops: bool, serve_model: bool) -> Result<(), String> {
+/// endpoint, both from before the first request, and it takes the connections of each link of
+/// `links` from then too. It fails, with the gateway's reason, if the gateway refuses the session,
+/// having started nothing.
+pub(crate) fn serve(
+    gateway: &Gateway,
+    serve_ops: bool,
+    serve_model: bool,
+    links: Vec<Link>,
+) -> Result<(), String> {
     let (reader, writer) = meet(gateway, gpus())?;
     let sender = Sender(Arc::new(Mutex::new(writer)));
+    let carried = Links::default();
+    carried.serve(&sender, links)?;
     let ops = Ops::default();
     if serve_ops {
         ops.serve(sender.clone()).context("serving ops failed")?;
@@ -95,6 +104,7 @@ pub(crate) fn serve(gateway: &Gateway, serve_ops: bool, serve_model: bool) -> Re
         ops,
         model,
         puts: Puts::default(),
+        links: carried,
     };
     let served = session.serve(&mut BufReader::new(reader));
     // The op in flight, the callers waiting their turns and the model requests in flight end as
@@ -308,6 +318,7 @@ struct Session {
     ops: Ops,
     model: Model,
     puts: Puts,
+    links: Links,
 }
 
 impl Session {
@@ -349,6 +360,30 @@ impl Session {
             } => self.model.part(request, Part::Head { status, headers }),
             ToSandbox::ModelData { request } => self.model.part(request, Part::Data(body.to_vec())),
             ToSandbox::ModelEnd { request, cut } => self.model.part(request, Part::End { cut }),
+            ToSandbox::LinkOpened { request, link } => {
+                self.links.opened(&self.sender, request, link);
+                Ok(())
+            }
+            ToSandbox::LinkRefused { request, message } => {
+                self.links.refused(request, &message);
+                Ok(())
+            }
+            ToSandbox::LinkConnect { link, port } => {
+                self.links.connect(&self.sender, link, port);
+                Ok(())
+            }
+            ToSandbox::LinkData { link } => {
+                self.links.data(link, body.to_vec());
+                Ok(())
+            }
+            ToSandbox::LinkCredit { link, bytes } => {
+                self.links.credit(link, bytes);
+                Ok(())
+            }
+            ToSandbox::LinkEnd { link } => {
+                self.links.end(link);
+                Ok(())
+            }
         }
     }
 

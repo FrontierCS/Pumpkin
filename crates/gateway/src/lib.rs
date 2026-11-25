@@ -5,7 +5,9 @@
 //! [`Arrival`]s that the session's reader thread hands it. What an op or a model request means is
 //! the owner's to decide: the gateway authorizes nothing, but bounds what they cost the host. The
 //! owner answers an op with [`Session::reply`] or [`Session::refuse`], and a model request with
-//! [`IncomingModelRequest::respond`], which may run on any thread.
+//! [`IncomingModelRequest::respond`], which may run on any thread. A session accepted with a
+//! [`Place`] in its sandbox's [`Pod`] also carries the links between the pod's containers that the
+//! place allows, which the gateway serves itself, never handing them to the owner.
 //!
 //! A sandbox, however buggy, can't harm the host through its session: a message that fails to
 //! parse or comes out of turn, more replies than a waiting request takes, and a malformed tree
@@ -23,9 +25,7 @@
 //! wait behind another writer's, until that writer's deadline.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{self, BufReader, Read, Write};
-use std::net::{Shutdown, TcpStream};
-use std::os::unix::net::UnixStream;
+use std::io::{self, BufReader};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
@@ -35,6 +35,8 @@ use std::time::Duration;
 use std::{fmt, fs};
 
 use bound::{Bound, Until, passed};
+use connection::Connection;
+pub use links::{Place, Pod};
 pub use meeting::{Dialer, GatewayAddress, Listener, Registration, Sockets, Unattested, Unreached};
 pub use op::Op;
 pub use process::Process;
@@ -49,6 +51,8 @@ use schema::sandbox::{
 use stdx::time::Clock;
 
 mod bound;
+mod connection;
+mod links;
 mod meeting;
 mod op;
 mod process;
@@ -87,6 +91,8 @@ struct Shared {
     routes: Mutex<Routes>,
     // Why the session ended, recorded once, under the routes' lock, which `end` explains.
     ended: OnceLock<String>,
+    // Its place in its sandbox's pod, if it carries links.
+    links: Option<Place>,
 }
 
 #[derive(Debug)]
@@ -268,8 +274,10 @@ impl<C: Clock> Session<C> {
         gpus: Option<Vec<GpuModel>>,
         limit: Option<OpPayloadLimit>,
         takes_models: bool,
+        links: Option<Place>,
         send: Box<dyn Fn(Arrival) + Send>,
     ) -> io::Result<Self> {
+        let frames = links.as_ref().map(Place::join);
         let shared = Arc::new(Shared {
             connection: stream,
             writer: Mutex::new(()),
@@ -280,6 +288,7 @@ impl<C: Clock> Session<C> {
                 models: BTreeSet::new(),
             }),
             ended: OnceLock::new(),
+            links,
         });
         let id = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
         let assembler = Assembler {
@@ -290,6 +299,9 @@ impl<C: Clock> Session<C> {
             takes_models,
             models: BTreeMap::new(),
         };
+        if let Some(frames) = frames {
+            links::write(&shared, frames)?;
+        }
         let reader = thread::Builder::new()
             .name("session".to_owned())
             .spawn(move || route(assembler))
@@ -647,6 +659,7 @@ impl Responder {
 enum Due {
     Request,
     Response,
+    Link,
 }
 
 impl Due {
@@ -654,6 +667,7 @@ impl Due {
         match self {
             Self::Request => "request",
             Self::Response => "response",
+            Self::Link => "link's frame",
         }
     }
 }
@@ -724,6 +738,10 @@ impl Shared {
         let _ = self.connection.shutdown();
         let recorded = self.ended.get_or_init(|| reason);
         routes.open.clear();
+        drop(routes);
+        if let Some(place) = &self.links {
+            place.leave();
+        }
         recorded
     }
 
@@ -739,69 +757,6 @@ impl Shared {
             )
         };
         io::Error::new(io::ErrorKind::ConnectionAborted, reason.clone())
-    }
-}
-
-#[derive(Debug)]
-enum Connection {
-    Unix(UnixStream),
-    Tcp(TcpStream),
-    Tls(tls::Stream),
-}
-
-impl Connection {
-    fn shutdown(&self) -> io::Result<()> {
-        match self {
-            Self::Unix(stream) => stream.shutdown(Shutdown::Both),
-            Self::Tcp(stream) => stream.shutdown(Shutdown::Both),
-            Self::Tls(stream) => stream.shutdown(),
-        }
-    }
-
-    fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
-        match self {
-            Self::Unix(stream) => stream.set_nonblocking(nonblocking),
-            Self::Tcp(stream) => stream.set_nonblocking(nonblocking),
-            Self::Tls(stream) => stream.set_nonblocking(nonblocking),
-        }
-    }
-
-    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
-        match self {
-            Self::Unix(stream) => stream.set_write_timeout(timeout),
-            Self::Tcp(stream) => stream.set_write_timeout(timeout),
-            Self::Tls(stream) => stream.set_write_timeout(timeout),
-        }
-    }
-}
-
-// Through a shared reference, as `UnixStream` and `TcpStream` read and write, since the session's
-// reader thread reads beside the owner that writes and may end the session.
-impl Read for &Connection {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match self {
-            Connection::Unix(stream) => (&mut &*stream).read(buf),
-            Connection::Tcp(stream) => (&mut &*stream).read(buf),
-            Connection::Tls(stream) => (&mut &*stream).read(buf),
-        }
-    }
-}
-
-impl Write for &Connection {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        match self {
-            Connection::Unix(stream) => (&mut &*stream).write(buf),
-            Connection::Tcp(stream) => (&mut &*stream).write(buf),
-            Connection::Tls(stream) => (&mut &*stream).write(buf),
-        }
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        match self {
-            Connection::Unix(stream) => (&mut &*stream).flush(),
-            Connection::Tcp(stream) => (&mut &*stream).flush(),
-            Connection::Tls(stream) => (&mut &*stream).flush(),
-        }
     }
 }
 
@@ -835,6 +790,10 @@ fn route(mut ops: Assembler) {
                 ops.open_model(request, head, size)
             }
             FromSandbox::ModelData { request } => ops.model_data(request, &body),
+            link @ (FromSandbox::LinkOpen { .. }
+            | FromSandbox::LinkData { .. }
+            | FromSandbox::LinkCredit { .. }
+            | FromSandbox::LinkEnd { .. }) => ops.link(link, body),
             FromSandbox::Done { stream } => route_reply(routes, stream, Reply::Done, &ops.owner),
             FromSandbox::Failed { stream, message } => {
                 route_reply(routes, stream, Reply::Failed(message), &ops.owner)

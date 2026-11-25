@@ -144,8 +144,10 @@ impl Modal<'_> {
             model,
             hard_end,
             by,
-            // Its classes offer no companions, so placing gives a sandbox none.
+            // Its classes offer no companions, so placing gives a sandbox none, nor links, which
+            // join a companion.
             companions: _,
+            links: _,
         } = create;
         let Listening { grant } = dial;
         let Some((path, sha256)) = sandboxd.as_str().rsplit_once(DIGEST) else {

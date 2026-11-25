@@ -17,7 +17,7 @@
 //! Ops go the other way ([`op`]): [`FromSandbox::Op`] gives a payload's size before its bytes
 //! follow in [`FromSandbox::OpData`], and the gateway answers once ([`ToSandbox::OpReply`]), at
 //! most one op in flight a sandbox. A session takes ops only if accepted with [`OpPayloadLimit`],
-//! and model requests ([`FromSandbox::ModelRequest`]) only if accepted for them.
+//! model requests ([`FromSandbox::ModelRequest`]) and links ([`FromSandbox::LinkOpen`]) as well.
 
 use std::fmt;
 use std::io::{self, Read};
@@ -31,7 +31,7 @@ use serde_json::Value;
 
 use crate::frame;
 pub use crate::ir::values::RelativePath;
-use crate::ir::{AbsolutePath, Argv, Env, EnvVar, GpuModel, Mode};
+use crate::ir::{AbsolutePath, Argv, Env, EnvVar, GpuModel, LinkPort, Member, Mode};
 
 pub mod op;
 pub mod tree;
@@ -84,6 +84,19 @@ pub const MAX_MODEL_REQUESTS_IN_FLIGHT: usize = 7;
 /// The most bytes a model request's body may hold: as many as an op's payload, since the gateway
 /// holds each whole, as it holds a payload.
 pub const MAX_MODEL_REQUEST_BYTES: u64 = MAX_OP_PAYLOAD_BYTES;
+
+/// The window of each way of a link: the most bytes that one end may have sent and the other not
+/// yet granted back ([`ToSandbox::LinkCredit`]).
+///
+/// It holds from the link's opening, so that no link holds up its session's other frames. A
+/// sandbox that sends more breaks the protocol.
+// Over a round trip of a tenth of a second through the gateway, a link carries 1.25 MiB/s each
+// way, plenty for HTTP's requests and responses; a session's `MAX_LINKS` hold 128 MiB at most.
+pub const LINK_WINDOW_BYTES: u32 = 128 << 10;
+
+/// The most links a session holds open at once, of both its own asking and its pod's: one asked for
+/// past it is refused.
+pub const MAX_LINKS: usize = 1024;
 
 /// The directory that holds Pumpkin's files in every sandbox, `/pumpkin`, and belongs to the
 /// role's user.
@@ -207,6 +220,10 @@ pub(crate) fn pumpkin_dirs() -> [AbsolutePath; 2] {
 /// endpoint there, and the session's owner accepts the session to take model requests.
 pub const MODEL_PORT: u16 = 11235;
 
+/// The port where a provider's `sandboxd` that listens does ([`Listening`]), in each of its
+/// sandbox's containers, which no link takes.
+pub const LISTEN_PORT: u16 = 7434;
+
 /// The URL of the model endpoint, `http://127.0.0.1:<MODEL_PORT>`.
 ///
 /// A harness in the sandbox makes model requests ([`FromSandbox::ModelRequest`]) there: by that
@@ -217,7 +234,7 @@ pub fn model_url() -> String {
 
 /// The version of the protocol that both ends of a session speak, which its [`Hello`] gives.
 // `examples/smoke/probe.py` states it too, for the hello that it forges.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// The most bytes a [`Hello`]'s message holds, at any version ([the protocol](crate::sandbox)); its
 /// body holds its [`Attestation`], if any.
@@ -636,6 +653,22 @@ pub enum ToSandbox {
     /// whole, or `cut` short, which its client must not take as whole. With no `ModelResponse`
     /// before it, the request ends without a response, cut short.
     ModelEnd { request: u32, cut: bool },
+    /// Opens link `link`, a number the gateway uses once a session, for the sandbox's link request
+    /// `request`, which this ends. Each end may now send [`LINK_WINDOW_BYTES`] of it.
+    LinkOpened { request: u32, link: u32 },
+    /// Refuses the sandbox's link request `request`, which this ends.
+    LinkRefused { request: u32, message: String },
+    /// Opens link `link`, a number the gateway uses once a session, from another container of the
+    /// sandbox's pod to the service at `port` on the sandbox's `127.0.0.1`, which `sandboxd`
+    /// connects to. Each end may now send [`LINK_WINDOW_BYTES`] of it; one that doesn't connect
+    /// ends its way at once.
+    LinkConnect { link: u32, port: LinkPort },
+    /// Bytes of link `link`, in the frame's body.
+    LinkData { link: u32 },
+    /// Grants back `bytes` that the sandbox sent of link `link`, which it may send again.
+    LinkCredit { link: u32, bytes: u32 },
+    /// The end of link `link`'s bytes to the sandbox. The link is gone once both ways have ended.
+    LinkEnd { link: u32 },
 }
 
 /// What `sandboxd` sends.
@@ -679,6 +712,22 @@ pub enum FromSandbox {
     /// Bytes of model request `request`'s body, in the frame's body, which go no further than its
     /// size. An empty frame changes nothing.
     ModelData { request: u32 },
+    /// Asks for a link to the service at `port` of container `to` of the sandbox's pod, for a
+    /// connection that `sandboxd` took on that container's behalf, which the gateway carries to
+    /// the other container's session ([`ToSandbox::LinkConnect`]), each way as a stream of bytes
+    /// that a `LinkEnd` ends. Its number is none that a link request in flight has, and it is in
+    /// flight until the gateway opens or refuses it.
+    LinkOpen {
+        request: u32,
+        to: Member,
+        port: LinkPort,
+    },
+    /// Bytes of link `link`, in the frame's body, within its window.
+    LinkData { link: u32 },
+    /// Grants back `bytes` of link `link` that the gateway sent, which it may send again.
+    LinkCredit { link: u32, bytes: u32 },
+    /// The end of link `link`'s bytes from the sandbox.
+    LinkEnd { link: u32 },
 }
 
 /// How to start a command.

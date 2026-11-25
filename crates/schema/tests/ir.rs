@@ -626,18 +626,18 @@ fn lease_status_bound() {
 fn hellos_and_frames() {
     check(
         [
-            HelloJson(r#"{"version":3}"#),
-            HelloJson(r#"{"version":2,"grant":"00112233445566778899aabbccddeeff"}"#),
+            HelloJson(r#"{"version":4}"#),
             HelloJson(r#"{"version":3,"grant":"00112233445566778899aabbccddeeff"}"#),
-            HelloJson(r#"{"version":3,"gpus":["NVIDIA A100-SXM4-80GB","NVIDIA H100 80GB HBM3"]}"#),
-            HelloJson(r#"{"version":3,"gpus":["NVIDIA A100\u0000"]}"#),
+            HelloJson(r#"{"version":4,"grant":"00112233445566778899aabbccddeeff"}"#),
+            HelloJson(r#"{"version":4,"gpus":["NVIDIA A100-SXM4-80GB","NVIDIA H100 80GB HBM3"]}"#),
+            HelloJson(r#"{"version":4,"gpus":["NVIDIA A100\u0000"]}"#),
         ],
         &expect![[r#"
             Hello { gpus: None }
-            sandboxd speaks sandbox protocol 2: expected 3, which this gateway speaks, as a sandboxd built from the same Pumpkin does
-            the hello isn't of sandbox protocol 3's form: unknown field `grant`, expected `version` or `gpus`
+            sandboxd speaks sandbox protocol 3: expected 4, which this gateway speaks, as a sandboxd built from the same Pumpkin does
+            the hello isn't of sandbox protocol 4's form: unknown field `grant`, expected `version` or `gpus`
             Hello { gpus: Some([GpuModel("NVIDIA A100-SXM4-80GB"), GpuModel("NVIDIA H100 80GB HBM3")]) }
-            the hello isn't of sandbox protocol 3's form: `NVIDIA A100\0` is not a GPU's model: use one as `nvidia-smi` names it, such as `NVIDIA H100 80GB HBM3`"#]],
+            the hello isn't of sandbox protocol 4's form: `NVIDIA A100\0` is not a GPU's model: use one as `nvidia-smi` names it, such as `NVIDIA H100 80GB HBM3`"#]],
     );
     check(
         [
@@ -678,16 +678,16 @@ fn hellos_and_frames() {
 fn hello_bodies_and_answers() {
     check(
         [
-            HelloFrame(r#"{"version":3}"#, 0),
-            HelloFrame(r#"{"version":3}"#, MAX_ATTESTATION_BYTES),
+            HelloFrame(r#"{"version":4}"#, 0),
+            HelloFrame(r#"{"version":4}"#, MAX_ATTESTATION_BYTES),
+            HelloFrame(r#"{"version":4}"#, MAX_ATTESTATION_BYTES + 1),
             HelloFrame(r#"{"version":3}"#, MAX_ATTESTATION_BYTES + 1),
-            HelloFrame(r#"{"version":2}"#, MAX_ATTESTATION_BYTES + 1),
         ],
         &expect![[r#"
-            {"version":3} and 0 bytes: Hello { gpus: None }, None of None bytes
-            {"version":3} and 4096 bytes: Hello { gpus: None }, Some(Attestation(..)) of Some(4096) bytes
-            {"version":3} and 4097 bytes: InvalidData: the hello's body is 4097 bytes: a hello's holds at most 4096
-            {"version":2} and 4097 bytes: InvalidData: sandboxd speaks sandbox protocol 2: expected 3, which this gateway speaks, as a sandboxd built from the same Pumpkin does"#]],
+            {"version":4} and 0 bytes: Hello { gpus: None }, None of None bytes
+            {"version":4} and 4096 bytes: Hello { gpus: None }, Some(Attestation(..)) of Some(4096) bytes
+            {"version":4} and 4097 bytes: InvalidData: the hello's body is 4097 bytes: a hello's holds at most 4096
+            {"version":3} and 4097 bytes: InvalidData: sandboxd speaks sandbox protocol 3: expected 4, which this gateway speaks, as a sandboxd built from the same Pumpkin does"#]],
     );
     check(
         [
@@ -1303,6 +1303,46 @@ fn companion(name: &str, image: char) -> Value {
     })
 }
 
+/// [`pod`]'s workflow with `scheduler` and `swe-000` beside the runner's own, and `links`.
+fn linked(links: Value) -> Value {
+    let mut ir = pod(json!([
+        companion("scheduler", '4'),
+        companion("swe-000", '5')
+    ]));
+    ir["roles"][3]["runtime"]["runner"]["links"] = links;
+    ir
+}
+
+#[test]
+fn links() {
+    let link = |from: &str, to: &str, port: u16| json!({ "from": from, "to": to, "port": port });
+    check(
+        [
+            linked(json!([
+                link("main", "scheduler", 8002),
+                link("scheduler", "main", 8000)
+            ])),
+            linked(json!([link("ghost", "scheduler", 8002)])),
+            linked(json!([link("main", "swe_000", 8002)])),
+            linked(json!([link("scheduler", "scheduler", 8002)])),
+            linked(json!([
+                link("main", "scheduler", 8002),
+                link("main", "scheduler", 8002)
+            ])),
+            linked(json!([link("main", "scheduler", 80)])),
+            linked(json!([link("main", "scheduler", 11235)])),
+        ],
+        &expect![[r#"
+            parsed
+            /roles/3/runtime/runner/links/0/from: `ghost` names no container of `gpu`'s pod: name `main`, the runner's own, or one of its companions
+            `swe_000` is not a valid companion name: use 1 to 63 characters from a-z, 0-9 and `-`, starting with a letter and ending with a letter or a digit
+            /roles/3/runtime/runner/links/0/to: the link joins `scheduler` to itself, whose own loopback reaches its port: link two of the pod's containers
+            /roles/3/runtime/runner/links/1: the link is given already, at /roles/3/runtime/runner/links/0: give each link once
+            port 80 is below 1024, where no `sandboxd`, which has no privileges, can listen: link a port from 1024
+            port 11235 is one of Pumpkin's own in a sandbox, 11235 and 7434: link another"#]],
+    );
+}
+
 #[test]
 fn pods() {
     let two = json!([
@@ -1317,6 +1357,7 @@ fn pods() {
                 companion("scheduler", '4'),
                 companion("scheduler", '5')
             ])),
+            pod(json!([companion("main", '4')])),
             pod(json!([companion("swe_000", '4')])),
             pod(json!([companion("swe-", '4')])),
             pod(json!([companion("scheduler", '2')])),
@@ -1324,6 +1365,7 @@ fn pods() {
         &expect![[r#"
             parsed
             /roles/3/runtime/runner/companions/1/name: `scheduler` also names /roles/3/runtime/runner/companions/0: give each a unique name
+            `main` names the runner's own container: give its companion another name
             `swe_000` is not a valid companion name: use 1 to 63 characters from a-z, 0-9 and `-`, starting with a letter and ending with a letter or a digit
             `swe-` is not a valid companion name: use 1 to 63 characters from a-z, 0-9 and `-`, starting with a letter and ending with a letter or a digit
             /roles/0/runtime/agent/grants/1/session/runner: `gpu`'s companion `scheduler` runs target `trainer`'s image, sha256:2222222222222222222222222222222222222222222222222222222222222222: give the runner an image no target has"#]],

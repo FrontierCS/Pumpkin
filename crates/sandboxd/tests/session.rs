@@ -14,8 +14,9 @@
 #![expect(clippy::disallowed_methods, reason = "nextest bounds each test")]
 
 use std::cell::Cell;
+use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
-use std::io::{self, Read};
+use std::io::{self, Read, Write as _};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
@@ -28,10 +29,10 @@ use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 
 use expect_test::{Expect, expect};
-use gateway::{Arrival, Dialer, GatewayAddress, Listener, Process, Put, Sockets};
+use gateway::{Arrival, Dialer, GatewayAddress, Listener, Place, Pod, Process, Put, Sockets};
 use schema::frame;
 use schema::frame::MAX_BODY_BYTES;
-use schema::ir::{AbsolutePath, Argv, Env, EnvVar, Mode, Name};
+use schema::ir::{AbsolutePath, Argv, CompanionName, Env, EnvVar, LinkPort, Member, Mode, Name};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
     Endpoint, Entry, ExitStatus, FromSandbox, HELLO_TIMEOUT, HelloReply, Launch, Listening,
@@ -94,8 +95,12 @@ impl Sandbox {
         Self::start_with(meeting, sandboxd)
     }
 
+    fn start_with(meeting: Meeting, sandboxd: Command) -> Self {
+        Self::start_placed(meeting, sandboxd, None)
+    }
+
     #[expect(clippy::too_many_lines, reason = "it sets up each meeting")]
-    fn start_with(meeting: Meeting, mut sandboxd: Command) -> Self {
+    fn start_placed(meeting: Meeting, mut sandboxd: Command, place: Option<Place>) -> Self {
         let dir = TestDir::new();
         // Without symbolic links, as the kernel names the working directories that `processes`
         // finds the sandbox's processes by.
@@ -151,8 +156,14 @@ impl Sandbox {
             listened(address);
         }
         let (sender, arrivals) = mpsc::channel();
-        let accepted =
-            registration.accept((&Machine, hung()), None, false, sender, |a| a, || false);
+        let accepted = registration.accept(
+            (&Machine, hung()),
+            None,
+            (false, place),
+            sender,
+            |a| a,
+            || false,
+        );
         let mut session = accepted.unwrap();
         let dirs = ["in", "out", "home", "log"].map(relative);
         session
@@ -947,6 +958,148 @@ fn listening() {
     );
 }
 
+// A case of flags that `sandboxd` refuses: its name, its arguments and its environment.
+type Refused<'a> = (&'a str, &'a [&'a str], &'a [(&'a str, &'a OsStr)]);
+
+// The loopback addresses where the links' connections to the companions are taken, as a provider
+// would give them: ones that no other test listens on.
+const SCHEDULER_AT: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 77);
+const WORKER_AT: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 78);
+
+// Two `sandboxd`s of a pod on one host: the test serves the companion's port on 127.0.0.1, and
+// connects to main's link at the companion's address, as main's commands would.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the pod, the steps and their snapshot"
+)]
+fn links() {
+    let pod = Pod::default();
+    let companion =
+        |name: &str| Member::Companion(CompanionName::try_from(name.to_owned()).unwrap());
+    let (scheduler, worker) = (companion("scheduler"), companion("worker"));
+    let service = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = LinkPort::try_from(service.local_addr().unwrap().port()).unwrap();
+    let unserved = LinkPort::try_from(unlistened().port()).unwrap();
+    // Taken by main's `sandboxd`, but given by no link of the pod.
+    let unlinked = LinkPort::try_from(unlistened().port()).unwrap();
+    let mut command = stdx::process::command(env!("CARGO_BIN_EXE_sandboxd"), PATH_ONLY);
+    let taken = [
+        (&scheduler, port, SCHEDULER_AT),
+        (&scheduler, unserved, SCHEDULER_AT),
+        (&scheduler, unlinked, SCHEDULER_AT),
+        (&worker, port, WORKER_AT),
+    ];
+    for (to, at, address) in taken {
+        command.args(["--link", &format!("{to}:{at}@{address}")]);
+    }
+    let reaches = [(&scheduler, port), (&scheduler, unserved), (&worker, port)];
+    let reaches = reaches.map(|(to, at)| (to.clone(), at));
+    let place = pod.place(Member::Main, BTreeSet::from(reaches));
+    let main = Sandbox::start_placed(Meeting::Socket, command, Some(place));
+    // On a thread named apart, which a test directory of its own is named after.
+    let place = pod.place(scheduler, BTreeSet::new());
+    let starting = thread::Builder::new().name("links: the companion".to_owned());
+    let started = starting.spawn(move || {
+        let sandboxd = stdx::process::command(env!("CARGO_BIN_EXE_sandboxd"), PATH_ONLY);
+        Sandbox::start_placed(Meeting::Socket, sandboxd, Some(place))
+    });
+    let companion = started.unwrap().join().unwrap();
+    let mut lines = vec![carried(
+        &service,
+        SocketAddr::from((SCHEDULER_AT, port.get())),
+    )];
+    let closed = |address: Ipv4Addr, at: LinkPort| {
+        let mut client = dialed(SocketAddr::from((address, at.get())));
+        client.set_read_timeout(Some(HELLO_TIMEOUT)).unwrap();
+        client.read(&mut [0]).map_err(|error| error.kind())
+    };
+    lines.push(format!(
+        "to a port where nothing listens: {:?}",
+        closed(SCHEDULER_AT, unserved)
+    ));
+    lines.push(format!(
+        "by no link of the pod: {:?}",
+        closed(SCHEDULER_AT, unlinked)
+    ));
+    lines.push(format!(
+        "to a container with no session: {:?}",
+        closed(WORKER_AT, port)
+    ));
+    let mut client = dialed(SocketAddr::from((SCHEDULER_AT, port.get())));
+    client.set_read_timeout(Some(HELLO_TIMEOUT)).unwrap();
+    let (served, _) = service.accept().unwrap();
+    lines.extend(
+        companion
+            .end()
+            .into_iter()
+            .map(|line| format!("companion: {line}")),
+    );
+    let read = client.read(&mut [0]).map_err(|error| error.kind());
+    lines.push(format!("once the companion's session ended: {read:?}"));
+    drop(served);
+    let cases: [Refused<'_>; 2] = [
+        (
+            "--link with no address",
+            &["127.0.0.1:1", "--link", "main:8000"],
+            &[],
+        ),
+        (
+            "--link off the loopback",
+            &["127.0.0.1:1", "--link", "main:8000@10.0.0.1"],
+            &[],
+        ),
+    ];
+    for (case, args, env) in cases {
+        let args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
+        lines.push(format!("{case}: {}", ended(main.sandboxd(&args, env))));
+    }
+    lines.extend(main.end());
+    expect![[r#"
+        1 MiB each way, past the window: to the service intact: true, back intact: true
+        to a port where nothing listens: Ok(0)
+        by no link of the pod: Ok(0)
+        to a container with no session: Ok(0)
+        companion: then Ended { reason: "the owner dropped the session" }
+        companion: sandboxd: exit status: 0
+        companion: left running: 0
+        once the companion's session ended: Ok(0)
+        --link with no address: exit status: 1: sandboxd: can't parse `--link`, `main:8000` is no link: it has no `@`: give `<to>:<port>@<address>`, such as `main:8000@127.0.0.2`: see `sandboxd --help`
+        --link off the loopback: exit status: 1: sandboxd: can't parse `--link`, `main:8000@10.0.0.1` is no link: 10.0.0.1 is no loopback address, which only this container reaches: give `<to>:<port>@<address>`, such as `main:8000@127.0.0.2`: see `sandboxd --help`
+        then Ended { reason: "the owner dropped the session" }
+        sandboxd: exit status: 0
+        left running: 0"#]].assert_eq(&lines.join("\n"));
+}
+
+// Connects to the link at `link`, and sends 1 MiB, eight windows, to the service that `service`
+// takes it at, which sends as much back once the client has ended its way; says whether each got
+// all of it, intact.
+fn carried(service: &TcpListener, link: SocketAddr) -> String {
+    let payload: Vec<u8> = (0..1 << 20)
+        .map(|n: u32| u8::try_from(n % 251).unwrap())
+        .collect();
+    let mut client = dialed(link);
+    client.set_read_timeout(Some(HELLO_TIMEOUT)).unwrap();
+    let (mut served, _) = service.accept().unwrap();
+    served.set_read_timeout(Some(HELLO_TIMEOUT)).unwrap();
+    let sent = payload.clone();
+    let serving = thread::spawn(move || {
+        let mut got = Vec::new();
+        served.read_to_end(&mut got).unwrap();
+        served.write_all(&sent).unwrap();
+        got == sent
+    });
+    client.write_all(&payload).unwrap();
+    client.shutdown(Shutdown::Write).unwrap();
+    let mut back = Vec::new();
+    client.read_to_end(&mut back).unwrap();
+    let there = serving.join().unwrap();
+    format!(
+        "1 MiB each way, past the window: to the service intact: {there}, back intact: {}",
+        back == payload
+    )
+}
+
 fn listening_apart(sandbox: &Sandbox) -> Vec<String> {
     let apart = unlistened();
     let apart_text = apart.to_string();
@@ -1390,7 +1543,14 @@ fn as_root_with_user() {
     let container = format!("sandboxd-{}-as-root", std::process::id());
     start_as_root(&dir, &container, "1234:1235");
     let (sender, arrivals) = mpsc::channel();
-    let accepted = registration.accept((&Machine, hung()), None, false, sender, |a| a, || false);
+    let accepted = registration.accept(
+        (&Machine, hung()),
+        None,
+        (false, None),
+        sender,
+        |a| a,
+        || false,
+    );
     let mut session = accepted.unwrap();
     let mut lines = as_user(&mut session, &arrivals, &root.join("collected"));
     lines.extend(left_behind(&mut session, &arrivals, &container));

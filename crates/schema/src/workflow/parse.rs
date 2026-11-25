@@ -8,7 +8,7 @@ use super::{
     Agent, AgentId, Final, Holder, JobFunction, NowFunction, ParseErrors, RoleId, Runner, RunnerId,
     Sandbox, Session, Target, TargetId, Workflow,
 };
-use crate::ir::{self, JsonPointer, Name, RolePath};
+use crate::ir::{self, JsonPointer, MAIN_CONTAINER, Name, RolePath};
 use crate::sandbox::{MAX_OP_PAYLOAD_BYTES, MAX_TRANSFER_BYTES};
 
 impl Workflow {
@@ -133,20 +133,68 @@ impl<'ir> Parser<'ir> {
                     cwd,
                     env,
                     companions,
+                    links,
                 }) => {
                     let list = runtime_at.token("runner").token("companions");
                     let names = companions.iter().map(|companion| &companion.name);
                     self.errors.unique(names, |index| list.token(index));
+                    let list = runtime_at.token("runner").token("links");
+                    self.links((name, companions), links, &list);
                     let runner = Runner {
                         cwd: cwd.clone(),
                         env: env.clone(),
                         companions: companions.clone(),
+                        links: links.clone(),
                     };
                     self.runners.insert(id, runner);
                 }
             }
             // A name given twice, which `unique` has reported, resolves to its first role.
             self.role_ids.entry(name.as_str()).or_insert(id);
+        }
+    }
+
+    /// Checks that each of `links`, at `list`, joins two of the containers of the pod of the
+    /// runner `role`, whose companions are `companions`, and is given once.
+    fn links(
+        &mut self,
+        (role, companions): (&Name, &[ir::Companion]),
+        links: &[ir::Link],
+        list: &JsonPointer,
+    ) {
+        let named = |member: &ir::Member| match member {
+            ir::Member::Main => true,
+            ir::Member::Companion(name) => {
+                companions.iter().any(|companion| companion.name == *name)
+            }
+        };
+        let mut given = BTreeMap::new();
+        for (index, link) in links.iter().enumerate() {
+            let at = list.token(index);
+            for (field, member) in [("from", &link.from), ("to", &link.to)] {
+                if !named(member) {
+                    let message = format!(
+                        "`{member}` names no container of `{role}`'s pod: name `{MAIN_CONTAINER}`, \
+                         the runner's own, or one of its companions"
+                    );
+                    self.errors.report(at.token(field), message);
+                }
+            }
+            if link.from == link.to {
+                let message = format!(
+                    "the link joins `{}` to itself, whose own loopback reaches its port: link two \
+                     of the pod's containers",
+                    link.to
+                );
+                self.errors.report(at.token("to"), message);
+            }
+            if let Some(earlier) = given.insert(link, index) {
+                let message = format!(
+                    "the link is given already, at {}: give each link once",
+                    list.token(earlier)
+                );
+                self.errors.report(at, message);
+            }
         }
     }
 
