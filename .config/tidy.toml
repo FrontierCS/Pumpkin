@@ -17,7 +17,7 @@
 # over `SENTENCE_CAP` words in `xtask/src/tidy/sentences.rs`, or with a semicolon that chains
 # clauses.
 [sentences]
-"ARCHITECTURE.md" = 28
+"ARCHITECTURE.md" = 24
 "crates/aws/src/iam/simulate.rs" = 1
 "crates/aws/src/lib.rs" = 12
 "crates/aws/src/problem.rs" = 1
