@@ -2293,6 +2293,9 @@ fn reported_before_the_hard_end() {
     // driver comes first, and the hold below counts the next op alone.
     let argv = [
         "ops",
+        // The launch is recorded before the first op, so only the agent's session sends what the
+        // hold counts.
+        "await_log agent_started",
         "call train 6",
         "await_file jobs/0/sandbox.json",
         "exit",
@@ -2458,6 +2461,14 @@ fn taken_past_the_deadline() {
 // The session's end, which reached the host at 0, is decided at 0, ahead of the core's tick.
 #[test]
 fn held_by_a_slow_sync() {
+    let argv = [
+        "ops",
+        // The launch is recorded before the first op, so only the agent's session sends what the
+        // hold counts.
+        "await_log agent_started",
+        "ops",
+        "close",
+    ];
     let slow = SlowSync {
         record: Synced::Holding("log.jsonl", r#""kind":"agent_started""#),
         queued: 1,
@@ -2467,7 +2478,7 @@ fn held_by_a_slow_sync() {
         &SimHost::new().slow_sync(slow),
         "held-by-a-slow-sync",
         &[(PROVIDER, &Sim::new())],
-        &short_workflow(&["ops", "ops", "close"], 30),
+        &short_workflow(&argv, 30),
         SANDBOXD,
         &expect![[r#"
             finished, showing [score=0]
