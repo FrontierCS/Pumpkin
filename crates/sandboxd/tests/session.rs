@@ -1155,7 +1155,9 @@ fn relay_refusals() {
             greeted(apart.into(), &ours, &mut Vec::new());
             let mut said = ended(sandboxd);
             for (n, peer) in peers.iter().enumerate() {
-                said = said.replace(peer, &format!("$PEER{n}"));
+                // The kernel may give a later peer the address of one that has closed. So each
+                // mask replaces one occurrence, in the order that the relay tells of its peers.
+                said = said.replacen(peer, &format!("$PEER{n}"), 1);
             }
             lines.push(format!("then, its session ended: {said}"));
             lines.extend(relay_flags(sandbox));
@@ -1301,7 +1303,9 @@ fn listening_apart(sandbox: &Sandbox) -> Vec<String> {
     lines.extend(answers.map(|answer| greeted(apart.into(), &answer, &mut peers)));
     let mut said = ended(listening);
     for (n, peer) in peers.iter().enumerate() {
-        said = said.replace(peer, &format!("$PEER{n}"));
+        // The kernel may give a later peer the address of one that has closed. So each mask
+        // replaces one occurrence, in the order that `sandboxd` tells of its peers.
+        said = said.replacen(peer, &format!("$PEER{n}"), 1);
     }
     lines.push(format!("then, its session ended: {said}"));
     lines
