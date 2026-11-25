@@ -43,6 +43,7 @@ agent = codex(
     model = MODEL,
     effort = "low",
     tools = "native",
+    catalog_entry = None,
     workspace = "/workspace",
     prompt = PROMPT,
     finalize_grace_seconds = 0,

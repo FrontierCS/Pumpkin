@@ -75,6 +75,7 @@ def bench_task(
         model = MODEL,
         effort = EFFORT,
         tools = "native",
+        catalog_entry = None,
         workspace = "/workspace",
         prompt = PROMPT,
         finalize_grace_seconds = 60,
@@ -358,8 +359,8 @@ fn tasks() {
                 52 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED)
                    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `bench_task()`, called at tasks/broken/task.star:5:1
-            lib/bench.star:110:18: tasks/broken/judge/Dockerfile:1: `busybox:1.37` isn't pinned by digest: name it as `<image>@sha256:<64 hexadecimal digits>`, `scratch`, an earlier stage or a named context the build is given
-                110 |         "image": image(recipe, mount = SHARED),
+            lib/bench.star:111:18: tasks/broken/judge/Dockerfile:1: `busybox:1.37` isn't pinned by digest: name it as `<image>@sha256:<64 hexadecimal digits>`, `scratch`, an earlier stage or a named context the build is given
+                111 |         "image": image(recipe, mount = SHARED),
                     |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `_target()`, called at lib/bench.star:54:9
                 in `bench_task()`, called at tasks/broken/task.star:5:1
@@ -375,8 +376,8 @@ fn tasks() {
                 52 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED)
                    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `bench_task()`, called at tasks/broken/task.star:5:1
-            lib/bench.star:110:18: tasks/broken/judge/Dockerfile:1: `busybox:1.37` isn't pinned by digest: name it as `<image>@sha256:<64 hexadecimal digits>`, `scratch`, an earlier stage or a named context the build is given
-                110 |         "image": image(recipe, mount = SHARED),
+            lib/bench.star:111:18: tasks/broken/judge/Dockerfile:1: `busybox:1.37` isn't pinned by digest: name it as `<image>@sha256:<64 hexadecimal digits>`, `scratch`, an earlier stage or a named context the build is given
+                111 |         "image": image(recipe, mount = SHARED),
                     |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `_target()`, called at lib/bench.star:54:9
                 in `bench_task()`, called at tasks/broken/task.star:5:1
@@ -389,8 +390,8 @@ fn tasks() {
                 52 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED)
                    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `bench_task()`, called at tasks/other/task.star:5:1
-            lib/bench.star:110:18: `tasks/other/judge/Dockerfile` doesn't exist: name a regular file below the root that does
-                110 |         "image": image(recipe, mount = SHARED),
+            lib/bench.star:111:18: `tasks/other/judge/Dockerfile` doesn't exist: name a regular file below the root that does
+                111 |         "image": image(recipe, mount = SHARED),
                     |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `_target()`, called at lib/bench.star:54:9
                 in `bench_task()`, called at tasks/other/task.star:5:1
@@ -500,29 +501,29 @@ def _helper():
             tasks/bench/task.star:3:41: this name is loaded, but never used: drop it from the `load`
                 3 | load("//lib/bench.star", "bench_task", "sometimes")
                   |                                         ^^^^^^^^^
-            lib/bench.star:144:1: this function returns a value on some paths, but not on others: return one on every path, or on none
-                144 | def sometimes(x):
+            lib/bench.star:145:1: this function returns a value on some paths, but not on others: return one on every path, or on none
+                145 | def sometimes(x):
                     | ^^^^^^^^^^^^^^^^^
-            lib/bench.star:150:5: this docstring's `Args:` doesn't name the function's parameters: give each a line, and no other name
-                150 |     """`calls`, as a binding that a path may leave unbound."""
+            lib/bench.star:151:5: this docstring's `Args:` doesn't name the function's parameters: give each a line, and no other name
+                151 |     """`calls`, as a binding that a path may leave unbound."""
                     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-            lib/bench.star:150:5: this docstring doesn't say what the function returns: say it under `Returns:`
-                150 |     """`calls`, as a binding that a path may leave unbound."""
+            lib/bench.star:151:5: this docstring doesn't say what the function returns: say it under `Returns:`
+                151 |     """`calls`, as a binding that a path may leave unbound."""
                     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-            lib/bench.star:151:5: this is bound, but never used: use it, or drop it
-                151 |     unused = calls
+            lib/bench.star:152:5: this is bound, but never used: use it, or drop it
+                152 |     unused = calls
                     |     ^^^^^^
-            lib/bench.star:152:5: this expression's value is never used: use it, or drop the statement
-                152 |     calls == 100
+            lib/bench.star:153:5: this expression's value is never used: use it, or drop the statement
+                153 |     calls == 100
                     |     ^^^^^^^^^^^^
-            lib/bench.star:155:12: this name may be unbound here, as a path to this use doesn't bind it: bind it on every path to this use
-                155 |     return bound
+            lib/bench.star:156:12: this name may be unbound here, as a path to this use doesn't bind it: bind it on every path to this use
+                156 |     return bound
                     |            ^^^^^
-            lib/bench.star:156:5: this statement is never reached, as one before it ends its block: drop it, or move it before that one
-                156 |     fail("never")
+            lib/bench.star:157:5: this statement is never reached, as one before it ends its block: drop it, or move it before that one
+                157 |     fail("never")
                     |     ^^^^^^^^^^^^^
-            lib/bench.star:158:1: this is bound, but never used: use it, or drop it
-                158 | def _helper():
+            lib/bench.star:159:1: this is bound, but never used: use it, or drop it
+                159 | def _helper():
                     | ^^^^^^^^^^^^^^
             pumpkin: tasks/bench/task.star: the task has 9 problems
             pumpkin: to check it again: pumpkin check --arg model=model-a <scratch>/tasks/bench/task.star"#]],
@@ -695,8 +696,8 @@ fn roots() {
                 52 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED)
                    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `bench_task()`, called at tasks/linked/task.star:5:1
-            lib/bench.star:110:18: `tasks/linked/judge/Dockerfile` is a symbolic link, which could lead out of the root: put what it links to there instead
-                110 |         "image": image(recipe, mount = SHARED),
+            lib/bench.star:111:18: `tasks/linked/judge/Dockerfile` is a symbolic link, which could lead out of the root: put what it links to there instead
+                111 |         "image": image(recipe, mount = SHARED),
                     |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `_target()`, called at lib/bench.star:54:9
                 in `bench_task()`, called at tasks/linked/task.star:5:1
@@ -704,8 +705,8 @@ fn roots() {
             pumpkin: to check it again: pumpkin check --arg model=m <scratch>/repo/tasks/linked/task.star
             $ pumpkin check repo/tasks/mounted/task.star --arg=model=m
             exit status: Some(1)
-            lib/bench.star:110:18: shared/judge.Dockerfile:1: `busybox` isn't pinned by digest: name it as `<image>@sha256:<64 hexadecimal digits>`, `scratch`, an earlier stage or a named context the build is given
-                110 |         "image": image(recipe, mount = SHARED),
+            lib/bench.star:111:18: shared/judge.Dockerfile:1: `busybox` isn't pinned by digest: name it as `<image>@sha256:<64 hexadecimal digits>`, `scratch`, an earlier stage or a named context the build is given
+                111 |         "image": image(recipe, mount = SHARED),
                     |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `_target()`, called at lib/bench.star:54:9
                 in `bench_task()`, called at tasks/mounted/task.star:5:1
@@ -717,8 +718,8 @@ fn roots() {
                 52 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED)
                    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `bench_task()`, called at tasks/mounted/task.star:5:1
-            lib/bench.star:110:18: `shared` is a symbolic link, which could lead out of the root: put what it links to there instead
-                110 |         "image": image(recipe, mount = SHARED),
+            lib/bench.star:111:18: `shared` is a symbolic link, which could lead out of the root: put what it links to there instead
+                111 |         "image": image(recipe, mount = SHARED),
                     |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `_target()`, called at lib/bench.star:54:9
                 in `bench_task()`, called at tasks/mounted/task.star:5:1
@@ -750,8 +751,8 @@ fn roots() {
             pumpkin: to check it again: pumpkin check --arg model=m <scratch>/newer/task.star
             $ pumpkin check nested/tasks/bench/task.star --arg=model=m
             exit status: Some(1)
-            lib/bench.star:110:18: sub/Dockerfile:1: `busybox` isn't pinned by digest: name it as `<image>@sha256:<64 hexadecimal digits>`, `scratch`, an earlier stage or a named context the build is given
-                110 |         "image": image(recipe, mount = SHARED),
+            lib/bench.star:111:18: sub/Dockerfile:1: `busybox` isn't pinned by digest: name it as `<image>@sha256:<64 hexadecimal digits>`, `scratch`, an earlier stage or a named context the build is given
+                111 |         "image": image(recipe, mount = SHARED),
                     |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `_target()`, called at lib/bench.star:54:9
                 in `bench_task()`, called at tasks/bench/task.star:5:1
@@ -1060,40 +1061,40 @@ fn bodies() {
             pumpkin: to check it again: pumpkin check --arg model=m <scratch>/one/tasks/bench/task.star
             $ pumpkin check int/tasks/bench/task.star --arg=model=m
             exit status: Some(1)
-            lib/bench.star:89:33: `body` can't be an int: expected a dict
-                89 |                         "body": 3,
+            lib/bench.star:90:33: `body` can't be an int: expected a dict
+                90 |                         "body": 3,
                    |                                 ^
                 the IR's /roles/0/runtime/agent/grants/1/job/body
             pumpkin: int/tasks/bench/task.star: the task has 1 problem
             pumpkin: to check it again: pumpkin check --arg model=m <scratch>/int/tasks/bench/task.star
             $ pumpkin check now/tasks/bench/task.star --arg=model=m
             exit status: Some(1)
-            lib/bench.star:145:40: `submit`'s `finalize` follows the payload, so its caller gives it: annotate it `str`, `int` or `bool`
-                145 | def submit(run: Run, payload: Payload, finalize: float = 0.0):
+            lib/bench.star:146:40: `submit`'s `finalize` follows the payload, so its caller gives it: annotate it `str`, `int` or `bool`
+                146 | def submit(run: Run, payload: Payload, finalize: float = 0.0):
                     |                                        ^^^^^^^^
             pumpkin: now/tasks/bench/task.star: the task has 1 problem
             pumpkin: to check it again: pumpkin check --arg model=m <scratch>/now/tasks/bench/task.star
             $ pumpkin check final/tasks/bench/task.star --arg=model=m
             exit status: Some(1)
-            lib/bench.star:151:16: `final_call`'s first parameter is a `Run`, and the final call's body takes its `Target`: write `def final_call(target: Target, …)`
-                151 | def final_call(target: Run, submissions):
+            lib/bench.star:152:16: `final_call`'s first parameter is a `Run`, and the final call's body takes its `Target`: write `def final_call(target: Target, …)`
+                152 | def final_call(target: Run, submissions):
                     |                ^^^^^^
             pumpkin: final/tasks/bench/task.star: the task has 1 problem
             pumpkin: to check it again: pumpkin check --arg model=m <scratch>/final/tasks/bench/task.star
             $ pumpkin check after/tasks/bench/task.star --arg=model=m
             exit status: Some(1)
-            lib/bench.star:151:45: `final_call`'s `level` follows the submissions, and the final call has no caller to give it: remove it
-                151 | def final_call(target: Target, submissions, level: int = 1):
+            lib/bench.star:152:45: `final_call`'s `level` follows the submissions, and the final call has no caller to give it: remove it
+                152 | def final_call(target: Target, submissions, level: int = 1):
                     |                                             ^^^^^
             pumpkin: after/tasks/bench/task.star: the task has 1 problem
             pumpkin: to check it again: pumpkin check --arg model=m <scratch>/after/tasks/bench/task.star
             $ pumpkin check keywords/tasks/bench/task.star --arg=model=m
             exit status: Some(1)
-            lib/bench.star:151:5: the final call's `keywords` gives `level`, which is no keyword-only parameter of `final_call`: remove it
-                151 | def final_call(target: Target, submissions, *, mode: str, extra = 0):
+            lib/bench.star:152:5: the final call's `keywords` gives `level`, which is no keyword-only parameter of `final_call`: remove it
+                152 | def final_call(target: Target, submissions, *, mode: str, extra = 0):
                     |     ^^^^^^^^^^
-            lib/bench.star:151:48: the final call's keyword `mode` can't be `3`: `final_call` takes a string
-                151 | def final_call(target: Target, submissions, *, mode: str, extra = 0):
+            lib/bench.star:152:48: the final call's keyword `mode` can't be `3`: `final_call` takes a string
+                152 | def final_call(target: Target, submissions, *, mode: str, extra = 0):
                     |                                                ^^^^
             pumpkin: keywords/tasks/bench/task.star: the task has 2 problems
             pumpkin: to check it again: pumpkin check --arg model=m <scratch>/keywords/tasks/bench/task.star"#]],

@@ -1,5 +1,6 @@
-"""Codex, OpenAI's coding agent, as an agent's harness: `codex` adds Codex 0.167.0 to an agent's
-image and writes the runtime of one unattended `codex exec`, with the route to its model.
+"""Codex, OpenAI's coding agent, as an agent's harness: `codex` adds Codex 0.172.0 to an agent's
+image and writes the runtime of one unattended `codex exec`, with the route to its model and,
+if the caller gives one, Codex's catalog entry for it.
 
 Codex works in its workspace, and keeps its home (`CODEX_HOME`), with its configuration and its
 databases, and its temporary files (`TMPDIR`) in two directories of their own there. It writes its
@@ -8,17 +9,15 @@ only at the endpoint `sandboxd` serves, `MODEL_URL`, on the Responses API, with 
 host holds the key.
 """
 
-load("@pumpkin//harness/codex/catalog.star", "CATALOG")
-
 # Where `layer/Dockerfile` installs Codex.
-_ROOT = "/harness/codex-0.167.0"
+_ROOT = "/harness/codex-0.172.0"
 
 # The values of Codex's `model_reasoning_effort`, how hard the model reasons.
 _EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
 
 # The ways Codex can send the model its tools, which the model's upstream must forward.
-# `native`: as the model's catalog entry has it, the one `CATALOG` carries if it carries one and
-# Codex's own otherwise, in forms only some upstreams forward: an `additional_tools` input item in
+# `native`: as the model's catalog entry has it, the caller's if it gives one and Codex's own
+# otherwise, in forms only some upstreams forward: an `additional_tools` input item in
 # place of `tools`, and `custom` and `namespace` tools. `functions`: each as a `function` tool in
 # the request's `tools`, the form every upstream of the Responses API forwards, for an upstream
 # that forwards no other, through which Codex would have no tools at all. Codex then offers no
@@ -37,8 +36,8 @@ _FUNCTIONS = {
     "apply_patch_tool_type": None,
     # Sub-agents' tools are a `namespace` under either multi-agent version.
     "multi_agent_version": "disabled",
-    # `clock` is a `namespace`, and `send_user_message_async` adds a second way to ask a user,
-    # beside `request_user_input`, which stays.
+    # The tools an entry adds to Codex's own, such as `clock`, a `namespace`, and second ways to
+    # ask a user, beside `request_user_input`, which stays.
     "experimental_supported_tools": [],
 }
 
@@ -144,12 +143,13 @@ def codex(
         workspace,
         prompt,
         finalize_grace_seconds,
-        tools):
+        tools,
+        catalog_entry):
     """An agent role's `image` and `runtime`, for Codex on `model` at `effort`.
 
     Codex runs once, as `codex exec`, on the prompt it reads on its standard input, with its files
     readable by the agent's user alone. It takes the arguments every harness takes, in the sense
-    `crates/library` gives them, and `tools`, its own.
+    `crates/library` gives them, and `tools` and `catalog_entry`, its own.
 
     Args:
       base: as every harness.
@@ -158,8 +158,13 @@ def codex(
       workspace: as every harness; it holds Codex's temporary directory too.
       prompt: as every harness; the task on Codex's standard input, following its grant guide.
       finalize_grace_seconds: as every harness.
-      tools: how Codex sends the model its tools: one of `_TOOLS`. `functions` needs `CATALOG` to
-        carry the model's entry.
+      tools: how Codex sends the model its tools: one of `_TOOLS`. `functions` needs
+        `catalog_entry`.
+      catalog_entry: Codex's catalog entry for `model`, a dict of the JSON object that its
+        `model_catalog_json` lists, with `slug` set to `model`; or `None`, to leave Codex its own
+        entry for `model`, or its defaults for a model it lacks one for. An entry holds as Codex
+        reads it at the version `codex` installs. Codex keeps a given entry's instructions as they
+        are, even its own entry's, where with `None` it may drop those of a tool it leaves out.
 
     Returns:
       A dict of `image`, `base` with Codex added; and `runtime`, the agent's runtime that runs it,
@@ -170,19 +175,22 @@ def codex(
         fail("`{}` is not a reasoning effort: use one of {}".format(effort, ", ".join(_EFFORTS)))
     if prompt == None:
         fail("`None` is not a prompt: give a string, which may be empty")
-    entries = json.decode(CATALOG)["models"]
-    carried = [entry for entry in entries if entry["slug"] == model]
+    if catalog_entry != None:
+        # The subset has no `type`, and only a dict encodes as a JSON object.
+        if not json.encode(catalog_entry).startswith("{"):
+            fail("the catalog entry isn't a dict: give one entry, a dict, or `None`")
+        if "slug" not in catalog_entry:
+            message = "the catalog entry has no `slug`: give the one entry of `{}`, with its `slug`"
+            fail(message.format(model))
+        if catalog_entry["slug"] != model:
+            message = "the catalog entry's slug is `{}`, not the model's: set it to `{}`"
+            fail(message.format(catalog_entry["slug"], model))
     if tools == "native":
-        catalog = carried
+        catalog = [] if catalog_entry == None else [catalog_entry]
     elif tools == "functions":
-        if not carried:
-            slugs = " or ".join(["`{}`".format(entry["slug"]) for entry in entries])
-            message = (
-                "Codex's catalog entry for `{}` isn't carried, and sending its tools as " +
-                "functions needs it: use {}"
-            )
-            fail(message.format(model, slugs))
-        catalog = [carried[0] | _FUNCTIONS]
+        if catalog_entry == None:
+            fail("sending Codex's tools as functions needs the model's catalog entry: give one")
+        catalog = [catalog_entry | _FUNCTIONS]
     else:
         fail("`{}` is not a way to send Codex's tools: use one of {}".format(tools, ", ".join(_TOOLS)))
 

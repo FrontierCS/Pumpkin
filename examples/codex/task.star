@@ -16,6 +16,7 @@ agent = codex(
     model = MODEL,
     effort = EFFORT,
     tools = "native",
+    catalog_entry = None,
     workspace = "/workspace",
     prompt = "Write a greeting to the file `greeting` and finalize it as your submission.\n",
     finalize_grace_seconds = 60,
