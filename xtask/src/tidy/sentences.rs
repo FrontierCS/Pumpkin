@@ -4,7 +4,7 @@
 
 use std::mem;
 
-use super::{Cap, Counts};
+use super::ceilings::{Cap, Counts};
 
 // GitLab's documentation caps a sentence at 25 words, and Coder's guide counts a code span as one
 // word, as a reader takes it in as one:
