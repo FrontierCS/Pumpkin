@@ -69,13 +69,19 @@ import { drawLanes, inspectLane } from "./lanes.js";
  * @property {{ function: string } | "final"} [of] whose body a call's lane calls: a job function's, by its name, or the final call's
  * @property {string | null} [grant] a lease's session
  * @property {string} [holder]
- * @property {{ place: string, asked: number, started: number | null, gone: number | null, deleted: boolean | null }} sandbox
+ * @property {{ place: string, asked: number, started: number | null, gone: number | null, deleted: boolean | null, start?: SandboxStart }} sandbox
  * @property {string} said
  * @property {number[]} [answered] the times of its model answers, at most 500 of them, to draw
  * @property {number[]} [failed] those of `answered` that stand for a failed answer
  * @property {{ count: number, failed: number }} [answers] how many model answers it has, and failed
  * @property {Work[] | null} [work]
  * @property {Failure | null} [failure] the failure that the lane's sandbox, call or lease ended with
+ * @typedef {object} SandboxStart a sandbox's start as the runtime timed it, in seconds since the run started
+ * @property {number} began when its provider's create began
+ * @property {number} created when the create returned
+ * @property {number | null} met when its session met the gateway, once the log says so
+ * @property {{ name: string, from: number, to: number }[]} phases the first steps of the create that its provider timed, which may overlap or leave gaps
+ * @property {number} more_phases how many more steps it timed, which the reply leaves out
  * @typedef {{ kind: string, label: string, from: number, to: number | null, end: any }} Work
  * @typedef {{ roles: Role[], grants?: Grant[], edges: Edge[] }} Talk
  * @typedef {{ from: string, to: string, kind: string }} Grant a grant of the IR: its holder and the role it reaches
