@@ -49,16 +49,8 @@ const WORD_CAP: usize = 1_500;
 
 const SOURCES: [&str; 8] = ["rs", "star", "js", "css", "html", "py", "sh", "tf"];
 
-/// Where what a third party wrote is vendored, which the checks leave as they are.
-const VENDORED: [&str; 2] = [
-    "crates/lang/tests/conformance/",
-    "crates/library/tests/it/codex/",
-];
-
-/// Whether `path` is below one of [`VENDORED`].
-fn vendored(path: &str) -> bool {
-    VENDORED.iter().any(|dir| path.starts_with(dir))
-}
+/// Where the suites that a third party wrote are vendored, which the checks leave as they are.
+const VENDORED: &str = "crates/lang/tests/conformance/";
 
 const LINES: Cap = Cap {
     table: "long_files",
@@ -201,14 +193,14 @@ fn listed(repo: &Repo<'_>) -> Result<Vec<String>> {
 }
 
 /// The problems of `paths`: a file under a `tests/` directory that isn't Rust, but for
-/// the vendored files and the `.star` fixtures, which are input and not test data.
+/// `crates/lang`'s vendored suites and the `.star` fixtures, which are input and not test data.
 /// The `.svg` snapshots of `pumpkin`'s help are allowed too, as `cargo xtask refill` writes them.
 fn test_data(paths: &[String]) -> Vec<String> {
     let mut problems = Vec::new();
     for path in paths {
         let file = Path::new(path);
         let extension = file.extension().and_then(|extension| extension.to_str());
-        let input = vendored(path)
+        let input = path.starts_with(VENDORED)
             || (path.starts_with("crates/lang/tests/fixtures/") && extension == Some("star"));
         let snapshot =
             path.starts_with("crates/pumpkin/tests/it/help/") && extension == Some("svg");

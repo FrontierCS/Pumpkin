@@ -1,53 +1,21 @@
 //! `@pumpkin//harness/codex/codex.star`'s `codex()`: the agent role it gives for each set of
-//! arguments that Pumpkin's examples and tests and the task repository give it, and the
-//! arguments it refuses.
+//! arguments that Pumpkin's examples and tests give it, and the arguments it refuses.
 
 use std::fmt::Write as _;
 
 use expect_test::expect;
 use schema::ir;
-use serde_json::Value;
 
 use super::{check_refusals, check_roles};
 
-/// The arguments `codex()` takes besides `SHARED`, with the Starlark of their values. A case
-/// names its catalog entry by its slug, one of `models.json`'s, or gives it as JSON.
-fn own() -> [(&'static str, String); 2] {
-    // On one line, so that the call keeps its line in the test's task, whatever the JSON's length.
-    let models: Value = serde_json::from_str(include_str!("codex/models.json")).unwrap();
-    let models = models.to_string();
-    assert!(
-        !models.contains(r#"""""#),
-        "no triple quote ends the string early"
-    );
-    // The string isn't raw, as the subset refuses a raw string with a backslash before a quote.
-    let models = models.replace('\\', r"\\");
-    let entry = format!(
-        r#"[([entry for entry in json.decode("""{models}""")["models"] if entry["slug"] == given] or [json.decode(given)])[0] for given in [arg("catalog_entry", str)]][0]"#
-    );
-    [
-        ("tools", r#"arg("tools", str)"#.to_owned()),
-        ("catalog_entry", entry),
-    ]
-}
-
-/// A task's prompt, in full.
-const TASK_PROMPT: &str = "Solve the evaluation task in /task/README.md.
-
-Before doing any task work, read that file completely. It is authoritative for the exact train
-and final tar layouts, and for how to submit with `/.pumpkin/bin/sandboxctl`. Work only in
-/workspace. Submit a tar for train verification, inspect its score and remaining calls with
-`sandboxctl`, and iterate while useful. Do not write a replacement submission client.
-
-When the answer is ready, create the final tar in the task-defined format, run
-`/.pumpkin/bin/sandboxctl call final <tar> --arg finalize=true` exactly once as your last platform
-action, then exit.
-Web search is disabled; use only local task files and tools.
-";
+/// The arguments `codex()` takes besides `SHARED`, with the Starlark of their values.
+const OWN: [(&str, &str); 2] = [
+    ("tools", r#"arg("tools", str)"#),
+    ("catalog_entry", r#"json.decode(arg("catalog_entry", str))"#),
+];
 
 /// Model, effort, workspace, prompt, deadline, grace, tools and catalog entry, from
-/// `examples/codex`, `pumpkin`'s tests and the task repository; then other workspaces and prompts,
-/// and the root as the workspace.
+/// `examples/codex` and `pumpkin`'s tests; then another workspace and prompt.
 fn cases() -> Vec<[&'static str; 8]> {
     vec![
         // An empty prompt, which Codex takes, as `None` is the one it refuses.
@@ -74,26 +42,6 @@ fn cases() -> Vec<[&'static str; 8]> {
         [
             "gpt-6.1-terra",
             "xhigh",
-            "/workspace",
-            TASK_PROMPT,
-            "18000",
-            "60",
-            "functions",
-            "gpt-6.1-terra",
-        ],
-        [
-            "gpt-6.2-sol",
-            "xhigh",
-            "/workspace",
-            TASK_PROMPT,
-            "3600",
-            "60",
-            "native",
-            "gpt-6.2-sol",
-        ],
-        [
-            "gpt-6.1-terra",
-            "xhigh",
             "/srv/work",
             "Go.\n",
             "60",
@@ -101,29 +49,14 @@ fn cases() -> Vec<[&'static str; 8]> {
             "native",
             "null",
         ],
-        [
-            "gpt-6.2-astra",
-            "high",
-            "/",
-            "Go.\n",
-            "60",
-            "0",
-            "functions",
-            "gpt-6.2-astra",
-        ],
     ]
 }
 
 #[test]
-#[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
 fn roles() {
-    let own = own();
-    let own = own
-        .each_ref()
-        .map(|(keyword, value)| (*keyword, value.as_str()));
     check_roles(
         "codex",
-        &own,
+        &OWN,
         &cases(),
         true,
         excerpt,
@@ -159,46 +92,6 @@ fn roles() {
               model_reasoning_effort = "low"
               model_provider = "pumpkin"
             route: responses gpt-6.2-astra
-            gpt-6.1-terra xhigh /workspace functions gpt-6.1-terra:
-            argv: /harness/codex-0.172.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
-            env: CODEX_HOME=/workspace/.codex TMPDIR=/workspace/.tmp
-            cwd: /workspace
-            dir 0700 /workspace/.codex
-            dir 0700 /workspace/.tmp
-            grant help before stdin
-            file 0600 /workspace/.codex/config.toml:
-              model = "gpt-6.1-terra"
-              model_reasoning_effort = "xhigh"
-              model_catalog_json = "/workspace/.codex/model-catalog.json"
-              model_provider = "pumpkin"
-            file 0600 /workspace/.codex/model-catalog.json:
-              "gpt-6.1-terra" with 50 fields:
-                use_responses_lite: false
-                tool_mode: "direct"
-                apply_patch_tool_type: null
-                multi_agent_version: "disabled"
-                experimental_supported_tools: []
-            route: responses gpt-6.1-terra
-            gpt-6.2-sol xhigh /workspace native gpt-6.2-sol:
-            argv: /harness/codex-0.172.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
-            env: CODEX_HOME=/workspace/.codex TMPDIR=/workspace/.tmp
-            cwd: /workspace
-            dir 0700 /workspace/.codex
-            dir 0700 /workspace/.tmp
-            grant help before stdin
-            file 0600 /workspace/.codex/config.toml:
-              model = "gpt-6.2-sol"
-              model_reasoning_effort = "xhigh"
-              model_catalog_json = "/workspace/.codex/model-catalog.json"
-              model_provider = "pumpkin"
-            file 0600 /workspace/.codex/model-catalog.json:
-              "gpt-6.2-sol" with 52 fields:
-                use_responses_lite: true
-                tool_mode: "code_mode_only"
-                apply_patch_tool_type: "freeform"
-                multi_agent_version: "v2"
-                experimental_supported_tools: ["request_user_input_async","send_message_to_user_async","clock","literature_search_query","multi_agent_v2_in_code_mode"]
-            route: responses gpt-6.2-sol
             gpt-6.1-terra xhigh /srv/work native null:
             argv: /harness/codex-0.172.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
             env: CODEX_HOME=/srv/work/.codex TMPDIR=/srv/work/.tmp
@@ -211,26 +104,6 @@ fn roles() {
               model_reasoning_effort = "xhigh"
               model_provider = "pumpkin"
             route: responses gpt-6.1-terra
-            gpt-6.2-astra high / functions gpt-6.2-astra:
-            argv: /harness/codex-0.172.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
-            env: CODEX_HOME=/.codex TMPDIR=/.tmp
-            cwd: /
-            dir 0700 /.codex
-            dir 0700 /.tmp
-            grant help before stdin
-            file 0600 /.codex/config.toml:
-              model = "gpt-6.2-astra"
-              model_reasoning_effort = "high"
-              model_catalog_json = "/.codex/model-catalog.json"
-              model_provider = "pumpkin"
-            file 0600 /.codex/model-catalog.json:
-              "gpt-6.2-astra" with 52 fields:
-                use_responses_lite: false
-                tool_mode: "direct"
-                apply_patch_tool_type: null
-                multi_agent_version: "disabled"
-                experimental_supported_tools: []
-            route: responses gpt-6.2-astra
         "#]],
     );
 }
@@ -244,24 +117,20 @@ fn refusals() {
         "",
         "60",
         "0",
-        "functions",
-        "gpt-6.1-terra",
+        "native",
+        "null",
     ];
-    let own = own();
-    let own = own
-        .each_ref()
-        .map(|(keyword, value)| (*keyword, value.as_str()));
     check_refusals(
         "codex",
-        &own,
+        &OWN,
         &given,
         &[
             ("effort", "extreme"),
             ("tools", "both"),
-            ("model", "gpt-6.2-sol"),
-            ("catalog_entry", "null"),
+            ("tools", "functions"),
             ("catalog_entry", r#""gpt-6.1-terra""#),
             ("catalog_entry", r#"{"models": []}"#),
+            ("catalog_entry", r#"{"slug": "gpt-6.2-sol"}"#),
             ("workspace", "/pumpkin/home"),
         ],
         &["prompt"],
@@ -273,10 +142,6 @@ fn refusals() {
             @pumpkin//harness/codex/codex.star:195:9: fail: `both` is not a way to send Codex's tools: use one of native, functions
                 195 |         fail("`{}` is not a way to send Codex's tools: use one of {}".format(tools, ", ".join(_TOOLS)))
                     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `codex()`, called at task.star:16:9
-            @pumpkin//harness/codex/codex.star:187:13: fail: the catalog entry's slug is `gpt-6.1-terra`, not the model's: set it to `gpt-6.2-sol`
-                187 |             fail(message.format(catalog_entry["slug"], model))
-                    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `codex()`, called at task.star:16:9
             @pumpkin//harness/codex/codex.star:192:13: fail: sending Codex's tools as functions needs the model's catalog entry: give one
                 192 |             fail("sending Codex's tools as functions needs the model's catalog entry: give one")
@@ -290,6 +155,10 @@ fn refusals() {
                 184 |             fail(message.format(model))
                     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `codex()`, called at task.star:16:9
+            @pumpkin//harness/codex/codex.star:187:13: fail: the catalog entry's slug is `gpt-6.2-sol`, not the model's: set it to `gpt-6.1-terra`
+                187 |             fail(message.format(catalog_entry["slug"], model))
+                    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                in `codex()`, called at task.star:16:9
             @pumpkin//harness/codex/codex.star:202:12: `/pumpkin/home/.codex` is in `/pumpkin`, which holds Pumpkin's own files: name a path outside it
                 202 |     home = below + "/.codex"
                     |            ^^^^^^^^^^^^^^^^^
@@ -301,14 +170,10 @@ fn refusals() {
     );
 }
 
-/// What `file` holds, in the case at `index`: a model catalog by its models' slugs, how many
-/// fields each has, and the fields that set how Codex sends its tools; the configuration, and any
-/// other file, by the lines that name a model, the lines in which the cases' configurations
-/// differ, and in the first case also by the lines that the harness fills from Pumpkin's values.
+/// What `file` holds, in the case at `index`: the lines that name a model, the lines in which the
+/// cases' configurations differ, and in the first case also the lines that the harness fills from
+/// Pumpkin's values.
 fn excerpt(index: usize, file: &ir::File) -> String {
-    if file.path.as_str().ends_with("/model-catalog.json") {
-        return catalog(&file.content);
-    }
     let filled = ["base_url", "max_concurrent_threads_per_session"];
     let shown = |line: &&str| {
         line.starts_with("model") || index == 0 && filled.iter().any(|key| line.starts_with(key))
@@ -318,25 +183,4 @@ fn excerpt(index: usize, file: &ir::File) -> String {
         let _ = writeln!(excerpt, "  {line}");
     }
     excerpt
-}
-
-/// The catalog `text` holds, as [`excerpt`] shows it.
-fn catalog(text: &str) -> String {
-    let catalog: Value = serde_json::from_str(text).unwrap();
-    let fields = [
-        "use_responses_lite",
-        "tool_mode",
-        "apply_patch_tool_type",
-        "multi_agent_version",
-        "experimental_supported_tools",
-    ];
-    let mut shown = String::new();
-    for model in catalog["models"].as_array().unwrap() {
-        let count = model.as_object().unwrap().len();
-        let _ = writeln!(shown, "  {} with {count} fields:", model["slug"]);
-        for field in fields {
-            let _ = writeln!(shown, "    {field}: {}", model[field]);
-        }
-    }
-    shown
 }

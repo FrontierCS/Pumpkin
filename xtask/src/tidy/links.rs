@@ -8,7 +8,7 @@ use crate::repo::Repo;
 
 const GITHUB: &str = "https://github.com/";
 
-/// The problems of the links in `files`, the repository's but for the vendored files, to code on
+/// The problems of the links in `files`, the repository's but for the vendored suites, to code on
 /// GitHub at a revision that moves, a branch, a tag or a short SHA, where a citation must show the
 /// code that was read. A link to a Markdown document may follow its branch, as the help's links to
 /// the guides do.
@@ -19,7 +19,7 @@ pub(super) fn check(repo: &Repo<'_>, files: &[String]) -> Result<Vec<String>> {
             .extension()
             .and_then(|extension| extension.to_str());
         let text = |extension| SOURCES.contains(&extension) || matches!(extension, "md" | "toml");
-        if !extension.is_some_and(text) || super::vendored(path) {
+        if !extension.is_some_and(text) || path.starts_with(super::VENDORED) {
             continue;
         }
         for (index, line) in repo.read(path)?.lines().enumerate() {

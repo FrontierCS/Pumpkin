@@ -62,7 +62,7 @@
 "crates/lang/tests/it/fixtures.rs" = 2
 "crates/lang/tests/it/main.rs" = 17
 "crates/library/src/lib.rs" = 6
-"crates/library/tests/it/codex.rs" = 3
+"crates/library/tests/it/codex.rs" = 2
 "crates/library/tests/it/docker.rs" = 7
 "crates/library/tests/it/main.rs" = 9
 "crates/members/src/list.rs" = 1
