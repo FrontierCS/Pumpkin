@@ -19,8 +19,9 @@ use schema::sandbox::op::{
 };
 use schema::sandbox::{
     Endpoint, ExitStatus, Hello, HelloReply, MAX_ATTESTATION_BYTES, MAX_OP_PAYLOAD_BYTES,
-    MAX_TRANSFER_BYTES, RegistrationGrant, RelativePath, ToSandbox, command_env, command_stderr,
-    command_stdin, command_stdout, pumpkin_dir, pumpkin_subdirs, read_hello,
+    MAX_ROUTE_BYTES, MAX_TRANSFER_BYTES, RegistrationGrant, RelativePath, TlsIdentity, ToSandbox,
+    command_env, command_stderr, command_stdin, command_stdout, pumpkin_dir, pumpkin_subdirs,
+    read_hello, read_route, route,
 };
 use schema::workflow::{Class, Companions, Offers, Part, Placement, UsdPerHour, Workflow};
 use schema::{ec2_boot, frame, ir};
@@ -859,6 +860,89 @@ fn hello_bodies_and_answers() {
             the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
             the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
             the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox"#]],
+    );
+}
+
+/// What a peer sent a relay first, and what reading its route gives and leaves unread.
+struct Routed(Vec<u8>);
+
+impl Case for Routed {
+    fn outcome(self) -> String {
+        let mut unread = &*self.0;
+        let read = match read_route(&mut unread) {
+            Ok(companion) => format!("a route to `{companion}`"),
+            Err(error) => format!("{:?}: {error}", error.kind()),
+        };
+        let (sent, unread) = (self.0.len(), unread.len());
+        format!("{sent} bytes: {read}, with {unread} left unread")
+    }
+}
+
+#[test]
+fn routes() {
+    let longest = format!("a{}", "-0".repeat(31));
+    let sent = |companion: &str| {
+        let mut sent = route(&valid(companion)).into_bytes();
+        sent.extend(b"what follows");
+        Routed(sent)
+    };
+    check(
+        [
+            sent("db"),
+            sent(&longest),
+            Routed(b"db".to_vec()),
+            Routed(vec![b'a'; MAX_ROUTE_BYTES + 36]),
+            Routed(b"main\nwhat follows".to_vec()),
+            Routed(b"\n".to_vec()),
+            Routed(b"d\xffb\n".to_vec()),
+        ],
+        &expect![[r#"
+            15 bytes: a route to `db`, with 12 left unread
+            76 bytes: a route to `a-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0`, with 12 left unread
+            2 bytes: UnexpectedEof: the connection ended before its route's line feed: expected a companion's name and a line feed, with 0 left unread
+            100 bytes: InvalidData: the route has no line feed in its first 64 bytes: expected a companion's name and a line feed, with 36 left unread
+            17 bytes: InvalidData: the route names no companion: `main` names the runner's own container: give the companion another name, with 12 left unread
+            1 bytes: InvalidData: the route names no companion: `` is not a companion's name: use 1 to 63 characters from a-z, 0-9 and `-`, starting with a letter and ending with a letter or a digit, with 0 left unread
+            4 bytes: InvalidData: the route names no companion: `d�b` is not a companion's name: use 1 to 63 characters from a-z, 0-9 and `-`, starting with a letter and ending with a letter or a digit, with 0 left unread"#]],
+    );
+}
+
+/// A TLS identity's digits, as its two variables hold them, and what reading them gives.
+struct Identity(&'static str, &'static str);
+
+impl Case for Identity {
+    fn outcome(self) -> String {
+        let Self(certificate, key) = self;
+        match TlsIdentity::from_digits(certificate, key) {
+            Ok(identity) => {
+                let (certificate_bytes, key_bytes) = (identity.certificate(), identity.key());
+                let written = (identity.certificate_digits(), identity.key_digits());
+                let alike = written == (certificate.to_owned(), key.to_owned());
+                format!(
+                    "{identity:?} of {} and {} bytes, written back alike: {alike}",
+                    certificate_bytes.len(),
+                    key_bytes.len()
+                )
+            }
+            Err(error) => error,
+        }
+    }
+}
+
+#[test]
+fn tls_identities() {
+    check(
+        [
+            Identity("3082", "00ff10"),
+            Identity("3082", "00FF10"),
+            Identity("3082", "00ff1"),
+            Identity("30 82", "00ff10"),
+        ],
+        &expect![[r#"
+            TlsIdentity(..) of 2 and 3 bytes, written back alike: true
+            SANDBOXD_TLS_KEY isn't an even number of lowercase hexadecimal digits: set it to the digits of the identity issued for the companion
+            SANDBOXD_TLS_KEY isn't an even number of lowercase hexadecimal digits: set it to the digits of the identity issued for the companion
+            SANDBOXD_TLS_CERTIFICATE isn't an even number of lowercase hexadecimal digits: set it to the digits of the identity issued for the companion"#]],
     );
 }
 

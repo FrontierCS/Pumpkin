@@ -262,6 +262,21 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// The bytes that `digits` writes as [`hex`] does, or none if it doesn't write bytes so.
+pub(crate) fn unhex(digits: &str) -> Option<Vec<u8>> {
+    let value = |digit: u8| match digit {
+        b'0'..=b'9' => Some(digit - b'0'),
+        b'a'..=b'f' => Some(digit - b'a' + 10),
+        _ => None,
+    };
+    let (pairs, []) = digits.as_bytes().as_chunks() else {
+        return None;
+    };
+    (pairs.iter())
+        .map(|&[high, low]| Some((value(high)? << 4) | value(low)?))
+        .collect()
+}
+
 /// Whether `path` is a [`RelativePath`]: one or more `/`-separated components, none of them
 /// empty, `.` or `..`, and no NUL byte.
 const fn is_relative_path(path: &[u8]) -> bool {

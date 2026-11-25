@@ -19,7 +19,7 @@ use std::num::{NonZeroU32, NonZeroU64};
 use serde::{Deserialize, Serialize};
 
 pub mod argument;
-mod container;
+pub(crate) mod container;
 mod final_call;
 mod grant;
 mod job;

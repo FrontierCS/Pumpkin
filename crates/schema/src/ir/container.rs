@@ -23,7 +23,7 @@ checked_string!(
 const MAIN: &str = "main";
 
 /// The most bytes of a DNS label (RFC 1035, section 2.3.4).
-const MAX_LABEL_BYTES: usize = 63;
+pub(crate) const MAX_LABEL_BYTES: usize = 63;
 
 /// One of a sandbox's containers: `main`, or one of a runner's companions.
 ///
