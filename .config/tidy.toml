@@ -8,7 +8,7 @@
 
 # The Markdown documents over `WORD_CAP` words, as `wc -w` counts them.
 [words]
-"ARCHITECTURE.md" = 2787
+"ARCHITECTURE.md" = 2781
 "deploy/aws/README.md" = 2110
 "docs/glossary.md" = 1667
 "docs/language.md" = 1534

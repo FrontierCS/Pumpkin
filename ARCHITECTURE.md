@@ -118,9 +118,9 @@ protocol.
 **Architecture Invariant:** a sandbox can't harm the host through its session. Anything out of
 protocol ends the session, and a session costs the host only bounded memory and bounded waits.
 
-**Architecture Invariant:** the two ends share no Pumpkin crate but `schema` and `stdx`, so the
-protocol is all they agree on. The gateway knows no provider, so every provider's sandboxes have
-the same sessions.
+**Architecture Invariant:** the two ends share no Pumpkin crate but `schema`, `stdx` and `tls`, so
+the protocol is all they agree on. `tls` carries bytes below the protocol and knows none of its
+messages. The gateway knows no provider, so every provider's sandboxes have the same sessions.
 
 **Architecture Invariant:** `sandboxd` is no boundary within its sandbox. It has its role's
 privileges, so what it does the role's own code could do too. The session is the boundary.
@@ -169,9 +169,8 @@ each as a sandbox in a Modal workspace, under gVisor, through its helper, `pumpk
 ### `crates/runtime`
 
 The host side. `Run::prepare` reserves on each provider and begins the record, and `Run::execute`
-drives the `Core` on the run's providers to its outcome, or until a signal stops it. One thread
-drives the core, and each call and lease is a child on a thread of its own. `record` and `log` lay
-out the record, and `Record` reads it back.
+drives the `Core` on the run's providers to its outcome, or until a signal stops it. `record` and
+`log` lay out the record, and `Record` reads it back.
 
 **Architecture Invariant:** the runtime is written once, against `Provider`. It depends on no
 provider's crate, not even in its tests, which run on a simulated provider.

@@ -7,12 +7,14 @@
 
 use std::io::{self, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::{fmt, thread};
 
+use rustix::net::sockopt::{Timeout, set_socket_timeout};
 use schema::frame;
 use schema::ir::GpuModel;
 use schema::sandbox::{
@@ -36,8 +38,8 @@ pub(crate) enum Gateway {
     Tcp(SocketAddr, Attestation),
     /// At a TCP address of the sandbox's own, where it listens, and the gateway's answer to the
     /// hello presents the grant that identifies the gateway; until the deadline, past which no
-    /// gateway will.
-    Listen(SocketAddr, RegistrationGrant, Deadline),
+    /// gateway will. With a server, the session runs under its TLS.
+    Listen(SocketAddr, RegistrationGrant, Deadline, Option<tls::Server>),
 }
 
 // The listener doesn't block, so that the deadline is checked between polls. A twentieth of a
@@ -58,7 +60,7 @@ impl fmt::Display for Gateway {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Socket(socket) => socket.display().fmt(f),
-            Self::Tcp(address, _) | Self::Listen(address, _, _) => address.fmt(f),
+            Self::Tcp(address, _) | Self::Listen(address, _, _, _) => address.fmt(f),
         }
     }
 }
@@ -130,10 +132,11 @@ fn hello(gpus: Option<Vec<GpuModel>>) -> Hello {
 
 /// Listens at `address` until a peer's answer to `hello` presents `grant`, and returns that
 /// peer's connection's two ends, the session open; or fails once `by` has passed. Each other
-/// peer is told nothing more, and its connection closed, with why on standard error.
+/// peer is told nothing more, and its connection closed, with why on standard error. With a
+/// `server`, each peer's connection runs under its TLS, the hello included.
 fn listen(
     address: &SocketAddr,
-    grant: &RegistrationGrant,
+    (grant, server): (&RegistrationGrant, Option<&tls::Server>),
     by: Deadline,
     hello: &Hello,
 ) -> Result<(Reader, Writer), String> {
@@ -160,9 +163,10 @@ fn listen(
         stream
             .set_nonblocking(false)
             .context("making the connection block failed")?;
-        match greet(&stream, grant, by, hello) {
+        match greet(stream, (grant, server), by, hello) {
             // The listener closes as it drops, so no other peer reaches the session's sandbox.
-            Ok(()) => return halves(stream, TcpStream::try_clone),
+            Ok(Greeted::Tcp(stream)) => return halves(stream, TcpStream::try_clone),
+            Ok(Greeted::Tls(stream)) => return halves(stream, tls::Stream::try_clone),
             Err(error) => {
                 told += 1;
                 if told <= TOLD_PEERS_COUNT {
@@ -181,22 +185,51 @@ fn listen(
     }
 }
 
-/// Opens the session on `stream` with `hello`, as `open` does, all within `HELLO_TIMEOUT` and
-/// by `by`, with a peer whose answer presents `grant`; then lifts that bound.
+/// The connection of a peer that opened the session: as TCP carries it, or under TLS.
+enum Greeted {
+    Tcp(TcpStream),
+    Tls(tls::Stream),
+}
+
+/// Opens the session on `stream` with `hello`, as `open` does, with a peer whose answer presents
+/// `grant`. With a `server`, it first runs the server's TLS on `stream`, and opens the session
+/// under it. All of it is done within `HELLO_TIMEOUT` and by `by`.
 fn greet(
-    stream: &TcpStream,
-    grant: &RegistrationGrant,
+    stream: TcpStream,
+    (grant, server): (&RegistrationGrant, Option<&tls::Server>),
     by: Deadline,
     hello: &Hello,
-) -> Result<(), String> {
-    stdx::net::set_options(stream).context("setting the connection's options failed")?;
+) -> Result<Greeted, String> {
+    stdx::net::set_options(&stream).context("setting the connection's options failed")?;
     // No later than `by`, past which no gateway claims the sandbox.
     let left = by.remaining().unwrap_or_default();
-    let mut peer = Until::new(stream, Deadline::after(left.min(HELLO_TIMEOUT)));
+    let until = Deadline::after(left.min(HELLO_TIMEOUT));
+    match server {
+        None => opened(&stream, grant, until, hello).map(|()| Greeted::Tcp(stream)),
+        Some(server) => {
+            // Nothing is sent before the handshake is done, so the hello goes to no peer in the
+            // clear.
+            let secured = (server.accept(stream, until)).map_err(|error| error.to_string())?;
+            opened(&secured, grant, until, hello).map(|()| Greeted::Tls(secured))
+        }
+    }
+}
+
+/// Opens the session on `stream`, by `until`, with a peer whose answer to `hello` presents
+/// `grant`. Then lifts that bound.
+fn opened<S: AsFd>(
+    stream: &S,
+    grant: &RegistrationGrant,
+    until: Deadline,
+    hello: &Hello,
+) -> Result<(), String>
+where
+    for<'a> &'a S: Read + Write,
+{
+    let mut peer = Until::new(stream, until);
     open(&mut peer, (hello, None), Some(grant))?;
-    let lifted = stream
-        .set_read_timeout(None)
-        .and_then(|()| stream.set_write_timeout(None));
+    let lifted = set_socket_timeout(stream, Timeout::Recv, None)
+        .and_then(|()| set_socket_timeout(stream, Timeout::Send, None));
     lifted.context("lifting the bound on the connection's reads and writes failed")
 }
 
@@ -204,7 +237,9 @@ fn meet(gateway: &Gateway, gpus: Option<Vec<GpuModel>>) -> Result<(Reader, Write
     let connecting = format_args!("connecting to the gateway at {gateway} failed");
     let opening = format_args!("opening the session with the gateway at {gateway} failed");
     match gateway {
-        Gateway::Listen(address, grant, by) => listen(address, grant, *by, &hello(gpus)),
+        Gateway::Listen(address, grant, by, server) => {
+            listen(address, (grant, server.as_ref()), *by, &hello(gpus))
+        }
         Gateway::Socket(socket) => {
             let stream = UnixStream::connect(socket).context(connecting)?;
             open(&mut &stream, (&hello(gpus), None), None).context(opening)?;

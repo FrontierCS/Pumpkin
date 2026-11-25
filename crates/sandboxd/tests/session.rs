@@ -1,6 +1,7 @@
 //! `sandboxd` and the gateway's end of its session, together, meeting at a socket of the
 //! sandbox's own, at a TCP address on the loopback, or where `sandboxd` listens on the loopback,
-//! behind the stand-in TLS edge. `sandboxd` runs here as an ordinary process, not as a
+//! behind the stand-in TLS edge. A companion's listens under TLS of its own, behind a stand-in
+//! relay too. `sandboxd` runs here as an ordinary process, not as a
 //! sandbox's first process, and a temporary directory stands in for the sandbox. So `sandboxd`
 //! serves no ops, which it serves only at the sandbox's own `/pumpkin`, nor the model endpoint,
 //! at a port of the sandbox's own loopback. A fake gateway sends what the gateway's end never
@@ -14,6 +15,7 @@
 #![expect(clippy::disallowed_methods, reason = "nextest bounds each test")]
 
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
@@ -31,13 +33,13 @@ use expect_test::{Expect, expect};
 use gateway::{Arrival, Dialer, GatewayAddress, Listener, Process, Put, Sockets};
 use schema::frame;
 use schema::frame::MAX_BODY_BYTES;
-use schema::ir::{AbsolutePath, Argv, Env, EnvVar, Mode, Name};
+use schema::ir::{AbsolutePath, Argv, CompanionName, Env, EnvVar, Mode, Name};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
     Endpoint, Entry, ExitStatus, FromSandbox, HELLO_TIMEOUT, HelloReply, Launch, Listening,
-    MAX_ATTESTATION_BYTES, PROTOCOL_VERSION, PrivateDial, RegistrationGrant, RelativePath, Root,
-    SANDBOXD_ATTESTATION, SANDBOXD_GIVEN, SANDBOXD_GRANT, SOCKET_NAME, SocketDial, ToSandbox,
-    dir_mode, file_mode,
+    MAX_ATTESTATION_BYTES, PROTOCOL_VERSION, PrivateDial, RegistrationGrant, RelativePath, Relayed,
+    Root, SANDBOXD_ATTESTATION, SANDBOXD_GIVEN, SANDBOXD_GRANT, SANDBOXD_TLS_CERTIFICATE,
+    SANDBOXD_TLS_KEY, SOCKET_NAME, SocketDial, ToSandbox, dir_mode, file_mode,
 };
 use serde_json::{Value, json};
 use stdx::Deadline;
@@ -59,6 +61,9 @@ const PROBE: &str = "#!/bin/sh\nenv > \"$0.env\"\nexit 1\n";
 // A registration grant that no gateway of the tests issues.
 const GRANT: &str = "00112233445566778899aabbccddeeff";
 
+// The companion whose `sandboxd` listens under TLS.
+const COMPANION: &str = "companion";
+
 // The attestation of the sandbox that dials over TCP, which its registration's check admits.
 const ATTESTATION: &str = "the sandbox's attestation";
 
@@ -69,6 +74,8 @@ enum Meeting {
     Socket,
     Tcp,
     Listen,
+    // As the companion `COMPANION`, under TLS, behind a stand-in for its sandbox's relay.
+    Relayed,
 }
 
 #[expect(
@@ -144,6 +151,20 @@ impl Sandbox {
                     ])
                     .env(SANDBOXD_GRANT, grant.digits());
                 let port = test_support::edge::front(address.into());
+                let endpoint = Endpoint::new(test_support::edge::NAME.to_owned(), port).unwrap();
+                (Gateway::Listen(address), unreached.at(endpoint))
+            }
+            Meeting::Relayed => {
+                let dialer = Dialer::new(test_support::edge::client());
+                let (relayed, unreached) = dialer.relayed(&companion()).unwrap();
+                let address = unlistened();
+                let by = unix_seconds(3600);
+                sandboxd
+                    .args(["--listen", &address.to_string(), "--by", &by, "--tls"])
+                    .envs(given(&relayed));
+                let companions = BTreeMap::from([(companion(), address.into())]);
+                let relay = test_support::relayed::relay(companions);
+                let port = test_support::edge::front(relay.address);
                 let endpoint = Endpoint::new(test_support::edge::NAME.to_owned(), port).unwrap();
                 (Gateway::Listen(address), unreached.at(endpoint))
             }
@@ -258,6 +279,20 @@ impl Sandbox {
     fn sandboxd(&self, args: &[&OsStr], env: &[(&str, &OsStr)]) -> Child {
         sandboxd(&self.path, args, env)
     }
+}
+
+fn companion() -> CompanionName {
+    CompanionName::try_from(COMPANION.to_owned()).unwrap()
+}
+
+/// What `relayed` gives its companion's `sandboxd`, each in the variable that holds it.
+fn given(relayed: &Relayed) -> [(&'static str, String); 3] {
+    let Relayed { grant, identity } = relayed;
+    [
+        (SANDBOXD_GRANT, grant.digits()),
+        (SANDBOXD_TLS_CERTIFICATE, identity.certificate_digits()),
+        (SANDBOXD_TLS_KEY, identity.key_digits()),
+    ]
 }
 
 fn absolute(path: &Path) -> AbsolutePath {
@@ -1005,6 +1040,81 @@ fn listening() {
             sandboxd: exit status: 0
             left running: 0"#]],
     );
+}
+
+// A case of flags that `sandboxd` refuses: its name, its arguments and its environment.
+type Refused<'a> = (&'a str, &'a [&'a str], &'a [&'a (&'a str, String)]);
+
+#[test]
+fn under_tls() {
+    check(
+        Meeting::Relayed,
+        |sandbox| {
+            let mut lines = put_run_collect(sandbox);
+            let dialer = Dialer::new(test_support::edge::client());
+            let (ours, _) = dialer.relayed(&companion()).unwrap();
+            let (other, _) = dialer.relayed(&companion()).unwrap();
+            let [grant, certificate, key] = given(&ours);
+            let [_, _, other_key] = given(&other);
+            let odd = (SANDBOXD_TLS_KEY, "0".to_owned());
+            let (closed, by) = (unlistened().to_string(), unix_seconds(3600));
+            let listening = [&closed, "--listen", "--by", &by, "--tls"];
+            let cases: [Refused<'_>; 5] = [
+                ("--tls without --listen", &[&closed, "--tls"], &[]),
+                ("no certificate", &listening, &[&grant, &key]),
+                ("no key", &listening, &[&grant, &certificate]),
+                (
+                    "a key of odd digits",
+                    &listening,
+                    &[&grant, &certificate, &odd],
+                ),
+                (
+                    "another certificate's key",
+                    &listening,
+                    &[&grant, &certificate, &other_key],
+                ),
+            ];
+            for (case, args, env) in cases {
+                let args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
+                let env: Vec<_> = (env.iter())
+                    .map(|(name, value)| (*name, OsStr::new(value)))
+                    .collect();
+                let refused = ended(sandbox.sandboxd(&args, &env));
+                lines.push(format!("{case}: {}", masked(&refused)));
+            }
+            lines
+        },
+        &expect![[r#"
+            exited: Code(3)
+            out/empty/
+            out/evidence/payload: 2109497 bytes
+            out/result.json: {"bytes": 2109497}
+            payload collected intact: true
+            log/1.stderr: warning
+            log/1.stdout: home=/pumpkin/home mode=train path=/usr/bin:/bin in $ROOT/home
+            the command was given: []
+            the probe for GPUs was given: []
+            --tls without --listen: exit status: 1: sandboxd: --tls serves the session to a gateway that dials sandboxd: give it with --listen
+            no certificate: exit status: 1: sandboxd: SANDBOXD_TLS_CERTIFICATE is not set: set it to the digits of the identity issued for the companion, which a sandboxd that listens with --tls serves TLS with
+            no key: exit status: 1: sandboxd: SANDBOXD_TLS_KEY is not set: set it to the digits of the identity issued for the companion, which a sandboxd that listens with --tls serves TLS with
+            a key of odd digits: exit status: 1: sandboxd: SANDBOXD_TLS_KEY isn't an even number of lowercase hexadecimal digits: set it to the digits of the identity issued for the companion
+            another certificate's key: exit status: 1: sandboxd: the identity in SANDBOXD_TLS_CERTIFICATE and SANDBOXD_TLS_KEY can't serve TLS: TLS failed: <reason>: expected the certificate and the key issued for the companion
+            then Ended { reason: "the owner dropped the session" }
+            sandboxd: exit status: 0
+            left running: 0"#]],
+    );
+}
+
+/// `said`, with the reason that TLS's library gave in it, if any, masked.
+fn masked(said: &str) -> String {
+    let (start, end) = ("TLS failed: ", ": expected");
+    match said.split_once(start) {
+        Some((before, reason)) => {
+            let after = reason.find(end).map_or("", |at| &reason[at..]);
+            format!("{before}{start}<reason>{after}")
+        }
+        None => said.to_owned(),
+    }
 }
 
 fn listening_apart(sandbox: &Sandbox) -> Vec<String> {

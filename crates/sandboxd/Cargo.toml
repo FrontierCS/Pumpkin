@@ -13,6 +13,7 @@ test = false
 [dependencies]
 schema = { path = "../schema" }
 stdx = { path = "../stdx" }
+tls = { path = "../tls" }
 libc.workspace = true
 rustix = { workspace = true, features = ["net", "process", "thread"] }
 serde_json.workspace = true

@@ -214,6 +214,29 @@ impl Stream {
     }
 }
 
+// Its socket, for the options of a socket, such as a bound on its reads.
+impl AsFd for Stream {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.socket.as_fd()
+    }
+}
+
+impl Read for Stream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        (&*self).read(buf)
+    }
+}
+
+impl Write for Stream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        (&*self).write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        (&*self).flush()
+    }
+}
+
 impl Read for &Stream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let read = (&self.socket).read(buf)?;

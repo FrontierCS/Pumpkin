@@ -4,7 +4,7 @@
 //! It meets the gateway, at a Unix socket of the sandbox's own, at a TCP address, or with
 //! `--listen` where the gateway dials it, opens the session ([`schema::sandbox`]) with its hello,
 //! presenting the attestation in [`SANDBOXD_ATTESTATION`] where it dials a TCP address, and serves
-//! it until the gateway closes it.
+//! it until the gateway closes it. With `--tls`, it serves the session under TLS of its own.
 //! When the session ends it kills its commands and exits, which stops a sandbox it is first in.
 //!
 //! As a sandbox's first process (PID 1) it reaps the orphans the kernel hands it, and freezing
@@ -35,7 +35,7 @@ use std::time::Duration;
 use schema::ir::User;
 use schema::sandbox::{
     Attestation, HELLO_TIMEOUT, RegistrationGrant, SANDBOXD_ATTESTATION, SANDBOXD_GIVEN,
-    SANDBOXD_GRANT, pumpkin_dir,
+    SANDBOXD_GRANT, SANDBOXD_TLS_CERTIFICATE, SANDBOXD_TLS_KEY, TlsIdentity, pumpkin_dir,
 };
 use stdx::{Context, Deadline};
 
@@ -59,6 +59,10 @@ mod flags {
     #![expect(
         unreachable_pub,
         reason = "xflags declares the types it generates `pub`"
+    )]
+    #![expect(
+        clippy::struct_excessive_bools,
+        reason = "xflags generates a field of its own for each switch"
     )]
     #![expect(
         clippy::allow_attributes,
@@ -90,6 +94,11 @@ mod flags {
             /// minute after it exits with 1, since the gateway that would claim it gives up then,
             /// which ends a sandbox that its provider made too late. Refused without --listen.
             optional --by seconds: u64
+            /// With --listen, serves the session under TLS, as a companion behind its sandbox's
+            /// relay does. SANDBOXD_TLS_CERTIFICATE and SANDBOXD_TLS_KEY hold the certificate
+            /// and its PKCS #8 key, each as the lowercase hexadecimal digits of its DER. sandboxd
+            /// keeps both from the commands it starts. Refused without --listen.
+            optional --tls
             /// Becomes this user, `uid:gid`, each a number but 0, as sandboxd starts, which must be
             /// as root, having given the user /pumpkin, made if absent: no command, nor sandboxd,
             /// then keeps or regains a privilege. Freezing then kills every other process of the
@@ -115,6 +124,7 @@ mod flags {
 
         pub listen: bool,
         pub by: Option<u64>,
+        pub tls: bool,
         pub user: Option<RoleUser>,
         pub ops: bool,
         pub model: bool,
@@ -156,6 +166,7 @@ fn main() -> ExitCode {
         gateway,
         listen,
         by,
+        tls,
         user,
         ops,
         model,
@@ -183,9 +194,36 @@ fn main() -> ExitCode {
         eprintln!("sandboxd: making the process non-dumpable failed: {error}");
         return ExitCode::FAILURE;
     }
+    let gateway = given.and_then(|given| gateway_of(gateway, listen, by, tls, given));
+    match gateway.and_then(|gateway| session::serve(&gateway, ops, model)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("sandboxd: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// How `sandboxd` meets the gateway at `address`, as `--listen`, `--by` and `--tls` say.
+fn gateway_of(
+    address: Address,
+    listen: bool,
+    by: Option<u64>,
+    tls: bool,
+    given: Given,
+) -> Result<Gateway, String> {
+    let Given {
+        attestation,
+        grant,
+        tls_certificate,
+        tls_key,
+    } = given;
     let by = by.map(|seconds| Deadline::at_unix(Duration::from_secs(seconds) + UNCLAIMED_SLACK));
-    let gateway = given.and_then(|given| {
-        match (gateway, listen, by) {
+    match (address, listen, by) {
+        (Address::Socket(_) | Address::Tcp(_), false, _) if tls => Err(
+            "--tls serves the session to a gateway that dials sandboxd: give it with --listen"
+                .to_owned(),
+        ),
         (Address::Socket(socket), false, None) => Ok(Gateway::Socket(socket)),
         (Address::Socket(_), true, _) => Err(
             "--listen takes a TCP address of the sandbox's own: give one, such as `0.0.0.0:7434`, \
@@ -193,11 +231,12 @@ fn main() -> ExitCode {
                 .to_owned(),
         ),
         (Address::Tcp(address), false, None) => {
-            parsed_attestation(given.attestation)
+            parsed_attestation(attestation)
                 .map(|attestation| Gateway::Tcp(address, attestation))
         }
         (Address::Tcp(address), true, Some(by)) => {
-            parsed_grant(given.grant).map(|grant| Gateway::Listen(address, grant, by))
+            let server = tls.then(|| server(tls_certificate, tls_key)).transpose()?;
+            parsed_grant(grant).map(|grant| Gateway::Listen(address, grant, by, server))
         }
         (Address::Tcp(_), true, None) => Err(
             "--listen waits until the start's deadline: give it as --by, in seconds since the Unix \
@@ -207,14 +246,6 @@ fn main() -> ExitCode {
         (Address::Socket(_) | Address::Tcp(_), false, Some(_)) => Err(
             "--by bounds how long a sandboxd that listens waits: give it with --listen".to_owned(),
         ),
-    }
-    });
-    match gateway.and_then(|gateway| session::serve(&gateway, ops, model)) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("sandboxd: {error}");
-            ExitCode::FAILURE
-        }
     }
 }
 
@@ -293,6 +324,8 @@ fn become_role(User { uid, gid }: User) -> Result<(), String> {
 struct Given {
     attestation: Option<OsString>,
     grant: Option<OsString>,
+    tls_certificate: Option<OsString>,
+    tls_key: Option<OsString>,
 }
 
 impl Given {
@@ -304,10 +337,15 @@ impl Given {
         // https://github.com/buildkite/agent/blob/dc696c5ecad164b5aafc678b76bba69eef5111be/clicommand/agent_start.go#L902-L905
         // https://github.com/actions/runner/blob/d1eb12d4b115c301201de27d667284e1a80f2ab5/src/Runner.Listener/CommandSettings.cs#L110-L139
         let taken = stdx::env::take(SANDBOXD_GIVEN);
-        // In the list's order. No `sandboxd` serves TLS yet, so none reads the identity's two.
-        let [attestation, grant, _, _] =
+        // In the list's order.
+        let [attestation, grant, tls_certificate, tls_key] =
             taken.context("listing sandboxd's threads in /proc/self/task failed")?;
-        Ok(Self { attestation, grant })
+        Ok(Self {
+            attestation,
+            grant,
+            tls_certificate,
+            tls_key,
+        })
     }
 }
 
@@ -322,6 +360,30 @@ fn parsed_grant(grant: Option<OsString>) -> Result<RegistrationGrant, String> {
     // value that isn't a grant's digits.
     let digits = grant.into_string().unwrap_or_default();
     RegistrationGrant::try_from(digits).context(SANDBOXD_GRANT)
+}
+
+/// The TLS server that shows the identity whose digits `certificate` and `key` hold.
+fn server(certificate: Option<OsString>, key: Option<OsString>) -> Result<tls::Server, String> {
+    let digits = |digits: Option<OsString>, variable: &str| {
+        let Some(digits) = digits else {
+            return Err(format!(
+                "{variable} is not set: set it to the digits of the identity issued for the \
+                 companion, which a sandboxd that listens with --tls serves TLS with"
+            ));
+        };
+        // A value that isn't UTF-8 isn't hexadecimal digits either, so it is refused as any
+        // other value that isn't an identity's digits.
+        Ok(digits.into_string().unwrap_or_default())
+    };
+    let certificate = digits(certificate, SANDBOXD_TLS_CERTIFICATE)?;
+    let key = digits(key, SANDBOXD_TLS_KEY)?;
+    let identity = TlsIdentity::from_digits(&certificate, &key)?;
+    tls::Server::new(&[identity.certificate()], identity.key()).map_err(|error| {
+        format!(
+            "the identity in {SANDBOXD_TLS_CERTIFICATE} and {SANDBOXD_TLS_KEY} can't serve TLS: \
+             {error}: expected the certificate and the key issued for the companion"
+        )
+    })
 }
 
 fn parsed_attestation(attestation: Option<OsString>) -> Result<Attestation, String> {

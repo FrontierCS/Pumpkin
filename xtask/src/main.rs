@@ -822,7 +822,8 @@ fn sandboxd() -> Result<PathBuf> {
 fn release_binary(package: &str, target: &str) -> Result<PathBuf> {
     let mut build = cargo(&["build", "--release", "--locked", "--package", package]);
     build.args(["--target", target]);
-    if package == "pumpkin" && target == MUSL {
+    // `pumpkin` and `sandboxd` build `ring`'s C and assembly.
+    if target == MUSL {
         tools::musl_cc(&mut build)?;
     }
     let artifacts = executables(build)?;
