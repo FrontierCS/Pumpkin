@@ -30,8 +30,8 @@ APP = "pumpkin-images"
 RUN_TAG = "pumpkin-run"
 ROLE_TAG = "pumpkin-role"
 
-# How many images an import builds at once, and how many sidecars a create makes at once, each
-# on a thread of its own. Modal has taken 60 creates of a sidecar at once, and 250 builds.
+# How many images an import builds at once, and how many sidecars a create makes at once. Each
+# waits on Modal on a thread of its own, and this bounds the helper's threads.
 AT_ONCE = 64
 
 # How often a create lists its run until the list finds its sandbox: as often as Modal's SDK asks

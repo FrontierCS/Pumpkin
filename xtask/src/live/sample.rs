@@ -92,10 +92,13 @@ fn sampled(remote: &dyn Fn(&str) -> std::result::Result<String, String>, id: &st
         )
         .into());
     };
+    // Once the driver has exited, a glob below matches nothing and prints itself. The read of its
+    // own `status` fails then, and the command prints nothing.
     let files = format!(
-        "grep --with-filename --extended-regexp \
-         '^(Threads|VmRSS|VmHWM|Name|voluntary_ctxt_switches|nonvoluntary_ctxt_switches):' \
-         /proc/{pid}/status /proc/{pid}/task/*/status; \
+        "grep --with-filename --extended-regexp '^(Threads|VmRSS|VmHWM):' /proc/{pid}/status \
+         || exit 0; \
+         grep --with-filename --extended-regexp \
+         '^(Name|voluntary_ctxt_switches|nonvoluntary_ctxt_switches):' /proc/{pid}/task/*/status; \
          grep --with-filename '' /proc/{pid}/task/*/schedstat; \
          grep --with-filename '^Max open files' /proc/{pid}/limits; \
          printf '%s:\\n' /proc/{pid}/fd/*"
