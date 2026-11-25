@@ -24,6 +24,10 @@ use stdx::{Context, Deadline};
 use super::{Hosting, Looks, Sandboxes, Which};
 use crate::{Clock, Host, Stopped, interruption, log};
 
+mod gathered;
+
+use gathered::{Failure, gathered};
+
 /// How a provider's sandboxes and the gateway meet ([`Meeting`](provider::Meeting)), with what the
 /// run supplies for it.
 #[derive(Clone, Copy)]
@@ -232,12 +236,6 @@ struct Opened<C> {
     session: Result<Session<C>, Failure>,
 }
 
-struct Failure {
-    reason: String,
-    /// Whether it is the first failure among its sandbox's containers, which stopped the others.
-    first: bool,
-}
-
 /// The meeting of a companion: its thread, or how it went, once the thread has ended.
 type Meeting<'scope, C> = Result<thread::ScopedJoinHandle<'scope, Opened<C>>, Opened<C>>;
 
@@ -438,35 +436,6 @@ fn of<T>(
     container: Container,
 ) -> impl Fn(Arrival) -> T + Send + 'static {
     move |arrival| wrap(container.clone(), arrival)
-}
-
-/// The sessions of a sandbox whose containers' meetings went so, `main`'s and each companion's,
-/// if each opened one. Otherwise the failure that stopped the others, with its container, and
-/// every session that opened is dropped, which ends it.
-fn gathered<C>(
-    main: Opened<C>,
-    companions: Companions<C>,
-) -> Result<Sessions<C>, (Container, Failure)> {
-    let mut sessions = (main.session)
-        .map(|main| Sessions {
-            main,
-            companions: BTreeMap::new(),
-        })
-        .map_err(|failure| (Container::Main, failure));
-    for (name, opened) in companions {
-        sessions = match (sessions, opened.session) {
-            (Ok(mut sessions), Ok(session)) => {
-                sessions.companions.insert(name, session);
-                Ok(sessions)
-            }
-            (Ok(_), Err(failure)) => Err((Container::Companion(name), failure)),
-            // The failure that stopped the others is the sandbox's, wherever its container is
-            // declared.
-            (Err(_), Err(failure)) if failure.first => Err((Container::Companion(name), failure)),
-            (Err(failed), Ok(_) | Err(_)) => Err(failed),
-        };
-    }
-    sessions
 }
 
 /// Waits for a container to meet the gateway at `registration` by `by`, a time on `clock`, and
