@@ -10,10 +10,10 @@ use schema::ir;
 
 use super::body::{Host, Target, absolute, command_argv};
 use super::{Evaluation, Purpose};
-use crate::builtins::{Call, Takes, place, positional, string};
+use crate::builtins::{Call, origin, place, string};
 use crate::problem::Fault;
 use crate::syntax::Name;
-use crate::value::{Hosted, Kind, Value};
+use crate::value::{Hosted, Kind, Span, Value};
 use crate::{Loader, json};
 
 #[derive(Clone, Copy)]
@@ -93,31 +93,33 @@ impl<L: Loader> Evaluation<'_, '_, L> {
         })?;
         match method {
             RunnerMethod::Get => {
-                let [from, to] = positional::<2>(&name.text, Takes::exactly(2), call)?;
-                let from = absolute("the runner's source path", from)?;
-                let to = absolute("the target's destination directory", to)?;
+                let ([from, to], container) = copy(name, ["from", "to"], call)?;
+                let from = absolute("the runner's source path", &from)?;
+                let to = absolute("the target's destination directory", &to)?;
                 self.runner_target()
-                    .runner_get(&grant, lease, from, to)
+                    .runner_get(&grant, lease, container, from, to)
                     .map_err(|why| Fault::new(at, why))?;
             }
             RunnerMethod::Put => {
-                let [tree, to] = positional::<2>(&name.text, Takes::exactly(2), call)?;
-                let tree = absolute("the target's source directory", tree)?;
-                let to = absolute("the runner's destination directory", to)?;
+                let ([tree, to], container) = copy(name, ["tree", "to"], call)?;
+                let tree = absolute("the target's source directory", &tree)?;
+                let to = absolute("the runner's destination directory", &to)?;
                 self.runner_target()
-                    .runner_put(&grant, lease, tree, to)
+                    .runner_put(&grant, lease, container, tree, to)
                     .map_err(|why| Fault::new(at, why))?;
             }
             RunnerMethod::Run => {
-                let given = place(&name.text, &["argv", "timeout_seconds"], 1, call)?;
+                let params = ["argv", "timeout_seconds", "container"];
+                let given = place(&name.text, &params, 1, call)?;
                 let Some(argv) = &given[0] else {
                     return Err(Fault::new(at, "`run` needs argv"));
                 };
-                let argv = command_argv(name, argv.span, argv)?;
+                let argv = command_argv(name, argv.0, &argv.1)?;
                 let timeout_seconds = given[1].as_ref().map(seconds).transpose()?;
+                let container = container(given[2].as_ref())?;
                 let output = self
                     .runner_target()
-                    .runner_run(&grant, lease, argv, timeout_seconds)
+                    .runner_run(&grant, lease, container, argv, timeout_seconds)
                     .map_err(|why| Fault::new(at, why))?;
                 return json::value_of(&serde_json::json!(output), at, call.budget);
             }
@@ -129,10 +131,37 @@ impl<L: Loader> Evaluation<'_, '_, L> {
     }
 }
 
-fn seconds(value: &Value) -> Result<NonZeroU64, Fault> {
+/// What `put` and `get`, `name`, take: the two paths that `paths` names, each where it was given,
+/// and the container to copy to or from. A path is given by position or by name.
+fn copy(
+    name: &Name,
+    paths: [&str; 2],
+    call: &Call<'_>,
+) -> Result<([(Span, Value); 2], ir::Container), Fault> {
+    let given = place(&name.text, &[paths[0], paths[1], "container"], 2, call)?;
+    let path = |index: usize| {
+        given[index]
+            .clone()
+            .ok_or_else(|| Fault::new(call.at, format!("`{}` needs `{}`", name.text, paths[index])))
+    };
+    Ok(([path(0)?, path(1)?], container(given[2].as_ref())?))
+}
+
+/// The runner's container that `argument`, a string, names. Without it, `main`.
+fn container(argument: Option<&(Span, Value)>) -> Result<ir::Container, Fault> {
+    let Some((at, value)) = argument else {
+        return Ok(ir::Container::Main);
+    };
+    let name = string("a container's name", *at, value)?;
+    ir::Container::try_from(String::from(name))
+        .map_err(|why| origin(Fault::new(*at, why), "the argument", value))
+}
+
+fn seconds((at, value): &(Span, Value)) -> Result<NonZeroU64, Fault> {
     let seconds = match value.kind {
         Kind::Int(n) => u64::try_from(n).ok().and_then(NonZeroU64::new),
         _ => None,
     };
-    seconds.ok_or_else(|| Fault::new(value.span, "timeout_seconds must be a positive integer"))
+    let refused = || Fault::new(*at, "timeout_seconds must be a positive integer");
+    seconds.ok_or_else(|| origin(refused(), "the argument", value))
 }

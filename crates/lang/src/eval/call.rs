@@ -165,7 +165,7 @@ fn bind<'d>(function: &'d Function, call: &Call<'_>) -> Result<Locals<'d>, Fault
     let mut missing = Vec::new();
     for ((param, given), default) in def.params.iter().zip(given).zip(&function.defaults) {
         match (given, default) {
-            (Some(value), _) => arguments.push((param, value)),
+            (Some((_, value)), _) => arguments.push((param, value)),
             // Not checked against its annotation here, as `define` checked it, as Bazel does:
             // https://github.com/bazelbuild/bazel/blob/a765dc177f48efb4c9e1b980609b838c9ba27f42/src/main/java/net/starlark/java/eval/StarlarkFunction.java#L626-L628
             (None, Some(default)) => {

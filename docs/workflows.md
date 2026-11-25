@@ -94,15 +94,16 @@ body that was checked as the run started. A body's parameters, in order:
 | `target.get(path)` | returns the text of the file at `path` |
 | `target.caller()` | returns the calling agent's role, in a job's body |
 | `target.with_runner(session, callback, ...)` | opens a lease of the target's session, calls `callback(runner, ...)`, closes the lease even if the callback fails, and returns what the callback returned once the runner is deleted |
-| `runner.put(tree, to)` | copies the target's tree to a new path in the runner |
-| `runner.get(from, to)` | copies the runner's file or tree into a new directory on the target, where a file keeps its name |
-| `runner.run(argv, timeout_seconds = seconds)` | runs `argv` in the runner, and returns a [`RunnerOutput`](../crates/schema/src/sandbox/op.rs) |
+| `runner.put(tree, to, container = name)` | copies the target's tree to a new path in the runner |
+| `runner.get(from, to, container = name)` | copies the runner's file or tree into a new directory on the target, where a file keeps its name |
+| `runner.run(argv, timeout_seconds = seconds, container = name)` | runs `argv` in the runner, and returns a [`RunnerOutput`](../crates/schema/src/sandbox/op.rs) |
 | `run.set_submission(payload)`, `run.end_work()` | propose a now function's changes, as above |
 
 `get` and `capture` return at most 1 MiB of UTF-8 text. A runner handle works only in its
-callback. Any of these fails the body: a refused op, a failed copy, a command that doesn't start
-or whose output isn't collected whole, or a lease that runs out. A runner that can't be deleted
-fails the run.
+callback. Its `put`, `get` and `run` act on the runner's container that `container` names: `main`,
+its own, by default, or one of its companions. Any of these fails the body: a refused op, a failed
+copy, a command that doesn't start or whose output isn't collected whole, or a lease that runs
+out. A runner that can't be deleted fails the run.
 
 A body returns a dict of at most 1 MiB of JSON. Its keys are names, and JSON can hold its values.
 The body fails if its evaluation fails, as on `fail()` or a `get` of a missing file. It also fails

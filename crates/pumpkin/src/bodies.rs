@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::num::NonZeroU64;
 
 use lang::{Args, Body, BodyKind, Bounds, Host, Label, Loader, Problems};
-use schema::ir::{self, AbsolutePath, Argv, Name};
+use schema::ir::{self, AbsolutePath, Argv, Container, Name};
 use schema::sandbox::op::RunnerOutput;
 use schema::workflow::Workflow;
 use serde_json::{Map, Value};
@@ -198,28 +198,32 @@ impl lang::Target for Driven<'_> {
         &mut self,
         grant: &Name,
         lease: u64,
+        container: Container,
         tree: AbsolutePath,
         to: AbsolutePath,
     ) -> Result<(), String> {
-        self.0.runner_put(grant, lease, tree, to)
+        self.0.runner_put(grant, lease, container, tree, to)
     }
     fn runner_get(
         &mut self,
         grant: &Name,
         lease: u64,
+        container: Container,
         from: AbsolutePath,
         to: AbsolutePath,
     ) -> Result<(), String> {
-        self.0.runner_get(grant, lease, from, to)
+        self.0.runner_get(grant, lease, container, from, to)
     }
     fn runner_run(
         &mut self,
         grant: &Name,
         lease: u64,
+        container: Container,
         argv: Argv,
         timeout_seconds: Option<NonZeroU64>,
     ) -> Result<RunnerOutput, String> {
-        self.0.runner_run(grant, lease, argv, timeout_seconds)
+        self.0
+            .runner_run(grant, lease, container, argv, timeout_seconds)
     }
     fn runner_close(&mut self, grant: &Name, lease: u64) -> Result<(), String> {
         self.0.runner_close(grant, lease)

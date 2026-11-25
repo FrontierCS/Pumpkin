@@ -7,7 +7,7 @@ use std::num::NonZeroU64;
 
 use expect_test::{Expect, expect};
 use lang::{Args, Body, BodyKind, Bounds, Host, Label};
-use schema::ir::{AbsolutePath, ArgumentValue, Argv, Name};
+use schema::ir::{AbsolutePath, ArgumentValue, Argv, Container, Name};
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::{CommandEnd, RunnerOutput};
 use serde_json::{Value, json};
@@ -19,6 +19,14 @@ const RESULT: (&str, &str) = (
     "/pumpkin/out/result.json",
     r#"{"raw_score": 43.12, "failure": "slow", "metrics": {"passed": 7, "total": 10}}"#,
 );
+
+/// `path` in the runner's `container`, as `<container>:<path>`, or `path` alone in `main`.
+fn in_container(container: &Container, path: &(impl std::fmt::Display + ?Sized)) -> String {
+    match container {
+        Container::Main => path.to_string(),
+        Container::Companion(name) => format!("{name}:{path}"),
+    }
+}
 
 /// A host that logs each method a handle calls, a line each.
 #[derive(Default)]
@@ -35,9 +43,11 @@ impl lang::Target for Logged {
         &mut self,
         grant: &Name,
         lease: u64,
+        container: Container,
         tree: AbsolutePath,
         to: AbsolutePath,
     ) -> Result<(), String> {
+        let to = in_container(&container, &to);
         self.0.push(format!("{grant} {lease} put {tree} at {to}"));
         Ok(())
     }
@@ -46,9 +56,11 @@ impl lang::Target for Logged {
         &mut self,
         grant: &Name,
         lease: u64,
+        container: Container,
         from: AbsolutePath,
         to: AbsolutePath,
     ) -> Result<(), String> {
+        let from = in_container(&container, &from);
         self.0.push(format!("{grant} {lease} get {from} at {to}"));
         Ok(())
     }
@@ -57,12 +69,13 @@ impl lang::Target for Logged {
         &mut self,
         grant: &Name,
         lease: u64,
+        container: Container,
         argv: Argv,
         timeout_seconds: Option<NonZeroU64>,
     ) -> Result<RunnerOutput, String> {
+        let program = in_container(&container, argv.program());
         self.0.push(format!(
-            "{grant} {lease} run {} with timeout {timeout_seconds:?}",
-            argv.program()
+            "{grant} {lease} run {program} with timeout {timeout_seconds:?}"
         ));
         Ok(RunnerOutput {
             end: CommandEnd::Exited(ExitStatus::Code(7)),
@@ -254,6 +267,67 @@ def judge(target: Target, payload: Payload):
             cpp 0 get /work/result at /out
             cpp close 0
             returns end={"exited":{"code":7}} stderr_tail="diagnostic" stdout_tail="answer""#]],
+    );
+}
+
+// A runner's method takes `container`, which reaches the host. A name that no container could have
+// is refused where it is written.
+#[test]
+fn runner_containers() {
+    check(
+        "judge",
+        BodyKind::Job,
+        json!({}),
+        r#"
+#- //score.star
+def check(runner: Runner, source):
+    runner.put(source, "/work/src", container = "scheduler")
+    runner.run(["serve"], container = "scheduler")
+    runner.get("/work/out", "/out", container = "swe-000")
+    runner.run(["main"], container = "main")
+    return runner.run(["compile"], timeout_seconds = 2, container = "Scheduler")
+def judge(target: Target, payload: Payload):
+    return target.with_runner("cpp", check, "/source")
+"#,
+        &expect![[r#"
+            cpp open
+            cpp 0 put /source at scheduler:/work/src
+            cpp 0 run scheduler:serve with timeout None
+            cpp 0 get swe-000:/work/out at /out
+            cpp 0 run main with timeout None
+            cpp close 0
+            score.star:6:57: `Scheduler` is not a companion's name: use 1 to 63 characters from a-z, 0-9 and `-`, starting with a letter and ending with a letter or a digit
+                6 |     return runner.run(["compile"], timeout_seconds = 2, container = "Scheduler")
+                  |                                                         ^^^^^^^^^
+                the argument, `"Scheduler"`, is made at score.star:6:69
+                in `check()`, called at score.star:8:12
+                in `judge()`, called at score.star:7:5"#]],
+    );
+}
+
+// A bad path is reported at the argument that passes it, with a note of where the value was made.
+#[test]
+fn runner_path_faults() {
+    check(
+        "judge",
+        BodyKind::Job,
+        json!({}),
+        r#"
+#- //score.star
+def check(runner: Runner, source):
+    runner.put(source, "/work/src")
+def judge(target: Target, payload: Payload):
+    return target.with_runner("cpp", check, "work")
+"#,
+        &expect![[r#"
+            cpp open
+            cpp close 0
+            score.star:2:16: `work` is not a normalized absolute path: start with `/`, and use no empty, `.` or `..` components and no NUL byte
+                2 |     runner.put(source, "/work/src")
+                  |                ^^^^^^
+                the argument, `"work"`, is made at score.star:4:45
+                in `check()`, called at score.star:4:12
+                in `judge()`, called at score.star:3:5"#]],
     );
 }
 
