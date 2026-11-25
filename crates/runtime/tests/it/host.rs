@@ -33,8 +33,8 @@ const LOOK: Duration = Duration::from_millis(10);
 /// [`SlowSync`], a call of [`SimHost::moving_to`]'s function or the simulated provider
 /// ([`SimTime`]) moves it. A wait for a time to come takes an input as soon as one comes, or ends
 /// once the clock reaches its time; then it takes what the inbox holds, without waiting, but for
-/// the takes that the late take says wait. A wait that neither ends fails after `WATCHDOG`. A sync
-/// makes nothing last, and succeeds unless the script fails it.
+/// the looks that the late take or [`SimHost::awaiting`] says wait. A wait that neither ends fails
+/// after `WATCHDOG`. A sync makes nothing last, and succeeds unless the script fails it.
 pub(crate) struct SimHost {
     state: Arc<Mutex<State>>,
     journal: Option<Journal>,
@@ -54,6 +54,11 @@ struct State {
     // The syncs that move the clock once their thread has read it next, and the move due so.
     after_read: VecDeque<(Synced, Duration)>,
     due: Option<(ThreadId, Duration)>,
+    // From when the next look at an inbox other than the loop's waits for an input.
+    awaiting: Option<Duration>,
+    // The sync that arms the late input, and the time it moves the clock to once armed.
+    late_input: Option<(Synced, Duration)>,
+    late_input_due: Option<Duration>,
 }
 
 /// A take comes late, after setup or the agent's initial ops query: once `behind`
@@ -97,6 +102,9 @@ impl SimHost {
             unix: UNIX_EPOCH,
             after_read: VecDeque::new(),
             due: None,
+            awaiting: None,
+            late_input: None,
+            late_input_due: None,
         };
         Self {
             state: Arc::new(Mutex::new(state)),
@@ -135,6 +143,22 @@ impl SimHost {
     /// as the machine may hold one thread while the loop records what others report.
     pub(crate) fn held_sync(self, record: Synced, logged: &'static str) -> Self {
         stdx::unpoisoned(self.state.lock()).held = Some((record, logged));
+        self
+    }
+
+    /// Makes the first look at an inbox, other than the loop's, that ends once the clock reads `at`
+    /// end with an input. A look that would end with none waits for one instead. The machine may
+    /// run the thread that looks only once another thread has sent it one.
+    pub(crate) fn awaiting(self, at: Duration) -> Self {
+        stdx::unpoisoned(self.state.lock()).awaiting = Some(at);
+        self
+    }
+
+    /// Makes an input come late, once a sync makes `record` last. That is the next input that an
+    /// inbox other than the loop's hands over: the clock moves to `at` before the look returns it.
+    /// The machine may run the thread that looks only that late.
+    pub(crate) fn late_input(self, record: Synced, at: Duration) -> Self {
+        stdx::unpoisoned(self.state.lock()).late_input = Some((record, at));
         self
     }
 
@@ -201,6 +225,9 @@ impl Host for SimHost {
         }
         let awaited = (state.held.take_if(|(record, _)| reached(record))).map(|(_, logged)| logged);
         let failed = state.failed.take_if(|record| reached(record)).is_some();
+        if let Some((_, at)) = state.late_input.take_if(|(record, _)| reached(record)) {
+            state.late_input_due = Some(at);
+        }
         let first = state.first.clone();
         // Without the lock, so that the run's other threads read the clock as they hand the loop
         // its inputs.
@@ -232,6 +259,31 @@ impl Host for SimHost {
             return Err(io::Error::other("the simulated host's sync failed"));
         }
         Ok(())
+    }
+}
+
+// A look scripted and never taken means that the run never reached the order its test forces.
+impl Drop for SimHost {
+    #[expect(clippy::panic, reason = "a test's bug fails the test")]
+    fn drop(&mut self) {
+        let state = stdx::unpoisoned(self.state.lock());
+        let awaiting = state.awaiting;
+        let late = state.late_input.is_some() || state.late_input_due.is_some();
+        drop(state);
+        if thread::panicking() {
+            return;
+        }
+        if let Some(at) = awaiting {
+            panic!(
+                "no look at an inbox other than the loop's ended once the clock read {at:?}: \
+                 expected the run to reach the look that `SimHost::awaiting` armed"
+            );
+        }
+        assert!(
+            !late,
+            "no inbox other than the loop's handed over an input after the sync that arms the late \
+             input: expected the run to reach the input that `SimHost::late_input` delays"
+        );
     }
 }
 
@@ -354,13 +406,15 @@ impl Clock for SimClock {
             behind: VecDeque::new(),
         }));
         let mut state = stdx::unpoisoned(self.state.lock());
-        if state.first.is_none() {
+        let loops = state.first.is_none();
+        if loops {
             state.first = Some(Arc::clone(&queue) as Arc<dyn Fill>);
         }
         SimInbox {
             clock: self.clone(),
             queue,
             sender,
+            loops,
         }
     }
 }
@@ -370,6 +424,8 @@ pub(crate) struct SimInbox<T> {
     queue: Arc<Mutex<Queue<T>>>,
     // Kept, so that the inbox never disconnects, whoever else holds a sender.
     sender: Sender<T>,
+    // Whether it is the loop's inbox, the first that the clock made.
+    loops: bool,
 }
 
 struct Queue<T> {
@@ -433,8 +489,16 @@ impl<T: Send> SimInbox<T> {
                         queue.receiver.recv_timeout(LOOK)
                     };
                     match next {
-                        Ok(input) => break input,
-                        Err(RecvTimeoutError::Timeout) if due => return None,
+                        Ok(input) => {
+                            self.disarmed();
+                            break input;
+                        }
+                        Err(RecvTimeoutError::Timeout) if due => {
+                            if self.disarmed() {
+                                break queue.received(SCRIPTED);
+                            }
+                            return None;
+                        }
                         Err(RecvTimeoutError::Timeout) => assert!(
                             waited.elapsed() < WATCHDOG,
                             "the simulated host waited {WATCHDOG:?} for an input or a move of \
@@ -446,6 +510,7 @@ impl<T: Send> SimInbox<T> {
             }
         };
         drop(queue);
+        self.came_late();
         Some(self.late(input))
     }
 
@@ -471,6 +536,24 @@ impl<T: Send> SimInbox<T> {
 }
 
 impl<T> SimInbox<T> {
+    // Moves the clock, if this input is the one that `SimHost::late_input` makes late.
+    fn came_late(&self) {
+        let mut state = stdx::unpoisoned(self.clock.state.lock());
+        if !self.loops
+            && let Some(at) = state.late_input_due.take()
+        {
+            state.move_to(at);
+        }
+    }
+
+    // Disarms the look that `SimHost::awaiting` armed if this look, ending now, is it. Returns
+    // whether it did.
+    fn disarmed(&self) -> bool {
+        let mut state = stdx::unpoisoned(self.clock.state.lock());
+        let now = state.now;
+        !self.loops && state.awaiting.take_if(|at| now >= *at).is_some()
+    }
+
     // Whether a late take during setup, which waits for its input whatever the time, is next.
     fn during_setup(&self) -> bool {
         let state = stdx::unpoisoned(self.clock.state.lock());

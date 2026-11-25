@@ -613,7 +613,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 let event = self
                     .residents
                     .get_mut(&target)
-                    .and_then(|resident| resident.arrival(target, arrival));
+                    .and_then(|resident| resident.arrival(target, at, arrival));
                 return Ok(event.map(|event| (at, event)));
             }
             Input::Child(report) => return self.report(scope, core, report),
@@ -797,7 +797,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 Action::TearDownAgent { agent } => self.tear_down_agent(scope, agent)?,
                 Action::TearDownShared { target } => {
                     if let Some(resident) = self.residents.get_mut(&target) {
-                        resident.close();
+                        resident.close(self.clock.now());
                     }
                 }
                 // Only a reply can follow `Finish` or `Abandon` in its batch: the refusal of an op
@@ -941,8 +941,9 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
     }
 
     fn stop_children(&mut self) {
+        let at = self.clock.now();
         for resident in self.residents.values_mut() {
-            resident.close();
+            resident.close(at);
         }
         for call in self.jobs.values() {
             let _ = call.orders.send(Message::Stop);

@@ -61,14 +61,20 @@ impl<'r, H: Host> Resident<'r, H> {
         }
     }
 
-    pub(super) fn arrival(&mut self, target: TargetId, arrival: Arrival) -> Option<Event> {
+    /// Takes what the session's reader handed over at `at`.
+    pub(super) fn arrival(
+        &mut self,
+        target: TargetId,
+        at: Duration,
+        arrival: Arrival,
+    ) -> Option<Event> {
         // Deleting the sandbox ends its session.
         self.orders.as_ref()?;
         let reason = match arrival {
             Arrival::Ended { reason } => format!("the shared role's session ended: {reason}"),
             arrival @ Arrival::Exited { .. } => {
                 if let Some((_, sender)) = &self.active {
-                    let _ = sender.send(Message::Session(arrival));
+                    let _ = sender.send(Message::Session(at, arrival));
                 }
                 return None;
             }
@@ -77,29 +83,37 @@ impl<'r, H: Host> Resident<'r, H> {
                 "the shared role's session sent an unauthorized request".to_owned()
             }
         };
-        self.fail(target, reason)
+        self.fail(target, at, reason)
     }
 
-    pub(super) fn fail(&mut self, target: TargetId, reason: String) -> Option<Event> {
+    /// Fails the target for `reason`, which the run observed at `at`.
+    pub(super) fn fail(&mut self, target: TargetId, at: Duration, reason: String) -> Option<Event> {
         if self.failed.is_some() {
             return None;
         }
         if let Some((_, sender)) = &self.active {
-            let _ = sender.send(Message::Session(Arrival::Ended {
-                reason: reason.clone(),
-            }));
+            let _ = sender.send(Message::Session(
+                at,
+                Arrival::Ended {
+                    reason: reason.clone(),
+                },
+            ));
         }
         self.failed = Some(reason.clone());
         Some(Event::SharedFailed { target, reason })
     }
 
-    pub(super) fn close(&mut self) {
+    /// Closes the target at `at`.
+    pub(super) fn close(&mut self, at: Duration) {
         self.orders.take();
         if let Some((_, sender)) = &self.active {
             // The driver can stop forwarding command exits while the body awaits a killed client.
-            let _ = sender.send(Message::Session(Arrival::Ended {
-                reason: "the work phase ended".to_owned(),
-            }));
+            let _ = sender.send(Message::Session(
+                at,
+                Arrival::Ended {
+                    reason: "the work phase ended".to_owned(),
+                },
+            ));
         }
     }
 }

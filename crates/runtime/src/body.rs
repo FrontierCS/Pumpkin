@@ -33,7 +33,7 @@ use stdx::time::Clock as _;
 use crate::child::{Child, Report};
 use crate::lease::command_dir;
 use crate::record::{Stored, reference};
-use crate::relay::{Relay, Waited};
+use crate::relay::{Relay, SessionEnd, Waited};
 use crate::sandbox::{collect, collect_as};
 use crate::scoped::Waiting;
 use crate::{Clock, Entry, Host, Targeted};
@@ -382,7 +382,7 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
         match idle {
             Ok(true) => return Err(self.cut_short(Cut::Stopped)),
             Ok(false) => {}
-            Err(reason) => return Err(format!("the target's session ended: {reason}")),
+            Err(ended) => return self.session_ended(ended),
         }
         if self.child.clock.now() >= self.timeout {
             return Err(self.cut_short(Cut::TimedOut));
@@ -405,9 +405,16 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
             grant,
             (waiting, op),
         );
-        match self.timely(waited)? {
-            // A queued receipt can wake the body after its deadline, including the final close.
-            Waited::Finished(status) => self.going().map(|_| status),
+        let waited = match waited {
+            Ok(waited) => waited,
+            Err(ended) => return self.session_ended(ended),
+        };
+        match waited {
+            Waited::Finished(replied) => {
+                let status = self.timely(replied)?;
+                // A queued receipt can wake the body after its deadline, including the final close.
+                self.going().map(|_| status)
+            }
             Waited::Stopped => Err(self.cut_short(Cut::Stopped)),
             Waited::TimedOut => Err(self.cut_short(Cut::TimedOut)),
         }
@@ -422,13 +429,35 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
         cut.reason()
     }
 
-    /// `done`, what came of an ask of the target, whose failure once the call's timeout, its
-    /// deadline, has passed is the timeout's.
-    fn timely<T>(&mut self, done: Result<T, String>) -> Result<T, String> {
-        match done {
-            Err(_) if self.child.clock.now() >= self.timeout => Err(self.cut_short(Cut::TimedOut)),
-            done => done,
+    /// Why an ask fails, for `reason`, which came at `at`: the timeout's if that was at or past it,
+    /// so that what came first decides. The times are clock reads on different threads, so some
+    /// orders still end either way. A wait, or the read before an ask, can see the timeout before
+    /// an earlier end reaches the call. An ask's own failure is timed as its thread sees it, not
+    /// by the reader's stamp. A write that the socket times out can end the session up to a kernel
+    /// tick early. The reader can record an end before the timeout and stamp it at or after. A
+    /// shared target's end reaches the call through the loop, which can hold it for seconds.
+    fn failed<T>(&mut self, at: Duration, reason: String) -> Result<T, String> {
+        if at >= self.timeout {
+            Err(self.cut_short(Cut::TimedOut))
+        } else {
+            Err(reason)
         }
+    }
+
+    /// `done`, what came of an ask of the target, whose failure `failed` decides by the time the
+    /// ask failed.
+    fn timely<T>(&mut self, done: Result<T, String>) -> Result<T, String> {
+        done.or_else(|reason| {
+            let at = self.child.clock.now();
+            self.failed(at, reason)
+        })
+    }
+
+    /// Why an ask fails once the target's session has ended, which `failed` decides by the end's
+    /// time.
+    fn session_ended<T>(&mut self, ended: SessionEnd) -> Result<T, String> {
+        let SessionEnd { at, reason } = ended;
+        self.failed(at, format!("the target's session ended: {reason}"))
     }
 
     /// Logs what the body asked of the target, now.
@@ -487,7 +516,8 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
         loop {
             match self
                 .relay
-                .wait(self.child, self.call.job, until, process, self.session)?
+                .wait(self.child, self.call.job, until, process, self.session)
+                .map_err(|ended| ended.reason)?
             {
                 Waited::Finished(status) => return Ok(status),
                 Waited::Stopped => {}
@@ -598,7 +628,7 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
             }
             Ok(Waited::TimedOut) => Err(self.cut_short(Cut::TimedOut)),
             Ok(Waited::Stopped) => Err(self.cut_short(Cut::Stopped)),
-            Err(reason) => Err(format!("the target's session ended: {reason}")),
+            Err(ended) => self.session_ended(ended),
         }
     }
 

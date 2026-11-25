@@ -408,6 +408,18 @@ impl Sim {
         self
     }
 
+    /// Returns a function that ends the session of the sandbox `id`, as a sandbox that crashes
+    /// closes its connection.
+    pub(crate) fn crashing(&self, id: &'static str) -> impl Fn() + Send + Sync + 'static {
+        let state = Arc::clone(&self.state);
+        move || {
+            let state = stdx::unpoisoned(state.lock());
+            if let Some(connection) = status(&state.sandboxes[id].shared).connection.take() {
+                let _ = connection.shutdown(Shutdown::Both);
+            }
+        }
+    }
+
     pub(crate) fn journal(&self) -> Option<&Journal> {
         self.journal.as_ref()
     }

@@ -122,6 +122,7 @@ fn drive<H: Host>(
 /// Runs the commands and transfers the core orders in `child`'s sandbox, whose session is
 /// `session`, one at a time, until the core's stop, which leaves in `running` the command that
 /// still runs then, if one does; or fails with why the runner failed first.
+#[expect(clippy::too_many_lines, reason = "one arm per kind of message")]
 fn serve<H: Host>(
     leased: &Leased<'_>,
     child: &mut Child<'_, H, Order>,
@@ -174,7 +175,7 @@ fn serve<H: Host>(
                     }
                 }
             }
-            Some(Message::Session(Arrival::Exited { process, status })) => {
+            Some(Message::Session(_, Arrival::Exited { process, status })) => {
                 let Some(ran) = running.take_if(|running| running.process == process) else {
                     continue;
                 };
@@ -186,12 +187,13 @@ fn serve<H: Host>(
                 let (stdout, stderr) = outputs(child, ran.command, session, ran.required_output)?;
                 child.event(command_ended(lease, ran.command, (end, stdout, stderr)));
             }
-            Some(Message::Session(Arrival::Ended { reason })) => {
+            Some(Message::Session(_, Arrival::Ended { reason })) => {
                 return Err(format!("the runner's session ended: {reason}"));
             }
             // A type for a passive session's arrivals would split the gateway's `pub` `Arrival` by
             // the kind of session.
             Some(Message::Session(
+                _,
                 Arrival::Op(_) | Arrival::Refused(_) | Arrival::ModelRequest(_),
             )) => unreachable!(
                 "lease {}'s passive session handed out an op or a model request, though it was \

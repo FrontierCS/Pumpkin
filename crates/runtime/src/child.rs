@@ -50,11 +50,12 @@ pub(super) struct Deadlines {
 }
 
 pub(super) enum Message<O> {
-    /// What its session's reader handed over ([`Registration::accept`]): its commands' exits and
-    /// its end, and the ops and model requests of a session that takes them.
+    /// What its session handed over ([`Registration::accept`]), at the time the run observed it.
+    /// That is its commands' exits and its end, and the ops and model requests of a session that
+    /// takes them. A shared target's end can come from the loop, which ended the target.
     ///
     /// [`Registration::accept`]: gateway::Registration::accept
-    Session(Arrival),
+    Session(Duration, Arrival),
     Stop,
     /// An order of the core's for its driver, or the core's reply to its op.
     Order(O),
@@ -147,7 +148,9 @@ pub(super) fn run<H: Host, O: Send + 'static>(
     }
     let by = (&child.clock, child.deadlines.startup);
     let inbox = child.inbox.sender();
-    let started = (child.sandboxes).start(which, ops, by, child.hard_end, inbox, Message::Session);
+    let stamp = child.clock.clone();
+    let wrap = move |arrival| Message::Session(stamp.now(), arrival);
+    let started = (child.sandboxes).start(which, ops, by, child.hard_end, inbox, wrap);
     let mut sandbox = match started {
         Ok(sandbox) => sandbox,
         Err(failure) => match failure.dispose(child.sandboxes) {
@@ -219,7 +222,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 let event = self
                     .residents
                     .get_mut(&target)
-                    .and_then(|resident| resident.fail(target, reason));
+                    .and_then(|resident| resident.fail(target, at, reason));
                 Ok(event.map(|event| (at, event)))
             }
             Report::Event(at, event) => Ok(Some((at, event))),
