@@ -18,14 +18,14 @@ use std::{fmt, io};
 use decision::{JobId, LeaseId};
 use gateway::{Arrival, Dialer, Listener, Session, Sockets};
 use provider::{
-    Admits, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Role, RunTag, SandboxId,
-    SandboxdRef, Sweep, Undeleted, UnixTime,
+    Create, Created, ImageRef, Listed, Meeting, Provider, Role, RunTag, SandboxId, SandboxdRef,
+    Sweep, Undeleted, UnixTime,
 };
 use schema::ir::{Command, GpuModel, Image, Name};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
-    Endpoint, Launch, Listening, OpPayloadLimit, PUMPKIN_BYTES, PrivateDial, RelativePath,
-    SocketDial, command_env, command_stderr, command_stdout, pumpkin_dir,
+    Launch, OpPayloadLimit, PUMPKIN_BYTES, RelativePath, command_env, command_stderr,
+    command_stdout, pumpkin_dir,
 };
 use schema::workflow::{
     AgentId, ByProvider, ByRole, JobFunctionId, Placed, RoleId, RunnerId, SessionId, TargetId,
@@ -36,6 +36,10 @@ use stdx::time::Clock as _;
 use stdx::{Context, Deadline, time};
 
 use super::{Clock, Host, Input, Stopped, interruption, log, record};
+
+mod meets;
+
+use meets::Meets;
 
 /// The most entries, files and directories, that the host collects from a sandbox in one tree.
 pub(super) const ENTRIES: u64 = 100_000;
@@ -192,47 +196,6 @@ struct Hosting<'p> {
     provider: &'p dyn Provider,
     sandboxd: SandboxdRef,
     meets: Meets<'p>,
-}
-
-/// How a provider's sandboxes and the gateway meet ([`Meeting`]), with what the run supplies for
-/// it.
-#[derive(Clone, Copy)]
-enum Meets<'p> {
-    Sockets(&'p dyn Creator<SocketDial>),
-    Private(
-        &'p dyn Creator<PrivateDial, (Created, Admits)>,
-        &'p Listener,
-    ),
-    Dials(&'p dyn Creator<Listening, (Created, Endpoint)>, &'p Dialer),
-}
-
-impl Meets<'_> {
-    /// Issues what the new sandbox dials, creates it, and returns the registration of its session,
-    /// which awaits it by `by`.
-    fn create(
-        self,
-        sockets: &Sockets,
-        create: &Create,
-        by: Deadline,
-    ) -> Result<(Created, gateway::Registration), String> {
-        let issued = |error: io::Error| error.to_string();
-        match self {
-            Self::Sockets(creator) => {
-                let (dial, registration) = sockets.issue(&create.name).map_err(issued)?;
-                Ok((creator.create(create, dial)?, registration))
-            }
-            Self::Private(creator, listener) => {
-                let (dial, unattested) = listener.issue(by);
-                let (created, admits) = creator.create(create, dial)?;
-                Ok((created, unattested.admitting(admits)))
-            }
-            Self::Dials(creator, dialer) => {
-                let (dial, unreached) = dialer.issue().map_err(issued)?;
-                let (created, endpoint) = creator.create(create, dial)?;
-                Ok((created, unreached.at(endpoint)))
-            }
-        }
-    }
 }
 
 /// Whose sandbox: the agent's, a `work_phase` target's, a call's target, or an instance of a
