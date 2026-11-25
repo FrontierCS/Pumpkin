@@ -996,6 +996,7 @@ fn header_names() {
         "api-key",
         "x-goog-api-key",
         "x-goog-user-project",
+        "x-goog-iam-authorization-token",
         "ocp-apim-subscription-key",
         "cookie",
         "set-cookie",
@@ -1049,6 +1050,7 @@ fn header_names() {
             `api-key` carries a credential or picks an account, which are the host's alone: list another header
             `x-goog-api-key` carries a credential or picks an account, which are the host's alone: list another header
             `x-goog-user-project` carries a credential or picks an account, which are the host's alone: list another header
+            `x-goog-iam-authorization-token` carries a credential or picks an account, which are the host's alone: list another header
             `ocp-apim-subscription-key` carries a credential or picks an account, which are the host's alone: list another header
             `cookie` carries a credential or picks an account, which are the host's alone: list another header
             `set-cookie` carries a credential or picks an account, which are the host's alone: list another header
