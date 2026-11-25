@@ -109,6 +109,20 @@ mod flags {
                 optional --lost
             }
 
+            /// Samples the driver of a started run, on the controller that
+            /// `~/.config/pumpkin/pumpkin.toml` names, every 100 ms until it exits. It reads the
+            /// driver's `/proc` alone, over the SSH that `live` uses, as the job's user. Each
+            /// sample is a line of its threads, resident memory and peak, open files and their
+            /// limits, and its tasks by name.
+            /// Every tenth also has a line a task, with its switches and `schedstat`.
+            cmd sample-driver {
+                /// The run's id.
+                required id: String
+                /// The `.pumpkin` of the task repository that sent the run, which holds where the
+                /// controller was found.
+                required --workspace dir: PathBuf
+            }
+
             /// Counts incoming operations by request kind in a run's `log.jsonl`. Reports the
             /// bytes of matching lines, including their newlines, and the full log size.
             cmd op-stats {
@@ -194,6 +208,7 @@ mod flags {
         Figures(Figures),
         AwsCertificates(AwsCertificates),
         Live(Live),
+        SampleDriver(SampleDriver),
         OpStats(OpStats),
         Sandboxd(Sandboxd),
         Build(Build),
@@ -223,6 +238,13 @@ mod flags {
 
         pub gpu_model: Option<String>,
         pub lost: bool,
+    }
+
+    #[derive(Debug)]
+    pub struct SampleDriver {
+        pub id: String,
+
+        pub workspace: PathBuf,
     }
 
     #[derive(Debug)]
@@ -343,6 +365,7 @@ fn try_main() -> Result<()> {
             };
             live::smoke(provider, gpu_model.as_deref(), lost)
         }
+        flags::XtaskCmd::SampleDriver(sample) => live::sample_driver(&sample),
         flags::XtaskCmd::OpStats(flags::OpStats { run_dir, caller }) => {
             op_stats::report(&run_dir, caller.as_deref())
         }
