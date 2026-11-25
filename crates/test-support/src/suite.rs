@@ -24,8 +24,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use expect_test::expect;
 use gateway::{Arrival, Dialer, Put, Registration, Session, Sockets};
 use provider::{
-    Console, Create, ImageRef, Listed, Meeting, Provider, Reservation, Role, RunTag, SandboxId,
-    SandboxdRef, UnixTime,
+    Console, Create, ImageRef, Listed, ListenDials, Listened, Meeting, Provider, Reservation, Role,
+    RunTag, SandboxId, SandboxdRef, UnixTime,
 };
 use schema::ir::{AbsolutePath, Argv, Env, Image, Name, Resources, User};
 use schema::sandbox::{Launch, RelativePath, file_mode};
@@ -469,9 +469,21 @@ impl<'a> Suite<'a> {
                 Ok((creator.create(&create, dial)?.id, registration))
             }
             Meeting::Listen(creator) => {
-                let (dial, unreached) = self.dialer.issue().unwrap();
-                let (created, endpoint) = creator.create(&create, dial)?;
-                Ok((created.id, unreached.at(endpoint)))
+                let (main, unreached) = self.dialer.issue().unwrap();
+                let dials = ListenDials {
+                    main,
+                    companions: Vec::new(),
+                };
+                let Listened {
+                    created,
+                    main,
+                    relay,
+                } = creator.create(&create, dials)?;
+                assert!(
+                    relay.is_none(),
+                    "a create given no companions gave a relay: expected none"
+                );
+                Ok((created.id, unreached.at(main)))
             }
             Meeting::Private(_) => panic!(
                 "the suite meets no sandbox that dials a private address: run it on a provider \

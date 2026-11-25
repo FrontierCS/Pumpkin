@@ -7,10 +7,10 @@ use std::net::IpAddr;
 use std::path::Path;
 
 use schema::ir::Image;
-use schema::sandbox::{Attestation, Endpoint, Listening, PrivateDial, SocketDial};
+use schema::sandbox::{Attestation, PrivateDial, SocketDial};
 pub use values::{
-    Console, Create, Created, ImageRef, Listed, Phase, Ready, Role, RunTag, SandboxId, SandboxdRef,
-    Undeleted, UnixTime,
+    CompanionDial, Console, Create, Created, ImageRef, Listed, ListenDials, Listened, Phase, Ready,
+    Role, RunTag, SandboxId, SandboxdRef, Undeleted, UnixTime,
 };
 
 mod values;
@@ -91,9 +91,9 @@ pub enum Meeting<'p> {
     /// On a private network that the gateway's host is on, each dialing a TCP address the host
     /// has there, and presenting an attestation that the check its create gives admits.
     Private(&'p dyn Creator<PrivateDial, (Created, Admits)>),
-    /// Across the Internet, each listening, and the gateway dialing it at the endpoint its create
-    /// gives.
-    Listen(&'p dyn Creator<Listening, (Created, Endpoint)>),
+    /// Across the Internet, each container listening. The gateway dials `main` at an endpoint that
+    /// its create gives, and each companion through the sandbox's relay.
+    Listen(&'p dyn Creator<ListenDials, Listened>),
 }
 
 /// Whether a hello over a private network ([`Meeting::Private`]) is from the sandbox that a create

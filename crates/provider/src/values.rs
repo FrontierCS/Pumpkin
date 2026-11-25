@@ -5,7 +5,8 @@ use std::fmt;
 use std::num::NonZeroU32;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use schema::ir::{Name, Resources, User};
+use schema::ir::{AbsolutePath, CompanionName, Env, Name, Resources, User};
+use schema::sandbox::{Endpoint, Listening, Relayed};
 use schema::workflow::Class;
 use serde::Serialize;
 use serde_json::Value;
@@ -175,6 +176,41 @@ pub struct Created {
     /// The steps of the create that the provider timed, for the run's record alone. A provider
     /// that times none gives none.
     pub phases: Vec<Phase>,
+}
+
+/// What the containers of a sandbox that listens are given to meet the gateway by
+/// ([`Meeting::Listen`](crate::Meeting::Listen)).
+///
+/// The create starts a `sandboxd` in each container. `main`'s is given `main`, and each of a
+/// runner's companions, in their declared order, is given its own.
+#[derive(Debug)]
+pub struct ListenDials {
+    pub main: Listening,
+    pub companions: Vec<CompanionDial>,
+}
+
+/// A companion of a runner's sandbox that listens, as the runner declares it
+/// ([`ir::Companion`](schema::ir::Companion)). Its image is as the provider published it, and
+/// `relayed` is what its `sandboxd` is given.
+#[derive(Debug)]
+pub struct CompanionDial {
+    pub name: CompanionName,
+    pub image: ImageRef,
+    pub user: User,
+    pub cwd: AbsolutePath,
+    pub env: Env,
+    pub relayed: Relayed,
+}
+
+/// What a create of a sandbox that listens returns: where the gateway dials `main`, and its relay.
+///
+/// The relay carries the gateway to each companion ([`Relayed`]). `relay` is some exactly when
+/// the create was given companions.
+#[derive(Debug)]
+pub struct Listened {
+    pub created: Created,
+    pub main: Endpoint,
+    pub relay: Option<Endpoint>,
 }
 
 /// A step of a create, timed by the provider's own monotonic clock.

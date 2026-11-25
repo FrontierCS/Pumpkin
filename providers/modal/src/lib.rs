@@ -29,11 +29,10 @@ use std::path::Path;
 use aws::{Cli, Region, Repository, RepositoryName, RoleArn};
 use engine::{Platform, Pusher};
 use provider::{
-    Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation,
-    Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
+    Console, Create, Creator, ImageRef, Listed, ListenDials, Listened, Meeting, Provider, Ready,
+    Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
 use schema::ir::{self, GpuModel, Image, Name};
-use schema::sandbox::{Endpoint, Listening};
 use schema::workflow::{Class, Companions, Offers, UsdPerHour};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -399,8 +398,19 @@ impl Provider for Modal<'_> {
     }
 }
 
-impl Creator<Listening, (Created, Endpoint)> for Modal<'_> {
-    fn create(&self, create: &Create, dial: Listening) -> Result<(Created, Endpoint), String> {
-        self.create_sandbox(create, &dial)
+impl Creator<ListenDials, Listened> for Modal<'_> {
+    fn create(&self, create: &Create, dials: ListenDials) -> Result<Listened, String> {
+        let ListenDials { main, companions } = dials;
+        assert!(
+            companions.is_empty(),
+            "Modal was asked for a sandbox that holds companions, though its classes offer none \
+             (`Offers::companions`), and placing puts a runner that declares any on none of them"
+        );
+        let (created, main) = self.create_sandbox(create, &main)?;
+        Ok(Listened {
+            created,
+            main,
+            relay: None,
+        })
     }
 }

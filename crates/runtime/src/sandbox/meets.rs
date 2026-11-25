@@ -3,8 +3,8 @@
 use std::io;
 
 use gateway::{Dialer, Listener, Sockets};
-use provider::{Admits, Create, Created, Creator};
-use schema::sandbox::{Endpoint, Listening, PrivateDial, SocketDial};
+use provider::{Admits, Create, Created, Creator, ListenDials, Listened};
+use schema::sandbox::{PrivateDial, SocketDial};
 use stdx::Deadline;
 
 /// How a provider's sandboxes and the gateway meet ([`Meeting`](provider::Meeting)), with what the
@@ -16,7 +16,7 @@ pub(super) enum Meets<'p> {
         &'p dyn Creator<PrivateDial, (Created, Admits)>,
         &'p Listener,
     ),
-    Dials(&'p dyn Creator<Listening, (Created, Endpoint)>, &'p Dialer),
+    Dials(&'p dyn Creator<ListenDials, Listened>, &'p Dialer),
 }
 
 impl Meets<'_> {
@@ -40,9 +40,18 @@ impl Meets<'_> {
                 Ok((created, unattested.admitting(admits)))
             }
             Self::Dials(creator, dialer) => {
-                let (dial, unreached) = dialer.issue().map_err(issued)?;
-                let (created, endpoint) = creator.create(create, dial)?;
-                Ok((created, unreached.at(endpoint)))
+                let (main, unreached) = dialer.issue().map_err(issued)?;
+                let dials = ListenDials {
+                    main,
+                    companions: Vec::new(),
+                };
+                // Given no companions, the create gives no relay.
+                let Listened {
+                    created,
+                    main,
+                    relay: _,
+                } = creator.create(create, dials)?;
+                Ok((created, unreached.at(main)))
             }
         }
     }
