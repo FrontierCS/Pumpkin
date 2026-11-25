@@ -4,9 +4,9 @@
 //! headers of its API's own and those the entry lists, holds a JSON object, and names a model
 //! the route allows, in that object or in its path as its API has it. Nowhere in that object may
 //! it keep state on the provider's side, run a tool there or have the provider fetch a URL that
-//! isn't inline data, nor pick a feature of the provider's beyond the models and tools:
-//! `RESPONSES`, `CHAT`, `MESSAGES` and `generate_content::RULES` name the fields. Any other
-//! request is answered with a [`Refusal`] that says what to send instead.
+//! isn't inline data, nor pick a feature of the provider's beyond the models and tools: each
+//! API's `Rules` name the fields. Any other request is answered with a [`Refusal`] that says
+//! what to send instead.
 //!
 //! The rules refuse the forms they name and pass every other field. They read the body's JSON
 //! fields, never the text of its context, and the body that goes upstream is the one they read.

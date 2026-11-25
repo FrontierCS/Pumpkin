@@ -848,20 +848,17 @@ Example, of a machine whose runs go to the person's controllers, one with Modal:
         rows: &[
             Row {
                 literal: "url",
-                about: "The base URL of its API. It is https, or http to a loopback IP address, \
-                        such as 127.0.0.1 but not localhost. The route reaches each API's \
-                        endpoint below it: /responses, /chat/completions, /messages, which an \
-                        Anthropic Messages API serves, such as https://api.anthropic.com/v1, or \
-                        /models/<model>:<method>, which a Gemini API serves, such as \
-                        https://generativelanguage.googleapis.com/v1beta.",
+                about: "The base URL of its API: the URL of the API's endpoint without the \
+                        endpoint's own path, such as https://api.anthropic.com/v1 for Anthropic's \
+                        Messages API. It is https, or http to a loopback IP address, such as \
+                        127.0.0.1 but not localhost.",
                 keys: &[],
             },
             Row {
                 literal: "key_file",
                 about: "The file that holds its key, below this file's directory unless the path \
-                        is absolute. The route sends the key as `authorization: Bearer <key>`, \
-                        to /messages as `x-api-key: <key>`, and to /models as \
-                        `x-goog-api-key: <key>`.",
+                        is absolute. The route sends the key in the header that its API takes for \
+                        it.",
                 keys: &[],
             },
             Row {
