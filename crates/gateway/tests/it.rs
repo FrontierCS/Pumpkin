@@ -1934,7 +1934,7 @@ fn dials() {
 }
 
 fn untrusted() -> String {
-    let (_, unreached) = Dialer::new(tls::Client::web_pki()).issue().unwrap();
+    let (_, unreached) = Dialer::new(test_support::edge::web_pki()).issue().unwrap();
     let edge = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = edge.local_addr().unwrap().port();
     let shown = thread::spawn(move || {

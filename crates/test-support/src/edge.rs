@@ -117,6 +117,11 @@ pub fn client() -> tls::Client {
     tls::Client::trusting(&root).unwrap()
 }
 
+/// A TLS client that trusts Web PKI's roots, as the driver's does, and so not the stand-in's.
+pub fn web_pki() -> tls::Client {
+    tls::Client::trusting_roots(webpki_roots::TLS_SERVER_ROOTS)
+}
+
 /// Listens on the loopback in front of `target` as long as the process lasts; returns the port.
 ///
 /// Each connection gets the stand-in's TLS and is copied both ways to one of its own to `target`;

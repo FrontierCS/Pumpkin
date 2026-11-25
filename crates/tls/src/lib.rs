@@ -23,7 +23,7 @@ use std::time::Duration;
 use rustix::event::{self, PollFd, PollFlags, Timespec};
 use rustix::io::Errno;
 use rustls::crypto::CryptoProvider;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, TrustAnchor};
 use rustls::{
     ClientConfig, ClientConnection, ConfigBuilder, Connection, RootCertStore, ServerConfig,
     ServerConnection, WantsVerifier,
@@ -47,11 +47,10 @@ pub struct Client {
 }
 
 impl Client {
-    /// A client that trusts Web PKI's roots, those of Mozilla's program as `webpki-roots` ships
-    /// them.
-    pub fn web_pki() -> Self {
+    /// A client that trusts `roots` alone, such as Web PKI's, which `webpki-roots` ships.
+    pub fn trusting_roots(roots: &[TrustAnchor<'static>]) -> Self {
         let roots = RootCertStore {
-            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+            roots: roots.to_vec(),
         };
         Self::with(roots)
     }

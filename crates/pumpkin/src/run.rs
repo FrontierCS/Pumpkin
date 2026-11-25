@@ -206,7 +206,7 @@ pub(crate) fn driver_run(driver: cli::Driver) -> Result<Exit, String> {
     // `execute` records why the run stopped in its `outcome.json`; these lines, the driver's last,
     // then close that ending, which a controller's client says from its copy instead.
     // Binds nothing, so every run has one, whether or not a role's sandboxes listen.
-    let dialer = Dialer::new(tls::Client::web_pki());
+    let dialer = Dialer::new(tls::Client::trusting_roots(webpki_roots::TLS_SERVER_ROOTS));
     let bodies = Bodies::new(&sources, &args);
     let executed = run.execute(
         sandboxd.path(),

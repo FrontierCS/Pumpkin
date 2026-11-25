@@ -777,6 +777,7 @@ dependencies = [
  "test-support",
  "tls",
  "toml",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -1107,6 +1108,7 @@ dependencies = [
  "sha2",
  "stdx",
  "tls",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -1168,7 +1170,6 @@ dependencies = [
  "rustls",
  "stdx",
  "test-support",
- "webpki-roots",
 ]
 
 [[package]]
