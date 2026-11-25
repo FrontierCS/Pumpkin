@@ -2107,13 +2107,21 @@ fn ls_answered_there() {
     let driver = lock_driver(&there.join(live));
     // The jobs: one of a run that has a record, and one of each state yet to start a run.
     let (waiting, building) = ("20261107-130000-2c9b0004", "20261107-130100-2c9b0005");
+    let before_slot = "20261107-130101-2c9b0008";
     let unstarted = ["20261107-130200-2c9b0006", "20261106-130300-2c9b0007"];
-    for id in [ended, waiting, building].iter().chain(&unstarted) {
+    for id in [ended, waiting, building, before_slot]
+        .iter()
+        .chain(&unstarted)
+    {
         scratch.write(&format!("home/jobs/{id}/log"), "");
         scratch.write(&format!("home/jobs/{id}/member"), "alice\n");
     }
-    scratch.write(&format!("run/pumpkin/{waiting}/waiting"), "");
-    fs::create_dir_all(scratch.0.join(format!("run/pumpkin/{building}"))).unwrap();
+    for (id, marker, days) in [(waiting, "waiting", 1), (building, "building", 2)] {
+        let path = format!("run/pumpkin/{id}/{marker}");
+        scratch.write(&path, "");
+        days_ago(&scratch.0.join(path), days);
+    }
+    fs::create_dir_all(scratch.0.join(format!("run/pumpkin/{before_slot}"))).unwrap();
     days_ago(
         &scratch.0.join(format!("home/jobs/{}/log", unstarted[1])),
         2,
@@ -2136,15 +2144,16 @@ fn ls_answered_there() {
         &expect![[r#"
             $ pumpkin ls
             exit status: Some(0)
-            pumpkin: controller `alice`: up <t>, 3 jobs, disk <n>% used
+            pumpkin: controller `alice`: up <t>, 4 jobs, disk <n>% used
             printed:
               20261107-110000-0d0c0008 -     finished          -  -               -  -: score=3 metrics={"solved":3}
               20261107-120000-1b8a0001 alice finished          -  -               -  -: score=7 metrics={"solved":3}
               20261107-120100-1b8a0002 -     publishing      <t>                  -  -
-              20261107-130000-2c9b0004 alice waiting         <t>                  -  -
-              20261107-130100-2c9b0005 alice building        <t>                  -  -
+              20261107-130000-2c9b0004 alice waiting         <t>                  -  waiting 24h for a build slot
+              20261107-130100-2c9b0005 alice building        <t>                  -  holding a build slot for 48h
+              20261107-130101-2c9b0008 alice building        <t>                  -  -
               20261107-130200-2c9b0006 alice unstarted       <t>                  -  -: its job ended before the run started: to see why: pumpkin wait --controller alice 20261107-130200-2c9b0006
-              6 runs: 1 waiting, 1 building, 1 running, 2 finished, 1 unstarted; 2 runs that ended over a day ago aren't listed: to list them: pumpkin ls --controller alice 20261106
+              7 runs: 1 waiting, 2 building, 1 running, 2 finished, 1 unstarted; 2 runs that ended over a day ago aren't listed: to list them: pumpkin ls --controller alice 20261106
             $ pumpkin ls 20261106
             exit status: Some(0)
             pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used

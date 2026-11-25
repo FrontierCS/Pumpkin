@@ -90,11 +90,10 @@ impl Entry {
 /// A run as `ls` shows it: a job of a controller that has yet to start the run, or a run that
 /// has a record.
 pub(crate) enum Listed {
-    /// A job on the controller that builds the run, which `pumpkin run` asked for at `asked`,
-    /// since the Unix epoch.
-    Building { asked: Option<Duration> },
-    /// A job on the controller that waits for a build slot, as [`Listed::Building`] says.
-    Waiting { asked: Option<Duration> },
+    /// A job on the controller that builds the run, with when it took a build slot if it holds one.
+    Building { held_since: Option<UnixTime> },
+    /// A job on the controller that has waited for a build slot since `waiting_since`.
+    Waiting { waiting_since: UnixTime },
     /// A job on the controller that has ended, whose run has no record in the controller's runs
     /// directory.
     Unstarted,
@@ -366,21 +365,38 @@ pub(crate) struct Columns {
     pub(crate) rest: String,
 }
 
-fn columns(id: &str, listed: &Listed, state: State, now: UnixTime, named: &next::At) -> Columns {
-    let column = |state: &str, time: &str, bound: &str, usd: &str, rest: &str| Columns {
+fn column(state: &str, time: &str, bound: &str, usd: &str, rest: &str) -> Columns {
+    Columns {
         state: state.to_owned(),
         time: time.to_owned(),
         bound: bound.to_owned(),
         usd: usd.to_owned(),
         rest: rest.to_owned(),
-    };
+    }
+}
+
+fn columns(id: &str, listed: &Listed, state: State, now: UnixTime, named: &next::At) -> Columns {
     let state = state.name();
     let since = |asked: &Option<Duration>| {
         asked.map(|asked| column_span(now.since_epoch().saturating_sub(asked)))
     };
+    let job = |detail: &str| {
+        let age = since(&runtime::minted(id));
+        column(state, age.as_deref().unwrap_or("-"), "", "-", detail)
+    };
     let run = match listed {
-        Listed::Building { asked } | Listed::Waiting { asked } => {
-            return column(state, since(asked).as_deref().unwrap_or("-"), "", "-", "-");
+        Listed::Waiting { waiting_since } => {
+            let waited = span(now.since(*waiting_since));
+            return job(&format!("waiting {waited} for a build slot"));
+        }
+        Listed::Building { held_since } => {
+            return match held_since {
+                Some(since) => job(&format!(
+                    "holding a build slot for {}",
+                    span(now.since(*since))
+                )),
+                None => job("-"),
+            };
         }
         Listed::Unstarted => {
             let why = format!(

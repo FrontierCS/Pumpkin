@@ -29,7 +29,7 @@ use schema::frame;
 use stdx::Context as _;
 
 use crate::cli::Exit;
-use crate::job::{JOBS, WAITING};
+use crate::job::{BUILDING, JOBS, WAITING};
 use crate::link::copy::CopiedRequest;
 use crate::link::{
     self, Ask, Health, HealthRequest, Hello, Job, Jobs, JobsRequest, ListRequest, Listed, Owner,
@@ -365,12 +365,13 @@ fn unstarted(
         if !crate::picked(prefixes, id) || listing.runs.contains_key(id) {
             continue;
         }
-        let asked = runtime::minted(id);
         let tmpfs = held.join(id);
-        let listed = if exists(&tmpfs.join(WAITING))? {
-            progress::Listed::Waiting { asked }
+        let listed = if let Some(waiting_since) = modified(&tmpfs.join(WAITING))? {
+            progress::Listed::Waiting { waiting_since }
         } else if is_dir(&tmpfs)? {
-            progress::Listed::Building { asked }
+            progress::Listed::Building {
+                held_since: modified(&tmpfs.join(BUILDING))?,
+            }
         } else if logged_since(&jobs.join(id).join("log"), since)? {
             progress::Listed::Unstarted
         } else {
@@ -402,10 +403,13 @@ fn logged_since(log: &Path, since: Option<UnixTime>) -> Result<bool, String> {
     let Some(since) = since else {
         return Ok(true);
     };
-    let modified = match fs::metadata(log).and_then(|metadata| metadata.modified()) {
-        Ok(modified) => modified,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(true),
-        Err(error) => return Err(error).context(log.display()),
-    };
-    Ok(UnixTime::of(modified).unwrap_or(crate::EPOCH) >= since)
+    Ok(modified(log)?.is_none_or(|modified| modified >= since))
+}
+
+fn modified(path: &Path) -> Result<Option<UnixTime>, String> {
+    match fs::metadata(path).and_then(|metadata| metadata.modified()) {
+        Ok(time) => Ok(Some(UnixTime::of(time).unwrap_or(crate::EPOCH))),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).context(path.display()),
+    }
 }
