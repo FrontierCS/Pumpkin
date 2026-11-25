@@ -96,7 +96,7 @@ const HELD: &str = "held";
 
 // The file of a job's tmpfs directory that exists while the job holds a build slot, so may build
 // an image that no tag names yet, which no prune then removes.
-const BUILDING: &str = "building";
+pub(crate) const BUILDING: &str = "building";
 
 // The file of a job's tmpfs directory that exists while the job waits for a build slot, so that
 // `ls` lists it as waiting.
