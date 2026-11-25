@@ -151,8 +151,7 @@ fn stream(events: &[Value]) -> Streamed {
     (items.collect(), stop, whole)
 }
 
-/// What the body's `generationConfig` asks: the path names the model and whether the answer is
-/// a stream, so the body says neither.
+/// What the body's `generationConfig` asks.
 fn config(body: &Map<String, Value>) -> Config {
     let generation = body.get("generationConfig");
     let asked = |field: &str| generation.and_then(|generation| generation.get(field));
@@ -172,12 +171,10 @@ fn config(body: &Map<String, Value>) -> Config {
             .flatten()
     });
     Config {
-        model: None,
         reasoning_effort: effort,
         temperature: asked("temperature").and_then(Value::as_f64),
         max_tokens: asked("maxOutputTokens").and_then(Value::as_u64),
         stop: stops.map(str::to_owned).collect(),
-        stream: None,
         tools: declared
             .filter_map(|function| string(function, "name"))
             .collect(),

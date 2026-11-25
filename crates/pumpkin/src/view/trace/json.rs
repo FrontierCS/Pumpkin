@@ -524,21 +524,18 @@ fn config_json(
             Ok(body) => {
                 let body = serde_json::from_slice(&body).unwrap_or(Value::Null);
                 let read::Config {
-                    model,
                     reasoning_effort,
                     temperature,
                     max_tokens,
                     stop,
-                    stream,
                     tools,
                 } = read::config(api, &body);
-                // A body that names no model leaves it to the path, whose model the event names
-                // as the client did.
-                let model = model.map_or_else(|| event["model"].clone(), Value::from);
+                // The route read the model and the stream where the API names them, in the body
+                // or the path, and the event names both.
                 json!({
-                    "model": model, "reasoning_effort": reasoning_effort,
+                    "model": event["model"], "reasoning_effort": reasoning_effort,
                     "temperature": temperature, "max_tokens": max_tokens, "stop": stop,
-                    "stream": stream, "tools": tools,
+                    "stream": event["stream"], "tools": tools,
                 })
             }
             Err(error) => json!({ "error": error }),

@@ -29,8 +29,8 @@ pub(super) const RULES: Rules = Rules {
         prefix: "/v1beta/models/",
         // A stream without `alt=sse` is one JSON array, whose usage no reader of events finds.
         methods: &[
-            ("generateContent", None),
-            ("streamGenerateContent", Some("alt=sse")),
+            ("generateContent", None, false),
+            ("streamGenerateContent", Some("alt=sse"), true),
         ],
     },
     headers: &HEADERS,

@@ -81,7 +81,6 @@ pub struct Reply {
 /// What a request asked of the model, as far as its body says.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
-    pub model: Option<String>,
     /// The reasoning's effort, or, of a Messages request that names no effort, its thinking's
     /// budget in tokens.
     pub reasoning_effort: Option<String>,
@@ -90,8 +89,6 @@ pub struct Config {
     pub max_tokens: Option<u64>,
     /// The sequences that stop the answer.
     pub stop: Vec<String>,
-    /// Whether the answer is a stream, or `None` where the request's path says it.
-    pub stream: Option<bool>,
     /// The names of the tools it declares, or the type of one that has none.
     pub tools: Vec<String>,
 }
@@ -273,12 +270,10 @@ fn config_of(body: &Map<String, Value>, effort: Option<&Value>, max_tokens: &[&s
         _ => Vec::new(),
     };
     Config {
-        model: body.get("model").and_then(Value::as_str).map(str::to_owned),
         reasoning_effort: effort.and_then(Value::as_str).map(str::to_owned),
         temperature: body.get("temperature").and_then(Value::as_f64),
         max_tokens: (max_tokens.iter()).find_map(|field| body.get(*field)?.as_u64()),
         stop,
-        stream: Some(body.get("stream").and_then(Value::as_bool) == Some(true)),
         tools: tool_names(body.get("tools")),
     }
 }

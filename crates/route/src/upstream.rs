@@ -79,13 +79,15 @@ pub struct Upstream {
 ///
 /// An upstream's response comes with the provider's id for the request, if it gave one, which an
 /// operator names to ask the provider about the request, the usage that its body reported, if it
-/// did ([`Usage`]), and the failure that it stated, if it did ([`Failure`]).
+/// did ([`Usage`]), and the failure that it stated, if it did ([`Failure`]). A request that the
+/// route closed comes with whether it asked for its answer as a `stream`.
 #[derive(Debug)]
 pub enum Answer {
     /// With the upstream's response, whole, which had `status`, from `model`, as the route
     /// allows it.
     Forwarded {
         model: ModelName,
+        stream: bool,
         status: u16,
         request_id: Option<String>,
         usage: Option<Usage>,
@@ -95,6 +97,7 @@ pub enum Answer {
     /// cut short: it broke off, was given up on, or the session stopped taking it.
     Cut {
         model: ModelName,
+        stream: bool,
         status: u16,
         request_id: Option<String>,
         usage: Option<Usage>,
@@ -108,8 +111,10 @@ pub enum Answer {
         message: String,
     },
     /// With a refusal of the route's own, with `status` and `message`, in place of the
-    /// upstream's response with the status `upstream_status`, if one came.
+    /// upstream's response for `model` with the status `upstream_status`, if one came.
     Refused {
+        model: ModelName,
+        stream: bool,
         upstream_status: Option<u16>,
         request_id: Option<String>,
         status: u16,
@@ -117,7 +122,7 @@ pub enum Answer {
     },
     /// With the route's end, after the request for `model` was handed to the upstream's
     /// connection, which may have sent it whole, and before the response's head came.
-    Abandoned { model: ModelName },
+    Abandoned { model: ModelName, stream: bool },
 }
 
 /// Why the route barred a request before it reached the upstream.
@@ -307,7 +312,7 @@ impl Upstream {
         let call = match self.url(closed) {
             Ok(url) => self.agent.post(url).config(),
             Err(refusal) => {
-                let answer = refusal.answered(None, None);
+                let answer = refusal.answered(closed, None, None);
                 return refuse(refusal, answer, closed, client, answered);
             }
         };
@@ -337,36 +342,14 @@ impl Upstream {
         let mut client = match request.respond(status, headers, by) {
             Ok(client) => client,
             Err(error) => {
-                answered(Answer::Cut {
-                    model: closed.model().clone(),
-                    status,
-                    request_id,
-                    usage: None,
-                    failed: None,
-                });
+                answered(told(closed, false, (status, request_id), (None, None)));
                 return Err(error);
             }
         };
         let mut scan = closed.scan();
         let relayed = relay(&mut body, &mut client, &mut scan, keep);
-        let (usage, failed) = scan.finish();
-        let model = closed.model().clone();
-        answered(match relayed {
-            Relayed::Whole => Answer::Forwarded {
-                model,
-                status,
-                request_id,
-                usage,
-                failed,
-            },
-            Relayed::BrokeOff | Relayed::Unsent(_) => Answer::Cut {
-                model,
-                status,
-                request_id,
-                usage,
-                failed,
-            },
-        });
+        let whole = matches!(relayed, Relayed::Whole);
+        answered(told(closed, whole, (status, request_id), scan.finish()));
         match relayed {
             Relayed::Whole => client.end(),
             Relayed::BrokeOff => client.cut(),
@@ -379,11 +362,11 @@ impl Upstream {
     /// which abandoned the request, and else no answer from the provider.
     fn without_head(&self, error: &ureq::Error, closed: &Closed<'_>) -> (Refusal, Answer) {
         if self.was_shut_down() {
-            let model = closed.model().clone();
-            (Refusal::ended(), Answer::Abandoned { model })
+            let (model, stream) = (closed.model().clone(), closed.stream());
+            (Refusal::ended(), Answer::Abandoned { model, stream })
         } else {
             let refusal = unanswered(error);
-            let answer = refusal.answered(None, None);
+            let answer = refusal.answered(closed, None, None);
             (refusal, answer)
         }
     }
@@ -646,7 +629,7 @@ fn replaced(
     while let Ok(read @ 1..) = body.read(&mut buffer) {
         keep.response(&buffer[..read]);
     }
-    answered(refusal.answered(Some(status), request_id));
+    answered(refusal.answered(closed, Some(status), request_id));
     refusal.answer(closed.route().api(), request, by)
 }
 
@@ -697,6 +680,36 @@ struct Broken(Option<io::Error>);
 impl Read for Broken {
     fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
         self.0.take().map_or(Ok(0), Err)
+    }
+}
+
+/// The answer that the upstream's response to `closed` gave, with its `status` and `request_id`
+/// and the usage and failure that it reported: `whole`, or cut short.
+fn told(
+    closed: &Closed<'_>,
+    whole: bool,
+    (status, request_id): (u16, Option<String>),
+    (usage, failed): (Option<Usage>, Option<Failure>),
+) -> Answer {
+    let (model, stream) = (closed.model().clone(), closed.stream());
+    if whole {
+        Answer::Forwarded {
+            model,
+            stream,
+            status,
+            request_id,
+            usage,
+            failed,
+        }
+    } else {
+        Answer::Cut {
+            model,
+            stream,
+            status,
+            request_id,
+            usage,
+            failed,
+        }
     }
 }
 

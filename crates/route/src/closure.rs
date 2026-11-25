@@ -80,18 +80,19 @@ enum Endpoint {
     /// and any other is it with a query that goes upstream with it.
     Fixed(&'static [&'static str]),
     /// To a path of its model's: `prefix`, the model's name, `:` and one of `methods`, each with
-    /// the query that it takes, which goes upstream with it.
+    /// the query that it takes, which goes upstream with it, and whether it answers with a stream.
     Models {
         prefix: &'static str,
-        methods: &'static [(&'static str, Option<&'static str>)],
+        methods: &'static [(&'static str, Option<&'static str>, bool)],
     },
 }
 
 /// What a request's target names, as its API's endpoint reads it.
 pub(crate) struct Target<'p> {
     query: Option<&'static str>,
-    /// The model and the method that the path names, of an endpoint that has a path for each.
-    method: Option<(&'p str, &'static str)>,
+    /// The model and the method that the path names, of an endpoint that has a path for each, and
+    /// whether the method answers with a stream.
+    method: Option<(&'p str, &'static str, bool)>,
 }
 
 /// What differs between the APIs: the endpoints, headers and checks of each.
@@ -185,6 +186,8 @@ pub(crate) struct Closed<'r> {
     /// The model that the request named, and the name that its upstream takes for it, which
     /// `body` or `path` names.
     model: (ModelName, ModelName),
+    /// Whether the answer is a stream, as `body` or `path` asks.
+    stream: bool,
     route: &'r Route,
 }
 
@@ -273,12 +276,12 @@ impl Route {
                 };
                 // A model's name may hold a `:` of its own.
                 let (model, method) = named.rsplit_once(':')?;
-                let (method, query) = (methods.iter())
-                    .find(|(name, takes)| *name == method && *takes == query)
+                let (method, query, stream) = (methods.iter())
+                    .find(|(name, takes, _)| *name == method && *takes == query)
                     .copied()?;
                 Some(Target {
                     query,
-                    method: Some((model, method)),
+                    method: Some((model, method, stream)),
                 })
             }
         }
@@ -331,9 +334,12 @@ impl Route {
         let headers = passed(&self.request_headers, headers)?;
         let mut body = body?;
         (rules.stored)(&body)?;
-        let named = match method {
-            Some((model, _)) => Some(model),
-            None => body.get("model").and_then(Value::as_str),
+        let (named, stream) = match method {
+            Some((model, _, stream)) => (Some(model), stream),
+            None => (
+                body.get("model").and_then(Value::as_str),
+                body.get("stream") == Some(&Value::Bool(true)),
+            ),
         };
         let allowed = named.and_then(|named| self.allows(named));
         let (model, upstream_name) =
@@ -341,7 +347,7 @@ impl Route {
         (rules.feature)(&body)?;
         (rules.choice)(&body)?;
         closed_fields(rules, &body)?;
-        let path = method.map(|(_, method)| format!("/{upstream_name}:{method}"));
+        let path = method.map(|(_, method, _)| format!("/{upstream_name}:{method}"));
         if path.is_none() {
             let named = Value::String(upstream_name.as_str().to_owned());
             body.insert("model".to_owned(), named);
@@ -358,6 +364,7 @@ impl Route {
             dropped_headers,
             body,
             model,
+            stream,
             route: self,
         })
     }
@@ -431,6 +438,10 @@ impl Closed<'_> {
         &self.model.0
     }
 
+    pub(crate) fn stream(&self) -> bool {
+        self.stream
+    }
+
     /// The request's body, as [`Route::close`] parsed it.
     pub(crate) fn body(&self) -> &[u8] {
         &self.body
@@ -467,7 +478,7 @@ impl Endpoint {
         match *self {
             Self::Fixed(targets) => vec![format!("POST {}", targets[0])],
             Self::Models { prefix, methods } => (methods.iter())
-                .map(|(method, query)| {
+                .map(|(method, query, _)| {
                     let query = query.map(|query| format!("?{query}")).unwrap_or_default();
                     format!("POST {prefix}<model>:{method}{query}")
                 })
@@ -545,14 +556,17 @@ impl Refusal {
         refusal(Status::BadRequest, message.to_owned())
     }
 
-    /// How [`Refusal::answer`] answers its client, in place of the upstream's response with the
-    /// status `upstream_status`, if one came.
+    /// How [`Refusal::answer`] answers its client, in place of the upstream's response to `closed`
+    /// with the status `upstream_status`, if one came.
     pub(crate) fn answered(
         &self,
+        closed: &Closed<'_>,
         upstream_status: Option<u16>,
         request_id: Option<String>,
     ) -> Answer {
         Answer::Refused {
+            model: closed.model().clone(),
+            stream: closed.stream(),
             upstream_status,
             request_id,
             status: self.status.code(),

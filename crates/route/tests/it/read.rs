@@ -84,7 +84,7 @@ fn requests() {
         writeln!(out, "{api}: {config:?}\n{}", shown(&items)).unwrap();
     }
     expect![[r#"
-        responses: Config { model: Some("glm-5.3-flash"), reasoning_effort: Some("xhigh"), temperature: None, max_tokens: None, stop: [], stream: Some(true), tools: ["exec_command", "write_stdin"] }
+        responses: Config { reasoning_effort: Some("xhigh"), temperature: None, max_tokens: None, stop: [], tools: ["exec_command", "write_stdin"] }
           System { text: "You are a coding" }
           User { text: "Solve the evaluation task" }
           Reasoning { text: "We need inspect README" }
@@ -92,14 +92,14 @@ fn requests() {
           Call { id: Some("call_7036f25cd4703cd25abc703a"), name: "exec_command", arguments: "{\"cmd\":\"cat /task/README.md\",\"workdir\":\"/workspace\",\"yield_time_ms\":10000,\"max_output_tokens\":30000}" }
           Output { call_id: Some("call_7036f25cd4703cd25abc703a"), text: "Chunk ID: d1afae Wall time: 0.0000 seconds Process exited", error: false }
 
-        chat: Config { model: Some("glm-5.3-flash"), reasoning_effort: None, temperature: None, max_tokens: Some(4096), stop: [], stream: Some(false), tools: ["send_email", "delete_email"] }
+        chat: Config { reasoning_effort: None, temperature: None, max_tokens: Some(4096), stop: [], tools: ["send_email", "delete_email"] }
           System { text: "You are an AI language model" }
           User { text: "Please take a look at the" }
           Assistant { text: "I'll start by finding the file" }
           Call { id: Some("call_-4703692581470369258"), name: "search_files_by_filename", arguments: "{\"filename\": \"team-building-activities.docx\"}" }
           Output { call_id: Some("call_-4703692581470369258"), text: "ValidationError: The tool 'search_files_by_filename' is not", error: false }
 
-        messages: Config { model: Some("m-large"), reasoning_effort: Some("high"), temperature: Some(1.0), max_tokens: Some(32000), stop: ["</done>"], stream: Some(true), tools: ["Bash", "Read"] }
+        messages: Config { reasoning_effort: Some("high"), temperature: Some(1.0), max_tokens: Some(32000), stop: ["</done>"], tools: ["Bash", "Read"] }
           System { text: "You are Claude Code\nWork in /workspace" }
           User { text: "Solve the task" }
           Other { json: Object {"source": Object {"data": String("AAAA"), "media_type": String("image/png"), "type": String("base64")}, "type": String("image")} }
@@ -112,7 +112,7 @@ fn requests() {
           System { text: "Primary working directory: /workspace" }
           Assistant { text: "Done." }
 
-        generate_content: Config { model: None, reasoning_effort: Some("LOW"), temperature: Some(1.0), max_tokens: Some(2000), stop: [], stream: None, tools: ["run_command"] }
+        generate_content: Config { reasoning_effort: Some("LOW"), temperature: Some(1.0), max_tokens: Some(2000), stop: [], tools: ["run_command"] }
           System { text: "You are a coding agent. Think briefly, say in a few words what you will do, then use the tool." }
           User { text: "What is this machine's hostname?" }
           Assistant { text: "I will run `hostname` to check the machine's hostname." }
@@ -382,17 +382,17 @@ fn messages_of_any_form() {
         .unwrap();
     }
     expect![[r#"
-        Config { model: None, reasoning_effort: None, temperature: None, max_tokens: None, stop: [], stream: Some(false), tools: [] }
+        Config { reasoning_effort: None, temperature: None, max_tokens: None, stop: [], tools: [] }
           Other { json: Object {"content": Number(7), "role": String("user")} }
           Other { json: Number(7) }
           Other { json: String("a") }
           Other { json: Object {"type": Number(7)} }
 
-        Config { model: None, reasoning_effort: None, temperature: None, max_tokens: None, stop: [], stream: Some(false), tools: [] }
+        Config { reasoning_effort: None, temperature: None, max_tokens: None, stop: [], tools: [] }
 
-        Config { model: None, reasoning_effort: None, temperature: None, max_tokens: None, stop: [], stream: Some(false), tools: [] }
+        Config { reasoning_effort: None, temperature: None, max_tokens: None, stop: [], tools: [] }
 
-        Config { model: None, reasoning_effort: Some("2048"), temperature: None, max_tokens: None, stop: [], stream: Some(false), tools: [] }
+        Config { reasoning_effort: Some("2048"), temperature: None, max_tokens: None, stop: [], tools: [] }
           System { text: "Be brief" }
 
     "#]].assert_eq(&out);
