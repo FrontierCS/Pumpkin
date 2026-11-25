@@ -35,7 +35,8 @@
 "crates/engine/tests/it/prune.rs" = 2
 "crates/gateway/src/bound.rs" = 1
 "crates/gateway/src/lib.rs" = 24
-"crates/gateway/src/meeting.rs" = 30
+"crates/gateway/src/meeting.rs" = 25
+"crates/gateway/src/meeting/dial.rs" = 5
 "crates/gateway/src/trees.rs" = 5
 "crates/gateway/tests/it.rs" = 15
 "crates/lang/src/builtins.rs" = 4
