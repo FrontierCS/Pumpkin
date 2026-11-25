@@ -52,7 +52,7 @@ fn cases() -> Vec<[&'static str; 8]> {
     vec![
         // An empty prompt, which Codex takes, as `None` is the one it refuses.
         [
-            "gpt-6.1-terra",
+            "gpt-6.2-sol",
             "high",
             "/workspace",
             "",
@@ -62,7 +62,7 @@ fn cases() -> Vec<[&'static str; 8]> {
             "none",
         ],
         [
-            "gpt-6.1-terra",
+            "gpt-6.2-astra",
             "low",
             "/home/agent",
             "Solve it.",
@@ -82,14 +82,14 @@ fn cases() -> Vec<[&'static str; 8]> {
             "gpt-6.1-terra",
         ],
         [
-            "gpt-6.1-terra",
+            "gpt-6.2-sol",
             "xhigh",
             "/workspace",
             TASK_PROMPT,
             "3600",
             "60",
             "native",
-            "gpt-6.1-terra",
+            "gpt-6.2-sol",
         ],
         [
             "gpt-6.1-terra",
@@ -102,14 +102,14 @@ fn cases() -> Vec<[&'static str; 8]> {
             "none",
         ],
         [
-            "gpt-6.1-terra",
+            "gpt-6.2-astra",
             "high",
             "/",
             "Go.\n",
             "60",
             "0",
             "functions",
-            "gpt-6.1-terra",
+            "gpt-6.2-astra",
         ],
     ]
 }
@@ -128,39 +128,39 @@ fn roles() {
         true,
         excerpt,
         &expect![[r#"
-            gpt-6.1-terra high /workspace native none:
-            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
+            gpt-6.2-sol high /workspace native none:
+            argv: /harness/codex-0.172.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
             env: CODEX_HOME=/workspace/.codex TMPDIR=/workspace/.tmp
             cwd: /workspace
             dir 0700 /workspace/.codex
             dir 0700 /workspace/.tmp
             grant help before stdin
             file 0600 /workspace/.codex/config.toml:
-              model = "gpt-6.1-terra"
+              model = "gpt-6.2-sol"
               model_reasoning_effort = "high"
               model_provider = "pumpkin"
               base_url = "http://127.0.0.1:11235"
               max_concurrent_threads_per_session = 6
-            route: responses gpt-6.1-terra
+            route: responses gpt-6.2-sol
             request headers: originator user-agent session-id thread-id x-codex-beta-features x-codex-window-id x-codex-turn-metadata x-openai-internal-codex-responses-lite
             response headers: openai-model x-reasoning-included x-models-etag x-codex-turn-state x-codex-safety-buffering-enabled x-codex-safety-buffering-faster-model x-codex-credits-has-credits x-codex-credits-unlimited x-codex-credits-balance x-codex-promo-message x-codex-rate-limit-reached-type x-codex-active-limit x-oai-request-id cf-ray x-openai-authorization-error x-error-json x-codex-primary-used-percent x-codex-primary-window-minutes x-codex-primary-reset-at x-codex-secondary-used-percent x-codex-secondary-window-minutes x-codex-secondary-reset-at x-codex-limit-name
             image 1: //images's Dockerfile, in pumpkin/images
             image 2: @pumpkin//harness/codex/layer's Dockerfile, image 1 as base, in pumpkin-library/harness/codex/layer
             the agent's image: image 2
-            gpt-6.1-terra low /home/agent native none:
-            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
+            gpt-6.2-astra low /home/agent native none:
+            argv: /harness/codex-0.172.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
             env: CODEX_HOME=/home/agent/.codex TMPDIR=/home/agent/.tmp
             cwd: /home/agent
             dir 0700 /home/agent/.codex
             dir 0700 /home/agent/.tmp
             grant help before stdin
             file 0600 /home/agent/.codex/config.toml:
-              model = "gpt-6.1-terra"
+              model = "gpt-6.2-astra"
               model_reasoning_effort = "low"
               model_provider = "pumpkin"
-            route: responses gpt-6.1-terra
+            route: responses gpt-6.2-astra
             gpt-6.1-terra xhigh /workspace functions gpt-6.1-terra:
-            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
+            argv: /harness/codex-0.172.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
             env: CODEX_HOME=/workspace/.codex TMPDIR=/workspace/.tmp
             cwd: /workspace
             dir 0700 /workspace/.codex
@@ -179,28 +179,28 @@ fn roles() {
                 multi_agent_version: "disabled"
                 experimental_supported_tools: []
             route: responses gpt-6.1-terra
-            gpt-6.1-terra xhigh /workspace native gpt-6.1-terra:
-            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
+            gpt-6.2-sol xhigh /workspace native gpt-6.2-sol:
+            argv: /harness/codex-0.172.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
             env: CODEX_HOME=/workspace/.codex TMPDIR=/workspace/.tmp
             cwd: /workspace
             dir 0700 /workspace/.codex
             dir 0700 /workspace/.tmp
             grant help before stdin
             file 0600 /workspace/.codex/config.toml:
-              model = "gpt-6.1-terra"
+              model = "gpt-6.2-sol"
               model_reasoning_effort = "xhigh"
               model_catalog_json = "/workspace/.codex/model-catalog.json"
               model_provider = "pumpkin"
             file 0600 /workspace/.codex/model-catalog.json:
-              "gpt-6.1-terra" with 50 fields:
+              "gpt-6.2-sol" with 52 fields:
                 use_responses_lite: true
                 tool_mode: "code_mode_only"
                 apply_patch_tool_type: "freeform"
                 multi_agent_version: "v2"
-                experimental_supported_tools: ["send_user_message_async","clock"]
-            route: responses gpt-6.1-terra
+                experimental_supported_tools: ["request_user_input_async","send_message_to_user_async","clock","literature_search_query","multi_agent_v2_in_code_mode"]
+            route: responses gpt-6.2-sol
             gpt-6.1-terra xhigh /srv/work native none:
-            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
+            argv: /harness/codex-0.172.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
             env: CODEX_HOME=/srv/work/.codex TMPDIR=/srv/work/.tmp
             cwd: /srv/work
             dir 0700 /srv/work/.codex
@@ -211,26 +211,26 @@ fn roles() {
               model_reasoning_effort = "xhigh"
               model_provider = "pumpkin"
             route: responses gpt-6.1-terra
-            gpt-6.1-terra high / functions gpt-6.1-terra:
-            argv: /harness/codex-0.167.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
+            gpt-6.2-astra high / functions gpt-6.2-astra:
+            argv: /harness/codex-0.172.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
             env: CODEX_HOME=/.codex TMPDIR=/.tmp
             cwd: /
             dir 0700 /.codex
             dir 0700 /.tmp
             grant help before stdin
             file 0600 /.codex/config.toml:
-              model = "gpt-6.1-terra"
+              model = "gpt-6.2-astra"
               model_reasoning_effort = "high"
               model_catalog_json = "/.codex/model-catalog.json"
               model_provider = "pumpkin"
             file 0600 /.codex/model-catalog.json:
-              "gpt-6.1-terra" with 50 fields:
+              "gpt-6.2-astra" with 52 fields:
                 use_responses_lite: false
                 tool_mode: "direct"
                 apply_patch_tool_type: null
                 multi_agent_version: "disabled"
                 experimental_supported_tools: []
-            route: responses gpt-6.1-terra
+            route: responses gpt-6.2-astra
         "#]],
     );
 }

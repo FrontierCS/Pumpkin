@@ -131,7 +131,7 @@ fn agy_layer() {
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn codex_layer() {
-    let script = "cd /harness/codex-0.167.0 && find . | sort | xargs stat -c '%A %u:%g %n' \
+    let script = "cd /harness/codex-0.172.0 && find . | sort | xargs stat -c '%A %u:%g %n' \
                   && ./bin/codex --version";
     check(
         "harness/codex/layer/Dockerfile",
@@ -145,7 +145,7 @@ fn codex_layer() {
             -r--r--r-- 0:0 ./codex-package.json
             dr-xr-xr-x 0:0 ./codex-path
             -r-xr-xr-x 0:0 ./codex-path/rg
-            codex-cli 0.167.0
+            codex-cli 0.172.0
             the layer on another base: the same"#]],
     );
 }

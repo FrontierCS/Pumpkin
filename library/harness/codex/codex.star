@@ -1,4 +1,4 @@
-"""Codex, OpenAI's coding agent, as an agent's harness: `codex` adds Codex 0.167.0 to an agent's
+"""Codex, OpenAI's coding agent, as an agent's harness: `codex` adds Codex 0.172.0 to an agent's
 image and writes the runtime of one unattended `codex exec`, with the route to its model and,
 if the caller gives one, Codex's catalog entry for it.
 
@@ -10,7 +10,7 @@ host holds the key.
 """
 
 # Where `layer/Dockerfile` installs Codex.
-_ROOT = "/harness/codex-0.167.0"
+_ROOT = "/harness/codex-0.172.0"
 
 # The values of Codex's `model_reasoning_effort`, how hard the model reasons.
 _EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
