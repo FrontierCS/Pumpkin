@@ -20,7 +20,7 @@ use ::aws::Cli;
 use super::aws::{self, answers, unanswered};
 use super::linking::{Build, Linked, Unlinked};
 use super::{Address, CONNECT_TIMEOUT, Located, Name, Reached};
-use crate::config::Find;
+use crate::config::{Find, Interface};
 use crate::link::{ViewRequest, Viewed};
 use crate::{config, say};
 
@@ -140,19 +140,23 @@ impl Viewing {
             "starting controller `{}`, {id}, as the page asked",
             reached.name
         ));
-        aws::start(connected(cli, reached)?, id)
+        let (cli, _) = connected(cli, reached)?;
+        aws::start(cli, id)
     }
 
-    /// Whether the controller runs, as EC2 says, and its `sshd` answers where it was found.
+    /// Whether the controller runs, as EC2 says, and its `sshd` answers at its address that
+    /// the configuration names, which becomes where it is found.
     fn answerable(&mut self) -> Result<(), Unviewed> {
-        let Self { reached, cli, .. } = self;
+        let Self {
+            reached,
+            cli,
+            located,
+            linked,
+            ..
+        } = self;
         let name = &reached.name;
-        let (instance, address, interface) = match &self.located {
-            Located::Ec2 {
-                instance,
-                address,
-                interface,
-            } => (instance, *address, *interface),
+        let (instance, found) = match located {
+            Located::Ec2 { instance, address } => (instance, address),
             Located::Address(address) => {
                 return probed(address).map_err(|error| {
                     Unviewed::Down(format!(
@@ -162,21 +166,33 @@ impl Viewing {
                 });
             }
         };
-        let state = connected(cli, reached).and_then(|cli| aws::state(cli, name, instance));
-        let down = match state.map_err(Unviewed::Failed)?.as_str() {
-            "running" => match answers(address) {
-                Ok(()) => return Ok(()),
-                Err(error) => format!(
-                    "controller `{name}` runs, but its `sshd` doesn't answer at {address}: \
-                     {error}: one just started answers within a minute; past that, {}",
-                    unanswered(&error, interface)
-                ),
-            },
-            "stopped" => return Err(Unviewed::Stopped),
-            "pending" => format!("controller `{name}` is starting"),
-            "stopping" => format!("controller `{name}` is stopping: start it once it has stopped"),
+        let (cli, interface) = connected(cli, reached).map_err(Unviewed::Failed)?;
+        let (state, address) =
+            aws::state(cli, name, instance, interface).map_err(Unviewed::Failed)?;
+        let down = match (state.as_str(), address) {
+            ("running", None) => aws::unaddressed(name, instance, interface),
+            ("running", Some(address)) => {
+                // A public address changes at each start, so one started since is elsewhere.
+                if address != *found {
+                    *found = address;
+                    *linked = None;
+                }
+                match answers(address) {
+                    Ok(()) => return Ok(()),
+                    Err(error) => format!(
+                        "controller `{name}` runs, but its `sshd` doesn't answer at {address}: \
+                         {error}: one just started answers within a minute; past that, {}",
+                        unanswered(&error, interface)
+                    ),
+                }
+            }
+            ("stopped", _) => return Err(Unviewed::Stopped),
+            ("pending", _) => format!("controller `{name}` is starting"),
+            ("stopping", _) => {
+                format!("controller `{name}` is stopping: start it once it has stopped")
+            }
             // As when it was terminated, and another made in its place, which `reach` finds.
-            state => {
+            (state, _) => {
                 return Err(Unviewed::Failed(format!(
                     "controller `{name}`, {instance}, is {state}: stop this view and start it \
                      again, which finds the controller anew"
@@ -223,12 +239,13 @@ impl Viewing {
     }
 }
 
-/// The connection to EC2 in the controller's region, made at its first use.
-fn connected<'a>(cli: &'a mut Option<Cli>, reached: &Reached) -> Result<&'a Cli, String> {
-    if let Some(made) = cli {
-        return Ok(made);
-    }
-    let Find::Ec2 { region, .. } = &reached.find else {
+/// The connection to EC2 in the controller's region, made at its first use, and the controller's
+/// address that the configuration names.
+fn connected<'a>(
+    cli: &'a mut Option<Cli>,
+    reached: &Reached,
+) -> Result<(&'a Cli, Interface), String> {
+    let Find::Ec2 { region, interface } = &reached.find else {
         return Err(format!(
             "controller `{}` is at the address that the configuration names, which EC2 knows \
              nothing of: remove the workspace's `.pumpkin/controller`, which holds where an EC2 \
@@ -236,7 +253,11 @@ fn connected<'a>(cli: &'a mut Option<Cli>, reached: &Reached) -> Result<&'a Cli,
             reached.name
         ));
     };
-    Ok(cli.insert(Cli::connect(region.clone())?))
+    let made = match cli {
+        Some(made) => made,
+        None => cli.insert(Cli::connect(region.clone())?),
+    };
+    Ok((made, *interface))
 }
 
 /// Whether a connection to `address` opens within `CONNECT_TIMEOUT`, as `ssh` waits for one, to

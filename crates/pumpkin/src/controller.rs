@@ -30,7 +30,7 @@ pub(crate) use viewing::{Unviewed, Viewing};
 
 use self::aws::{find, kept};
 pub(crate) use self::aws::{instances, live, tag, tagged};
-use crate::config::{self, Find};
+use crate::config::{self, Find, Interface};
 use crate::workspace::Workspace;
 use crate::{next, say};
 
@@ -217,7 +217,16 @@ impl Reached {
         let alias = match find {
             // By the controller's name, rather than the instance that the tag finds, so that the
             // tag that names the controller can't lead this machine's key to another instance.
-            Find::Ec2 { region, .. } => format!("{name}.{}", region.as_str()),
+            // One for each of its addresses, so that a host that answered at the other, as one in
+            // this machine's VPC may at a private address, pins no key and keeps no `found` here.
+            Find::Ec2 {
+                region,
+                interface: Interface::PrivateIp,
+            } => format!("{name}.{}", region.as_str()),
+            Find::Ec2 {
+                region,
+                interface: Interface::PublicIp,
+            } => format!("{name}.{}.public_ip", region.as_str()),
             // As `ssh` names a host at a port other than 22 in `known_hosts`.
             Find::Address(address) => format!("[{}]:{}", address.host, address.port),
         };
@@ -278,17 +287,15 @@ impl Reached {
     }
 
     fn repair(&self, previous: &Found, said: &str) -> Result<Found, String> {
-        self.location.repair(&self.name, Some(previous), || match &previous.at {
-            Located::Ec2 {
-                address, interface, ..
-            } => {
+        self.location.repair(&self.name, Some(previous), || match (&self.find, &previous.at) {
+            (Find::Ec2 { interface, .. }, Located::Ec2 { address, .. }) => {
                 let probe = aws::answers(*address);
                 self.locate().map_err(|error| match probe {
                     Ok(()) => format!("{said}; finding the controller again: {error}"),
                     Err(probe) => format!("{said}; SSH at its last {}: {probe}: {}; finding the controller again: {error}", interface.address(), aws::unanswered(&probe, *interface)),
                 })
             }
-            Located::Address(_) => self.locate(),
+            (Find::Address(_), _) | (Find::Ec2 { .. }, Located::Address(_)) => self.locate(),
         })
     }
 

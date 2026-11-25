@@ -56,6 +56,10 @@ data "aws_vpc" "this" {
   id = var.vpc_id
 }
 
+locals {
+  vpc_blocks = [for block in data.aws_vpc.this.cidr_block_associations : block.cidr_block if block.state == "associated"]
+}
+
 # Each IPv4 block associated with the VPC reaches port 22. rust-lang's EFS module admits its VPC's
 # primary block, read the same way
 # (https://github.com/rust-lang/simpleinfra/blob/75291a2cdf0dd5ba60860701274f9500703102da/terraform/shared/modules/efs-filesystem/main.tf#L23-L48).
@@ -65,7 +69,7 @@ data "aws_vpc" "this" {
 # Its description has no apostrophe, which EC2 refuses in a rule's description and a plan doesn't
 # check.
 resource "aws_vpc_security_group_ingress_rule" "controller_ssh" {
-  for_each          = toset([for block in data.aws_vpc.this.cidr_block_associations : block.cidr_block if block.state == "associated"])
+  for_each          = toset(local.vpc_blocks)
   security_group_id = aws_security_group.controller.id
   description       = "ssh from the VPC"
   ip_protocol       = "tcp"
@@ -75,9 +79,10 @@ resource "aws_vpc_security_group_ingress_rule" "controller_ssh" {
 }
 
 # A machine outside the VPC reaches the controller's public address from a block of its own. Its
-# description has no apostrophe, as the VPC rule's has none.
+# description has no apostrophe, as the VPC rule's has none. A block that the VPC rule admits gets
+# no second rule, which EC2 would refuse at apply as a duplicate.
 resource "aws_vpc_security_group_ingress_rule" "controller_ssh_from" {
-  for_each          = toset(var.ssh_from)
+  for_each          = setsubtract(toset(var.ssh_from), local.vpc_blocks)
   security_group_id = aws_security_group.controller.id
   description       = "ssh from the blocks that ssh_from names"
   ip_protocol       = "tcp"

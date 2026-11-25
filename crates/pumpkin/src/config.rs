@@ -96,7 +96,7 @@ pub(crate) enum Find {
 // which also picks the subnets that they launch in:
 // https://github.com/ray-project/ray/blob/a83e55e30263dec80b7d803a8c503aad995f4130/python/ray/autoscaler/_private/aws/config.py#L473-L487
 // https://github.com/skypilot-org/skypilot/blob/052914aaccb29a9a2364dd73654f2e61f0af42a0/sky/provision/aws/instance.py#L690-L691
-#[derive(Clone, Copy, Default, Deserialize, Serialize)]
+#[derive(Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Interface {
     /// Its address in its subnet, which a machine in its VPC reaches.

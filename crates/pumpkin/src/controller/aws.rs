@@ -30,8 +30,9 @@ const START_TIMEOUT: Duration = Duration::from_mins(10);
 
 const START_POLL: Duration = Duration::from_secs(5);
 
-// How long a probe of `sshd` waits to connect. Inside the controller's VPC a connection takes
-// milliseconds, so a longer wait would only delay the next probe. SkyPilot's:
+// How long a probe of `sshd` waits to connect. A connection takes milliseconds inside the
+// controller's VPC, and under a tenth of a second from another region of the same continent to its
+// public address, so a longer wait would only delay the next probe. SkyPilot's:
 // https://github.com/skypilot-org/skypilot/blob/052914aaccb29a9a2364dd73654f2e61f0af42a0/sky/provision/provisioner.py#L500-L501
 const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -190,15 +191,32 @@ fn ready(cli: &Cli, name: &Name, id: &str, interface: Interface) -> Result<Locat
 }
 
 /// The state that EC2 gives instance `id` of controller `name`, as it names it, such as `running`
-/// or `stopped`.
-pub(super) fn state(cli: &Cli, name: &Name, id: &str) -> Result<String, String> {
-    instance(cli, name, id).map(|instance| instance.state.name)
+/// or `stopped`, and the instance's address that `interface` names, if it has one now.
+pub(super) fn state(
+    cli: &Cli,
+    name: &Name,
+    id: &str,
+    interface: Interface,
+) -> Result<(String, Option<IpAddr>), String> {
+    let instance = instance(cli, name, id)?;
+    let address = instance.address(interface);
+    Ok((instance.state.name, address))
 }
 
 /// Starts instance `id`, as `start-instances` does: one that runs or is starting is left so.
 pub(super) fn start(cli: &Cli, id: &str) -> Result<(), String> {
     let start = ["--instance-ids", id];
     cli.run(&CLIENT.start, &start, Bound::Call).map(drop)
+}
+
+impl Instance {
+    /// Its address that `interface` names, if it has one now.
+    fn address(&self, interface: Interface) -> Option<IpAddr> {
+        match interface {
+            Interface::PrivateIp => self.private_ip_address,
+            Interface::PublicIp => self.public_ip_address,
+        }
+    }
 }
 
 fn instance(cli: &Cli, name: &Name, id: &str) -> Result<Instance, String> {
@@ -218,28 +236,16 @@ fn answering(
     interface: Interface,
     started: Option<Instant>,
 ) -> Result<Located, String> {
+    let address = instance.address(interface);
     let Instance {
         id,
         state: _,
         launch_time,
-        private_ip_address,
-        public_ip_address,
+        private_ip_address: _,
+        public_ip_address: _,
     } = instance;
-    let (address, expected) = match interface {
-        Interface::PrivateIp => (
-            private_ip_address,
-            "the one of its subnet that `deploy/aws` gives it",
-        ),
-        Interface::PublicIp => (
-            public_ip_address,
-            "the one that EC2 gives it at each start, as `deploy/aws` asks",
-        ),
-    };
     let Some(address) = address else {
-        return Err(format!(
-            "controller `{name}`, {id}, runs with no {}: expected {expected}",
-            interface.address()
-        ));
+        return Err(unaddressed(name, &id, interface));
     };
     let launched: Timestamp = launch_time.parse().map_err(|error| {
         format!(
@@ -261,7 +267,6 @@ fn answering(
             return Ok(Located::Ec2 {
                 instance: id,
                 address,
-                interface,
             });
         };
         if by.remaining().is_none() {
@@ -275,6 +280,19 @@ fn answering(
         }
         thread::sleep(START_POLL);
     }
+}
+
+/// Why controller `name`, instance `id`, which runs with no address that `interface` names, can't
+/// be reached, and what was expected.
+pub(super) fn unaddressed(name: &Name, id: &str, interface: Interface) -> String {
+    let expected = match interface {
+        Interface::PrivateIp => "the one of its subnet that `deploy/aws` gives it",
+        Interface::PublicIp => "the one that EC2 gives it at each start, as `deploy/aws` asks",
+    };
+    format!(
+        "controller `{name}`, {id}, runs with no {}: expected {expected}",
+        interface.address()
+    )
 }
 
 /// Why `sshd` of a controller that runs didn't answer a probe ([`answers`]) at its address that

@@ -442,11 +442,7 @@ fn connect(scratch: &Scratch, client: &[(String, String); 2]) {
 // The location of the controller, in the workspace's directory `dir` of it.
 fn found_at(dir: &Path) {
     fs::create_dir_all(dir).unwrap();
-    let found = json!({
-        "instance": INSTANCE,
-        "address": "255.255.255.255",
-        "interface": "private_ip",
-    });
+    let found = json!({ "instance": INSTANCE, "address": "255.255.255.255" });
     let file = dir.join("found");
     fs::write(&file, found.to_string()).unwrap();
     fs::set_permissions(file, Permissions::from_mode(0o600)).unwrap();
