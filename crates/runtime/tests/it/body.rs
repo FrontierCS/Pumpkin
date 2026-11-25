@@ -88,6 +88,9 @@ impl runtime::Bodies for Bodies<'_> {
             }
             "holds" => {
                 target.run(&argv(&["print", "one"]))?;
+                // Logged once the first command's output is collected, after which only the held
+                // collect waits.
+                target.get(&AbsolutePath::from_static("/pumpkin/log/0/command.stdout"))?;
                 target.get(&AbsolutePath::from_static("/work/held"))?;
                 target.run(&argv(&["print", "two"]))?;
                 Ok(Vec::new())
