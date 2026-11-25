@@ -104,6 +104,32 @@ fn check(recipe: &str, named: &[(&str, &str)], script: &str, expect: &Expect) {
 
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
+fn agy_layer() {
+    // agy writes its state below its home as it starts.
+    let script = "cd /harness/agy-1.5.16 && find . | sort | xargs stat -c '%A %u:%g %n' \
+                  && HOME=/tmp ./antigravity --version";
+    check(
+        "harness/agy/layer/Dockerfile",
+        &[],
+        script,
+        &expect![[r#"
+            dr-xr-xr-x 0:0 .
+            -r-xr-xr-x 0:0 ./antigravity
+            dr-xr-xr-x 0:0 ./lib
+            -r-xr-xr-x 0:0 ./lib/ld-linux-x86-64.so.2
+            -r--r--r-- 0:0 ./lib/libc.so.6
+            -r--r--r-- 0:0 ./lib/libdl.so.2
+            -r--r--r-- 0:0 ./lib/libm.so.6
+            -r--r--r-- 0:0 ./lib/libpthread.so.0
+            -r--r--r-- 0:0 ./lib/libresolv.so.2
+            -r--r--r-- 0:0 ./lib/librt.so.1
+            1.5.16
+            the layer on another base: the same"#]],
+    );
+}
+
+#[test]
+#[ignore = "needs Docker: run cargo xtask live docker"]
 fn codex_layer() {
     let script = "cd /harness/codex-0.167.0 && find . | sort | xargs stat -c '%A %u:%g %n' \
                   && ./bin/codex --version";

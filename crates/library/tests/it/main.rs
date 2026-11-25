@@ -8,6 +8,7 @@
 )]
 #![expect(clippy::disallowed_methods, reason = "nextest bounds each test")]
 
+mod agy;
 mod claude_code;
 mod codex;
 mod docker;
