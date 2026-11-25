@@ -1,7 +1,7 @@
 # The team's controller. It builds the tasks' images and runs the drivers, and it runs no role.
-# Its members reach it over ssh from its VPC, each with a key that `members` lists. It stops
-# itself when it has no job and no SSH session, by a unit that `pumpkin-admin install` sets up, so
-# it costs only its volumes between runs.
+# Its members reach it over ssh from its VPC or from `ssh_from`, each with a key that `members`
+# lists. It stops itself when it has no job and no SSH session, by a unit that `pumpkin-admin
+# install` sets up, so it costs only its volumes between runs.
 
 resource "aws_iam_role" "controller" {
   name               = "${local.prefix}-controller"

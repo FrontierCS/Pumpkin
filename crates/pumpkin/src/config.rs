@@ -76,10 +76,45 @@ pub(crate) struct Controller {
 // https://gitlab.com/gitlab-org/omnibus-gitlab/-/blob/9b9a2e883910b2f996fd23f4845435e0cdc71550/doc/docker/README.md#L164-L186
 #[derive(Clone)]
 pub(crate) enum Find {
-    /// By the tag of its EC2 instance in `region`, which a command starts if it is stopped.
-    Ec2 { region: aws::Region },
+    /// By the tag of its EC2 instance in `region`, which a command starts if it is stopped, at
+    /// the instance's address that `interface` names.
+    Ec2 {
+        region: aws::Region,
+        interface: Interface,
+    },
     /// At a fixed address, which no command starts.
     Address(crate::controller::Address),
+}
+
+/// Which of an EC2 controller's addresses a client reaches its `sshd` at, as `ssh_interface`
+/// names it.
+// Packer's Amazon plugin names the address it reaches an instance's `sshd` at by `ssh_interface`,
+// with these among its values:
+// https://github.com/hashicorp/packer-plugin-amazon/blob/de72fcb21cab5bb56f7e974da3342ae3a586d9c5/builder/common/run_config.go#L663-L687
+// https://github.com/hashicorp/packer-plugin-amazon/blob/de72fcb21cab5bb56f7e974da3342ae3a586d9c5/builder/common/ssh.go#L42-L51
+// Not Ray's or SkyPilot's `use_internal_ips`, a flag whose default is the public address, and
+// which also picks the subnets that they launch in:
+// https://github.com/ray-project/ray/blob/a83e55e30263dec80b7d803a8c503aad995f4130/python/ray/autoscaler/_private/aws/config.py#L473-L487
+// https://github.com/skypilot-org/skypilot/blob/052914aaccb29a9a2364dd73654f2e61f0af42a0/sky/provision/aws/instance.py#L690-L691
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Interface {
+    /// Its address in its subnet, which a machine in its VPC reaches.
+    #[default]
+    PrivateIp,
+    /// The public IPv4 address that EC2 gives it at each start, which a machine elsewhere reaches
+    /// from an address that `deploy/aws`'s `ssh_from` lists.
+    PublicIp,
+}
+
+impl Interface {
+    /// The address, as a message names it, such as `private address`.
+    pub(crate) fn address(self) -> &'static str {
+        match self {
+            Self::PrivateIp => "private address",
+            Self::PublicIp => "public address",
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -87,6 +122,7 @@ pub(crate) enum Find {
 struct ControllerTable {
     region: Option<aws::Region>,
     address: Option<crate::controller::Address>,
+    ssh_interface: Option<Interface>,
     modal: Option<ClientModal>,
 }
 
@@ -95,12 +131,23 @@ impl Controller {
         let ControllerTable {
             region,
             address,
+            ssh_interface,
             modal,
         } = table;
-        let find = match (region, address) {
-            (Some(region), None) => Find::Ec2 { region },
-            (None, Some(address)) => Find::Address(address),
-            (Some(_), Some(_)) | (None, None) => {
+        let find = match (region, address, ssh_interface) {
+            (Some(region), None, interface) => Find::Ec2 {
+                region,
+                interface: interface.unwrap_or_default(),
+            },
+            (None, Some(address), None) => Find::Address(address),
+            (None, Some(_), Some(_)) => {
+                return Err(format!(
+                    "`[controllers.{name}]` names `ssh_interface` beside `address`, but only a \
+                     controller that deploy/aws made has addresses to choose from: remove \
+                     `ssh_interface`"
+                ));
+            }
+            (Some(_), Some(_), _) | (None, None, _) => {
                 return Err(format!(
                     "`[controllers.{name}]` names both or neither of `region` and `address`: name \
                      the `region` of a controller that deploy/aws made, or the `address` of one \

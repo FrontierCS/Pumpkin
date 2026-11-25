@@ -33,6 +33,7 @@ module "pumpkin" {
   vpc_id           = "vpc-…"
   subnet_id        = "subnet-…"
   modal_workspaces = ["ac-alice", "ac-bob"] # alice's and bob's workspaces, who run roles on Modal
+  ssh_from         = ["203.0.113.7/32"]     # bob's machine, in another VPC, by its Elastic IP
   members = {
     alice = ["ssh-ed25519 AAAA… alice-laptop", "ssh-ed25519 AAAA… alice-desk"]
     bob   = ["ssh-ed25519 AAAA… bob"]

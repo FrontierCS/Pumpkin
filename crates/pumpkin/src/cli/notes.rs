@@ -911,9 +911,19 @@ $HOME/.config/pumpkin/ssh/.",
                 literal: "region",
                 about: "The region that deploy/aws was applied in, for a controller that \
                         deploy/aws made. The client finds it there by its tag, starts it if it \
-                        is stopped, and reaches it at its private address. The machine is in the \
-                        controller's VPC, or reaches it through a VPN that translates its \
-                        addresses into the VPC's.",
+                        is stopped, and reaches it at the address that `ssh_interface` names.",
+                keys: &[],
+            },
+            Row {
+                literal: "ssh_interface",
+                about: "Which address of a controller that deploy/aws made the client reaches \
+                        its sshd at, as each command reads it from EC2. `private_ip`, the \
+                        default, is its private address, which a machine in the controller's VPC \
+                        reaches, or one behind a VPN that translates its addresses into the \
+                        VPC's. `public_ip` is the public IPv4 address that EC2 gives it at each \
+                        start, which a machine reaches from an address that deploy/aws's \
+                        `ssh_from` lists. A configuration that names `address` names no \
+                        `ssh_interface`.",
                 keys: &[],
             },
             Row {

@@ -25,7 +25,8 @@ const FAILURE_KEPT: Duration = super::AGAIN[1];
 #[derive(Deserialize, Serialize)]
 #[serde(untagged)]
 pub(super) enum Located {
-    /// Its EC2 instance, and the private address at which its `sshd` answered, at port 22.
+    /// Its EC2 instance, and its address that the configuration's `ssh_interface` names, at
+    /// which its `sshd` answered, at port 22.
     Ec2 { instance: String, address: IpAddr },
     /// The address that the configuration names.
     Address(Address),

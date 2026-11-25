@@ -796,7 +796,8 @@ fn target_refusals() {
         )
     );
     scratch.write("misnamed.toml", &misnamed);
-    // Both or neither of `region` and `address`, and an address that `ssh` would take as an option.
+    // Both or neither of `region` and `address`, an address that `ssh` would take as an option,
+    // and an address with the choice of an EC2 controller's.
     let named = fs::read_to_string(&config).unwrap();
     let region = "region = \"us-west-1\"";
     let finds = [
@@ -805,6 +806,10 @@ fn target_refusals() {
         (
             "optional.toml",
             "address = \"-oProxyCommand=true:22\"".to_owned(),
+        ),
+        (
+            "interface.toml",
+            "address = \"lab:2222\"\nssh_interface = \"public_ip\"".to_owned(),
         ),
         (
             "modal.toml",
@@ -931,6 +936,9 @@ fn target_refusals() {
             2 | address = "-oProxyCommand=true:22"
               |           ^^^^^^^^^^^^^^^^^^^^^^^^
             `-oProxyCommand=true:22` is not a controller's address: give its host and the port of its `sshd`, such as `lab.example.org:2222` or `192.0.2.1:2222`
+            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --config ../interface.toml
+            exit status: Some(1)
+            pumpkin: ../interface.toml: `[controllers.alice]` names `ssh_interface` beside `address`, but only a controller that deploy/aws made has addresses to choose from: remove `ssh_interface`
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --config ../modal.toml
             exit status: Some(1)
             pumpkin: ../modal.toml: `[controllers.alice]` names `modal` beside `address`, but a Modal provider needs a controller that deploy/aws made: remove `[controllers.alice.modal]`

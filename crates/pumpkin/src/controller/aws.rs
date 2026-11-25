@@ -1,5 +1,5 @@
 //! Finding a controller's EC2 instance by its tag, starting it, and waiting until its `sshd`
-//! answers at its private address.
+//! answers at the address that the configuration's `ssh_interface` names.
 
 use std::fs::{self, DirBuilder};
 use std::net::{IpAddr, SocketAddr, TcpStream};
@@ -17,6 +17,7 @@ use stdx::process::{self, Echo, Environment, Run};
 use stdx::{Context as _, Deadline};
 
 use super::{Located, Name, SHORT_TIMEOUT};
+use crate::config::Interface;
 use crate::iam::CLIENT;
 use crate::say;
 
@@ -29,8 +30,9 @@ const START_TIMEOUT: Duration = Duration::from_mins(10);
 
 const START_POLL: Duration = Duration::from_secs(5);
 
-// How long a probe of `sshd` waits to connect. Inside the controller's VPC a connection takes
-// milliseconds, so a longer wait would only delay the next probe. SkyPilot's:
+// How long a probe of `sshd` waits to connect. A connection takes milliseconds inside the
+// controller's VPC, and under a tenth of a second from another region of the same continent to its
+// public address, so a longer wait would only delay the next probe. SkyPilot's:
 // https://github.com/skypilot-org/skypilot/blob/052914aaccb29a9a2364dd73654f2e61f0af42a0/sky/provision/provisioner.py#L500-L501
 const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -55,6 +57,7 @@ struct Instance {
     /// When it last started, as RFC 3339.
     launch_time: String,
     private_ip_address: Option<IpAddr>,
+    public_ip_address: Option<IpAddr>,
 }
 
 #[derive(Deserialize)]
@@ -105,8 +108,8 @@ pub(super) fn kept() -> Result<PathBuf, String> {
 }
 
 /// Finds controller `name` in `region` by its tag, starts it if it is stopped, and waits until its
-/// `sshd` answers, and returns where it is.
-pub(super) fn find(region: &Region, name: &Name) -> Result<Located, String> {
+/// `sshd` answers at its address that `interface` names, and returns where it is.
+pub(super) fn find(region: &Region, name: &Name, interface: Interface) -> Result<Located, String> {
     let cli = Cli::connect(region.clone())?;
     let live = |instance: &Instance| live(&instance.state.name);
     let found: Vec<Instance> = instances(&cli, &CLIENT.describe, &tagged(name))?;
@@ -118,7 +121,7 @@ pub(super) fn find(region: &Region, name: &Name) -> Result<Located, String> {
             region.as_str()
         ));
     };
-    ready(&cli, name, &instance.id)
+    ready(&cli, name, &instance.id, interface)
 }
 
 /// The filter of `aws ec2 describe-instances` that matches the instances of controller `name` by
@@ -153,13 +156,13 @@ pub(crate) fn instances<T: DeserializeOwned>(
         .collect())
 }
 
-fn ready(cli: &Cli, name: &Name, id: &str) -> Result<Located, String> {
+fn ready(cli: &Cli, name: &Name, id: &str, interface: Interface) -> Result<Located, String> {
     let by = Deadline::after(START_TIMEOUT);
     let mut started = None;
     loop {
         let instance = instance(cli, name, id)?;
         match instance.state.name.as_str() {
-            "running" => return answering(name, instance, started),
+            "running" => return answering(name, instance, interface, started),
             "stopped" if started.is_none() => {
                 say(format_args!(
                     "starting controller `{name}`, {id}, which is stopped"
@@ -188,15 +191,32 @@ fn ready(cli: &Cli, name: &Name, id: &str) -> Result<Located, String> {
 }
 
 /// The state that EC2 gives instance `id` of controller `name`, as it names it, such as `running`
-/// or `stopped`.
-pub(super) fn state(cli: &Cli, name: &Name, id: &str) -> Result<String, String> {
-    instance(cli, name, id).map(|instance| instance.state.name)
+/// or `stopped`, and the instance's address that `interface` names, if it has one now.
+pub(super) fn state(
+    cli: &Cli,
+    name: &Name,
+    id: &str,
+    interface: Interface,
+) -> Result<(String, Option<IpAddr>), String> {
+    let instance = instance(cli, name, id)?;
+    let address = instance.address(interface);
+    Ok((instance.state.name, address))
 }
 
 /// Starts instance `id`, as `start-instances` does: one that runs or is starting is left so.
 pub(super) fn start(cli: &Cli, id: &str) -> Result<(), String> {
     let start = ["--instance-ids", id];
     cli.run(&CLIENT.start, &start, Bound::Call).map(drop)
+}
+
+impl Instance {
+    /// Its address that `interface` names, if it has one now.
+    fn address(&self, interface: Interface) -> Option<IpAddr> {
+        match interface {
+            Interface::PrivateIp => self.private_ip_address,
+            Interface::PublicIp => self.public_ip_address,
+        }
+    }
 }
 
 fn instance(cli: &Cli, name: &Name, id: &str) -> Result<Instance, String> {
@@ -207,20 +227,25 @@ fn instance(cli: &Cli, name: &Name, id: &str) -> Result<Instance, String> {
     })
 }
 
-/// Waits until the `sshd` of `instance`, which runs, answers at its private address, until
-/// `START_TIMEOUT` after its launch, and says how long that took if this command `started` it.
-fn answering(name: &Name, instance: Instance, started: Option<Instant>) -> Result<Located, String> {
+/// Waits until the `sshd` of `instance`, which runs, answers at its address that `interface`
+/// names, until `START_TIMEOUT` after its launch, and says how long that took if this command
+/// `started` it.
+fn answering(
+    name: &Name,
+    instance: Instance,
+    interface: Interface,
+    started: Option<Instant>,
+) -> Result<Located, String> {
+    let address = instance.address(interface);
     let Instance {
         id,
         state: _,
         launch_time,
-        private_ip_address,
+        private_ip_address: _,
+        public_ip_address: _,
     } = instance;
-    let Some(address) = private_ip_address else {
-        return Err(format!(
-            "controller `{name}`, {id}, runs with no private address: expected the one of its \
-             subnet that `deploy/aws` gives it"
-        ));
+    let Some(address) = address else {
+        return Err(unaddressed(name, &id, interface));
     };
     let launched: Timestamp = launch_time.parse().map_err(|error| {
         format!(
@@ -246,31 +271,58 @@ fn answering(name: &Name, instance: Instance, started: Option<Instant>) -> Resul
         };
         if by.remaining().is_none() {
             return Err(format!(
-                "controller `{name}`, {id}, didn't answer SSH at its private address, {address}, \
-                 in the {} s it was waited for: {error}: {}",
+                "controller `{name}`, {id}, didn't answer SSH at its {}, {address}, in the {} s \
+                 it was waited for: {error}: {}",
+                interface.address(),
                 waiting.elapsed().as_secs(),
-                unanswered(&error)
+                unanswered(&error, interface)
             ));
         }
         thread::sleep(START_POLL);
     }
 }
 
-/// Why `sshd` of a controller that runs didn't answer a probe ([`answers`]) that failed with
-/// `error`, and what to do.
-pub(super) fn unanswered(error: &io::Error) -> &'static str {
-    match error.kind() {
+/// Why controller `name`, instance `id`, which runs with no address that `interface` names, can't
+/// be reached, and what was expected.
+pub(super) fn unaddressed(name: &Name, id: &str, interface: Interface) -> String {
+    let expected = match interface {
+        Interface::PrivateIp => "the one of its subnet that `deploy/aws` gives it",
+        Interface::PublicIp => "the one that EC2 gives it at each start, as `deploy/aws` asks",
+    };
+    format!(
+        "controller `{name}`, {id}, runs with no {}: expected {expected}",
+        interface.address()
+    )
+}
+
+/// Why `sshd` of a controller that runs didn't answer a probe ([`answers`]) at its address that
+/// `interface` names, which failed with `error`, and what to do.
+pub(super) fn unanswered(error: &io::Error, interface: Interface) -> &'static str {
+    match (error.kind(), interface) {
         // A security group drops what it doesn't admit, so a refusal is the instance's.
-        io::ErrorKind::ConnectionRefused => {
+        (io::ErrorKind::ConnectionRefused, _) => {
             "nothing listens there, as when the controller is stopping though EC2 says it runs, \
              or its `sshd` is down: run the command again shortly"
         }
-        io::ErrorKind::TimedOut
-        | io::ErrorKind::HostUnreachable
-        | io::ErrorKind::NetworkUnreachable => {
+        (
+            io::ErrorKind::TimedOut
+            | io::ErrorKind::HostUnreachable
+            | io::ErrorKind::NetworkUnreachable,
+            Interface::PrivateIp,
+        ) => {
             "this machine doesn't reach the controller from an address of the controller's VPC: \
              run the command from a machine in that VPC, or through a VPN that translates its \
              addresses into the VPC's"
+        }
+        (
+            io::ErrorKind::TimedOut
+            | io::ErrorKind::HostUnreachable
+            | io::ErrorKind::NetworkUnreachable,
+            Interface::PublicIp,
+        ) => {
+            "this machine doesn't reach the controller from an address that deploy/aws's \
+             `ssh_from` lists: ask its admin to list this machine's public IPv4 address there, \
+             and to apply"
         }
         _ => "run the command again",
     }

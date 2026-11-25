@@ -9,7 +9,7 @@ output "client_config" {
 }
 
 # What a member's machine needs to reach the controller: find it by its tag and start it, then
-# reach its `sshd` from its VPC with a key that `members` lists. The machine pushes no key, as
+# reach its `sshd` from its VPC or from `ssh_from` with a key that `members` lists. The machine pushes no key, as
 # the admin's list is the only way in.
 resource "aws_iam_policy" "client" {
   name        = "${local.prefix}-client"
