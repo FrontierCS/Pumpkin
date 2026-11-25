@@ -25,6 +25,7 @@ use stdx::time::{Clock as _, Machine};
 
 pub mod edge;
 pub mod http;
+pub mod relayed;
 pub mod suite;
 mod test_dir;
 

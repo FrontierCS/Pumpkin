@@ -1,5 +1,6 @@
 //! The meeting of a sandbox whose `sandboxd` listens: the gateway dials it, at the endpoint that
-//! its create gives.
+//! its create gives. A companion listens behind its sandbox's relay, where the gateway reaches it
+//! within the connection that it dials ([`relayed`]).
 
 use std::fs::File;
 use std::io::{self, Read};
@@ -7,6 +8,7 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 use std::{fmt, thread};
 
+use relayed::Within;
 use schema::sandbox::{
     Endpoint, HELLO_TIMEOUT, Hello, Listening, REGISTRATION_GRANT_BYTES, RegistrationGrant,
 };
@@ -15,6 +17,8 @@ use stdx::time::{Clock, Machine};
 
 use super::{Meeting, Met, POLL, Registration, read_hello, refuse, unstopped};
 use crate::{Bound, Connection, context};
+
+mod relayed;
 
 const RANDOM: &str = "/dev/urandom";
 
@@ -35,6 +39,8 @@ const REDIAL_MOST: Duration = Duration::from_secs(15);
 /// a slow link, makes the accept wait, and only the deadline fails it, saying why the last dial
 /// failed. TLS that the client refuses, as a certificate it doesn't trust for the endpoint's name,
 /// and a hello that the gateway refuses, fail it at once.
+///
+/// A companion listens behind its sandbox's relay ([`Dialer::relayed`]).
 #[derive(Debug)]
 pub struct Dialer {
     client: tls::Client,
@@ -53,27 +59,35 @@ impl Dialer {
         let unreached = Unreached {
             client: self.client.clone(),
             grant: grant.clone(),
+            within: None,
         };
         Ok((Listening { grant }, unreached))
     }
 }
 
-/// A grant issued for a sandbox whose endpoint isn't known yet.
+/// A grant issued for a sandbox, or for a companion, whose endpoint isn't known yet.
 #[derive(Debug)]
 pub struct Unreached {
     client: tls::Client,
     grant: RegistrationGrant,
+    within: Option<Within>,
 }
 
 impl Unreached {
-    /// Registers the endpoint where the sandbox listens.
+    /// Registers the endpoint where the sandbox listens. For a companion, that is the endpoint
+    /// of its sandbox's relay.
     pub fn at(self, endpoint: Endpoint) -> Registration {
-        let Self { client, grant } = self;
+        let Self {
+            client,
+            grant,
+            within,
+        } = self;
         Registration {
             meeting: Meeting::Dial(Dialed {
                 client,
                 grant,
                 endpoint,
+                within,
             }),
         }
     }
@@ -84,13 +98,23 @@ pub(super) struct Dialed {
     client: tls::Client,
     pub(super) grant: RegistrationGrant,
     endpoint: Endpoint,
+    // For a companion, what reaches it within a connection to `endpoint`, its sandbox's relay.
+    within: Option<Within>,
 }
 
 const LISTENING: &str = "its sandboxd to listen there";
 
 impl Dialed {
+    // What the gateway dials, as a message names it.
+    fn dialed(&self) -> String {
+        match &self.within {
+            None => format!("the sandbox at {}", self.endpoint),
+            Some(within) => within.dialed(&self.endpoint),
+        }
+    }
+
     fn awaited(&self) -> impl fmt::Display {
-        format!("the gateway reached the sandbox at {}", self.endpoint)
+        format!("the gateway reached {}", self.dialed())
     }
 
     pub(super) fn connected(
@@ -98,13 +122,13 @@ impl Dialed {
         by: Bound<'_, impl Clock>,
         stopped: &dyn Fn() -> bool,
     ) -> io::Result<Met> {
-        let endpoint = &self.endpoint;
+        let dialed = self.dialed();
         let late = |failed: &dyn fmt::Display| {
             io::Error::new(
                 io::ErrorKind::TimedOut,
                 format!(
-                    "the gateway didn't reach the sandbox at {endpoint} by the deadline: \
-                     {failed}: expected its sandboxd to listen there while the deadline lasts"
+                    "the gateway didn't reach {dialed} by the deadline: {failed}: expected its \
+                     sandboxd to listen there while the deadline lasts"
                 ),
             )
         };
@@ -145,8 +169,8 @@ impl Dialed {
         let stream = self.connect(deadline, stopped)?;
         unstopped(stopped, self.awaited(), LISTENING).map_err(DialError::Never)?;
         let secured = self.client.connect(stream, endpoint.host(), deadline);
-        let connection = match secured {
-            Ok(stream) => Connection::Tls(stream),
+        let secured = match secured {
+            Ok(stream) => stream,
             // TLS's own failures are `InvalidData`, a certificate that isn't the endpoint's among
             // them: another dial would meet the same.
             Err(error) if error.kind() == io::ErrorKind::InvalidData => {
@@ -156,6 +180,16 @@ impl Dialed {
             }
             Err(error) => return Err(DialError::Again(error)),
         };
+        let session = match &self.within {
+            None => secured,
+            Some(within) => {
+                unstopped(stopped, self.awaited(), LISTENING).map_err(DialError::Never)?;
+                // The relay reads `secured`, so nothing of the session goes there: the hello is
+                // read, and its answer sent, on the companion's own stream alone.
+                within.connect(secured, endpoint, deadline)?
+            }
+        };
+        let connection = Connection::Tls(session);
         match read_hello(&connection, by, stopped) {
             Ok((Hello { gpus }, None)) => Ok(Met { connection, gpus }),
             Ok((_, Some(_))) => {

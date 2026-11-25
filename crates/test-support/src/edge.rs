@@ -136,6 +136,23 @@ pub fn front(target: SocketAddr) -> u16 {
     port
 }
 
+/// Listens in front of `serve`, which gets each connection that the stand-in carries on, one at
+/// a time. Returns the port, as [`front`] does.
+///
+/// # Panics
+///
+/// Panics if it can't listen.
+pub fn front_of(mut serve: impl FnMut(TcpStream) + Send + 'static) -> u16 {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = front(listener.local_addr().unwrap());
+    thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            serve(stream);
+        }
+    });
+    port
+}
+
 /// Ends the TLS of `stream`, and copies it both ways with a connection to `target`.
 fn relay(stream: TcpStream, target: SocketAddr) {
     let Ok(secured) = server().accept(stream, Deadline::after(HUNG)) else {

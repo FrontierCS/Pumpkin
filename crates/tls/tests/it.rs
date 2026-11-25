@@ -289,19 +289,6 @@ fn refused_peers() {
     );
 }
 
-/// The port of a stand-in edge whose far end is `serve`, which gets each connection that the edge
-/// carries to it.
-fn behind_edge(mut serve: impl FnMut(TcpStream) + Send + 'static) -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = edge::front(listener.local_addr().unwrap());
-    thread::spawn(move || {
-        for stream in listener.incoming() {
-            serve(stream.unwrap());
-        }
-    });
-    port
-}
-
 /// Runs `client`'s TLS for the server `name` within the TLS of the edge at `port`. Returns what
 /// `scenario` says of its stream, or why it has none.
 fn within(
@@ -330,7 +317,7 @@ fn read(mut stream: &Stream, expected: &str) -> String {
 fn within_another_connection() {
     let (heard, server_heard) = mpsc::channel();
     // The server within answers, then says what the client sent before it closed.
-    let answering = behind_edge(move |stream| {
+    let answering = edge::front_of(move |stream| {
         let Ok(secured) = edge::other_server().accept(stream, Deadline::after(HUNG)) else {
             return;
         };
@@ -340,9 +327,9 @@ fn within_another_connection() {
         heard.send(read.map_err(|error| error.kind())).unwrap();
     });
     // It closes once the handshake's first bytes have come, so the client has sent them.
-    let closing = behind_edge(|mut stream| drop(stream.read(&mut [0])));
+    let closing = edge::front_of(|mut stream| drop(stream.read(&mut [0])));
     // It cuts its TCP connection, below its TLS, once the client has what it sent.
-    let cutting = behind_edge(|stream| {
+    let cutting = edge::front_of(|stream| {
         let tcp = stream.try_clone().unwrap();
         let secured = edge::other_server().accept(stream, Deadline::after(HUNG));
         let secured = secured.unwrap();

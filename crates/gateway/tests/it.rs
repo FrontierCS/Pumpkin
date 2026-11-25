@@ -3,7 +3,8 @@
 //! op's reply or a model response's end, for a while or for the gateway to hang up, and then ends
 //! the session: it sends what a buggy `sandboxd` might. Other fakes open their sessions with first
 //! frames of their own. An accept that is stopped takes no connection. A dialer's fakes listen
-//! behind the stand-in TLS edge.
+//! behind the stand-in TLS edge. A companion's fakes serve TLS of their own behind a relay there,
+//! which carries them or doesn't.
 #![expect(
     clippy::unwrap_used,
     clippy::panic,
@@ -11,6 +12,7 @@
 )]
 
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::io::{Read as _, Write};
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::num::NonZeroU64;
@@ -19,7 +21,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime};
@@ -28,21 +30,23 @@ use std::{fs, iter, panic};
 use expect_test::{Expect, expect};
 use gateway::{
     Arrival, Dialer, GatewayAddress, IncomingModelRequest, IncomingOp, Listener, Process, Put,
-    Registration, Sockets, Unattested,
+    Registration, Sockets, Unattested, Unreached,
 };
 use schema::frame;
-use schema::ir::{AbsolutePath, Argv, Env, Name, Resources};
+use schema::ir::{AbsolutePath, Argv, CompanionName, Env, Name, Resources};
 use schema::sandbox::op::{OpReply, OpsReply};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
     Endpoint, HELLO_TIMEOUT, Hello, HelloReply, Launch, Listening, MAX_HELLO_BYTES,
     MAX_MODEL_REQUEST_BYTES, MAX_MODEL_REQUESTS_IN_FLIGHT, MAX_OP_PAYLOAD_BYTES, OpPayloadLimit,
-    PROTOCOL_VERSION, PrivateDial, RelativePath, SOCKET_NAME, SocketDial, ToSandbox, file_mode,
+    PROTOCOL_VERSION, PrivateDial, RegistrationGrant, RelativePath, Relayed, SOCKET_NAME,
+    SocketDial, TlsIdentity, ToSandbox, file_mode, read_route,
 };
 use serde_json::{Value, json};
 use stdx::Deadline;
 use stdx::time::{self, Clock, Machine};
-use test_support::{HUNG, TestDir, hung};
+use test_support::relayed::Carried;
+use test_support::{HUNG, TestDir, edge, hung, relayed};
 
 type Session = gateway::Session<Still>;
 
@@ -102,6 +106,11 @@ impl Still {
             }
             marker.exists()
         }))
+    }
+
+    // Its event is `reached`, which a fake sets.
+    fn until(reached: Arc<AtomicBool>) -> Self {
+        Self(Arc::new(move || reached.load(Ordering::Relaxed)))
     }
 
     // Its event is its second read.
@@ -1963,4 +1972,320 @@ fn listening(closes_first: bool, (hello, body): Said) -> (u16, JoinHandle<Option
             .map(|(answer, _)| answer)
     });
     (port, sandbox)
+}
+
+// The deadline of an accept whose peer stalls, on a `Still` whose event is the stall, and so the
+// bound of each of its dials. A dial that ends before the stall is made again.
+const STALL_BOUND: Duration = Duration::from_millis(250);
+
+// What a fake companion says once a connection has its TLS: a hello, or nothing, having marked
+// that it has come so far.
+enum Says {
+    Hello(Said),
+    Nothing(Arc<AtomicBool>),
+}
+
+fn companion_named(name: &str) -> CompanionName {
+    CompanionName::try_from(name.to_owned()).unwrap()
+}
+
+fn relayed_to(dialer: &Dialer, name: &str) -> (RegistrationGrant, TlsIdentity, Unreached) {
+    let (Relayed { grant, identity }, unreached) = dialer.relayed(&companion_named(name)).unwrap();
+    (grant, identity, unreached)
+}
+
+/// A fake companion named `name`, which serves `server`'s TLS to each connection, then says
+/// `says`, and sends what the gateway answered. Accepted, it answers as [`named`].
+fn companion(
+    server: tls::Server,
+    name: &'static str,
+    says: Says,
+) -> (SocketAddr, Receiver<Option<HelloReply>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (heard, answers) = mpsc::channel();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = server.accept(stream.unwrap(), Deadline::after(HUNG)) else {
+                continue;
+            };
+            let (hello, body) = match &says {
+                Says::Hello(said) => said,
+                Says::Nothing(reached) => {
+                    reached.store(true, Ordering::Relaxed);
+                    // Silent until the gateway ends the connection.
+                    let _ = (&stream).read(&mut [0]);
+                    continue;
+                }
+            };
+            frame::write(&mut &stream, hello, body).unwrap();
+            let answer = frame::read::<HelloReply>(&mut &stream).ok().flatten();
+            let answer = answer.map(|(answer, _)| answer);
+            let accepted = matches!(answer, Some(HelloReply::Accepted { .. }));
+            // Nothing receives it once the case has its outcome.
+            let _ = heard.send(answer);
+            if !accepted {
+                continue;
+            }
+            let Ok(Some((request, _))) = frame::read::<ToSandbox>(&mut &stream) else {
+                continue;
+            };
+            for message in named(stream_of(&request).unwrap(), name) {
+                frame::write(&mut &stream, &message, &[]).unwrap();
+            }
+            while let Ok(Some(_)) = frame::read::<ToSandbox>(&mut &stream) {}
+        }
+    });
+    (address, answers)
+}
+
+/// Whether `carried` holds none of the bytes of a session whose grant is `grant`. Those are the
+/// grant's digits, and what each frame of the session's holds.
+fn unread(carried: &[&[u8]], grant: &RegistrationGrant) -> bool {
+    let session = [&grant.digits(), "\"type\"", "\"version\"", "I am"];
+    let holds = |needle: &str| {
+        (carried.iter()).any(|carried| {
+            carried
+                .windows(needle.len())
+                .any(|at| at == needle.as_bytes())
+        })
+    };
+    !session.into_iter().any(holds)
+}
+
+/// The outcome of the accept of `unreached` at the relay behind the edge's `port`.
+fn accepted<C: Clock>(
+    unreached: Unreached,
+    port: u16,
+    (clock, by): (&C, Duration),
+    stopped: bool,
+) -> String {
+    let (sender, _) = mpsc::channel();
+    let registration = unreached.at(endpoint(port));
+    let session = registration.accept((clock, by), None, false, sender, |a| a, || stopped);
+    let session = (session.map(drop)).map_err(|error| format!("{:?}: {error}", error.kind()));
+    format!("{session:?}").replace(&port.to_string(), "$PORT")
+}
+
+#[test]
+fn relayed_meetings() {
+    check(
+        |_| {
+            let dialer = Dialer::new(edge::client());
+            let met = ["scheduler", "swe-000"].map(|name| {
+                let (grant, identity, unreached) = relayed_to(&dialer, name);
+                let said = Says::Hello((json!(hello()), Vec::new()));
+                let (address, heard) = companion(relayed::server(&identity), name, said);
+                (name, grant, unreached, address, heard)
+            });
+            let behind =
+                (met.iter()).map(|(name, .., address, _)| (companion_named(name), *address));
+            let relay = relayed::relay(behind.collect());
+            let port = edge::front(relay.address);
+            let lines = met.map(|(name, grant, unreached, _, heard)| {
+                let session = accept_and_freeze(unreached.at(endpoint(port)), hung());
+                let Carried {
+                    to_companion,
+                    to_gateway,
+                } = relay.ended();
+                // Each way begins with a record of TLS's handshake, so the relay did carry it.
+                let tls = [&to_companion, &to_gateway].map(|sent| sent.starts_with(&[0x16, 0x03]));
+                let unread = unread(&[&to_companion, &to_gateway], &grant);
+                let granted = HelloReply::Accepted { grant: Some(grant) };
+                let presented = heard.recv_timeout(HUNG).unwrap() == Some(granted);
+                format!(
+                    "companion `{name}`, through its sandbox's relay: {session}; it heard its \
+                     grant: {presented}\n  the relay carried TLS each way: {tls:?}, and none of \
+                     the session's bytes: {unread}"
+                )
+            });
+            lines.to_vec()
+        },
+        &expect![[r#"
+            companion `scheduler`, through its sandbox's relay: Other: I am scheduler; it heard its grant: true
+              the relay carried TLS each way: [true, true], and none of the session's bytes: true
+            companion `swe-000`, through its sandbox's relay: Other: I am swe-000; it heard its grant: true
+              the relay carried TLS each way: [true, true], and none of the session's bytes: true"#]],
+    );
+}
+
+/// A relay behind an edge, which carries to one fake companion, named `name`. That one serves
+/// `server`'s TLS and says `says`. Returns the edge's port, the relay and what the companion heard.
+fn relayed_behind(
+    name: &'static str,
+    server: tls::Server,
+    says: Says,
+) -> (u16, relayed::Relay, Receiver<Option<HelloReply>>) {
+    let (address, heard) = companion(server, name, says);
+    let relay = relayed::relay(BTreeMap::from([(companion_named(name), address)]));
+    (edge::front(relay.address), relay, heard)
+}
+
+/// Waits for a connection that `relay` carried to end, and says whether it is [`unread`].
+fn ended_unread(relay: &relayed::Relay, grant: &RegistrationGrant) -> bool {
+    let Carried {
+        to_companion,
+        to_gateway,
+    } = relay.ended();
+    unread(&[&to_companion, &to_gateway], grant)
+}
+
+#[test]
+fn untrusted_companions() {
+    check(
+        |_| {
+            let dialer = Dialer::new(edge::client());
+            let said = || Says::Hello((json!(hello()), Vec::new()));
+            // Each accept dials once, as a companion that it can't trust fails it for good.
+            let refused = |name: &'static str, server: tls::Server| {
+                let (grant, _, unreached) = relayed_to(&dialer, name);
+                let (port, relay, _) = relayed_behind(name, server, said());
+                let outcome = accepted(unreached, port, (&Machine, hung()), false);
+                assert!(ended_unread(&relay, &grant));
+                outcome
+            };
+            let (_, another, _) = relayed_to(&dialer, "swe-000");
+            let foreign = refused("scheduler", relayed::server(&another));
+            let (_, again, _) = relayed_to(&dialer, "scheduler");
+            let rekeyed = refused("scheduler", relayed::server(&again));
+            let public = refused(edge::OTHER_NAME, edge::other_server());
+            vec![
+                format!("the certificate issued for another companion: {foreign}"),
+                format!("one issued for its name later, of another key: {rekeyed}"),
+                format!("one for its name that the dialer's own roots vouch for: {public}"),
+            ]
+        },
+        &expect![[r#"
+            the certificate issued for another companion: Err("InvalidData: the gateway can't trust companion `scheduler` behind the relay at localhost:$PORT: the TLS handshake failed: invalid peer certificate: UnknownIssuer: expected TLS 1.3 from `scheduler`, with a certificate trusted for it")
+            one issued for its name later, of another key: Err("InvalidData: the gateway can't trust companion `scheduler` behind the relay at localhost:$PORT: the TLS handshake failed: invalid peer certificate: BadSignature: expected TLS 1.3 from `scheduler`, with a certificate trusted for it")
+            one for its name that the dialer's own roots vouch for: Err("InvalidData: the gateway can't trust companion `companion` behind the relay at localhost:$PORT: the TLS handshake failed: invalid peer certificate: UnknownIssuer: expected TLS 1.3 from `companion`, with a certificate trusted for it")"#]],
+    );
+}
+
+#[test]
+fn answering_relay() {
+    check(
+        |_| {
+            let dialer = Dialer::new(edge::client());
+            let (grant, _, unreached) = relayed_to(&dialer, "scheduler");
+            // The relay says a hello of its own, in the clear, and sends on what it then hears.
+            let (heard, answers) = mpsc::channel();
+            let port = edge::front_of(move |mut stream| {
+                read_route(&mut stream).unwrap();
+                frame::write(&mut stream, &json!(hello()), &[]).unwrap();
+                let mut answered = Vec::new();
+                let _ = stream.read_to_end(&mut answered);
+                heard.send(answered).unwrap();
+            });
+            let answering = accepted(unreached, port, (&Machine, hung()), false);
+            let unread = unread(&[&answers.recv_timeout(HUNG).unwrap()], &grant);
+            vec![
+                format!("a relay that answers for the companion: {answering}"),
+                format!("  it heard none of the session's bytes: {unread}"),
+            ]
+        },
+        &expect![[r#"
+            a relay that answers for the companion: Err("InvalidData: the gateway can't trust companion `scheduler` behind the relay at localhost:$PORT: the TLS handshake failed: received corrupt message of type InvalidContentType: expected TLS 1.3 from `scheduler`, with a certificate trusted for it")
+              it heard none of the session's bytes: true"#]],
+    );
+}
+
+#[test]
+fn closing_relays() {
+    check(
+        |_| {
+            let dialer = Dialer::new(edge::client());
+            // An accept whose deadline passes once its first dial has failed.
+            let once = |port: u16| {
+                let (_, _, unreached) = relayed_to(&dialer, "scheduler");
+                accepted(unreached, port, (&Still::after_a_read(), EVENT), false)
+            };
+            let unrouted = once(edge::front_of(drop));
+            let refused = once(edge::front_of(|mut stream| {
+                read_route(&mut stream).unwrap();
+            }));
+            // The relay carries the handshake's start, and five bytes of a TLS server's answer.
+            let said = Says::Hello((json!(hello()), Vec::new()));
+            let (address, _) = companion(edge::other_server(), "scheduler", said);
+            let cut = once(edge::front_of(move |mut stream| {
+                read_route(&mut stream).unwrap();
+                let mut companion = TcpStream::connect(address).unwrap();
+                let mut start = [0; 5];
+                stream.read_exact(&mut start).unwrap();
+                companion.write_all(&start).unwrap();
+                let mut rest = stream.try_clone().unwrap();
+                let mut to_companion = companion.try_clone().unwrap();
+                thread::spawn(move || std::io::copy(&mut rest, &mut to_companion));
+                companion.read_exact(&mut start).unwrap();
+                stream.write_all(&start).unwrap();
+                stream.shutdown(Shutdown::Both).unwrap();
+                companion.shutdown(Shutdown::Both).unwrap();
+            }));
+            vec![
+                format!("a relay that closes before the route: {unrouted}"),
+                format!("one that closes at the route: {refused}"),
+                format!("one that closes in the companion's handshake: {cut}"),
+            ]
+        },
+        &expect![[r#"
+            a relay that closes before the route: Err("TimedOut: the gateway didn't reach companion `scheduler` through its sandbox's relay at localhost:$PORT by the deadline: its last dial failed: the relay at localhost:$PORT closed the connection before the TLS handshake with companion `scheduler` was done: expected its sandboxd to listen there while the deadline lasts")
+            one that closes at the route: Err("TimedOut: the gateway didn't reach companion `scheduler` through its sandbox's relay at localhost:$PORT by the deadline: its last dial failed: the relay at localhost:$PORT closed the connection before the TLS handshake with companion `scheduler` was done: expected its sandboxd to listen there while the deadline lasts")
+            one that closes in the companion's handshake: Err("TimedOut: the gateway didn't reach companion `scheduler` through its sandbox's relay at localhost:$PORT by the deadline: its last dial failed: the relay at localhost:$PORT closed the connection before the TLS handshake with companion `scheduler` was done: expected its sandboxd to listen there while the deadline lasts")"#]],
+    );
+}
+
+/// What becomes of the accept of a companion that says `says` within its TLS, on `clock`, and
+/// what the companion heard.
+fn greeted<C: Clock>(
+    dialer: &Dialer,
+    says: Says,
+    (clock, by): (&C, Duration),
+) -> (String, Option<HelloReply>) {
+    let (grant, identity, unreached) = relayed_to(dialer, "scheduler");
+    let server = relayed::server(&identity);
+    let (port, relay, heard) = relayed_behind("scheduler", server, says);
+    let outcome = accepted(unreached, port, (clock, by), false);
+    assert!(ended_unread(&relay, &grant));
+    (outcome, heard.try_recv().ok().flatten())
+}
+
+#[test]
+fn unmet_companions() {
+    check(
+        |_| {
+            let dialer = Dialer::new(edge::client());
+            // The relay holds the connection and carries nothing, until the gateway ends it.
+            let (stalled, ended) = (Arc::new(AtomicBool::new(false)), mpsc::channel());
+            let (reached, (end, ends)) = (Arc::clone(&stalled), ended);
+            let port = edge::front_of(move |mut stream| {
+                read_route(&mut stream).unwrap();
+                reached.store(true, Ordering::Relaxed);
+                let _ = stream.read_to_end(&mut Vec::new());
+                let _ = end.send(());
+            });
+            let (_, _, unreached) = relayed_to(&dialer, "scheduler");
+            let clock = Still::until(stalled);
+            let uncarried = accepted(unreached, port, (&clock, STALL_BOUND), false);
+            ends.recv_timeout(HUNG).unwrap();
+            let (_, _, unreached) = relayed_to(&dialer, "scheduler");
+            let stopped = accepted(unreached, port, (&Machine, hung()), true);
+            let stalled = Arc::new(AtomicBool::new(false));
+            let clock = Still::until(Arc::clone(&stalled));
+            let (silent, _) = greeted(&dialer, Says::Nothing(stalled), (&clock, STALL_BOUND));
+            let later = (json!({ "version": PROTOCOL_VERSION + 1 }), Vec::new());
+            let (versioned, told) = greeted(&dialer, Says::Hello(later), (&Machine, hung()));
+            let told = matches!(told, Some(HelloReply::Refused { .. }));
+            vec![
+                format!("a relay that carries nothing: {uncarried}"),
+                format!("an accept that is stopped: {stopped}"),
+                format!("a companion that says no hello: {silent}"),
+                format!("one whose hello the gateway refuses: {versioned}; it was told: {told}"),
+            ]
+        },
+        &expect![[r#"
+            a relay that carries nothing: Err("TimedOut: the gateway didn't reach companion `scheduler` through its sandbox's relay at localhost:$PORT by the deadline: its last dial failed: companion `scheduler` behind the relay at localhost:$PORT: the TLS handshake wasn't done by its deadline: expected TLS 1.3 from `scheduler`, with a certificate trusted for it: expected its sandboxd to listen there while the deadline lasts")
+            an accept that is stopped: Err("Other: the accept was stopped before the gateway reached companion `scheduler` through its sandbox's relay at localhost:$PORT: expected its sandboxd to listen there before the stop")
+            a companion that says no hello: Err("TimedOut: the gateway didn't reach companion `scheduler` through its sandbox's relay at localhost:$PORT by the deadline: its last dial failed: the sandbox connected but sent no hello by the deadline: expected its sandboxd to send one as it connects, as a sandboxd built from the same Pumpkin does: expected its sandboxd to listen there while the deadline lasts")
+            one whose hello the gateway refuses: Err("InvalidData: the gateway refused the session: sandboxd speaks sandbox protocol <later version>: expected <version>, which this gateway speaks, as a sandboxd built from the same Pumpkin does"); it was told: true"#]],
+    );
 }
