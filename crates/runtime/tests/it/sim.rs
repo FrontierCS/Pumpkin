@@ -42,7 +42,7 @@ use std::time::Duration;
 
 use provider::{
     Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation,
-    Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
+    Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted, UnixTime,
 };
 use schema::frame;
 use schema::ir::{AbsolutePath, Argv, CpuModel, Image, Mode, Name, Sha256Digest};
@@ -217,6 +217,8 @@ struct State {
     modes: Vec<u32>,
     models: Vec<bool>,
     classes: Vec<Name>,
+    /// Each create's sandbox, by its name, and its hard end.
+    hard_ends: Vec<(String, UnixTime)>,
     published: Vec<String>,
     cpus: u64,
     reserved: Vec<Reserved>,
@@ -342,6 +344,7 @@ impl Sim {
                 modes: Vec::new(),
                 models: Vec::new(),
                 classes: Vec::new(),
+                hard_ends: Vec::new(),
                 published: Vec::new(),
                 cpus: 1 << 10,
                 reserved: Vec::new(),
@@ -474,6 +477,10 @@ impl Sim {
 
     pub(crate) fn classes(&self) -> Vec<Name> {
         self.state().classes.clone()
+    }
+
+    pub(crate) fn hard_ends(&self) -> Vec<(String, UnixTime)> {
+        self.state().hard_ends.clone()
     }
 
     pub(crate) fn published(&self) -> Vec<String> {
@@ -748,6 +755,7 @@ impl Sim {
         state.modes.push(mode);
         state.models.push(model);
         state.classes.push(create.class.clone());
+        (state.hard_ends).push((create.name.to_string(), create.hard_end));
         let sandbox = Sandbox {
             run: create.run.clone(),
             refusals,

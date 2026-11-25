@@ -113,7 +113,8 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         for target in self.workflow().work_targets() {
             let which = Which::Shared(target);
             let by = self.placed.startup(target.role());
-            let hard_end = self.unix_hard_end;
+            let collect_end = self.teardown_end();
+            let hard_end = self.unix_at(collect_end);
             let (resident, rx) = Resident::open();
             self.residents.insert(target, resident);
             let inbox = self.inbox.sender();
@@ -123,7 +124,6 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             let sandboxes = self.sandboxes;
             let bodies = self.bodies;
             let dir = self.dir.join(which.record_dir(self.workflow()));
-            let collect_end = self.teardown_end();
             thread::Builder::new()
                 .name(which.name().to_string())
                 .stack_size(bodies.stack_bytes())

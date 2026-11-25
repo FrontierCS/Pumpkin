@@ -235,7 +235,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         Ok(Child {
             which,
             deadlines,
-            hard_end: self.unix_hard_end,
+            hard_end: self.unix_at(deadlines.collect),
             dir,
             sandboxes: self.sandboxes,
             clock: self.clock.clone(),

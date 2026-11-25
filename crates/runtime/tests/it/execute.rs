@@ -249,6 +249,8 @@ enum Also {
     ChangedItem,
     Polls,
     Reaped,
+    /// Each sandbox's hard end, after the run's start.
+    HardEnds,
     /// A part of the records that nothing orders among the others, which the log shows apart
     /// from them, sorted.
     Racing(&'static str),
@@ -265,6 +267,7 @@ fn interruption(also: &[Also]) -> Option<At> {
         | Also::ChangedItem
         | Also::Polls
         | Also::Reaped
+        | Also::HardEnds
         | Also::Racing(_)
         | Also::File(_) => None,
     })
@@ -432,6 +435,10 @@ fn held(
         lines.push(format!("payloads hold: {payloads:?}"));
     }
     lines.extend(declared(name, record, providers));
+    let hard_ends = sandboxes_hard_ends(name, log, providers);
+    if also.contains(&Also::HardEnds) {
+        lines.extend(hard_ends);
+    }
     let outcome = fs::read_to_string(record.join("outcome.json")).unwrap();
     let (usage, finished) = outcome_holds(name, returned, &outcome, log);
     if let Some(finished) = finished {
@@ -721,6 +728,32 @@ fn sandboxes_hold(
         undeleted, left,
         "{name}: usage {usage} counts other sandboxes undeleted"
     );
+}
+
+// Each sandbox's hard end, as its create took it, after the run's start, which the log's first
+// record gives with the run's hard end. None is past the run's.
+fn sandboxes_hard_ends(name: &str, log: &[Value], providers: &[(&str, &Sim)]) -> Vec<String> {
+    let Some(started) = log.first().map(|first| &first["event"]) else {
+        return Vec::new();
+    };
+    let start = Duration::from_nanos(nanos(&started["unix_ns"]).unwrap());
+    let run_hard_end = Duration::from_nanos(nanos(&started["hard_end_ns"]).unwrap());
+    let mut lines = Vec::new();
+    for (_, provider) in providers {
+        for (sandbox, hard_end) in provider.hard_ends() {
+            let after = hard_end.since_epoch().saturating_sub(start);
+            assert!(
+                after <= run_hard_end,
+                "{name}: {sandbox}'s hard end is {after:?} after the run's start, past the run's \
+                 hard end, {run_hard_end:?}"
+            );
+            let seconds = after.as_secs();
+            lines.push(format!(
+                "{sandbox}'s hard end: {seconds} s after the run's start"
+            ));
+        }
+    }
+    lines
 }
 
 fn declared(name: &str, record: &Path, providers: &[(&str, &Sim)]) -> Vec<String> {
@@ -3808,6 +3841,40 @@ fn deep_returns() {
             {"actions":[{"kind":"finish"}],"at_ns":"0","event":{"job":3,"kind":"call_torn_down"},"observed_ns":"0","seq":27}
             its last record came before the agent's teardown was to end"#]],
     );
+}
+
+// A sandbox of the work phase ends by the agents' teardown's end: the agent's, a call's target's
+// and a runner's that the agent leases. The final call's target ends by the run's hard end.
+#[test]
+fn hard_ends() {
+    let argv = [
+        "ops",
+        "call train 6",
+        "await 0 completed",
+        "gpu.open",
+        "await_lease gpu 0 ready",
+        "gpu.close 0",
+        "await_lease gpu 0 closed",
+        "call submit 6 finalize=true",
+    ];
+    let also = [Also::HardEnds];
+    let shown = executed(
+        &SimHost::new(),
+        "hard-ends",
+        &[(PROVIDER, &Sim::new())],
+        &lease_workflow(&argv, 30, RUNNER),
+        SANDBOXD,
+        &also,
+    );
+    let hard_ends: Vec<&str> = (shown.lines())
+        .filter(|line| line.contains("'s hard end: "))
+        .collect();
+    expect![[r#"
+        agent-0's hard end: 150 s after the run's start
+        job-0's hard end: 150 s after the run's start
+        lease-0's hard end: 150 s after the run's start
+        job-1's hard end: 300 s after the run's start"#]]
+    .assert_eq(&hard_ends.join("\n"));
 }
 
 #[test]

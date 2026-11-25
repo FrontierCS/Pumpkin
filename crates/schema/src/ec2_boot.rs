@@ -44,7 +44,7 @@ const START_LINE: &str = "pumpkin-ec2 start";
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Start {
-    /// The run's hard end, in whole seconds since the Unix epoch, rounded down. Once the
+    /// The sandbox's hard end, in whole seconds since the Unix epoch, rounded down. Once the
     /// container has started, the instance starts powering off then, and the boot's wait for the
     /// container ends by then.
     pub hard_end_unix_seconds: u64,

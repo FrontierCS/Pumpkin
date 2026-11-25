@@ -205,7 +205,8 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
     pub(super) fn start_agents<'s>(&mut self, scope: &'s Scope<'s, 'r>) -> Result<(), String> {
         let workflow = self.workflow();
         let sandboxes = self.sandboxes;
-        let hard_end = self.unix_hard_end;
+        // An agent's sandbox is torn down, and what it holds collected, by the teardown's end.
+        let hard_end = self.unix_at(self.teardown_end());
         let mut ready = self.clock.inbox();
         let mut gates = BTreeMap::new();
         self.start_residents(scope, &ready.sender())?;
