@@ -68,7 +68,7 @@ locals {
 # the controller's Docker engine, the EC2 provider `aws`, and, with a pull role, the `images` of
 # the Modal provider `modal`. A job drops `images` if its client sends no
 # `[controllers.<name>.modal]`. With `draining`, each job is refused as it starts. Nothing else is
-# here: the rest is each job's own or its client's. The advanced tier holds 8 KB.
+# here: the rest is each job's own or its client's. The advanced tier holds 8 KiB.
 resource "aws_ssm_parameter" "settings" {
   name = "/${local.prefix}/settings"
   type = "String"

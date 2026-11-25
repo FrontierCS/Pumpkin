@@ -75,7 +75,7 @@ variable "classes" {
 }
 
 variable "root_volume_gib" {
-  description = "The root volume of each sandbox's instance, in GiB, which holds its images and its workspace or scratch: 100 fits the GPU tasks' reference agents' 45 GB images."
+  description = "The root volume of each sandbox's instance, in GiB, which holds its images and its workspace or scratch: 100 fits the GPU tasks' reference agents' images of about 45 GiB."
   type        = number
   default     = 100
 }
@@ -87,7 +87,7 @@ variable "controller_instance_type" {
 }
 
 variable "controller_volume_gib" {
-  description = "The controller's data volume, in GiB, which outlives each instance of the controller. It holds the build cache and the images of recent tasks, at 20 to 70 GB a task, which each job prunes as the volume fills, the trees and the records."
+  description = "The controller's data volume, in GiB, which outlives each instance of the controller. It holds the build cache and the images of recent tasks, at about 20 to 70 GiB a task, which each job prunes as the volume fills, the trees and the records."
   type        = number
   default     = 1000
 }

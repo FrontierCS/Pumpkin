@@ -13,8 +13,8 @@ use std::collections::BTreeSet;
 use schema::ir::Image;
 
 /// The share of the disk used, in percent, past which a prune removes images.
-// Past it, a task's build may not fit what is left: its images take 20 to 70 GB, and a fifth of
-// the controller's default 1000 GiB volume is 200 GiB.
+// Past it, a task's build may not fit what is left: its images take about 20 to 70 GiB, and a
+// fifth of the controller's default 1000 GiB volume is 200 GiB.
 pub const HIGH_PERCENT: u64 = 80;
 
 /// The share of the disk used, in percent, down to which a prune removes images.
