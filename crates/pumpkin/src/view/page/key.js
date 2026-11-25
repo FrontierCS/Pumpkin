@@ -9,8 +9,9 @@ import { byId, fill, h } from "./h.js";
 /** @typedef {"list" | "run" | "trace" | "payload"} Page */
 /**
  * A colour's swatch: `look` is `box` for a mark's square, `bar` for a lane's bar, `tick` for a
- * line, `ink` for words in the colour; `alpha` is the share of it the page draws, if not whole.
- * @typedef {{ token: string, look: "box" | "bar" | "tick" | "ink", words: string, alpha?: number }} Swatch
+ * line, `ink` for words in the colour; `alpha` is the share of it the page draws, if not whole, or
+ * `shade` names the token of `style.css` that holds that share.
+ * @typedef {{ token: string, look: "box" | "bar" | "tick" | "ink", words: string } & ({ alpha?: number, shade?: undefined } | { shade: string, alpha?: undefined })} Swatch
  */
 
 /** @type {Array<{ name: string, pages: Page[], swatches: Swatch[] }>} */
@@ -36,6 +37,16 @@ const KEY = [
       { token: "--model", look: "tick", words: "A model answer" },
       { token: "--fail-bar", look: "tick", words: "A failed model answer, or failed work" },
       { token: "--fail-bar", look: "box", words: "What failed, at the time it failed" },
+    ],
+  },
+  {
+    name: "A sandbox's start, in its lane's colour",
+    pages: ["run"],
+    swatches: [
+      { token: "--agent", look: "bar", words: "Waiting for its provider's create to begin", shade: "--shade-waiting" },
+      { token: "--agent", look: "bar", words: "Its provider's create", shade: "--shade-creating" },
+      { token: "--agent", look: "bar", words: "Waiting for its session to meet the gateway", shade: "--shade-meeting" },
+      { token: "--agent", look: "bar", words: "Setting it up, until it started", shade: "--shade-setting-up" },
     ],
   },
   {
@@ -86,8 +97,8 @@ const button = byId("colour-key-button");
 const panel = byId("colour-key");
 
 /** @param {Swatch} swatch */
-function drawn({ token, look, words, alpha }) {
-  const style = { [look === "ink" ? "color" : "background"]: "var(" + token + ")", opacity: alpha ?? 1 };
+function drawn({ token, look, words, alpha, shade }) {
+  const style = { [look === "ink" ? "color" : "background"]: "var(" + token + ")", opacity: shade ? "var(" + shade + ")" : (alpha ?? 1) };
   return h("li", {}, h("span", { class: "swatch sw-" + look, style }, look === "ink" ? "Aa" : ""), words);
 }
 

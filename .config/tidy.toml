@@ -174,7 +174,7 @@
 "crates/runtime/src/log/call.rs" = 1
 "crates/runtime/src/log/fold.rs" = 7
 "crates/runtime/src/log/logged.rs" = 5
-"crates/runtime/src/log/progress.rs" = 12
+"crates/runtime/src/log/progress.rs" = 10
 "crates/runtime/src/log/usage.rs" = 7
 "crates/runtime/src/model.rs" = 14
 "crates/runtime/src/op.rs" = 2

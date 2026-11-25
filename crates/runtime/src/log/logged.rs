@@ -186,6 +186,16 @@ pub(super) enum Event {
         #[serde(default)]
         kept: Kept,
     },
+    SandboxCreated {
+        sandbox: SandboxName,
+        #[serde(deserialize_with = "nanos")]
+        began_ns: Duration,
+        #[serde(default)]
+        phases: Vec<Phase>,
+    },
+    SandboxMet {
+        sandbox: SandboxName,
+    },
     SandboxGpus {
         sandbox: SandboxName,
         gpus: Vec<String>,
@@ -223,6 +233,8 @@ impl Event {
             | Self::Tick
             | Self::ModelRequestStarted { .. }
             | Self::ModelAnswered { .. }
+            | Self::SandboxCreated { .. }
+            | Self::SandboxMet { .. }
             | Self::SandboxGpus { .. }
             | Self::SandboxDeleted { .. }
             | Self::Unknown => None,
@@ -254,11 +266,24 @@ impl Event {
             | Self::Tick
             | Self::ModelRequestStarted { .. }
             | Self::ModelAnswered { .. }
+            | Self::SandboxCreated { .. }
+            | Self::SandboxMet { .. }
             | Self::SandboxGpus { .. }
             | Self::SandboxDeleted { .. }
             | Self::Unknown => None,
         }
     }
+}
+
+/// A step of a sandbox's create that its provider timed, as `sandbox_created` gives it.
+#[derive(Debug, Deserialize)]
+pub(super) struct Phase {
+    // Any string: a provider names its own steps, so a name that this build doesn't know reads.
+    pub(super) name: String,
+    #[serde(deserialize_with = "nanos")]
+    pub(super) began_ns: Duration,
+    #[serde(deserialize_with = "nanos")]
+    pub(super) took_ns: Duration,
 }
 
 /// Whose command a `command_ended` ended: a lease's, or a job function's call's.

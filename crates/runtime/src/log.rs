@@ -50,6 +50,7 @@ use super::{Durable, Host, Stopped, record};
 mod call;
 mod fold;
 mod logged;
+mod model_use;
 pub(super) mod outcome;
 mod progress;
 mod roles;
@@ -59,10 +60,11 @@ pub use call::{CallEnd, CallOf, CallSpan, CallStart};
 pub use fold::{LogFold, StartedOver, TakenLine};
 pub(super) use fold::{final_call, lines, progress};
 pub use logged::{CallerName, Direction};
+pub use model_use::{ModelUse, Tokens};
 pub(super) use progress::places;
 pub use progress::{
-    AgentEnd, AgentSpan, Closed, LeaseSpan, ModelUse, Part, Place, Progress, Readout, Sandbox,
-    SharedSpan, Tokens, Unread, Work,
+    AgentEnd, AgentSpan, Closed, LeaseSpan, Part, Place, Progress, Readout, Sandbox, SandboxStart,
+    SharedSpan, StartPhase, Unread, Work,
 };
 pub(super) use roles::ir_in;
 pub use usage::{Cost, PlaceUse, Priced, TokensCost, Used};

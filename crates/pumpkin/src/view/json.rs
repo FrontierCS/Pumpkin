@@ -4,7 +4,9 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use runtime::{CallerName, Cost, Ending, ModelUse, Progress, Readout, Tokens};
+use runtime::{
+    CallerName, Cost, Ending, ModelUse, Progress, Readout, SandboxStart, StartPhase, Tokens,
+};
 use serde_json::{Value, json};
 
 use super::failure::{self, Failures};
@@ -16,6 +18,12 @@ use crate::{controller, next};
 /// How many marks at most a lane's answers and failures are drawn as across the run's time: a
 /// lane's track on a page is about a thousand pixels wide, and a run makes thousands of requests.
 const LANE_TICKS: u32 = 500;
+
+/// How many phases of a sandbox's start a lane gives at most: its provider's first ones. A provider
+/// may time any number, and each is a row of the start's card on the page.
+// The card's other 11 rows and 16 phases, at 21 px a row, make a card of about 570 px, which a
+// laptop's window holds.
+const START_PHASES: usize = 16;
 
 /// A log line as the page reads it: its fields, each string cut, with the byte it starts at and
 /// its `when`. A line that is no JSON object comes as `unread` text.
@@ -280,13 +288,46 @@ fn model_json(model: &ModelUse) -> Value {
     })
 }
 
+/// A lane's sandbox. It has a `start` only if the log timed the sandbox's start.
 fn sandbox(sandbox: &runtime::Sandbox) -> Value {
-    json!({
+    let mut json = json!({
         "place": progress::placed(sandbox),
         "asked": sandbox.asked.as_secs_f64(),
         "started": sandbox.started.map(|at| at.as_secs_f64()),
         "gone": sandbox.gone.map(|at| at.as_secs_f64()),
         "deleted": sandbox.deleted,
+    });
+    if let Some(start) = &sandbox.start {
+        json["start"] = start_json(start);
+    }
+    json
+}
+
+/// A sandbox's start, each time in seconds since the run started. It gives each phase from its
+/// start to its end, at most [`START_PHASES`], and how many more there are as `more_phases`.
+fn start_json(start: &SandboxStart) -> Value {
+    let SandboxStart {
+        began,
+        created,
+        met,
+        phases,
+    } = start;
+    let more_phases = phases.len().saturating_sub(START_PHASES);
+    let phases: Vec<Value> = (phases.iter().take(START_PHASES))
+        .map(|StartPhase { name, began, took }| {
+            json!({
+                "name": cut_text(name.clone()),
+                "from": began.as_secs_f64(),
+                "to": began.saturating_add(*took).as_secs_f64(),
+            })
+        })
+        .collect();
+    json!({
+        "began": began.as_secs_f64(),
+        "created": created.as_secs_f64(),
+        "met": met.map(|at| at.as_secs_f64()),
+        "phases": phases,
+        "more_phases": more_phases,
     })
 }
 

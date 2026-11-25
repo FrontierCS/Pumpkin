@@ -303,6 +303,13 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 .span { position: absolute; top: 2px; height: 10px; border-radius: 3px; background: var(--kind); }
 .span.starting { opacity: 0.4; }
 .span.open { border-right: 2px dashed var(--bg); }
+/* A start in its parts, each a shade of the lane's colour, which the colour key's swatches take
+   too. Neighbours differ by at least 0.3, so that a part's edges show. */
+:root { --shade-waiting: 0.15; --shade-creating: 0.55; --shade-meeting: 0.25; --shade-setting-up: 0.7; }
+.span.start { background: none; overflow: hidden; }
+.span.start .part { position: absolute; top: 0; height: 100%; background: var(--kind); }
+.part.waiting { opacity: var(--shade-waiting); } .part.creating { opacity: var(--shade-creating); }
+.part.meeting { opacity: var(--shade-meeting); } .part.setting-up { opacity: var(--shade-setting-up); }
 .work { position: absolute; top: 5px; height: 4px; background: var(--on-bar); min-width: 1px; }
 .work.call { top: 3px; height: 8px; min-width: 3px; padding: 0; border: 0; }
 .work.call:hover, .work.call:focus-visible, .work.call.lit { background: var(--mark-bar); z-index: 1; }
