@@ -36,7 +36,8 @@ use schema::sandbox::tree::Limits;
 use schema::sandbox::{
     Endpoint, Entry, ExitStatus, FromSandbox, HELLO_TIMEOUT, HelloReply, Launch, Listening,
     MAX_ATTESTATION_BYTES, PROTOCOL_VERSION, PrivateDial, RegistrationGrant, RelativePath, Root,
-    SANDBOXD_ATTESTATION, SANDBOXD_GRANT, SOCKET_NAME, SocketDial, ToSandbox, dir_mode, file_mode,
+    SANDBOXD_ATTESTATION, SANDBOXD_GIVEN, SANDBOXD_GRANT, SOCKET_NAME, SocketDial, ToSandbox,
+    dir_mode, file_mode,
 };
 use serde_json::{Value, json};
 use stdx::Deadline;
@@ -48,9 +49,12 @@ type Session = gateway::Session<Machine>;
 
 const PATH_ONLY: Environment = Environment::Only(&["PATH"]);
 
-// The programs that `sandboxd` and the tests' commands run, on a `PATH` of their own that lacks
-// `nvidia-smi`, so that the hello names no GPU and no start waits on a probe for them.
+// The programs that `sandboxd` and the tests' commands run, on a `PATH` of their own. Its
+// `nvidia-smi` names no GPU, so the hello names none and no start waits on a probe for them.
 const TOOLS: [&str; 8] = ["sh", "env", "sleep", "stat", "chmod", "mkdir", "wc", "cp"];
+
+// An `nvidia-smi` that records the environment it is run with, beside itself, and fails.
+const PROBE: &str = "#!/bin/sh\nenv > \"$0.env\"\nexit 1\n";
 
 // A registration grant that no gateway of the tests issues.
 const GRANT: &str = "00112233445566778899aabbccddeeff";
@@ -60,8 +64,8 @@ const ATTESTATION: &str = "the sandbox's attestation";
 
 #[derive(Clone, Copy)]
 enum Meeting {
-    // `sandboxd` gets `GRANT` and `ATTESTATION` in its environment all the same, which a command
-    // shows it doesn't get.
+    // `sandboxd` gets each of `SANDBOXD_GIVEN` in its environment all the same, which a command
+    // and the probe for GPUs show they don't get.
     Socket,
     Tcp,
     Listen,
@@ -109,8 +113,7 @@ impl Sandbox {
                 let (SocketDial { dir }, registration) = sockets.issue(&name).unwrap();
                 sandboxd
                     .arg(dir.join(SOCKET_NAME))
-                    .env(SANDBOXD_GRANT, GRANT)
-                    .env(SANDBOXD_ATTESTATION, ATTESTATION);
+                    .envs(SANDBOXD_GIVEN.map(|name| (name, GRANT)));
                 (Gateway::Sockets(sockets), registration)
             }
             Meeting::Tcp => {
@@ -265,7 +268,7 @@ fn relative(path: &str) -> RelativePath {
     RelativePath::try_from(path.to_owned()).unwrap()
 }
 
-/// A `PATH` of one directory below `dir`, which holds links to [`TOOLS`] alone.
+/// A `PATH` of one directory below `dir`, which holds links to [`TOOLS`], and [`PROBE`].
 fn tools(dir: &Path) -> OsString {
     let path = env::var_os("PATH").unwrap();
     let bin = dir.join("bin");
@@ -277,6 +280,9 @@ fn tools(dir: &Path) -> OsString {
         };
         symlink(tool, bin.join(name)).unwrap();
     }
+    let probe = bin.join("nvidia-smi");
+    fs::write(&probe, PROBE).unwrap();
+    fs::set_permissions(&probe, fs::Permissions::from_mode(0o755)).unwrap();
     bin.into_os_string()
 }
 
@@ -418,7 +424,9 @@ fn puts_runs_and_collects() {
             out/result.json: {"bytes": 2109497}
             payload collected intact: true
             log/1.stderr: warning
-            log/1.stdout: home=/pumpkin/home mode=train grant=unset attestation=unset path=/usr/bin:/bin in $ROOT/home
+            log/1.stdout: home=/pumpkin/home mode=train path=/usr/bin:/bin in $ROOT/home
+            the command was given: []
+            the probe for GPUs was given: []
             then Ended { reason: "the owner dropped the session" }
             sandboxd: exit status: 0
             left running: 0"#]],
@@ -439,7 +447,8 @@ fn put_run_collect(sandbox: &mut Sandbox) -> Vec<String> {
         printf '{"bytes": %s}' "$(wc --bytes < ../in/payload/raw)" > ../out/result.json
         mkdir ../out/evidence && cp ../in/payload/raw ../out/evidence/payload
         mkdir ../out/empty
-        echo "home=$HOME mode=$MODE grant=${SANDBOXD_GRANT-unset} attestation=${SANDBOXD_ATTESTATION-unset} path=$PATH in $(pwd)"
+        echo "home=$HOME mode=$MODE path=$PATH in $(pwd)"
+        env > ../command.env
         echo warning >&2
         exit 3"#;
     let launch = sandbox.sh(
@@ -454,6 +463,18 @@ fn put_run_collect(sandbox: &mut Sandbox) -> Vec<String> {
     let kept = fs::read(sandbox.root.join("collected/out/evidence/payload")).unwrap();
     lines.push(format!("payload collected intact: {}", kept == raw));
     lines.extend(sandbox.collect("log").unwrap());
+    let ran = [
+        ("the command", "command.env"),
+        ("the probe for GPUs", "bin/nvidia-smi.env"),
+    ];
+    for (program, env) in ran {
+        let env = fs::read_to_string(sandbox.root.join(env)).unwrap();
+        let given: Vec<&str> = (env.lines())
+            .filter_map(|line| line.split_once('=').map(|(name, _)| name))
+            .filter(|name| SANDBOXD_GIVEN.contains(name))
+            .collect();
+        lines.push(format!("{program} was given: {given:?}"));
+    }
     lines
 }
 

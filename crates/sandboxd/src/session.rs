@@ -17,7 +17,7 @@ use schema::frame;
 use schema::ir::GpuModel;
 use schema::sandbox::{
     Attestation, FromSandbox, HELLO_TIMEOUT, Hello, HelloReply, MAX_HELLO_BYTES, RegistrationGrant,
-    SANDBOXD_ATTESTATION, SANDBOXD_GRANT, ToSandbox, read_hello_reply,
+    ToSandbox, read_hello_reply,
 };
 use stdx::process::{self, Bound, Echo, Environment, Run, printed};
 use stdx::{Context, Deadline, unpoisoned};
@@ -107,11 +107,7 @@ pub(crate) fn serve(gateway: &Gateway, serve_ops: bool, serve_model: bool) -> Re
 /// none where it isn't on `PATH`, fails, or names none.
 fn gpus() -> Option<Vec<GpuModel>> {
     let mut nvidia_smi = process::command("nvidia-smi", Environment::Inherited);
-    nvidia_smi
-        .args(["--query-gpu=name", "--format=csv,noheader"])
-        // It runs as a command would, which has neither a grant nor an attestation.
-        .env_remove(SANDBOXD_GRANT)
-        .env_remove(SANDBOXD_ATTESTATION);
+    nvidia_smi.args(["--query-gpu=name", "--format=csv,noheader"]);
     let how = Run::new(Bound::Within(GPUS_TIMEOUT), Echo::Silent);
     let names = printed(process::run(&mut nvidia_smi, how).ok()?).ok()?;
     let gpus = names

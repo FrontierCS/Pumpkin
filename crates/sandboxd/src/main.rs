@@ -19,7 +19,6 @@
 //! boundary within its sandbox. It does make itself non-dumpable first, so that the role's code
 //! can't reach it through `/proc` ([`sys::make_non_dumpable`] says why).
 
-use std::env;
 use std::ffi::OsString;
 use std::fmt::Display;
 use std::fs::{DirBuilder, OpenOptions};
@@ -35,8 +34,8 @@ use std::time::Duration;
 
 use schema::ir::User;
 use schema::sandbox::{
-    Attestation, HELLO_TIMEOUT, RegistrationGrant, SANDBOXD_ATTESTATION, SANDBOXD_GRANT,
-    pumpkin_dir,
+    Attestation, HELLO_TIMEOUT, RegistrationGrant, SANDBOXD_ATTESTATION, SANDBOXD_GIVEN,
+    SANDBOXD_GRANT, pumpkin_dir,
 };
 use stdx::{Context, Deadline};
 
@@ -152,6 +151,7 @@ fn main() -> ExitCode {
     if Path::new(&name).file_name() == Some("sandboxctl".as_ref()) {
         return ctl::main(args);
     }
+    let given = Given::take();
     let flags::Sandboxd {
         gateway,
         listen,
@@ -184,7 +184,8 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let by = by.map(|seconds| Deadline::at_unix(Duration::from_secs(seconds) + UNCLAIMED_SLACK));
-    let gateway = match (gateway, listen, by) {
+    let gateway = given.and_then(|given| {
+        match (gateway, listen, by) {
         (Address::Socket(socket), false, None) => Ok(Gateway::Socket(socket)),
         (Address::Socket(_), true, _) => Err(
             "--listen takes a TCP address of the sandbox's own: give one, such as `0.0.0.0:7434`, \
@@ -192,10 +193,11 @@ fn main() -> ExitCode {
                 .to_owned(),
         ),
         (Address::Tcp(address), false, None) => {
-            attestation().map(|attestation| Gateway::Tcp(address, attestation))
+            parsed_attestation(given.attestation)
+                .map(|attestation| Gateway::Tcp(address, attestation))
         }
         (Address::Tcp(address), true, Some(by)) => {
-            grant().map(|grant| Gateway::Listen(address, grant, by))
+            parsed_grant(given.grant).map(|grant| Gateway::Listen(address, grant, by))
         }
         (Address::Tcp(_), true, None) => Err(
             "--listen waits until the start's deadline: give it as --by, in seconds since the Unix \
@@ -205,7 +207,8 @@ fn main() -> ExitCode {
         (Address::Socket(_) | Address::Tcp(_), false, Some(_)) => Err(
             "--by bounds how long a sandboxd that listens waits: give it with --listen".to_owned(),
         ),
-    };
+    }
+    });
     match gateway.and_then(|gateway| session::serve(&gateway, ops, model)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -286,8 +289,30 @@ fn become_role(User { uid, gid }: User) -> Result<(), String> {
     sys::adopt_orphans().context("taking the orphans of sandboxd's commands failed")
 }
 
-fn grant() -> Result<RegistrationGrant, String> {
-    let Some(grant) = env::var_os(SANDBOXD_GRANT) else {
+/// What a provider gives `sandboxd` alone ([`SANDBOXD_GIVEN`]), each `None` where it is unset.
+struct Given {
+    attestation: Option<OsString>,
+    grant: Option<OsString>,
+}
+
+impl Given {
+    /// Takes what a provider gives `sandboxd` alone from its environment. It is to be called
+    /// before `sandboxd` starts a thread, as `stdx::env::take` needs.
+    fn take() -> Result<Self, String> {
+        // Taken as it starts, as Buildkite's agent unsets its configuration and GitHub's runner
+        // its inputs, so that nothing it starts inherits them:
+        // https://github.com/buildkite/agent/blob/dc696c5ecad164b5aafc678b76bba69eef5111be/clicommand/agent_start.go#L902-L905
+        // https://github.com/actions/runner/blob/d1eb12d4b115c301201de27d667284e1a80f2ab5/src/Runner.Listener/CommandSettings.cs#L110-L139
+        let taken = stdx::env::take(SANDBOXD_GIVEN);
+        // In the list's order. No `sandboxd` serves TLS yet, so none reads the identity's two.
+        let [attestation, grant, _, _] =
+            taken.context("listing sandboxd's threads in /proc/self/task failed")?;
+        Ok(Self { attestation, grant })
+    }
+}
+
+fn parsed_grant(grant: Option<OsString>) -> Result<RegistrationGrant, String> {
+    let Some(grant) = grant else {
         return Err(format!(
             "{SANDBOXD_GRANT} is not set: set it to the registration grant issued for the \
              sandbox, which the gateway that dials a sandboxd that listens presents"
@@ -299,8 +324,8 @@ fn grant() -> Result<RegistrationGrant, String> {
     RegistrationGrant::try_from(digits).context(SANDBOXD_GRANT)
 }
 
-fn attestation() -> Result<Attestation, String> {
-    let Some(attestation) = env::var_os(SANDBOXD_ATTESTATION) else {
+fn parsed_attestation(attestation: Option<OsString>) -> Result<Attestation, String> {
+    let Some(attestation) = attestation else {
         return Err(format!(
             "{SANDBOXD_ATTESTATION} is not set: set it to the sandbox's attestation, which a \
              sandboxd that dials its gateway over TCP presents"

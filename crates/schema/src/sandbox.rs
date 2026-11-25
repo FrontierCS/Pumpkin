@@ -699,6 +699,15 @@ pub const SANDBOXD_TLS_KEY: &str = "SANDBOXD_TLS_KEY";
 // present it first, from the sandbox's own address.
 pub const SANDBOXD_ATTESTATION: &str = "SANDBOXD_ATTESTATION";
 
+/// The environment variables that hold what a provider gives `sandboxd` alone. `sandboxd` takes
+/// each from its environment as it starts, so no program that it runs inherits one.
+pub const SANDBOXD_GIVEN: [&str; 4] = [
+    SANDBOXD_ATTESTATION,
+    SANDBOXD_GRANT,
+    SANDBOXD_TLS_CERTIFICATE,
+    SANDBOXD_TLS_KEY,
+];
+
 /// The gateway's answer to the session's first frame, with an empty body: `{"type":"accepted"}`, or
 /// `{"type":"accepted","grant":"…"}` where the gateway dialed, or a refusal.
 ///
