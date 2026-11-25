@@ -35,8 +35,9 @@ pub(crate) fn run<H: Host>(
         .sessions()
         .any(|(_, grant)| grant.holder == holder)
         .then_some(OpPayloadLimit::NONE);
-    crate::child::run(child, ops, |child, session| {
-        evaluate(call, bodies, child, session, &mut body::Stdin::default())
+    crate::child::run(child, ops, |child, sessions| {
+        let stdin = &mut body::Stdin::default();
+        evaluate(call, bodies, child, &mut sessions.main, stdin)
     });
 }
 

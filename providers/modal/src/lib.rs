@@ -29,8 +29,8 @@ use std::path::Path;
 use aws::{Cli, Region, Repository, RepositoryName, RoleArn};
 use engine::{Platform, Pusher};
 use provider::{
-    Console, Create, Creator, ImageRef, Listed, ListenDials, Listened, Meeting, Provider, Ready,
-    Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
+    Console, Create, Creator, ImageRef, Listed, ListenDials, Listened, Listens, Meeting, Provider,
+    Ready, Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
 use schema::ir::{self, GpuModel, Image, Name};
 use schema::workflow::{Class, Companions, Offers, UsdPerHour};
@@ -412,5 +412,20 @@ impl Creator<ListenDials, Listened> for Modal<'_> {
             main,
             relay: None,
         })
+    }
+}
+
+impl Listens for Modal<'_> {
+    // Its classes offer no companions, so no runner that declares any is placed on it.
+    fn publish_companion_images(
+        &self,
+        images: &[Image],
+        _: &SandboxdRef,
+    ) -> Result<Vec<ImageRef>, String> {
+        Err(format!(
+            "a Modal sandbox holds no companions, so none of these {} images is published: \
+             declare the companions on a runner whose class offers them (`Offers::companions`)",
+            images.len()
+        ))
     }
 }

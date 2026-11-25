@@ -150,7 +150,7 @@ pub struct SandboxStart {
     pub began: Duration,
     /// When its provider's create returned.
     pub created: Duration,
-    /// When its session met the gateway, once the log says so.
+    /// When the last of its containers met the gateway, once the log says so.
     pub met: Option<Duration>,
     /// The steps of the create that its provider timed, in the order it gave them. They may
     /// overlap or leave gaps.

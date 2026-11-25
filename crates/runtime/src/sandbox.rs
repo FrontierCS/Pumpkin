@@ -8,12 +8,12 @@
 use std::cell::{Cell, RefCell};
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, SystemTime};
-use std::{fmt, io};
 
 use decision::{JobId, LeaseId};
 use gateway::{Arrival, Dialer, Listener, Session, Sockets};
@@ -21,7 +21,7 @@ use provider::{
     Create, Created, ImageRef, Listed, Meeting, Provider, Role, RunTag, SandboxId, SandboxdRef,
     Sweep, Undeleted, UnixTime,
 };
-use schema::ir::{Command, GpuModel, Image, Name};
+use schema::ir::{Command, Container, GpuModel, Image, Name};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
     Launch, OpPayloadLimit, PUMPKIN_BYTES, RelativePath, command_env, command_stderr,
@@ -39,7 +39,8 @@ use super::{Clock, Host, Input, Stopped, interruption, log, record};
 
 mod meets;
 
-use meets::Meets;
+pub(super) use meets::Sessions;
+use meets::{Meets, Registrations, WithCompanions};
 
 /// The most entries, files and directories, that the host collects from a sandbox in one tree.
 pub(super) const ENTRIES: u64 = 100_000;
@@ -155,6 +156,7 @@ fn provider_role(workflow: &Workflow, role: RoleId, instances: NonZeroU32) -> Ro
 pub(super) struct Published<'p> {
     providers: ByProvider<Hosting<'p>>,
     images: ByRole<ImageRef>,
+    companions: BTreeMap<RunnerId, WithCompanions<'p>>,
     sockets: Sockets,
 }
 
@@ -165,6 +167,8 @@ pub(super) struct Sandboxes<'p, H: Host> {
     placed: &'p Placed,
     providers: ByProvider<Hosting<'p>>,
     images: ByRole<ImageRef>,
+    // Each runner that declares companions, with them.
+    companions: BTreeMap<RunnerId, WithCompanions<'p>>,
     sockets: Sockets,
     record: &'p Path,
     host: &'p H,
@@ -338,24 +342,25 @@ impl Unstarted {
     }
 }
 
-/// A sandbox whose session is up, to be deleted through [`Sandboxes::delete`].
+/// A sandbox whose sessions are up, to be deleted through [`Sandboxes::delete`].
 pub(super) struct Started<C> {
     which: Which,
     id: SandboxId,
-    pub(super) session: Session<C>,
+    pub(super) sessions: Sessions<C>,
 }
 
 impl<'p> Published<'p> {
     /// Publishes `sandboxd` on each provider that hosts a role, and each role's image there, once
-    /// however many roles name it, then makes the run's sockets directory in `record`, which
-    /// must not exist yet. A provider that is private meets the gateway at `private`, which then
-    /// must be some; one whose sandboxes listen, through `dialer`.
+    /// however many roles name it. Then it publishes the images of each leased runner's
+    /// companions, and makes the run's sockets directory in `record`, which must not exist yet. A
+    /// provider that is private meets the gateway at `private`, which then must be some; one whose
+    /// sandboxes listen, through `dialer`.
     ///
     /// Stops as interrupted before each publish once a signal has come, as a publish may take
     /// minutes.
     pub(super) fn create(
         providers: &ByProvider<&'p dyn Provider>,
-        placed: &Placed,
+        placed: &'p Placed,
         sandboxd: &Path,
         private: Option<&'p Listener>,
         dialer: &'p Dialer,
@@ -378,7 +383,7 @@ impl<'p> Published<'p> {
                     })?;
                     Meets::Private(creator, listener)
                 }
-                Meeting::Listen(creator) => Meets::Dials(creator, dialer),
+                Meeting::Listen(listens) => Meets::Dials(listens, dialer),
             };
             let published = provider.publish_sandboxd(sandboxd);
             let sandboxd = published.context(format_args!(
@@ -406,6 +411,7 @@ impl<'p> Published<'p> {
                 }
             }
         })?;
+        let companions = meets::publish_companions(placed, &providers)?;
         // In the record, so that they go where it goes: `record::create` made it, and checked the
         // path to it, so that no other user may rename entries in it, or above it, as
         // `Sockets::create` needs.
@@ -414,6 +420,7 @@ impl<'p> Published<'p> {
         Ok(Self {
             providers,
             images,
+            companions,
             sockets,
         })
     }
@@ -432,6 +439,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         let Published {
             providers,
             images,
+            companions,
             sockets,
         } = published;
         // A start ends within a fortieth of its role's startup, or 15 s, and a list's time, of its
@@ -446,6 +454,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             placed,
             providers,
             images,
+            companions,
             sockets,
             record,
             host,
@@ -457,7 +466,8 @@ impl<'p, H: Host> Sandboxes<'p, H> {
 
     /// Creates and registers a sandbox by `by`, its startup bound as a time on `clock`. On failure
     /// the caller owns disposal, so it can release prepared peers before a console read or
-    /// deletion.
+    /// deletion. `wrap` makes what `arrivals` takes of an arrival on the session of the container
+    /// that it is given. That is `main`, but in a runner's sandbox.
     pub(super) fn start<T: Send + 'static>(
         &self,
         which: Which,
@@ -465,7 +475,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         (clock, by): (&H::Clock, Duration),
         hard_end: UnixTime,
         arrivals: Sender<T>,
-        wrap: impl Fn(Arrival) -> T + Send + 'static,
+        wrap: impl Fn(Container, Arrival) -> T + Clone + Send + 'static,
     ) -> Result<Started<H::Clock>, Unstarted> {
         let name = which.name();
         let now = UnixTime::of(SystemTime::now())?;
@@ -489,7 +499,13 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             hard_end,
             by: by_unix.min(hard_end),
         };
-        let (id, registration) = self.create(&placement.provider, &create, (clock, by))?;
+        // Only a runner declares companions, and each lease's sandbox holds its runner's.
+        let companions = match which {
+            Which::Lease(_, runner, _) => self.companions.get(&runner),
+            Which::Agent(_) | Which::Shared(_) | Which::Call(..) => None,
+        };
+        let on = &placement.provider;
+        let (id, registrations) = self.create(on, &create, companions, (clock, by))?;
         let made = Made {
             on: &placement.provider,
             id: id.clone(),
@@ -500,65 +516,44 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         let recorded = self.write_sandbox(&made, None);
         // Listed before the write's failure is looked at, as `unstarted` finds it there.
         stdx::unpoisoned(self.inventory.lock()).created.push(made);
-        if let Err(error) = recorded {
-            return Err(Unstarted::Created {
+        let sessions = recorded.and_then(|()| {
+            let (sandbox, opens) = ((which, &id, hosting.provider), (ops, model));
+            self.meet(sandbox, registrations?, (clock, by), opens, arrivals, wrap)
+        });
+        match sessions {
+            Ok(sessions) => Ok(Started {
                 which,
                 id,
-                reason: error,
-            });
-        }
-        let looks = Looks::new(clock);
-        // The wait ends at once for a signal, and for a sandbox that its provider lists as
-        // ended, which will never connect.
-        let stopped = || {
-            interruption::signal().is_some()
-                || looks.ended(self.between_looks, || self.ended(hosting.provider, &id))
-        };
-        let accepted = registration.accept((clock, by), ops, model, arrivals, wrap, stopped);
-        if accepted.is_ok() {
-            let (sandbox, at) = (create.name.clone(), clock.now());
-            self.send([log::Entry::Met { sandbox, at }]);
-        }
-        let accepted = accepted.map_err(|error| match looks.found() {
-            (true, _) => "it ended before it met the gateway: expected its `sandboxd` to run \
-                          until it connects"
-                .to_owned(),
-            (false, Some(failed)) if error.kind() == io::ErrorKind::TimedOut => {
-                format!("{error}; the last list of its provider failed: {failed}")
-            }
-            (false, _) => error.to_string(),
-        });
-        let session = accepted.and_then(|mut session| session.set_up(by).map(|()| session));
-        let session = session.and_then(|session| match session.gpus() {
-            Some(gpus) => self.saw(which, &id, gpus).map(|()| session),
-            None => Ok(session),
-        });
-        match session {
-            Ok(session) => Ok(Started { which, id, session }),
-            Err(error) => Err(Unstarted::Created {
-                which,
-                id,
-                reason: error,
+                sessions,
             }),
+            Err(reason) => Err(Unstarted::Created { which, id, reason }),
         }
     }
 
-    // Creates the sandbox that `create` describes on provider `on`, by `by` on `clock`. Tells the
-    // log when the create began and returned, with the phases that the provider timed.
+    // Creates the sandbox that `create` describes on provider `on`, with `companions` if given,
+    // by `by` on `clock`. Tells the log when the create began and returned, with the phases that
+    // the provider timed. Returns its sessions' registrations, or why it can't be met.
     fn create(
         &self,
         on: &'p Name,
         create: &Create,
+        companions: Option<&WithCompanions<'p>>,
         (clock, by): (&H::Clock, Duration),
-    ) -> Result<(SandboxId, gateway::Registration), String> {
+    ) -> Result<(SandboxId, Result<Registrations, String>), String> {
         let by_machine = Deadline::after(time::left(clock, by).unwrap_or_default());
         let began = clock.now();
-        let started = self
-            .providers
-            .get(on)
-            .meets
-            .create(&self.sockets, create, by_machine);
-        let (Created { id, phases }, registration) = started.inspect_err(|_| {
+        let started = match companions {
+            None => {
+                let meets = self.providers.get(on).meets;
+                let alone = meets.create(&self.sockets, create, by_machine);
+                alone.map(|(created, main)| {
+                    let companions = Vec::new();
+                    (created, Ok(Registrations { main, companions }))
+                })
+            }
+            Some(with) => with.create(create),
+        };
+        let (Created { id, phases }, registrations) = started.inspect_err(|_| {
             let mut inventory = stdx::unpoisoned(self.inventory.lock());
             inventory.unnamed.insert(on);
         })?;
@@ -568,7 +563,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             phases,
             at: clock.now(),
         }]);
-        Ok((id, registration))
+        Ok((id, registrations))
     }
 
     fn saw(&self, which: Which, id: &SandboxId, gpus: &[GpuModel]) -> Result<(), String> {
@@ -647,10 +642,14 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         &self,
         started: Started<H::Clock>,
     ) -> (Vec<log::Entry>, Result<(), String>) {
-        let Started { which, id, session } = started;
+        let Started {
+            which,
+            id,
+            sessions,
+        } = started;
         let provider = self.provider(which);
         let deleted = provider.delete(&self.run, std::slice::from_ref(&id));
-        drop(session);
+        drop(sessions);
         let (logged, recorded) =
             self.record_deletes(self.on(which), std::slice::from_ref(&id), &deleted);
         let deleted = deleted.context("deleting the sandbox failed");

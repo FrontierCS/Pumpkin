@@ -323,6 +323,15 @@ impl<'h, H: Host> Log<'h, H> {
                 json!({ "kind": "sandbox_met", "sandbox": sandbox }),
                 &[],
             ),
+            Entry::ContainerMet {
+                sandbox,
+                container,
+                at,
+            } => self.observed(
+                at,
+                json!({ "kind": "container_met", "sandbox": sandbox, "container": container }),
+                &[],
+            ),
             Entry::Gpus(sandbox, gpus) => {
                 self.told(json!({ "kind": "sandbox_gpus", "sandbox": sandbox, "gpus": gpus }))
             }
@@ -453,9 +462,18 @@ pub(super) enum Entry {
         phases: Vec<Phase>,
         at: Duration,
     },
-    /// A sandbox's session that met the gateway, as `sandbox_met`, observed as it met.
+    /// A sandbox whose every container met the gateway, as `sandbox_met`, observed as the last
+    /// of them met.
     Met {
         sandbox: Name,
+        at: Duration,
+    },
+    /// A container that met the gateway, in a sandbox that holds companions, as `container_met`,
+    /// observed as it met. It is a kind of its own, as a reader that knows only `sandbox_met`
+    /// would take a container's meeting for its sandbox's.
+    ContainerMet {
+        sandbox: Name,
+        container: Container,
         at: Duration,
     },
     /// The GPUs that a sandbox's `sandboxd` saw as it started, as `sandbox_gpus`: the sandbox's

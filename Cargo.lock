@@ -859,6 +859,7 @@ dependencies = [
  "sha2",
  "stdx",
  "test-support",
+ "tls",
 ]
 
 [[package]]

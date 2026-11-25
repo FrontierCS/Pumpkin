@@ -3,6 +3,9 @@
 //! how each ended. A command that runs past its timeout, if it has one, is killed alone
 //! ([`Session::kill`]). The core's stop closes the lease: its runner is frozen, and its `out`, and
 //! the log of a command that still ran, are collected.
+//!
+//! A runner's sandbox holds a session for `main` and for each of its companions. The end of any
+//! session fails the lease.
 
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom};
@@ -24,7 +27,7 @@ use stdx::Context;
 use stdx::time::Clock as _;
 
 use super::child::{Child, End, Message};
-use super::sandbox::{ENTRIES, collect};
+use super::sandbox::{ENTRIES, Sessions, collect};
 use super::{Clock, Host, Inbox};
 
 /// The directory of a lease's record that holds the tree a transfer moves, while it does.
@@ -61,7 +64,7 @@ pub(super) struct Run {
 
 struct Running {
     command: u64,
-    /// The container that it runs in, whose session started it ([`Sessions::of`]).
+    /// The container that it runs in, whose session started it.
     container: Container,
     process: Process,
     /// When it is to be killed, since the run started, until it has been.
@@ -70,23 +73,18 @@ struct Running {
     required_output: bool,
 }
 
-/// The sessions of a lease's runner, one for each of its containers that met the gateway: `main`
-/// alone.
-struct Sessions<'s, C> {
-    main: &'s mut Session<C>,
-}
-
-impl<C> Sessions<'_, C> {
-    /// The session of `container`, or why it has none.
-    fn of(&mut self, container: &Container) -> Result<&mut Session<C>, String> {
-        match container {
-            Container::Main => Ok(&mut *self.main),
-            Container::Companion(name) => Err(format!(
-                "the runner's companion `{name}` has no session: run commands and copy trees in \
-                 `{}`",
-                Container::Main
-            )),
-        }
+/// The session of `container` among `sessions`, a runner's, or why a lease serves nothing in it.
+fn session_of<'s, C>(
+    sessions: &'s mut Sessions<C>,
+    container: &Container,
+) -> Result<&'s mut Session<C>, String> {
+    match container {
+        Container::Main => Ok(&mut sessions.main),
+        Container::Companion(name) => Err(format!(
+            "the runner's companion `{name}` takes no command or copy: run commands and copy \
+             trees in `{}`",
+            Container::Main
+        )),
     }
 }
 
@@ -101,8 +99,8 @@ pub(super) struct Leased<'r> {
 }
 
 pub(super) fn run<H: Host>(leased: &Leased<'_>, child: &mut Child<'_, H, Order>) {
-    super::child::run(child, None, |child, main| {
-        End::Event(drive(leased, child, &mut Sessions { main }))
+    super::child::run(child, None, |child, sessions| {
+        End::Event(drive(leased, child, sessions))
     });
 }
 
@@ -111,7 +109,7 @@ pub(super) fn run<H: Host>(leased: &Leased<'_>, child: &mut Child<'_, H, Order>)
 fn drive<H: Host>(
     leased: &Leased<'_>,
     child: &mut Child<'_, H, Order>,
-    sessions: &mut Sessions<'_, H::Clock>,
+    sessions: &mut Sessions<H::Clock>,
 ) -> Event {
     let lease = leased.lease;
     let failed = |reason: String| Event::LeaseFailed { lease, reason };
@@ -121,11 +119,12 @@ fn drive<H: Host>(
     while let Some(message) = child.inbox.take() {
         match message {
             Message::Stop => return Event::LeaseEnded { lease },
-            Message::Session(_, Arrival::Ended { reason }) => {
-                early.get_or_insert(reason);
+            Message::Session(container, _, Arrival::Ended { reason }) => {
+                early.get_or_insert((container, reason));
             }
             // The core orders a lease nothing until it is ready, and none of its commands runs.
             Message::Session(
+                _,
                 _,
                 Arrival::Exited { .. }
                 | Arrival::Op(_)
@@ -135,8 +134,8 @@ fn drive<H: Host>(
             | Message::Order(_) => {}
         }
     }
-    if let Some(reason) = early {
-        return failed(ended(&reason));
+    if let Some((container, reason)) = early {
+        return failed(ended(&container, &reason));
     }
     if let Err(error) = std::fs::create_dir(child.dir.join(log_dir().as_str())) {
         return failed(format!(
@@ -152,13 +151,13 @@ fn drive<H: Host>(
     }
     if let Some(running) = running {
         let dir = command_dir(running.command);
-        let session = sessions.of(&running.container);
+        let session = session_of(sessions, &running.container);
         let collected = session.and_then(|session| collect(session, &dir, &child.dir, by));
         if let Err(error) = collected {
             child.note(format!("lease {}'s {dir} is incomplete: {error}", lease.0));
         }
     }
-    if let Err(error) = collect(sessions.main, &out_dir(), &child.dir, by) {
+    if let Err(error) = collect(&mut sessions.main, &out_dir(), &child.dir, by) {
         child.note(format!("lease {}'s out is incomplete: {error}", lease.0));
     }
     served.map_or_else(failed, |()| Event::LeaseEnded { lease })
@@ -167,14 +166,14 @@ fn drive<H: Host>(
 /// Freezes, by `by`, the containers whose files the record keeps at a lease's end. They are `main`,
 /// whose `out` it collects, and that of `running`, the command that still runs, if one does.
 fn freeze<C: Clock>(
-    sessions: &mut Sessions<'_, C>,
+    sessions: &mut Sessions<C>,
     running: Option<&Running>,
     by: Duration,
 ) -> Result<(), String> {
     let still = running.map(|running| &running.container);
     let elsewhere = still.filter(|container| **container != Container::Main);
     for container in iter::once(&Container::Main).chain(elsewhere) {
-        let frozen = sessions.of(container)?.freeze(by);
+        let frozen = session_of(sessions, container)?.freeze(by);
         frozen.map_err(|error| format!("freezing the runner's `{container}` failed: {error}"))?;
     }
     Ok(())
@@ -187,7 +186,7 @@ fn freeze<C: Clock>(
 fn serve<H: Host>(
     leased: &Leased<'_>,
     child: &mut Child<'_, H, Order>,
-    sessions: &mut Sessions<'_, H::Clock>,
+    sessions: &mut Sessions<H::Clock>,
     running: &mut Option<Running>,
 ) -> Result<(), String> {
     let Leased {
@@ -237,10 +236,10 @@ fn serve<H: Host>(
                     }
                 }
             }
-            // A session's arrival is `main`'s, the one container with a session.
-            Some(Message::Session(_, Arrival::Exited { process, status })) => {
+            Some(Message::Session(container, _, Arrival::Exited { process, status })) => {
+                // A process of one container may have the number of another's.
                 let ran = running.take_if(|running| {
-                    running.container == Container::Main && running.process == process
+                    running.container == container && running.process == process
                 });
                 let Some(ran) = ran else {
                     continue;
@@ -250,31 +249,37 @@ fn serve<H: Host>(
                 } else {
                     CommandEnd::Exited(status)
                 };
-                let session = sessions.of(&ran.container)?;
+                let session = session_of(sessions, &ran.container)?;
                 let (stdout, stderr) = outputs(child, ran.command, session, ran.required_output)?;
                 child.event(command_ended(lease, ran.command, (end, stdout, stderr)));
             }
-            Some(Message::Session(_, Arrival::Ended { reason })) => {
-                return Err(ended(&reason));
+            Some(Message::Session(container, _, Arrival::Ended { reason })) => {
+                return Err(ended(&container, &reason));
             }
             // A type for a passive session's arrivals would split the gateway's `pub` `Arrival` by
             // the kind of session.
             Some(Message::Session(
                 _,
+                _,
                 Arrival::Op(_) | Arrival::Refused(_) | Arrival::ModelRequest(_),
             )) => unreachable!(
-                "lease {}'s passive session handed out an op or a model request, though it was \
-                 accepted without an op payload limit and without model requests, so either \
-                 ends the session instead, and arrives as its end",
+                "one of lease {}'s passive sessions handed out an op or a model request, though \
+                 each was accepted without an op payload limit and without model requests, so \
+                 either ends the session instead, and arrives as its end",
                 lease.0
             ),
         }
     }
 }
 
-/// Why a lease fails once its runner's session has ended, for `reason`.
-fn ended(reason: &str) -> String {
-    format!("the runner's session ended: {reason}")
+/// Why a lease fails once the session of `container` of its runner has ended, for `reason`.
+fn ended(container: &Container, reason: &str) -> String {
+    match container {
+        Container::Main => format!("the runner's session ended: {reason}"),
+        Container::Companion(name) => {
+            format!("the session of the runner's companion `{name}` ended: {reason}")
+        }
+    }
 }
 
 /// Kills `running`, whose timeout has passed, in its container, whose session `sessions` gives. A
@@ -283,10 +288,10 @@ fn kill<H: Host>(
     child: &Child<'_, H, Order>,
     by_start: Duration,
     running: &mut Running,
-    sessions: &mut Sessions<'_, H::Clock>,
+    sessions: &mut Sessions<H::Clock>,
 ) -> Result<(), String> {
     running.kill_at = None;
-    let session = sessions.of(&running.container)?;
+    let session = session_of(sessions, &running.container)?;
     match session.kill(running.process, by_start) {
         Ok(()) => running.timed_out = true,
         Err(error) => {
@@ -306,9 +311,9 @@ fn kill<H: Host>(
 fn start(
     runner: &Runner,
     (run, by): (&Run, Duration),
-    sessions: &mut Sessions<'_, impl Clock>,
+    sessions: &mut Sessions<impl Clock>,
 ) -> Result<Process, String> {
-    let session = sessions.of(&run.container)?;
+    let session = session_of(sessions, &run.container)?;
     let dir = command_dir(run.command);
     let put = session.put(&pumpkin_dir(), [Put::Dir(dir.clone(), dir_mode())], by);
     put.context(format_args!("making {dir} failed"))?;
@@ -364,11 +369,11 @@ fn outputs<H: Host>(
 /// how it ended. It is cut short once anything reaches the lease's inbox, which it keeps in `held`.
 fn transfer<H: Host>(
     child: &mut Child<'_, H, Order>,
-    sessions: &mut Sessions<'_, H::Clock>,
+    sessions: &mut Sessions<H::Clock>,
     order: &Transfer,
     held: &mut Option<Message<Order>>,
 ) -> TransferEnd {
-    let runner = match sessions.of(&order.container) {
+    let runner = match session_of(sessions, &order.container) {
         Ok(session) => session.trees(),
         Err(reason) => return TransferEnd::Failed(reason),
     };

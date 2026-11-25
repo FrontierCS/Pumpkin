@@ -31,18 +31,19 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
-use std::num::{NonZeroU32, NonZeroU64};
+use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-use std::{fs, io};
+use std::{fs, io, iter};
 
 use provider::{
-    Console, Create, Created, Creator, ImageRef, Listed, ListenDials, Listened, Meeting, Phase,
-    Provider, Ready, Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted, UnixTime,
+    CompanionDial, Console, Create, Created, Creator, ImageRef, Listed, ListenDials, Listened,
+    Listens, Meeting, Phase, Provider, Ready, Reservation, Role, RunTag, SandboxId, SandboxdRef,
+    Sweep, Undeleted, UnixTime,
 };
 use schema::frame;
 use schema::ir::{AbsolutePath, Argv, Container, CpuModel, Image, Mode, Name, Sha256Digest};
@@ -51,15 +52,15 @@ use schema::sandbox::op::{
 };
 use schema::sandbox::{
     Endpoint, Entry, ExitStatus, FromSandbox, HelloReply, Launch, PROTOCOL_VERSION,
-    RESULT_MAX_BYTES, RegistrationGrant, RelativePath, Root, SOCKET_NAME, SocketDial, ToSandbox,
-    dir_mode, file_mode, log_dir, out_dir, pumpkin_dir,
+    RESULT_MAX_BYTES, RegistrationGrant, RelativePath, Relayed, Root, SOCKET_NAME, SocketDial,
+    ToSandbox, dir_mode, file_mode, log_dir, out_dir, pumpkin_dir,
 };
 use schema::workflow::{Class, Companions, Offers, UsdPerHour};
 use serde_json::{Map, Value, json};
 use stdx::Deadline;
 use stdx::time::{Clock as _, Machine};
-use test_support::edge;
 use test_support::suite::{Locals, Subject};
+use test_support::{edge, relayed};
 
 use crate::host::SimTime;
 
@@ -136,6 +137,10 @@ const LAST_WAITS: Duration = Duration::from_secs(60);
 // How long a held set-up waits for the others before the test fails instead of hanging.
 const SET_UP_WAITS: Duration = Duration::from_secs(60);
 
+// How long a container waits for its turn to meet the gateway before the test fails instead of
+// hanging.
+const TURN_WAITS: Duration = Duration::from_secs(60);
+
 // A platform's sandbox ends some time after it is told to, so a delete that doesn't wait for its
 // end returns while it runs, which the suite then sees (`Subject::held`): far longer than the
 // suite takes to look after a delete returns, and far shorter than any test's bounds.
@@ -157,6 +162,12 @@ pub(crate) struct Sim {
     listens: bool,
     // The sandbox, by its name in its run, whose session ends once it is set up.
     brief: Option<&'static str>,
+    // The turns in which the containers of a sandbox that holds companions meet the gateway.
+    turns: Option<&'static [(&'static str, u64)]>,
+    // The companion that serves a certificate which the gateway didn't issue.
+    impostor: Option<&'static str>,
+    // Whether a create that is given companions says where its relay listens.
+    relays: bool,
 }
 
 // What is called once the run log holds each part in a line.
@@ -229,6 +240,8 @@ struct State {
     published: Vec<String>,
     cpus: u64,
     reserved: Vec<Reserved>,
+    /// What each create was given of each companion, by the sandbox's id.
+    companions: Vec<String>,
     /// The record of the run whose sandboxes these are, once `Sim::records` names it.
     record: Option<PathBuf>,
     /// The run's clock, on a simulated host.
@@ -251,7 +264,11 @@ struct Sandbox {
     // connection.
     shared: Arc<Mutex<Status>>,
     thread: JoinHandle<()>,
+    companions: Vec<Beside>,
 }
+
+// A companion's thread, with what it shares with it, as `main`'s does.
+type Beside = (Arc<Mutex<Status>>, JoinHandle<()>);
 
 impl Sandbox {
     fn of(&self, run: &RunTag) -> bool {
@@ -291,6 +308,8 @@ struct Status {
     time: Option<SimTime>,
     // Taken by the sandbox's first put.
     set_ups: Option<Arc<SetUps>>,
+    // Its turn to meet the gateway, which its first request ends.
+    turn: Option<Turn>,
 }
 
 /// What a sandbox's freeze meets.
@@ -357,6 +376,7 @@ impl Sim {
                 published: Vec::new(),
                 cpus: 1 << 10,
                 reserved: Vec::new(),
+                companions: Vec::new(),
                 record: None,
                 time: None,
             })),
@@ -366,6 +386,9 @@ impl Sim {
             step: None,
             listens: false,
             brief: None,
+            turns: None,
+            impostor: None,
+            relays: true,
         }
     }
 
@@ -498,6 +521,52 @@ impl Sim {
     }
 
     #[must_use]
+    /// Makes each class offer its sandboxes 8 companions at most, whatever the role needs. A
+    /// sandbox that listens runs each on a thread of its own, with files of its own, behind the
+    /// stand-in relay ([`relayed`]).
+    pub(crate) fn offering_companions(mut self) -> Self {
+        for class in self.ready.classes.values_mut() {
+            class.offers.companions = Companions::Reserved {
+                cpu_millis_each: NonZeroU64::MIN,
+                memory_bytes_each: NonZeroU64::MIN,
+                most: NonZeroUsize::new(8).unwrap(),
+            };
+        }
+        self
+    }
+
+    #[must_use]
+    /// Makes the containers of each sandbox that holds companions meet the gateway in `turns`.
+    /// Each says its hello once the one before it has taken its first request. It moves the clock
+    /// to its seconds first. A container without a turn never says hello.
+    pub(crate) fn meeting_in_turn(self, turns: &'static [(&'static str, u64)]) -> Self {
+        Self {
+            turns: Some(turns),
+            ..self
+        }
+    }
+
+    #[must_use]
+    /// Makes the companion `name` serve a certificate that the gateway didn't issue, as a
+    /// container that took its place would. It serves it at its turn, which then ends.
+    pub(crate) fn impostor(self, name: &'static str) -> Self {
+        Self {
+            impostor: Some(name),
+            ..self
+        }
+    }
+
+    #[must_use]
+    /// Makes each create that is given companions leave out where its relay listens, against
+    /// what [`Listened`] says.
+    pub(crate) fn naming_no_relay(self) -> Self {
+        Self {
+            relays: false,
+            ..self
+        }
+    }
+
+    #[must_use]
     /// Names the platform, which prefixes the references that it publishes and the only ones it
     /// takes.
     pub(crate) fn named(self, platform: &'static str) -> Self {
@@ -538,6 +607,11 @@ impl Sim {
 
     pub(crate) fn published(&self) -> Vec<String> {
         self.state().published.clone()
+    }
+
+    /// What each create was given of each companion.
+    pub(crate) fn companions(&self) -> Vec<String> {
+        self.state().companions.clone()
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
@@ -759,27 +833,59 @@ impl Provider for Sim {
 
 impl Creator<SocketDial> for Sim {
     fn create(&self, create: &Create, dial: SocketDial) -> Result<Created, String> {
-        self.timed(|| self.made(create, Meets::Dials(dial.dir.join(SOCKET_NAME))))
+        let meets = Meets::Dials(dial.dir.join(SOCKET_NAME));
+        self.timed(|| self.made(create, meets, Vec::new()))
     }
 }
 
 impl Creator<ListenDials, Listened> for Sim {
     fn create(&self, create: &Create, dials: ListenDials) -> Result<Listened, String> {
         let ListenDials { main, companions } = dials;
-        assert!(
-            companions.is_empty(),
-            "the simulated provider was asked for companions, though its classes offer none"
-        );
+        let behind_edge = |listener: &TcpListener| {
+            let port = edge::front(listener.local_addr().unwrap());
+            Endpoint::new(edge::NAME.to_owned(), port).unwrap()
+        };
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let port = edge::front(listener.local_addr().unwrap());
-        let created = self.timed(|| self.made(create, Meets::Listens(listener, main.grant)))?;
+        let main_endpoint = behind_edge(&listener);
+        // Each companion listens where only the sandbox's relay reaches it.
+        let beside: Vec<(TcpListener, CompanionDial)> = (companions.into_iter())
+            .map(|dial| (TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap(), dial))
+            .collect();
+        let relay = (!beside.is_empty()).then(|| {
+            let listening = (beside.iter())
+                .map(|(listener, dial)| (dial.name.clone(), listener.local_addr().unwrap()));
+            let relay = relayed::relay(listening.collect());
+            let port = edge::front(relay.address);
+            Endpoint::new(edge::NAME.to_owned(), port).unwrap()
+        });
+        let meets = Meets::Listens(listener, main.grant);
+        let created = self.timed(|| self.made(create, meets, beside))?;
         Ok(Listened {
             created,
-            main: Endpoint::new(edge::NAME.to_owned(), port).unwrap(),
-            relay: None,
+            main: main_endpoint,
+            relay: relay.filter(|_| self.relays),
         })
     }
 }
+
+impl Listens for Sim {
+    fn publish_companion_images(
+        &self,
+        images: &[Image],
+        sandboxd: &SandboxdRef,
+    ) -> Result<Vec<ImageRef>, String> {
+        self.own("the `sandboxd`", sandboxd.as_str())?;
+        let mut state = self.state();
+        let published = images.iter().map(|image| {
+            state.published.push(format!("companion's image {image}"));
+            ImageRef::from(format!("{}:{COMPANION}{image}", self.platform))
+        });
+        Ok(published.collect())
+    }
+}
+
+// What marks the reference of an image that was published as a companion's.
+const COMPANION: &str = "companion:";
 
 impl Sim {
     // Times `sandbox`, the making of a sandbox, as the create's one phase, amid its steps.
@@ -825,8 +931,14 @@ impl Sim {
     }
 
     // A sandbox, a thread of this process, ends with it, so the hard end needs nothing more; and
-    // the name needs no use, as each sandbox is created once.
-    fn made(&self, create: &Create, meets: Meets) -> Result<SandboxId, String> {
+    // the name needs no use, as each sandbox is created once. Each of `beside` is a companion
+    // that it holds, with where it listens.
+    fn made(
+        &self,
+        create: &Create,
+        meets: Meets,
+        beside: Vec<(TcpListener, CompanionDial)>,
+    ) -> Result<SandboxId, String> {
         let by = self.by(create);
         if by.passed() {
             let passed =
@@ -850,10 +962,9 @@ impl Sim {
         let (mute, hung) = dialing.silent();
         let hello = json!({ "version": PROTOCOL_VERSION });
         let mode = meets.mode();
-        let state = self.state();
-        let (record, time) = (state.record.clone(), state.time.clone());
-        drop(state);
-        let shared = Arc::new(Mutex::new(Status::new(self.journal.clone(), record, time)));
+        let fresh = self.fresh(!beside.is_empty());
+        let (given, companions) = self.accompanied(beside, &hello, &fresh)?;
+        let shared = fresh("main");
         // Before its thread starts, so that the console shows it once the create returns, however
         // late the thread runs.
         (status(&shared).console).push_str(if mute { NEVER_DIALS } else { "" });
@@ -870,6 +981,8 @@ impl Sim {
         let mut state = self.state();
         let id = format!("sim-{}", state.next);
         state.next += 1;
+        let given = given.into_iter().map(|given| format!("{id} holds {given}"));
+        state.companions.extend(given);
         state.modes.extend(mode);
         state.models.push(model);
         state.classes.push(create.class.clone());
@@ -881,6 +994,7 @@ impl Sim {
             listing,
             shared,
             thread,
+            companions,
         };
         state.sandboxes.insert(id.clone(), sandbox);
         self.tell(|| format!("created {id}"));
@@ -896,6 +1010,80 @@ impl Sim {
             ));
         }
         Ok(SandboxId::from(id))
+    }
+
+    // What makes the status that each container of a new sandbox shares with its thread, by the
+    // container's name. Only a sandbox that holds companions, an `accompanied` one, meets in turns.
+    fn fresh(&self, accompanied: bool) -> impl Fn(&str) -> Arc<Mutex<Status>> {
+        let state = self.state();
+        let (record, time) = (state.record.clone(), state.time.clone());
+        drop(state);
+        let (journal, turn) = (
+            self.journal.clone(),
+            turns_of(self.turns.filter(|_| accompanied)),
+        );
+        move |container| {
+            let mut status = Status::new(journal.clone(), record.clone(), time.clone());
+            status.turn = turn(container);
+            Arc::new(Mutex::new(status))
+        }
+    }
+
+    // Starts each of `beside`, a companion with where it listens. Returns what each was given,
+    // and what the sandbox keeps of each.
+    fn accompanied(
+        &self,
+        beside: Vec<(TcpListener, CompanionDial)>,
+        hello: &Value,
+        fresh: &impl Fn(&str) -> Arc<Mutex<Status>>,
+    ) -> Result<(Vec<String>, Vec<Beside>), String> {
+        let (mut given, mut companions) = (Vec::new(), Vec::new());
+        for (listener, dial) in beside {
+            let shared = fresh(dial.name.as_str());
+            let (shown, thread) = self.beside(listener, dial, hello, &shared)?;
+            given.push(shown);
+            companions.push((shared, thread));
+        }
+        Ok((given, companions))
+    }
+
+    // Starts the companion that `dial` describes, which listens at `listener`, on a thread of its
+    // own, which shares `shared` with it. Returns what it was given, as a test shows it, and the
+    // thread.
+    fn beside(
+        &self,
+        listener: TcpListener,
+        dial: CompanionDial,
+        hello: &Value,
+        shared: &Arc<Mutex<Status>>,
+    ) -> Result<(String, JoinHandle<()>), String> {
+        let CompanionDial {
+            name,
+            image,
+            user,
+            cwd,
+            env,
+            relayed: Relayed { grant, identity },
+        } = dial;
+        let image = self.own("a companion's image", image.as_str())?;
+        let Some(image) = image.strip_prefix(COMPANION) else {
+            return Err(format!(
+                "`{image}` wasn't published as a companion's image: publish it as one"
+            ));
+        };
+        let (who, env) = (format!("{}:{}", user.uid, user.gid), json!(env));
+        let given = format!("`{name}`, of image {image}, as {who}, in {cwd}, with {env}");
+        let server = if self.impostor == Some(name.as_str()) {
+            Secured::Impostor(edge::other_server())
+        } else {
+            Secured::Companion(relayed::server(&identity))
+        };
+        let (ours, hello) = (Arc::clone(shared), hello.clone());
+        let thread = thread::Builder::new()
+            .name(format!("sim-{name}"))
+            .spawn(move || listen(listener, &server, &grant, &hello, false, &ours))
+            .map_err(|error| format!("a companion's thread didn't start: {error}"))?;
+        Ok((given, thread))
     }
 
     // When `create` gives up, by the run's clock on a simulated host.
@@ -969,6 +1157,9 @@ impl Subject for Sim {
             step: self.step,
             listens: self.listens,
             brief: self.brief,
+            turns: self.turns,
+            impostor: self.impostor,
+            relays: self.relays,
         }))
     }
 
@@ -1109,17 +1300,21 @@ fn stop(sandbox: Sandbox) {
         listing: _,
         shared,
         thread,
+        companions,
     } = sandbox;
-    let mut status = status(&shared);
-    status.deleted = true;
-    if let Some(connection) = status.connection.take() {
-        let _ = connection.shutdown(Shutdown::Both);
+    // Its companions end with it.
+    for (shared, thread) in iter::once((shared, thread)).chain(companions) {
+        let mut status = status(&shared);
+        status.deleted = true;
+        if let Some(connection) = status.connection.take() {
+            let _ = connection.shutdown(Shutdown::Both);
+        }
+        drop(status);
+        // A thread that hangs waits to be woken once its sandbox is deleted.
+        thread.thread().unpark();
+        // Only a bug panics the thread, and joining raises its panic here.
+        thread.join().unwrap();
     }
-    drop(status);
-    // A thread that hangs waits to be woken once its sandbox is deleted.
-    thread.thread().unpark();
-    // Only a bug panics the thread, and joining raises its panic here.
-    thread.join().unwrap();
 }
 
 // Waits for the thread of a sandbox that `ends` at once to end, so that every list after its
@@ -1150,10 +1345,12 @@ impl Meets {
     }
 }
 
-// A sandbox's connection to the gateway: its socket, or a connection from the edge.
+// A container's connection to the gateway. It is its socket, a connection from the edge, or a
+// companion's end of its own TLS.
 enum Wire {
     Unix(UnixStream),
     Tcp(TcpStream),
+    Tls(tls::Stream),
 }
 
 impl Wire {
@@ -1162,14 +1359,21 @@ impl Wire {
         let other = match &self {
             Self::Unix(stream) => Self::Unix(stream.try_clone()?),
             Self::Tcp(stream) => Self::Tcp(stream.try_clone()?),
+            Self::Tls(stream) => Self::Tls(stream.try_clone()?),
         };
         Ok((self, other))
     }
 
     fn shutdown(&self, how: Shutdown) -> io::Result<()> {
-        match self {
-            Self::Unix(stream) => stream.shutdown(how),
-            Self::Tcp(stream) => stream.shutdown(how),
+        match (self, how) {
+            (Self::Unix(stream), how) => stream.shutdown(how),
+            (Self::Tcp(stream), how) => stream.shutdown(how),
+            (Self::Tls(stream), Shutdown::Both) => stream.shutdown(),
+            // Only an op that goes out as its session ends stops the reads alone.
+            (Self::Tls(_), Shutdown::Read | Shutdown::Write) => panic!(
+                "a companion's connection ends both ways at once, under TLS: script no op in a \
+                 companion, whose session is passive"
+            ),
         }
     }
 }
@@ -1179,6 +1383,7 @@ impl io::Read for Wire {
         match self {
             Self::Unix(stream) => stream.read(buffer),
             Self::Tcp(stream) => stream.read(buffer),
+            Self::Tls(stream) => (&*stream).read(buffer),
         }
     }
 }
@@ -1188,6 +1393,7 @@ impl io::Write for Wire {
         match self {
             Self::Unix(stream) => stream.write(buffer),
             Self::Tcp(stream) => stream.write(buffer),
+            Self::Tls(stream) => (&*stream).write(buffer),
         }
     }
 
@@ -1195,7 +1401,77 @@ impl io::Write for Wire {
         match self {
             Self::Unix(stream) => stream.flush(),
             Self::Tcp(stream) => stream.flush(),
+            Self::Tls(stream) => (&*stream).flush(),
         }
+    }
+}
+
+// What secures a connection that a container takes.
+enum Secured {
+    // The provider's edge, before the connection reaches `main`.
+    Edge,
+    // The companion's own TLS, with the identity that it was given.
+    Companion(tls::Server),
+    // TLS with an identity that the gateway didn't issue.
+    Impostor(tls::Server),
+}
+
+// The turns in which a sandbox's containers meet the gateway (`Sim::meeting_in_turn`).
+struct Turns {
+    // Each turn's container, and the seconds that the clock reads as it says its hello.
+    turns: &'static [(&'static str, u64)],
+    ended_count: Mutex<usize>,
+}
+
+// Each container's turn among `turns`, by the container's name, if its sandbox meets in turns.
+fn turns_of(turns: Option<&'static [(&'static str, u64)]>) -> impl Fn(&str) -> Option<Turn> {
+    let turns = turns.map(|turns| {
+        Arc::new(Turns {
+            turns,
+            ended_count: Mutex::new(0),
+        })
+    });
+    move |container| {
+        let turns = Arc::clone(turns.as_ref()?);
+        let index = turns.turns.iter().position(|(turn, _)| *turn == container);
+        Some(Turn { turns, index })
+    }
+}
+
+// A container's turn among its sandbox's.
+#[derive(Clone)]
+struct Turn {
+    turns: Arc<Turns>,
+    // None for a container without a turn, which never says hello.
+    index: Option<usize>,
+}
+
+impl Turn {
+    // Waits for the turn, and moves the clock to its time. Returns whether it came: a container
+    // without a turn waits until its sandbox is deleted.
+    fn came(&self, shared: &Mutex<Status>) -> bool {
+        let waited = Deadline::after(TURN_WAITS);
+        while self.index != Some(*stdx::unpoisoned(self.turns.ended_count.lock())) {
+            if status(shared).deleted {
+                return false;
+            }
+            assert!(
+                self.index.is_none() || waited.remaining().is_some(),
+                "a container waited {TURN_WAITS:?} for its turn to meet the gateway: expected \
+                 the run to meet every container of its sandbox at once"
+            );
+            thread::sleep(AWAIT_POLL);
+        }
+        let seconds = self.index.map(|index| self.turns.turns[index].1);
+        if let (Some(time), Some(seconds)) = (&status(shared).time, seconds) {
+            time.reach(Duration::from_secs(seconds));
+        }
+        true
+    }
+
+    // Ends the turn, so that the next one comes.
+    fn end(&self) {
+        *stdx::unpoisoned(self.turns.ended_count.lock()) += 1;
     }
 }
 
@@ -1217,7 +1493,9 @@ fn sandboxd(
     } else {
         match meets {
             Meets::Dials(socket) => dial(&socket, hello, model, shared),
-            Meets::Listens(listener, grant) => listen(listener, &grant, hello, model, shared),
+            Meets::Listens(listener, grant) => {
+                listen(listener, &Secured::Edge, &grant, hello, model, shared);
+            }
         }
     }
     if status(shared).deleted {
@@ -1240,14 +1518,19 @@ fn dial(socket: &Path, hello: &Value, model: bool, shared: &Mutex<Status>) {
     }
 }
 
-// Takes connections in turns, so that a delete ends the wait.
+// Takes connections one after another, so that a delete ends the wait, and serves the session of
+// the first that it opens. Each is secured as `secured` says. Where the sandbox's containers meet
+// in turns, it says its hello at its turn, and an impostor shows its certificate at its.
 fn listen(
     listener: TcpListener,
+    secured: &Secured,
     grant: &RegistrationGrant,
     hello: &Value,
     model: bool,
     shared: &Mutex<Status>,
 ) {
+    let turn = status(shared).turn.clone();
+    let came = || turn.as_ref().is_none_or(|turn| turn.came(shared));
     listener.set_nonblocking(true).unwrap();
     while !status(shared).deleted {
         let taken = match listener.accept() {
@@ -1262,11 +1545,29 @@ fn listen(
                 return;
             }
         };
-        let connection = (taken.set_nonblocking(false))
-            .and_then(|()| Wire::Tcp(taken).cloned())
-            .unwrap();
-        if let Some(session) = opened(connection, hello, Some(grant), shared) {
-            // No other peer reaches the session's sandbox.
+        taken.set_nonblocking(false).unwrap();
+        let handshake = Deadline::after(test_support::HUNG);
+        let wire = match secured {
+            Secured::Edge => Wire::Tcp(taken),
+            Secured::Companion(server) => match server.accept(taken, handshake) {
+                Ok(stream) => Wire::Tls(stream),
+                // A connection that is no TLS client's, or that ended, leaves the next one.
+                Err(_) => continue,
+            },
+            Secured::Impostor(server) => {
+                if came() {
+                    // The gateway refuses the certificate, which fails the handshake.
+                    drop(server.accept(taken, handshake));
+                    turn.iter().for_each(Turn::end);
+                }
+                return;
+            }
+        };
+        if !came() {
+            return;
+        }
+        if let Some(session) = opened(wire.cloned().unwrap(), hello, Some(grant), shared) {
+            // No other peer reaches the session's container.
             drop(listener);
             serve(session, model, shared);
             return;
@@ -2309,6 +2610,10 @@ fn serve(mut connection: Wire, model: bool, shared: &Mutex<Status>) {
     let (freezing, mut frozen) = (status(shared).freezing, false);
     // A connection that ends, cleanly or not, ends the session, as a delete's does.
     while let Ok(Some((request, body))) = frame::read::<ToSandbox>(&mut connection) {
+        // Its first request, which the gateway sends once it has noted when the container met.
+        if let Some(turn) = status(shared).turn.take() {
+            turn.end();
+        }
         if stalled(shared) {
             // It reads nothing more, as a stuck `sandboxd`, and answers nothing; the connection
             // stays open, by the clone its status keeps until a delete shuts it down, so the

@@ -186,7 +186,7 @@
 "crates/runtime/src/record/writer.rs" = 1
 "crates/runtime/src/relay.rs" = 2
 "crates/runtime/src/routes.rs" = 3
-"crates/runtime/src/sandbox.rs" = 12
+"crates/runtime/src/sandbox.rs" = 11
 "crates/runtime/src/sources.rs" = 1
 "crates/runtime/src/start.rs" = 2
 "crates/runtime/tests/it/body.rs" = 1

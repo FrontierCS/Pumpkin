@@ -14,13 +14,14 @@ use std::thread::Scope;
 use std::time::Duration;
 
 use decision::{CallResult, Caller, Core, Event, JobId, Request};
-use gateway::{Arrival, IncomingModelRequest, Session, Trees};
+use gateway::{Arrival, IncomingModelRequest, Trees};
 use provider::UnixTime;
+use schema::ir::Container;
 use schema::sandbox::OpPayloadLimit;
 use stdx::time::Clock as _;
 
 use super::log::Entry;
-use super::sandbox::{Sandboxes, Which};
+use super::sandbox::{Sandboxes, Sessions, Which};
 use super::{Asked, Clock, Host, Inbox, Input, Runtime};
 
 /// A child of the run, as its thread sees it, timed and synced by the host `H`, whose driver
@@ -50,12 +51,14 @@ pub(super) struct Deadlines {
 }
 
 pub(super) enum Message<O> {
-    /// What its session handed over ([`Registration::accept`]), at the time the run observed it.
-    /// That is its commands' exits and its end, and the ops and model requests of a session that
-    /// takes them. A shared target's end can come from the loop, which ended the target.
+    /// What the session of one of its sandbox's containers handed over
+    /// ([`Registration::accept`]), at the time the run observed it. The container is `main` but
+    /// in a runner's sandbox, which also holds its companions. That is its commands' exits and its
+    /// end, and the ops and model requests of a session that takes them. A shared target's end can
+    /// come from the loop, which ended the target.
     ///
     /// [`Registration::accept`]: gateway::Registration::accept
-    Session(Duration, Arrival),
+    Session(Container, Duration, Arrival),
     Stop,
     /// An order of the core's for its driver, or the core's reply to its op.
     Order(O),
@@ -126,15 +129,15 @@ impl End {
     }
 }
 
-/// Runs `child` to its end, reporting as it goes: starts its sandbox, whose session takes ops
-/// with `ops` as their payload limit, if given, then hands its session to `drive`, whose end it
-/// reports around the sandbox's delete ([`Child::close`]). A child whose start is due by a time
+/// Runs `child` to its end, reporting as it goes: starts its sandbox, whose `main` session takes
+/// ops with `ops` as their payload limit, if given, then hands its sessions to `drive`, whose end
+/// it reports around the sandbox's delete ([`Child::close`]). A child whose start is due by a time
 /// that has passed fails at once, with nothing created, as one whose sandbox doesn't start does
 /// ([`End::failed`]).
 pub(super) fn run<H: Host, O: Send + 'static>(
     child: &mut Child<'_, H, O>,
     ops: Option<OpPayloadLimit>,
-    drive: impl FnOnce(&mut Child<'_, H, O>, &mut Session<H::Clock>) -> End,
+    drive: impl FnOnce(&mut Child<'_, H, O>, &mut Sessions<H::Clock>) -> End,
 ) {
     let which = child.which;
     let noun = which.noun();
@@ -149,7 +152,7 @@ pub(super) fn run<H: Host, O: Send + 'static>(
     let by = (&child.clock, child.deadlines.startup);
     let inbox = child.inbox.sender();
     let stamp = child.clock.clone();
-    let wrap = move |arrival| Message::Session(stamp.now(), arrival);
+    let wrap = move |container, arrival| Message::Session(container, stamp.now(), arrival);
     let started = (child.sandboxes).start(which, ops, by, child.hard_end, inbox, wrap);
     let mut sandbox = match started {
         Ok(sandbox) => sandbox,
@@ -161,7 +164,7 @@ pub(super) fn run<H: Host, O: Send + 'static>(
             Err(reason) => return child.report(Report::Undeleted(reason)),
         },
     };
-    let last = drive(child, &mut sandbox.session);
+    let last = drive(child, &mut sandbox.sessions);
     child.close(last, || {
         let (logged, deleted) = child.sandboxes.delete(sandbox);
         for entry in logged {

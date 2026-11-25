@@ -20,8 +20,8 @@ use decision::{Outcome, lasts};
 use expect_test::{Expect, expect};
 use gateway::Dialer;
 use provider::{
-    Console, Create, Created, Creator, ImageRef, Listed, ListenDials, Listened, Meeting, Provider,
-    Ready, Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
+    Console, Create, Created, Creator, ImageRef, Listed, ListenDials, Listened, Listens, Meeting,
+    Provider, Ready, Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
 use route::Serving;
 use runtime::{
@@ -162,6 +162,16 @@ impl Creator<SocketDial> for Interrupting<'_> {
 impl Creator<ListenDials, Listened> for Interrupting<'_> {
     fn create(&self, create: &Create, dials: ListenDials) -> Result<Listened, String> {
         self.created(create, || self.sim.create(create, dials))
+    }
+}
+
+impl Listens for Interrupting<'_> {
+    fn publish_companion_images(
+        &self,
+        images: &[Image],
+        sandboxd: &SandboxdRef,
+    ) -> Result<Vec<ImageRef>, String> {
+        self.sim.publish_companion_images(images, sandboxd)
     }
 }
 
@@ -307,6 +317,8 @@ enum Also {
     HardEnds,
     /// Each sandbox's `sandbox_created` and `sandbox_met`, which the log otherwise drops.
     Starts,
+    /// The meetings of the named sandbox's containers, each with when it was observed.
+    Met(&'static str),
     /// A part of the records that nothing orders among the others, which the log shows apart
     /// from them, sorted.
     Racing(&'static str),
@@ -326,6 +338,7 @@ fn interruption(also: &[Also]) -> Option<At> {
         | Also::Reaped
         | Also::HardEnds
         | Also::Starts
+        | Also::Met(_)
         | Also::Racing(_)
         | Also::File(_) => None,
     })
@@ -389,6 +402,7 @@ fn executed_ir<H: Shown>(
     if also.contains(&Also::Polls) {
         lines.splice(1..1, polls(&log));
     }
+    lines.extend(also.iter().flat_map(|also| met(&log, also)));
     lines.push("log.jsonl:".to_owned());
     let (log, start, last) = logged(log, &started, H::SCRIPTED, also);
     lines.extend(log);
@@ -1270,7 +1284,8 @@ fn logged(
         // A sandbox's start, which `in_order` checks, is dropped too, as its place depends on
         // timing.
         let event = &logged["event"]["kind"];
-        if (event == "sandbox_created" || event == "sandbox_met") && !also.contains(&Also::Starts) {
+        let starts = ["sandbox_created", "sandbox_met", "container_met"];
+        if starts.iter().any(|kind| event == kind) && !also.contains(&Also::Starts) {
             continue;
         }
         let kind = &logged["event"]["request"]["kind"];
@@ -1338,6 +1353,24 @@ fn logged(
     (numbered_apart(records, also), start, last)
 }
 
+// The meetings of the containers of the sandbox that `also` names, if it names one. They are
+// each `container_met` and the `sandbox_met`, in the log's order, with when each was observed.
+fn met(log: &[Value], also: &Also) -> Vec<String> {
+    let Also::Met(sandbox) = also else {
+        return Vec::new();
+    };
+    let met = log.iter().filter_map(|logged| {
+        let event = &logged["event"];
+        let met = event["kind"] == "container_met" || event["kind"] == "sandbox_met";
+        let observed = Duration::from_nanos(nanos(&logged["observed_ns"])?);
+        (met && event["sandbox"] == *sandbox)
+            .then(|| format!("  {event}, observed at {observed:?}"))
+    });
+    let mut lines = vec![format!("the meetings of {sandbox}'s containers:")];
+    lines.extend(met);
+    lines
+}
+
 // The records numbered in order, then those of a racing kind, sorted, with no place.
 fn numbered_apart(records: Vec<Value>, also: &[Also]) -> Vec<String> {
     let races = |logged: &Value| {
@@ -1375,6 +1408,8 @@ fn polls(log: &[Value]) -> Vec<String> {
 fn in_order(log: &[Value]) -> Option<Duration> {
     let time = |ns: &Value| Duration::from_nanos(nanos(ns).unwrap());
     let (mut last, mut started, mut created) = (None, BTreeMap::new(), BTreeMap::new());
+    // When the last container of each sandbox to meet did.
+    let mut containers = BTreeMap::new();
     for (seq, logged) in log.iter().enumerate() {
         assert_eq!(logged["seq"], json!(seq), "{logged}");
         let at = Some(time(&logged["at_ns"]));
@@ -1407,10 +1442,23 @@ fn in_order(log: &[Value]) -> Option<Duration> {
                 let once = created.insert(event["sandbox"].as_str(), observed);
                 assert!(once.is_none(), "{logged}: its sandbox was created before");
             }
+            Some("container_met") => {
+                let created = created.get(&event["sandbox"].as_str());
+                let met = created.is_some_and(|created| *created <= observed);
+                assert!(met, "{logged}: no create of its sandbox came before");
+                let before = containers.insert(event["sandbox"].as_str(), observed);
+                assert!(
+                    before <= Some(observed),
+                    "{logged}: a container met after it"
+                );
+            }
             Some("sandbox_met") => {
                 let created = created.get(&event["sandbox"].as_str());
                 let met = created.is_some_and(|created| *created <= observed);
                 assert!(met, "{logged}: no create of its sandbox came before");
+                // A sandbox that holds companions met as the last of its containers did.
+                let last = containers.get(&event["sandbox"].as_str());
+                assert!(last.is_none_or(|last| *last == observed), "{logged}");
             }
             Some("sandbox_deleted") if event["sandbox"].is_string() => {
                 let known = created.contains_key(&event["sandbox"].as_str());
@@ -4557,6 +4605,57 @@ fn fails_as_its_session_ended_before_it_was_ready() {
         {"actions":[],"at_ns":"0","event":{"kind":"lease_failed","lease":0,"reason":"the runner's session ended: the sandbox ended the session"},"observed_ns":"0","seq":5}"#]].assert_eq(&leased(&shown));
 }
 
+/// [`lease_workflow`]'s, whose runner declares the companions `scheduler` and `swe-0`, and whose
+/// lease allows 8 commands, and 256 bytes a transfer.
+fn companions_workflow(argv: &[&str]) -> Value {
+    let mut ir = lease_workflow(argv, 30, RUNNER);
+    let lease = &mut ir["roles"][0]["runtime"]["agent"]["grants"][1]["session"];
+    lease["commands"] = json!(8);
+    lease["transfer_bytes"] = json!(256);
+    let companion = |name: &str, image: &str, id: u32, cwd: &str, env: &str| {
+        json!({
+            "name": name, "image": image, "user": { "uid": id, "gid": id },
+            "cwd": cwd, "env": [env],
+        })
+    };
+    let runner = ir["roles"].as_array_mut().unwrap().last_mut().unwrap();
+    runner["runtime"]["runner"]["companions"] = json!([
+        companion("scheduler", SCHEDULER, 2001, "/srv", "ROLE=scheduler"),
+        companion("swe-0", SWE, 2002, "/testbed", "INSTANCE=0"),
+    ]);
+    ir
+}
+
+const SCHEDULER: &str = "sha256:5555555555555555555555555555555555555555555555555555555555555555";
+const SWE: &str = "sha256:6666666666666666666666666666666666666666666666666666666666666666";
+
+/// A simulated provider whose sandboxes listen, and hold companions.
+fn accompanied() -> Sim {
+    Sim::new().listening().offering_companions()
+}
+
+/// `shown`, with the port of each endpoint on this host hidden, and TLS's own words for a
+/// certificate that it refuses.
+fn unported(shown: &str) -> String {
+    let mut hidden = String::new();
+    let mut rest = shown;
+    while let Some(at) = rest.find("localhost:") {
+        let (before, after) = rest.split_at(at + "localhost:".len());
+        hidden.push_str(before);
+        hidden.push_str("$PORT");
+        rest = after.trim_start_matches(|c: char| c.is_ascii_digit());
+    }
+    hidden.push_str(rest);
+    let failed = "the TLS handshake failed: ";
+    match (hidden.find(failed), hidden.find(": expected TLS 1.3")) {
+        (Some(from), Some(to)) => {
+            let from = from + failed.len();
+            format!("{}<why>{}", &hidden[..from], &hidden[to..])
+        }
+        _ => hidden,
+    }
+}
+
 /// What `shown` says of the run's leases: each line that names one, down to the log's last
 /// record, and all that follows it.
 fn leased(shown: &str) -> String {
@@ -4566,6 +4665,143 @@ fn leased(shown: &str) -> String {
     let after = |line: &&str| !line.is_empty() && !line.starts_with("its last record came");
     let files = files.lines().filter(after);
     leased.chain(files).collect::<Vec<_>>().join("\n")
+}
+
+// Each container of a runner's sandbox meets the gateway while the others do. Here each says its
+// hello once the one before it has met, in another order than the declared one.
+#[test]
+fn meets_every_container_at_once() {
+    let argv = [
+        "ops",
+        "gpu.open",
+        "await_lease gpu 0 ready",
+        "gpu.close 0",
+        "await_lease gpu 0 closed",
+        "call submit 6 finalize=true",
+    ];
+    let turns = &[("swe-0", 1), ("main", 2), ("scheduler", 3)];
+    let sim = accompanied().meeting_in_turn(turns);
+    let shown = executed(
+        &SimHost::new(),
+        "meets-every-container-at-once",
+        &[(PROVIDER, &sim)],
+        &companions_workflow(&argv),
+        SANDBOXD,
+        &[Also::Met("lease-0")],
+    );
+    let met = shown
+        .lines()
+        .filter(|line| line.contains("_met\"") || line.contains("meetings"));
+    let held = sim.companions().into_iter();
+    expect![[r#"
+        sim-2 holds `scheduler`, of image sha256:5555555555555555555555555555555555555555555555555555555555555555, as 2001:2001, in /srv, with ["ROLE=scheduler"]
+        sim-2 holds `swe-0`, of image sha256:6666666666666666666666666666666666666666666666666666666666666666, as 2002:2002, in /testbed, with ["INSTANCE=0"]
+        the meetings of lease-0's containers:
+          {"container":"swe-0","kind":"container_met","sandbox":"lease-0"}, observed at 1s
+          {"container":"main","kind":"container_met","sandbox":"lease-0"}, observed at 2s
+          {"container":"scheduler","kind":"container_met","sandbox":"lease-0"}, observed at 3s
+          {"kind":"sandbox_met","sandbox":"lease-0"}, observed at 3s"#]].assert_eq(&held.chain(met.map(str::to_owned)).collect::<Vec<_>>().join("\n"));
+}
+
+// A companion that the gateway can't trust fails its sandbox's start at once, by its name. `main`
+// had met, and `scheduler` never says hello: the failure ends its wait, and the sandbox is deleted.
+#[test]
+fn untrusted_companion_fails_the_start() {
+    let argv = [
+        "ops",
+        "gpu.open",
+        "await_lease gpu 0 failed",
+        "call submit 6 finalize=true",
+    ];
+    let sim = accompanied()
+        .meeting_in_turn(&[("main", 1), ("swe-0", 2)])
+        .impostor("swe-0");
+    let shown = executed(
+        &SimHost::new(),
+        "untrusted-companion-fails-the-start",
+        &[(PROVIDER, &sim)],
+        &companions_workflow(&argv),
+        SANDBOXD,
+        &[Also::Met("lease-0")],
+    );
+    expect![[r#"
+        the meetings of lease-0's containers:
+          {"container":"main","kind":"container_met","sandbox":"lease-0"}, observed at 1s
+        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":8,"cumulative_seconds":null,"instance_seconds":600,"instances":1}}},{"grant":"gpu","holder":"agent-0","instance":0,"kind":"start_lease","lease":0,"start_by_ns":"30000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"gpu","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"0","seq":3}
+        {"actions":[],"at_ns":"2000000000","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"lease-0"},"seq":4}
+        {"actions":[],"at_ns":"2000000000","event":{"kind":"lease_failed","lease":0,"reason":"the runner's sandbox didn't start: sandbox sim-2: its container `swe-0`: the gateway can't trust companion `swe-0` behind the relay at localhost:$PORT: the TLS handshake failed: <why>: expected TLS 1.3 from `swe-0`, with a certificate trusted for it"},"observed_ns":"2000000000","seq":5}"#]].assert_eq(&leased(&unported(&shown)));
+}
+
+// A sandbox whose `main` ends before it meets fails its start by `main`'s name. That failure ends
+// the waits of its companions, neither of which says hello.
+#[test]
+fn main_that_ended_stops_its_companions() {
+    let argv = [
+        "ops",
+        "gpu.open",
+        "await_lease gpu 0 failed",
+        "call submit 6 finalize=true",
+    ];
+    let mut ir = companions_workflow(&argv);
+    let runner = ir["roles"].as_array_mut().unwrap().last_mut().unwrap();
+    runner["image"] = json!(sim::image(MUTE).as_str());
+    // The clock passes the wait between two looks at the provider's list.
+    let looked = Synced::Holding("leases/0/.sandbox.json.partial", "sim-2");
+    let shown = executed(
+        &SimHost::new().moving_after_read(looked, Duration::from_secs(1)),
+        "main-that-ended-stops-its-companions",
+        &[(PROVIDER, &accompanied().meeting_in_turn(&[]))],
+        &ir,
+        SANDBOXD,
+        &[Also::Met("lease-0")],
+    );
+    expect![[r#"
+        the meetings of lease-0's containers:
+        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":8,"cumulative_seconds":null,"instance_seconds":600,"instances":1}}},{"grant":"gpu","holder":"agent-0","instance":0,"kind":"start_lease","lease":0,"start_by_ns":"30000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"gpu","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"0","seq":3}
+        {"actions":[],"at_ns":"1000000000","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"lease-0"},"seq":4}
+        {"actions":[],"at_ns":"1000000000","event":{"kind":"lease_failed","lease":0,"reason":"the runner's sandbox didn't start: sandbox sim-2: its container `main`: it ended before it met the gateway: expected its `sandboxd` to run until it connects; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"1000000000","seq":5}"#]].assert_eq(&leased(&shown));
+}
+
+// A create that was given companions and names no relay leaves a sandbox that can't be met, which
+// is deleted.
+#[test]
+fn created_without_a_relay() {
+    let argv = [
+        "ops",
+        "gpu.open",
+        "await_lease gpu 0 failed",
+        "call submit 6 finalize=true",
+    ];
+    let shown = executed(
+        &SimHost::new(),
+        "created-without-a-relay",
+        &[(PROVIDER, &accompanied().naming_no_relay())],
+        &companions_workflow(&argv),
+        SANDBOXD,
+        &[],
+    );
+    expect![[r#"
+        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":8,"cumulative_seconds":null,"instance_seconds":600,"instances":1}}},{"grant":"gpu","holder":"agent-0","instance":0,"kind":"start_lease","lease":0,"start_by_ns":"30000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"gpu","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"0","seq":3}
+        {"actions":[],"at_ns":"0","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"lease-0"},"seq":4}
+        {"actions":[],"at_ns":"0","event":{"kind":"lease_failed","lease":0,"reason":"the runner's sandbox didn't start: sandbox sim-2: its create gave no relay, though it was given 2 companions: expected the endpoint where its relay listens"},"observed_ns":"0","seq":5}"#]].assert_eq(&leased(&shown));
+}
+
+// Only a sandbox that listens holds companions, so a runner that declares them where sandboxes
+// dial is refused before any sandbox starts.
+#[test]
+fn companions_where_sandboxes_dial() {
+    let shown = executed(
+        &SimHost::new(),
+        "companions-where-sandboxes-dial",
+        &[(PROVIDER, &Sim::new().offering_companions())],
+        &companions_workflow(&["exit", "0"]),
+        SANDBOXD,
+        &[Also::Listing],
+    );
+    expect![[r#"
+        failed: role `gpu_runner` declares companions, and the sandboxes of provider `simulated` hold none, as they don't listen: declare none, or run it on a provider whose sandboxes listen
+        record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
+        log.jsonl:"#]].assert_eq(&shown);
 }
 
 #[test]
