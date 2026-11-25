@@ -581,7 +581,8 @@ impl<'p, H: Host> Sandboxes<'p, H> {
     }
 
     // Creates the sandbox that `create` describes on provider `on`, by `by` on `clock`. Tells the
-    // log when the create began and returned, with the phases that the provider timed.
+    // log when the create began and returned, with the phases that the provider timed, and the
+    // hard end that it was given.
     fn create(
         &self,
         on: &'p Name,
@@ -603,6 +604,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             sandbox: create.name.clone(),
             began,
             phases,
+            hard_end: create.hard_end,
             at: clock.now(),
         }]);
         Ok((id, registration))

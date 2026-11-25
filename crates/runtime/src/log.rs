@@ -76,10 +76,18 @@ pub(super) struct Log<'h, H: Host> {
     seq: u64,
     host: &'h H,
     clock: H::Clock,
+    // The `unix_ns` of `run_started`, from which each `UnixTime` that the log gives is a time
+    // since the run started.
+    unix_start: UnixTime,
 }
 
 impl<'h, H: Host> Log<'h, H> {
-    pub(super) fn create(host: &'h H, clock: H::Clock, dir: &Path) -> Result<Self, String> {
+    pub(super) fn create(
+        host: &'h H,
+        clock: H::Clock,
+        unix_start: UnixTime,
+        dir: &Path,
+    ) -> Result<Self, String> {
         let path = dir.join("log.jsonl");
         let file = OpenOptions::new()
             .append(true)
@@ -94,19 +102,19 @@ impl<'h, H: Host> Log<'h, H> {
             seq: 0,
             host,
             clock,
+            unix_start,
         })
     }
 
     pub(super) fn start(
         &mut self,
         workflow: &Workflow,
-        unix: UnixTime,
         hard_end: Duration,
         actions: &[Action],
     ) -> Result<(), String> {
         let event = json!({
             "kind": "run_started",
-            "unix_ns": nanos(unix.since_epoch()),
+            "unix_ns": nanos(self.unix_start.since_epoch()),
             "hard_end_ns": nanos(hard_end),
         });
         self.decided(workflow, Duration::ZERO, event, actions, false)
@@ -308,10 +316,12 @@ impl<'h, H: Host> Log<'h, H> {
                 sandbox,
                 began,
                 phases,
+                hard_end,
                 at,
             } => {
                 let mut event = json!({
                     "kind": "sandbox_created", "sandbox": sandbox, "began_ns": nanos(began),
+                    "hard_end_ns": nanos(hard_end.since(self.unix_start)),
                 });
                 if !phases.is_empty() {
                     event["phases"] = phases_json(began, &phases);
@@ -446,11 +456,13 @@ pub(super) enum Entry {
     ModelAnswered((Caller, u64), Box<ModelAnswer>),
     /// A sandbox's create that returned, as `sandbox_created`, observed as it returned: the
     /// sandbox's name in the run, and when the create began, as `began_ns`. Its `phases` are those
-    /// that its provider timed, if any.
+    /// that its provider timed, if any. Its `hard_end` is the one that the create was given, which
+    /// the log gives as `hard_end_ns`, a time since the run started.
     Created {
         sandbox: Name,
         began: Duration,
         phases: Vec<Phase>,
+        hard_end: UnixTime,
         at: Duration,
     },
     /// A sandbox's session that met the gateway, as `sandbox_met`, observed as it met.

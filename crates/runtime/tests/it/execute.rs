@@ -897,8 +897,9 @@ fn granted<'g>(grants: &'g Value, name: &Value) -> &'g Value {
 }
 
 // Each sandbox's hard end, as its create took it, after the run's start, which the log's first
-// record gives with the run's hard end. None is past the run's. A runner's is at most its
-// holder's, and at least the earlier of that and its life after its ready.
+// record gives with the run's hard end. None is past the run's. Each `sandbox_created` records the
+// hard end that its create took. A runner's is at most its holder's, and at least the earlier of
+// that and its life after its ready.
 fn sandboxes_hard_ends(
     name: &str,
     record: &Path,
@@ -952,6 +953,17 @@ fn sandboxes_hard_ends(
                  {due:?}, its holder's or its life of {life:?} after its ready at {ready:?}"
             );
         }
+    }
+    let events = log.iter().map(|logged| &logged["event"]);
+    for created in events.filter(|event| event["kind"] == "sandbox_created") {
+        let taken = hard_ends.get(created["sandbox"].as_str().unwrap());
+        // Not the run's hard end, the create's deadline or a time since the epoch. Nor one that
+        // another reading of the clock converted.
+        assert_eq!(
+            nanos(&created["hard_end_ns"]).map(Duration::from_nanos),
+            taken.copied(),
+            "{name}: {created} records a hard end other than the one that its create took"
+        );
     }
     lines
 }
@@ -2821,9 +2833,9 @@ fn start_times() {
     let starts = (shown.lines())
         .filter(|line| line.contains("sandbox_created") || line.contains("sandbox_met"));
     expect![[r#"
-        {"actions":[],"at_ns":"4000000000","event":{"began_ns":"0","kind":"sandbox_created","phases":[{"began_ns":"1000000000","name":"make","took_ns":"1000000000"}],"sandbox":"agent-0"},"observed_ns":"3000000000","seq":2}
+        {"actions":[],"at_ns":"4000000000","event":{"began_ns":"0","hard_end_ns":"150000000000","kind":"sandbox_created","phases":[{"began_ns":"1000000000","name":"make","took_ns":"1000000000"}],"sandbox":"agent-0"},"observed_ns":"3000000000","seq":2}
         {"actions":[],"at_ns":"4000000000","event":{"kind":"sandbox_met","sandbox":"agent-0"},"observed_ns":"4000000000","seq":3}
-        {"actions":[],"at_ns":"7000000000","event":{"began_ns":"4000000000","kind":"sandbox_created","phases":[{"began_ns":"5000000000","name":"make","took_ns":"1000000000"}],"sandbox":"job-0"},"observed_ns":"7000000000","seq":10}
+        {"actions":[],"at_ns":"7000000000","event":{"began_ns":"4000000000","hard_end_ns":"300000000000","kind":"sandbox_created","phases":[{"began_ns":"5000000000","name":"make","took_ns":"1000000000"}],"sandbox":"job-0"},"observed_ns":"7000000000","seq":10}
         {"actions":[],"at_ns":"8000000000","event":{"kind":"sandbox_met","sandbox":"job-0"},"observed_ns":"8000000000","seq":11}"#]].assert_eq(&starts.collect::<Vec<_>>().join("\n"));
 }
 
@@ -2880,7 +2892,7 @@ fn syncs() {
         log.jsonl:
         {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
-        {"actions":[],"at_ns":"0","event":{"began_ns":"0","kind":"sandbox_created","phases":[{"began_ns":"0","name":"make","took_ns":"0"}],"sandbox":"agent-0"},"observed_ns":"0","seq":2}
+        {"actions":[],"at_ns":"0","event":{"began_ns":"0","hard_end_ns":"150000000000","kind":"sandbox_created","phases":[{"began_ns":"0","name":"make","took_ns":"0"}],"sandbox":"agent-0"},"observed_ns":"0","seq":2}
         {"actions":[],"at_ns":"0","event":{"kind":"sandbox_met","sandbox":"agent-0"},"observed_ns":"0","seq":3}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":4}
         {"actions":[{"kind":"reply","reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"job","name":"train","payload_max_bytes":8},{"arguments":{"finalize":{"default":false,"type":"bool"}},"kind":"now","name":"submit","payload_max_bytes":16}],"kind":"ops","remaining_seconds":30,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"role":"agent"}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"kind":"ops"}},"observed_ns":"0","seq":5}
@@ -2890,7 +2902,7 @@ fn syncs() {
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_collected"},"seq":9}
         {"actions":[],"at_ns":"0","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":10}
         {"actions":[{"job":0,"kind":"start_final_call","selections":[{"role":"agent","selection":null}],"timeout_ns":"120000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"0","seq":11}
-        {"actions":[],"at_ns":"0","event":{"began_ns":"0","kind":"sandbox_created","phases":[{"began_ns":"0","name":"make","took_ns":"0"}],"sandbox":"job-0"},"observed_ns":"0","seq":12}
+        {"actions":[],"at_ns":"0","event":{"began_ns":"0","hard_end_ns":"300000000000","kind":"sandbox_created","phases":[{"began_ns":"0","name":"make","took_ns":"0"}],"sandbox":"job-0"},"observed_ns":"0","seq":12}
         {"actions":[],"at_ns":"0","event":{"kind":"sandbox_met","sandbox":"job-0"},"observed_ns":"0","seq":13}
         {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_started"},"observed_ns":"0","seq":14}
         {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_returned","returned":[{"name":"score","value":0}]},"observed_ns":"0","seq":15}
