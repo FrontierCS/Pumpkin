@@ -11,10 +11,11 @@
 //! the core never decided, such as a sandbox's create or delete, has no actions. It has an
 //! `observed_ns` only if the runtime timed it. The first line is `run_started`, observed at 0.
 //!
-//! Every `..._ns` is a string of decimal digits: nanoseconds since the run started, but the
-//! `unix_ns` of `run_started`, since the Unix epoch by the driving machine's clock; `u64::MAX`
-//! stands for anything longer. Grants appear by name, jobs, ops and leases by number, payloads by
-//! size and digest, and a `caller` or `holder` as `agent-<role index>` or `job-<n>`.
+//! Every `..._ns` is a string of decimal digits, a count of nanoseconds. Most are times since the
+//! run started. Two are durations: `timeout_ns` and a phase's `took_ns`. The `unix_ns` of
+//! `run_started` is a time since the Unix epoch, by the driving machine's clock. `u64::MAX` stands
+//! for anything longer. Grants appear by name, jobs, ops and leases by number, payloads by size
+//! and digest, and a `caller` or `holder` as `agent-<role index>` or `job-<n>`.
 //!
 //! The runtime syncs a line and all preceding lines before acting on it, including delivering a
 //! runner receipt to a body. Other lines last with the next sync. The run's end syncs the log
@@ -33,7 +34,7 @@ use decision::{
     Action, Caller, Effect, Evaluated, Event, JobId, Outcome, PayloadRef, Request, Unevaluated,
 };
 use gateway::RefusedOp;
-use provider::UnixTime;
+use provider::{Phase, UnixTime};
 use route::{Answer, Bar, Usage};
 use schema::ir::{AbsolutePath, Api, Argv, GpuModel, Name};
 use schema::sandbox::op::{CommandEnd, OpReply, SessionOp};
@@ -301,10 +302,18 @@ impl<'h, H: Host> Log<'h, H> {
                 self.observed(started, event, &[])
             }
             Entry::ModelAnswered(request, answered) => self.model_answered(request, *answered),
-            Entry::Created { sandbox, began, at } => {
-                let event = json!({
+            Entry::Created {
+                sandbox,
+                began,
+                phases,
+                at,
+            } => {
+                let mut event = json!({
                     "kind": "sandbox_created", "sandbox": sandbox, "began_ns": nanos(began),
                 });
+                if !phases.is_empty() {
+                    event["phases"] = phases_json(began, &phases);
+                }
                 self.observed(at, event, &[])
             }
             Entry::Met { sandbox, at } => self.observed(
@@ -434,10 +443,12 @@ pub(super) enum Entry {
     ModelRequestStarted((Caller, u64), Duration),
     ModelAnswered((Caller, u64), Box<ModelAnswer>),
     /// A sandbox's create that returned, as `sandbox_created`, observed as it returned: the
-    /// sandbox's name in the run, and when the create began, as `began_ns`.
+    /// sandbox's name in the run, and when the create began, as `began_ns`. Its `phases` are those
+    /// that its provider timed, if any.
     Created {
         sandbox: Name,
         began: Duration,
+        phases: Vec<Phase>,
         at: Duration,
     },
     /// A sandbox's session that met the gateway, as `sandbox_met`, observed as it met.
@@ -512,6 +523,21 @@ fn usage_json(usage: &Usage) -> Value {
         json["reasoning_tokens"] = json!(reasoning);
     }
     json
+}
+
+/// The `phases` of a create that began at `began`, each as `name`, `began_ns`, a time since the
+/// run started, and `took_ns`.
+fn phases_json(began: Duration, phases: &[Phase]) -> Value {
+    let phases = phases.iter().map(|phase| {
+        let Phase {
+            name,
+            began: after,
+            took,
+        } = phase;
+        let began = nanos(began.saturating_add(*after));
+        json!({ "name": name, "began_ns": began, "took_ns": nanos(*took) })
+    });
+    Value::Array(phases.collect())
 }
 
 /// `duration` as the log gives times and durations: its whole nanoseconds, as decimal digits, at

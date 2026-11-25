@@ -136,6 +136,9 @@ pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> 
     }
     let record = repo.join(".pumpkin/runs").join(&settings.name).join(&id);
     failed.extend(checked(&record, settings.modal.is_some()));
+    if settings.modal.is_some() {
+        failed.extend(phased(&record));
+    }
     let left = left(&settings, &id)?;
     if !left.is_empty() {
         failed.push(format!("left after the run: {}", left.join(", ")));
@@ -612,6 +615,83 @@ fn checked(record: &Path, gpu: bool) -> Vec<String> {
         }
     }
     failed
+}
+
+/// What is wrong in the log of a smoke run on Modal at `record`. That is each create on Modal
+/// that [`unphased`] finds wrong, or a log without one. A Modal sandbox's id starts with `sb-`,
+/// and its delete in the log names it.
+fn phased(record: &Path) -> Vec<String> {
+    let path = record.join("log.jsonl");
+    let log = match fs::read_to_string(&path) {
+        Ok(log) => log,
+        Err(error) => return vec![format!("reading {} failed: {error}", path.display())],
+    };
+    let lines = log.lines().map(serde_json::from_str::<serde_json::Value>);
+    let lines: Vec<serde_json::Value> = lines.flatten().collect();
+    let on_modal = |sandbox: &serde_json::Value| {
+        lines.iter().any(|line| {
+            let event = &line["event"];
+            event["kind"] == "sandbox_deleted"
+                && event["sandbox"] == *sandbox
+                && event["id"].as_str().is_some_and(|id| id.starts_with("sb-"))
+        })
+    };
+    let created = lines.iter().filter(|line| {
+        let event = &line["event"];
+        event["kind"] == "sandbox_created" && on_modal(&event["sandbox"])
+    });
+    let created: Vec<&serde_json::Value> = created.collect();
+    if created.is_empty() {
+        return vec!["the log records no create of a sandbox on Modal".to_owned()];
+    }
+    created.into_iter().filter_map(unphased).collect()
+}
+
+/// What is wrong with `line`, a create on Modal in the run log, if anything. Its phases are to be
+/// those that the helper times, in order, each within the create. One begins after the create
+/// did, as the helper's interpreter starts first, unless the helper's clock and this one differ.
+fn unphased(line: &serde_json::Value) -> Option<String> {
+    const PHASES: [&str; 4] = ["lookup", "create", "tunnels", "list"];
+    let ns = |value: &serde_json::Value| value.as_str().and_then(|ns| ns.parse::<u64>().ok());
+    let event = &line["event"];
+    let wrong = |what: &str| {
+        format!(
+            "sandbox {}'s create on Modal {what}: {line}",
+            event["sandbox"]
+        )
+    };
+    let phases: &[serde_json::Value] = event["phases"].as_array().map_or(&[], Vec::as_slice);
+    let names: Vec<&str> = phases
+        .iter()
+        .filter_map(|phase| phase["name"].as_str())
+        .collect();
+    if names != PHASES {
+        return Some(wrong(&format!(
+            "has the phases {names:?}: expected {PHASES:?}"
+        )));
+    }
+    let (Some(began), Some(returned)) = (ns(&event["began_ns"]), ns(&line["observed_ns"])) else {
+        return Some(wrong("has no times"));
+    };
+    let mut starts = Vec::new();
+    for phase in phases {
+        let (Some(start), Some(took)) = (ns(&phase["began_ns"]), ns(&phase["took_ns"])) else {
+            return Some(wrong("has a phase without its times"));
+        };
+        if start < began || start.saturating_add(took) > returned {
+            return Some(wrong("has a phase outside the create"));
+        }
+        starts.push(start);
+    }
+    if !starts.is_sorted() {
+        return Some(wrong("has phases that begin out of order"));
+    }
+    if starts.iter().all(|start| *start == began) {
+        return Some(wrong(
+            "has every phase at its start: expected the helper's clock to be this one",
+        ));
+    }
+    None
 }
 
 /// What of run `id` the providers still hold: an instance not terminated, a schedule, a sandbox.

@@ -217,6 +217,7 @@ impl Creator<SocketDial> for Docker<'_> {
         }
         Ok(Created {
             id: SandboxId::from(id),
+            phases: Vec::new(),
         })
     }
 }

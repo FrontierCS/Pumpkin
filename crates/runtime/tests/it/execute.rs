@@ -1198,6 +1198,12 @@ fn in_order(log: &[Value]) -> Option<Duration> {
             Some("sandbox_created") => {
                 let began = Some(time(&event["began_ns"]));
                 assert!(began <= observed, "{logged}: it began after it returned");
+                for phase in event["phases"].as_array().into_iter().flatten() {
+                    let start = Some(time(&phase["began_ns"]));
+                    let end = start.map(|start| start + time(&phase["took_ns"]));
+                    let within = began <= start && end <= observed;
+                    assert!(within, "{logged}: a phase lies outside its create");
+                }
                 let once = created.insert(event["sandbox"].as_str(), observed);
                 assert!(once.is_none(), "{logged}: its sandbox was created before");
             }
@@ -2634,9 +2640,9 @@ fn start_times() {
     let starts = (shown.lines())
         .filter(|line| line.contains("sandbox_created") || line.contains("sandbox_met"));
     expect![[r#"
-        {"actions":[],"at_ns":"4000000000","event":{"began_ns":"0","kind":"sandbox_created","sandbox":"agent-0"},"observed_ns":"3000000000","seq":2}
+        {"actions":[],"at_ns":"4000000000","event":{"began_ns":"0","kind":"sandbox_created","phases":[{"began_ns":"1000000000","name":"make","took_ns":"1000000000"}],"sandbox":"agent-0"},"observed_ns":"3000000000","seq":2}
         {"actions":[],"at_ns":"4000000000","event":{"kind":"sandbox_met","sandbox":"agent-0"},"observed_ns":"4000000000","seq":3}
-        {"actions":[],"at_ns":"7000000000","event":{"began_ns":"4000000000","kind":"sandbox_created","sandbox":"job-0"},"observed_ns":"7000000000","seq":10}
+        {"actions":[],"at_ns":"7000000000","event":{"began_ns":"4000000000","kind":"sandbox_created","phases":[{"began_ns":"5000000000","name":"make","took_ns":"1000000000"}],"sandbox":"job-0"},"observed_ns":"7000000000","seq":10}
         {"actions":[],"at_ns":"8000000000","event":{"kind":"sandbox_met","sandbox":"job-0"},"observed_ns":"8000000000","seq":11}"#]].assert_eq(&starts.collect::<Vec<_>>().join("\n"));
 }
 
@@ -2660,7 +2666,7 @@ fn syncs() {
         log.jsonl:
         {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
-        {"actions":[],"at_ns":"0","event":{"began_ns":"0","kind":"sandbox_created","sandbox":"agent-0"},"observed_ns":"0","seq":2}
+        {"actions":[],"at_ns":"0","event":{"began_ns":"0","kind":"sandbox_created","phases":[{"began_ns":"0","name":"make","took_ns":"0"}],"sandbox":"agent-0"},"observed_ns":"0","seq":2}
         {"actions":[],"at_ns":"0","event":{"kind":"sandbox_met","sandbox":"agent-0"},"observed_ns":"0","seq":3}
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":4}
         {"actions":[{"kind":"reply","reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"job","name":"train","payload_max_bytes":8},{"arguments":{"finalize":{"default":false,"type":"bool"}},"kind":"now","name":"submit","payload_max_bytes":16}],"kind":"ops","remaining_seconds":30,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"role":"agent"}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"kind":"ops"}},"observed_ns":"0","seq":5}
@@ -2670,7 +2676,7 @@ fn syncs() {
         {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_collected"},"seq":9}
         {"actions":[],"at_ns":"0","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":10}
         {"actions":[{"job":0,"kind":"start_final_call","selections":[{"role":"agent","selection":null}],"timeout_ns":"120000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"0","seq":11}
-        {"actions":[],"at_ns":"0","event":{"began_ns":"0","kind":"sandbox_created","sandbox":"job-0"},"observed_ns":"0","seq":12}
+        {"actions":[],"at_ns":"0","event":{"began_ns":"0","kind":"sandbox_created","phases":[{"began_ns":"0","name":"make","took_ns":"0"}],"sandbox":"job-0"},"observed_ns":"0","seq":12}
         {"actions":[],"at_ns":"0","event":{"kind":"sandbox_met","sandbox":"job-0"},"observed_ns":"0","seq":13}
         {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_started"},"observed_ns":"0","seq":14}
         {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_returned","returned":[{"name":"score","value":0}]},"observed_ns":"0","seq":15}

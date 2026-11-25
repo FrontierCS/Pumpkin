@@ -580,8 +580,8 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         }
     }
 
-    // Creates the sandbox that `create` describes on provider `on`, by `by` on `clock`, and tells
-    // the log when the create began and returned.
+    // Creates the sandbox that `create` describes on provider `on`, by `by` on `clock`. Tells the
+    // log when the create began and returned, with the phases that the provider timed.
     fn create(
         &self,
         on: &'p Name,
@@ -595,13 +595,14 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             .get(on)
             .meets
             .create(&self.sockets, create, by_machine);
-        let (Created { id }, registration) = started.inspect_err(|_| {
+        let (Created { id, phases }, registration) = started.inspect_err(|_| {
             let mut inventory = stdx::unpoisoned(self.inventory.lock());
             inventory.unnamed.insert(on);
         })?;
         self.send([log::Entry::Created {
             sandbox: create.name.clone(),
             began,
+            phases,
             at: clock.now(),
         }]);
         Ok((id, registration))

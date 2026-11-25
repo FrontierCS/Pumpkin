@@ -16,13 +16,14 @@ use std::path::Path;
 use std::time::Duration;
 
 use provider::{
-    Console, Create, Created, Listed, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
+    Console, Create, Created, Listed, Phase, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
 use schema::ir::Sha256Digest;
 use schema::sandbox::{Endpoint, Listening};
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 use stdx::Deadline;
+use stdx::time::{Clock as _, Machine};
 
 use crate::helper::{ASK_TIMEOUT, Request, Sandboxd};
 use crate::{Gpu, Modal, Reached, memory_mib};
@@ -44,6 +45,35 @@ struct Made {
     id: String,
     host: String,
     port: u16,
+    phases: Vec<Timed>,
+}
+
+/// A step of the helper's `create`, with when it began and how long it took, in nanoseconds. It
+/// began by the machine's monotonic clock, which `stdx::time::Machine` reads too.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Timed {
+    name: String,
+    began_ns: u64,
+    took_ns: u64,
+}
+
+impl Timed {
+    /// The step as a phase of a create that began at `began`, by the machine's monotonic clock.
+    fn phase(self, began: Duration) -> Phase {
+        let Self {
+            name,
+            began_ns,
+            took_ns,
+        } = self;
+        Phase {
+            name,
+            // The helper reads the clock after `began`, so only its bug makes a step begin before.
+            // Such a step shows at the create's start, rather than fail the create.
+            began: Duration::from_nanos(began_ns).saturating_sub(began),
+            took: Duration::from_nanos(took_ns),
+        }
+    }
 }
 
 /// What the helper's `list` returns of a sandbox.
@@ -84,12 +114,13 @@ pub(crate) fn publish_sandboxd(path: &Path) -> Result<SandboxdRef, String> {
 impl Modal<'_> {
     /// Creates the sandbox that `create` describes, listening as `dial` says, as
     /// `provider::Creator::create` asks, giving up at its deadline, when the helper is killed;
-    /// with the endpoint of its tunnel.
+    /// with the endpoint of its tunnel, and the phases that the helper timed.
     pub(crate) fn create_sandbox(
         &self,
         create: &Create,
         dial: &Listening,
     ) -> Result<(Created, Endpoint), String> {
+        let began = Machine.now();
         let Some(class) = self.classes.get(&create.class) else {
             return Err(format!(
                 "the provider has no class `{}`: expected one of those it declared",
@@ -107,14 +138,21 @@ impl Modal<'_> {
             .reached
             .helper
             .call::<Made>(&request, Deadline::at_unix(create.by.since_epoch()));
-        let Made { id, host, port } = made.map_err(|error| {
+        let Made {
+            id,
+            host,
+            port,
+            phases,
+        } = made.map_err(|error| {
             format!("{error}; what Modal made by then, if anything, the run's list finds")
         })?;
         let endpoint = Endpoint::new(host, port).map_err(|error| {
             format!("Modal's tunnel to sandbox {id} isn't an endpoint: {error}")
         })?;
+        let phases = phases.into_iter().map(|timed| timed.phase(began));
         let created = Created {
             id: SandboxId::from(id),
+            phases: phases.collect(),
         };
         Ok((created, endpoint))
     }

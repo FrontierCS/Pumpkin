@@ -70,7 +70,8 @@ pub(crate) enum Request<'a> {
         role_arn: &'a str,
         region: &'a str,
     },
-    /// Creates a sandbox of `run`, for `role`, and answers its id and its tunnel's host and port.
+    /// Creates a sandbox of `run`, for `role`, and answers its id, its tunnel's host and port, and
+    /// the phases of the create that it timed.
     Create {
         run: &'a str,
         role: &'a str,

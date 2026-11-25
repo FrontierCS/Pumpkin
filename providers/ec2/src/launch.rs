@@ -108,6 +108,7 @@ impl Ec2<'_> {
         let admits = self.documents.clone().admits(id.0.clone());
         let created = Created {
             id: SandboxId::from(id.0),
+            phases: Vec::new(),
         };
         Ok((created, admits))
     }
