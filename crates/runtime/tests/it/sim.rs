@@ -5,6 +5,7 @@
 //! its files in memory. The program of a command that a run starts in it scripts the command:
 //! - `exit <code>`; `stall [<seconds>]` (the sandbox stops answering, and moves the clock there
 //!   as it takes its next request);
+//! - `crash` ends its container's session, and `where` prints its directory and environment;
 //! - `print <words>` and `fill <n> <words>` (`n` `x`es first) leave their text as the command's
 //!   stdout, and `list <dir>` leaves a listing of what was put under `dir`;
 //! - `worker <code>` decodes its stdin's JSON byte array to stdout, or prints `absent` for no
@@ -2444,6 +2445,7 @@ impl Served {
         std::mem::take(&mut status(shared).brief)
     }
 
+    #[expect(clippy::too_many_lines, reason = "one arm per program")]
     fn start(
         &mut self,
         stream: u32,
@@ -2459,6 +2461,12 @@ impl Served {
                 return launch.argv.program() == "exit-close";
             }
             "stall" => stall(launch, shared),
+            "crash" => return true,
+            "where" => {
+                let text = format!("{} {}", launch.cwd, json!(launch.env));
+                self.printed.insert(launch.stdout.to_string(), text);
+                replies.push(exited(stream, 0));
+            }
             "mark" => {
                 fs::write(status(shared).record.as_ref().unwrap().join("launched"), "").unwrap();
             }

@@ -4703,6 +4703,108 @@ fn meets_every_container_at_once() {
           {"kind":"sandbox_met","sandbox":"lease-0"}, observed at 3s"#]].assert_eq(&held.chain(met.map(str::to_owned)).collect::<Vec<_>>().join("\n"));
 }
 
+// A command or a copy reaches the container that it names, and no other. A command starts in its
+// container's directory, with its container's environment.
+#[test]
+fn serves_each_container() {
+    let argv = [
+        "ops",
+        "gpu.open",
+        "await_lease gpu 0 ready",
+        "gpu.put 0:scheduler /workspace/.codex /work/in",
+        "await_transfer gpu 0 moved",
+        "gpu.run 0:scheduler - list /work/in",
+        "await_lease gpu 0 ready",
+        "gpu.run 0 - list /work/in",
+        "await_lease gpu 0 ready",
+        "gpu.run 0:swe-0 - where",
+        "await_lease gpu 0 ready",
+        "gpu.run 0 - where",
+        "await_lease gpu 0 ready",
+        "gpu.get 0:scheduler /work/in /pumpkin/out/scheduler",
+        "await_transfer gpu 0 moved",
+        "gpu.get 0:swe-0 /work/in /pumpkin/out/swe-0",
+        "await_transfer gpu 0 moved",
+        "gpu.close 0",
+        "await_lease gpu 0 closed",
+        "call submit 6 finalize=true",
+    ];
+    let outputs = [
+        "leases/0/log/1/command.stdout",
+        "leases/0/log/2/command.stdout",
+        "leases/0/log/3/command.stdout",
+        "leases/0/log/4/command.stdout",
+    ];
+    let also = iter::once(Also::Listing).chain(outputs.map(Also::File));
+    let shown = executed(
+        &SimHost::new(),
+        "serves-each-container",
+        &[(PROVIDER, &accompanied())],
+        &companions_workflow(&argv),
+        SANDBOXD,
+        &also.collect::<Vec<_>>(),
+    );
+    expect![[r#"
+        record: agents/agent/log/collected, agents/agent/out/collected, agents/agent/out/scheduler/collected, agents/agent/out/scheduler/config.toml, agents/agent/out/swe-0/collected, agents/agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/got/1/result.json, jobs/0/log/0/collected, jobs/0/out/collected, jobs/0/out/result.json, jobs/0/sandbox.json, leases/0/log/1/collected, leases/0/log/1/command.stdout, leases/0/log/2/collected, leases/0/log/2/command.stdout, leases/0/log/3/collected, leases/0/log/3/command.stdout, leases/0/log/4/collected, leases/0/log/4/command.stdout, leases/0/out/collected, leases/0/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":8,"cumulative_seconds":null,"instance_seconds":600,"instances":1}}},{"grant":"gpu","holder":"agent-0","instance":0,"kind":"start_lease","lease":0,"start_by_ns":"30000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"gpu","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"0","seq":3}
+        {"actions":[],"at_ns":"0","event":{"kind":"lease_ready","lease":0},"observed_ns":"0","seq":4}
+        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":7,"cumulative_seconds":null,"instance_seconds":600,"instances":1}}},{"direction":"put","kind":"transfer","lease":0,"max_bytes":256,"transfer":0}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":1,"request":{"container":"scheduler","grant":"gpu","kind":"lease_put","lease":0,"replace":false,"to":"/work/in","tree":"/workspace/.codex"}},"observed_ns":"0","seq":5}
+        {"actions":[],"at_ns":"0","event":{"end":{"moved":{"bytes":31,"entries":2}},"kind":"transfer_ended","lease":0,"transfer":0},"observed_ns":"0","seq":6}
+        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":6,"cumulative_seconds":null,"instance_seconds":600,"instances":1}}},{"command":1,"kind":"run_command","lease":0,"timeout_ns":null}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":2,"request":{"argv":["list","/work/in"],"container":"scheduler","grant":"gpu","kind":"lease_run","lease":0,"timeout_seconds":null}},"observed_ns":"0","seq":7}
+        {"actions":[],"at_ns":"0","event":{"command":1,"end":{"exited":{"code":0}},"kind":"command_ended","lease":0},"observed_ns":"0","seq":8}
+        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":5,"cumulative_seconds":null,"instance_seconds":600,"instances":1}}},{"command":2,"kind":"run_command","lease":0,"timeout_ns":null}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":3,"request":{"argv":["list","/work/in"],"grant":"gpu","kind":"lease_run","lease":0,"timeout_seconds":null}},"observed_ns":"0","seq":9}
+        {"actions":[],"at_ns":"0","event":{"command":2,"end":{"exited":{"code":0}},"kind":"command_ended","lease":0},"observed_ns":"0","seq":10}
+        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":4,"cumulative_seconds":null,"instance_seconds":600,"instances":1}}},{"command":3,"kind":"run_command","lease":0,"timeout_ns":null}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":4,"request":{"argv":["where"],"container":"swe-0","grant":"gpu","kind":"lease_run","lease":0,"timeout_seconds":null}},"observed_ns":"0","seq":11}
+        {"actions":[],"at_ns":"0","event":{"command":3,"end":{"exited":{"code":0}},"kind":"command_ended","lease":0},"observed_ns":"0","seq":12}
+        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":3,"cumulative_seconds":null,"instance_seconds":600,"instances":1}}},{"command":4,"kind":"run_command","lease":0,"timeout_ns":null}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":5,"request":{"argv":["where"],"grant":"gpu","kind":"lease_run","lease":0,"timeout_seconds":null}},"observed_ns":"0","seq":13}
+        {"actions":[],"at_ns":"0","event":{"command":4,"end":{"exited":{"code":0}},"kind":"command_ended","lease":0},"observed_ns":"0","seq":14}
+        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":2,"cumulative_seconds":null,"instance_seconds":600,"instances":1}}},{"direction":"get","kind":"transfer","lease":0,"max_bytes":256,"transfer":5}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":6,"request":{"container":"scheduler","from":"/work/in","grant":"gpu","kind":"lease_get","lease":0,"to":"/pumpkin/out/scheduler"}},"observed_ns":"0","seq":15}
+        {"actions":[],"at_ns":"0","event":{"end":{"moved":{"bytes":31,"entries":2}},"kind":"transfer_ended","lease":0,"transfer":5},"observed_ns":"0","seq":16}
+        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":1,"cumulative_seconds":null,"instance_seconds":600,"instances":1}}},{"direction":"get","kind":"transfer","lease":0,"max_bytes":256,"transfer":6}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":7,"request":{"container":"swe-0","from":"/work/in","grant":"gpu","kind":"lease_get","lease":0,"to":"/pumpkin/out/swe-0"}},"observed_ns":"0","seq":17}
+        {"actions":[],"at_ns":"0","event":{"end":{"moved":{"bytes":9,"entries":1}},"kind":"transfer_ended","lease":0,"transfer":6},"observed_ns":"0","seq":18}
+        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":1,"cumulative_seconds":null,"instance_seconds":0,"instances":1}}},{"kind":"close_lease","lease":0}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":8,"request":{"grant":"gpu","kind":"lease_close","lease":0}},"observed_ns":"0","seq":19}
+        {"actions":[],"at_ns":"0","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"lease-0"},"seq":20}
+        {"actions":[],"at_ns":"0","event":{"kind":"lease_ended","lease":0},"observed_ns":"0","seq":21}
+        leases/0/log/1/command.stdout:
+        0644 collected: collected
+        0600 config.toml: model = "gpt-6-astra"
+        leases/0/log/2/command.stdout:
+        leases/0/log/3/command.stdout:
+        /testbed ["HOME=/pumpkin/home","INSTANCE=0"]
+        leases/0/log/4/command.stdout:
+        /work ["HOME=/pumpkin/home","CUDA=1"]"#]].assert_eq(&leased(&shown));
+}
+
+// The end of a companion's session fails the lease, by the companion's name. What `main` holds is
+// still collected.
+#[test]
+fn fails_as_a_companions_session_ends() {
+    let argv = [
+        "ops",
+        "gpu.open",
+        "await_lease gpu 0 ready",
+        "gpu.run 0:scheduler - crash",
+        "await_lease gpu 0 failed",
+        "call submit 6 finalize=true",
+    ];
+    let shown = executed(
+        &SimHost::new(),
+        "fails-as-a-companions-session-ends",
+        &[(PROVIDER, &accompanied())],
+        &companions_workflow(&argv),
+        SANDBOXD,
+        &[Also::Listing],
+    );
+    expect![[r#"
+        record: agents/agent/log/collected, agents/agent/out/collected, agents/agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/got/1/result.json, jobs/0/log/0/collected, jobs/0/out/collected, jobs/0/out/result.json, jobs/0/sandbox.json, leases/0/log/, leases/0/out/collected, leases/0/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":8,"cumulative_seconds":null,"instance_seconds":600,"instances":1}}},{"grant":"gpu","holder":"agent-0","instance":0,"kind":"start_lease","lease":0,"start_by_ns":"30000000000"}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"gpu","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"0","seq":3}
+        {"actions":[],"at_ns":"0","event":{"kind":"lease_ready","lease":0},"observed_ns":"0","seq":4}
+        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":7,"cumulative_seconds":null,"instance_seconds":600,"instances":1}}},{"command":0,"kind":"run_command","lease":0,"timeout_ns":null}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":1,"request":{"argv":["crash"],"container":"scheduler","grant":"gpu","kind":"lease_run","lease":0,"timeout_seconds":null}},"observed_ns":"0","seq":5}
+        {"at_ns":"0","note":"lease 0's log/0 is incomplete: freezing the runner's `scheduler` failed: the sandbox ended the session","seq":6}
+        {"actions":[],"at_ns":"0","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"lease-0"},"seq":7}
+        {"actions":[],"at_ns":"0","event":{"kind":"lease_failed","lease":0,"reason":"the session of the runner's companion `scheduler` ended: the sandbox ended the session"},"observed_ns":"0","seq":8}"#]].assert_eq(&leased(&shown));
+}
+
 // A companion that the gateway can't trust fails its sandbox's start at once, by its name. `main`
 // had met, and `scheduler` never says hello: the failure ends its wait, and the sandbox is deleted.
 #[test]

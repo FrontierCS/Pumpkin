@@ -219,6 +219,13 @@ pub(crate) struct Sessions<C> {
     companions: BTreeMap<CompanionName, Session<C>>,
 }
 
+impl<C> Sessions<C> {
+    /// The session of the companion `name`, if the sandbox's role declares it.
+    pub(crate) fn companion(&mut self, name: &CompanionName) -> Option<&mut Session<C>> {
+        self.companions.get_mut(name)
+    }
+}
+
 /// How the meeting of one container went.
 struct Opened<C> {
     /// When it met the gateway, if it did.
