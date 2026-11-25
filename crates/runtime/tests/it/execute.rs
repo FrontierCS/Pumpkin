@@ -20,8 +20,8 @@ use decision::{Outcome, lasts};
 use expect_test::{Expect, expect};
 use gateway::Dialer;
 use provider::{
-    Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation,
-    Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
+    Console, Create, Created, Creator, ImageRef, Listed, ListenDials, Listened, Meeting, Provider,
+    Ready, Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
 use route::Serving;
 use runtime::{
@@ -139,7 +139,13 @@ impl Provider for Interrupting<'_> {
     }
 
     fn meeting(&self) -> Meeting<'_> {
-        Meeting::Local(self)
+        match self.sim.meeting() {
+            Meeting::Local(_) => Meeting::Local(self),
+            Meeting::Listen(_) => Meeting::Listen(self),
+            Meeting::Private(_) => {
+                panic!("the simulated provider's sandboxes dial no private address")
+            }
+        }
     }
 
     fn console(&self, run: &RunTag, id: &SandboxId) -> Result<Console, String> {
@@ -149,10 +155,27 @@ impl Provider for Interrupting<'_> {
 
 impl Creator<SocketDial> for Interrupting<'_> {
     fn create(&self, create: &Create, dial: SocketDial) -> Result<Created, String> {
+        self.created(create, || self.sim.create(create, dial))
+    }
+}
+
+impl Creator<ListenDials, Listened> for Interrupting<'_> {
+    fn create(&self, create: &Create, dials: ListenDials) -> Result<Listened, String> {
+        self.created(create, || self.sim.create(create, dials))
+    }
+}
+
+impl Interrupting<'_> {
+    // The simulated provider's `create`, after which the signal comes if `at` names it.
+    fn created<C>(
+        &self,
+        create: &Create,
+        sim: impl FnOnce() -> Result<C, String>,
+    ) -> Result<C, String> {
         if create.name.as_str().starts_with("shared-") {
             assert!(!create.ops && !create.model);
         }
-        let created = self.sim.create(create, dial);
+        let created = sim();
         if let Some(At::Created(name)) = self.at
             && create.name.as_str() == name
         {
@@ -257,6 +280,16 @@ fn check(
     expect: &Expect,
 ) {
     expect.assert_eq(&executed(host, name, providers, ir, sandboxd, &[]));
+}
+
+// What `case` shows on the simulated provider, which shows the same where its sandboxes listen.
+fn listening_too(case: impl Fn(Sim) -> String) -> String {
+    let (dialing, listening) = (case(Sim::new()), case(Sim::new().listening()));
+    assert_eq!(
+        listening, dialing,
+        "where sandboxes listen, against where they dial"
+    );
+    dialing
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1624,14 +1657,16 @@ fn stalls() {
 fn unstarted() {
     let ir = workflow(&["exit", "0"]);
     let on = |name, sandboxd| {
-        let looked = |record, id| Synced::Holding(record, id);
-        let host = SimHost::new()
-            .moving_after_read(looked(AGENT_SANDBOX, "sim-1"), Duration::from_secs(1))
-            .moving_after_read(
-                looked("jobs/0/.sandbox.json.partial", "sim-2"),
-                Duration::from_secs(2),
-            );
-        executed(&host, name, &[(PROVIDER, &Sim::new())], &ir, sandboxd, &[])
+        listening_too(|sim| {
+            let looked = |record, id| Synced::Holding(record, id);
+            let host = SimHost::new()
+                .moving_after_read(looked(AGENT_SANDBOX, "sim-1"), Duration::from_secs(1))
+                .moving_after_read(
+                    looked("jobs/0/.sandbox.json.partial", "sim-2"),
+                    Duration::from_secs(2),
+                );
+            executed(&host, name, &[(PROVIDER, &sim)], &ir, sandboxd, &[])
+        })
     };
     let (listed, left_out) = (on("unstarted", MUTE), on("unstarted-left-out", VANISHING));
     assert_eq!(
@@ -2802,22 +2837,26 @@ fn refusal_held_by_a_slow_sync() {
 // agent's create begins at 0, and the final call's target's at the agent's exit, at 4 s.
 #[test]
 fn start_times() {
-    let agent = Synced::Holding(AGENT_SANDBOX, "sim-1");
     let target = || Synced::Holding("jobs/0/.sandbox.json.partial", "sim-2");
-    // The loop logs the agent's create only once the agent is set up. The target's record waits
-    // for its create's line, so that the loop logs it before the clock moves.
-    let host = SimHost::new()
-        .moving_after_read(agent, Duration::from_secs(4))
-        .moving_after_read(target(), Duration::from_secs(8))
-        .held_sync(target(), r#""sandbox":"job-0""#);
-    let shown = executed(
-        &host,
-        "start-times",
-        &[(PROVIDER, &Sim::new().taking(Duration::from_secs(1)))],
-        &ops_workflow(&["ops", "exit"], 30),
-        SANDBOXD,
-        &[Also::Starts],
-    );
+    let shown = listening_too(|sim| {
+        // The loop logs the agent's create only once the agent is set up. The target's record
+        // waits for its create's line, so that the loop logs it before the clock moves.
+        let host = SimHost::new()
+            .moving_after_read(
+                Synced::Holding(AGENT_SANDBOX, "sim-1"),
+                Duration::from_secs(4),
+            )
+            .moving_after_read(target(), Duration::from_secs(8))
+            .held_sync(target(), r#""sandbox":"job-0""#);
+        executed(
+            &host,
+            "start-times",
+            &[(PROVIDER, &sim.taking(Duration::from_secs(1)))],
+            &ops_workflow(&["ops", "exit"], 30),
+            SANDBOXD,
+            &[Also::Starts],
+        )
+    });
     let starts = (shown.lines())
         .filter(|line| line.contains("sandbox_created") || line.contains("sandbox_met"));
     expect![[r#"
@@ -4601,14 +4640,16 @@ fn lease_transfers() {
     agent["dirs"].as_array_mut().unwrap().push(shut);
     let files = agent["files"].as_array_mut().unwrap();
     files.extend([blob, tool, read_only, shared, key]);
-    let shown = executed(
-        &SimHost::new(),
-        "lease-transfers",
-        &[(PROVIDER, &Sim::new())],
-        &ir,
-        SANDBOXD,
-        &[Also::Listing, Also::File("leases/0/log/1/command.stdout")],
-    );
+    let shown = listening_too(|sim| {
+        executed(
+            &SimHost::new(),
+            "lease-transfers",
+            &[(PROVIDER, &sim)],
+            &ir,
+            SANDBOXD,
+            &[Also::Listing, Also::File("leases/0/log/1/command.stdout")],
+        )
+    });
     expect![[r#"
         finished, showing [score=6]
         record: agents/agent/log/collected, agents/agent/out/back/collected, agents/agent/out/back/config.toml, agents/agent/out/back/ro, agents/agent/out/back/shared, agents/agent/out/back/shut/key, agents/agent/out/back/tool*, agents/agent/out/collected, agents/agent/out/got/collected, agents/agent/out/got/command.stdout, agents/agent/out/replaced/collected, agents/agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/got/1/result.json, jobs/0/log/0/collected, jobs/0/out/collected, jobs/0/out/result.json, jobs/0/sandbox.json, leases/0/log/1/collected, leases/0/log/1/command.stdout, leases/0/out/collected, leases/0/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json

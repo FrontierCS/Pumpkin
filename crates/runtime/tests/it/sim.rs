@@ -30,8 +30,7 @@
 )]
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::fs;
-use std::net::Shutdown;
+use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
 use std::num::{NonZeroU32, NonZeroU64};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
@@ -39,10 +38,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+use std::{fs, io};
 
 use provider::{
-    Console, Create, Created, Creator, ImageRef, Listed, Meeting, Phase, Provider, Ready,
-    Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted, UnixTime,
+    Console, Create, Created, Creator, ImageRef, Listed, ListenDials, Listened, Meeting, Phase,
+    Provider, Ready, Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted, UnixTime,
 };
 use schema::frame;
 use schema::ir::{AbsolutePath, Argv, Container, CpuModel, Image, Mode, Name, Sha256Digest};
@@ -50,14 +50,15 @@ use schema::sandbox::op::{
     JobState, Last, LeaseStatusReply, OpCall, OpReply, SessionOp, StatusReply, TransferStatus,
 };
 use schema::sandbox::{
-    Entry, ExitStatus, FromSandbox, HelloReply, Launch, PROTOCOL_VERSION, RESULT_MAX_BYTES,
-    RelativePath, Root, SOCKET_NAME, SocketDial, ToSandbox, dir_mode, file_mode, log_dir, out_dir,
-    pumpkin_dir,
+    Endpoint, Entry, ExitStatus, FromSandbox, HelloReply, Launch, PROTOCOL_VERSION,
+    RESULT_MAX_BYTES, RegistrationGrant, RelativePath, Root, SOCKET_NAME, SocketDial, ToSandbox,
+    dir_mode, file_mode, log_dir, out_dir, pumpkin_dir,
 };
 use schema::workflow::{Class, Companions, Offers, UsdPerHour};
 use serde_json::{Map, Value, json};
 use stdx::Deadline;
 use stdx::time::{Clock as _, Machine};
+use test_support::edge;
 use test_support::suite::{Locals, Subject};
 
 use crate::host::SimTime;
@@ -153,6 +154,7 @@ pub(crate) struct Sim {
     once_logged: Option<OnceLogged>,
     // How long each step of a create takes, if any time.
     step: Option<Duration>,
+    listens: bool,
 }
 
 // What is called once the run log holds each part in a line.
@@ -274,7 +276,7 @@ enum Listing {
 #[derive(Default)]
 struct Status {
     console: String,
-    connection: Option<UnixStream>,
+    connection: Option<Wire>,
     stalled: bool,
     // Where a stalled sandbox moves the clock to as it takes its next request.
     stall_to: Option<Duration>,
@@ -358,6 +360,7 @@ impl Sim {
             set_ups: None,
             once_logged: None,
             step: None,
+            listens: false,
         }
     }
 
@@ -465,6 +468,17 @@ impl Sim {
     fn tell(&self, entry: impl FnOnce() -> String) {
         if let Some(journal) = &self.journal {
             journal.tell(entry());
+        }
+    }
+
+    #[must_use]
+    /// Makes its sandboxes listen, as [`Meeting::Listen`] has them do, on the loopback behind the
+    /// stand-in edge ([`test_support::edge`]). Each opens its session with the first peer that
+    /// presents its grant, as `sandboxd` does.
+    pub(crate) fn listening(self) -> Self {
+        Self {
+            listens: true,
+            ..self
         }
     }
 
@@ -716,7 +730,11 @@ impl Provider for Sim {
     }
 
     fn meeting(&self) -> Meeting<'_> {
-        Meeting::Local(self)
+        if self.listens {
+            Meeting::Listen(self)
+        } else {
+            Meeting::Local(self)
+        }
     }
 
     fn console(&self, run: &RunTag, id: &SandboxId) -> Result<Console, String> {
@@ -726,11 +744,39 @@ impl Provider for Sim {
 
 impl Creator<SocketDial> for Sim {
     fn create(&self, create: &Create, dial: SocketDial) -> Result<Created, String> {
+        self.timed(|| self.made(create, Meets::Dials(dial.dir.join(SOCKET_NAME))))
+    }
+}
+
+impl Creator<ListenDials, Listened> for Sim {
+    fn create(&self, create: &Create, dials: ListenDials) -> Result<Listened, String> {
+        let ListenDials { main, companions } = dials;
+        assert!(
+            companions.is_empty(),
+            "the simulated provider was asked for companions, though its classes offer none"
+        );
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = edge::front(listener.local_addr().unwrap());
+        let created = self.timed(|| self.made(create, Meets::Listens(listener, main.grant)))?;
+        Ok(Listened {
+            created,
+            main: Endpoint::new(edge::NAME.to_owned(), port).unwrap(),
+            relay: None,
+        })
+    }
+}
+
+impl Sim {
+    // Times `sandbox`, the making of a sandbox, as the create's one phase, amid its steps.
+    fn timed(
+        &self,
+        sandbox: impl FnOnce() -> Result<SandboxId, String>,
+    ) -> Result<Created, String> {
         let called = self.now();
         self.took();
         let began = self.now();
         self.took();
-        let made = self.made(create, dial.dir.join(SOCKET_NAME));
+        let made = sandbox();
         let ended = self.now();
         self.took();
         // The one phase that it times: its making of the sandbox.
@@ -744,9 +790,7 @@ impl Creator<SocketDial> for Sim {
             phases: vec![phase],
         })
     }
-}
 
-impl Sim {
     // The time now, by the run's clock on a simulated host, and else by the machine's.
     fn now(&self) -> Duration {
         let time = self.state().time.clone();
@@ -767,7 +811,7 @@ impl Sim {
 
     // A sandbox, a thread of this process, ends with it, so the hard end needs nothing more; and
     // the name needs no use, as each sandbox is created once.
-    fn made(&self, create: &Create, socket: PathBuf) -> Result<SandboxId, String> {
+    fn made(&self, create: &Create, meets: Meets) -> Result<SandboxId, String> {
         let by = self.by(create);
         if by.passed() {
             let passed =
@@ -790,8 +834,7 @@ impl Sim {
         } = Faults::of(|fault: &str| path == fault || digest == image(fault).as_str());
         let (mute, hung) = dialing.silent();
         let hello = json!({ "version": PROTOCOL_VERSION });
-        let sockets = fs::metadata(socket.parent().unwrap().parent().unwrap()).unwrap();
-        let mode = sockets.permissions().mode() & 0o777;
+        let mode = meets.mode();
         let state = self.state();
         let (record, time) = (state.record.clone(), state.time.clone());
         drop(state);
@@ -804,14 +847,14 @@ impl Sim {
         let (ours, model) = (Arc::clone(&shared), create.model);
         let thread = thread::Builder::new()
             .name("sim-sandboxd".to_owned())
-            .spawn(move || sandboxd(&socket, mute, hung, &hello, model, &ours))
+            .spawn(move || sandboxd(meets, mute, hung, &hello, model, &ours))
             .map_err(|error| format!("the sandbox's thread didn't start: {error}"))?;
         ended(&thread, mute && !hung);
         let late = made == Made::Slow && by.slept();
         let mut state = self.state();
         let id = format!("sim-{}", state.next);
         state.next += 1;
-        state.modes.push(mode);
+        state.modes.extend(mode);
         state.models.push(model);
         state.classes.push(create.class.clone());
         (state.hard_ends).push((create.name.to_string(), create.hard_end));
@@ -908,6 +951,7 @@ impl Subject for Sim {
             set_ups: self.set_ups.clone(),
             once_logged: self.once_logged.clone(),
             step: self.step,
+            listens: self.listens,
         }))
     }
 
@@ -1071,8 +1115,75 @@ fn ended(thread: &JoinHandle<()>, ends: bool) {
 
 const NEVER_DIALS: &str = "sandboxd: a simulated one, which never dials\n";
 
+// How a sandbox meets the gateway: by dialing its socket, or by listening for a peer that
+// presents its grant.
+enum Meets {
+    Dials(PathBuf),
+    Listens(TcpListener, RegistrationGrant),
+}
+
+impl Meets {
+    // The mode of the directory of the sockets, if it dials one.
+    fn mode(&self) -> Option<u32> {
+        let Self::Dials(socket) = self else {
+            return None;
+        };
+        let sockets = fs::metadata(socket.parent().unwrap().parent().unwrap()).unwrap();
+        Some(sockets.permissions().mode() & 0o777)
+    }
+}
+
+// A sandbox's connection to the gateway: its socket, or a connection from the edge.
+enum Wire {
+    Unix(UnixStream),
+    Tcp(TcpStream),
+}
+
+impl Wire {
+    // It and its clone, which a delete shuts down.
+    fn cloned(self) -> io::Result<(Self, Self)> {
+        let other = match &self {
+            Self::Unix(stream) => Self::Unix(stream.try_clone()?),
+            Self::Tcp(stream) => Self::Tcp(stream.try_clone()?),
+        };
+        Ok((self, other))
+    }
+
+    fn shutdown(&self, how: Shutdown) -> io::Result<()> {
+        match self {
+            Self::Unix(stream) => stream.shutdown(how),
+            Self::Tcp(stream) => stream.shutdown(how),
+        }
+    }
+}
+
+impl io::Read for Wire {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Unix(stream) => stream.read(buffer),
+            Self::Tcp(stream) => stream.read(buffer),
+        }
+    }
+}
+
+impl io::Write for Wire {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Unix(stream) => stream.write(buffer),
+            Self::Tcp(stream) => stream.write(buffer),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Unix(stream) => stream.flush(),
+            Self::Tcp(stream) => stream.flush(),
+        }
+    }
+}
+
 fn sandboxd(
-    socket: &Path,
+    meets: Meets,
     mute: bool,
     hung: bool,
     hello: &Value,
@@ -1080,12 +1191,17 @@ fn sandboxd(
     shared: &Mutex<Status>,
 ) {
     if mute {
+        // A sandbox that never dials doesn't listen either.
+        drop(meets);
         // A park can end spuriously, so the deletion is checked again.
         while hung && !status(shared).deleted {
             thread::park();
         }
     } else {
-        dial(socket, hello, model, shared);
+        match meets {
+            Meets::Dials(socket) => dial(&socket, hello, model, shared),
+            Meets::Listens(listener, grant) => listen(listener, &grant, hello, model, shared),
+        }
     }
     if status(shared).deleted {
         thread::sleep(ENDING);
@@ -1093,36 +1209,84 @@ fn sandboxd(
 }
 
 fn dial(socket: &Path, hello: &Value, model: bool, shared: &Mutex<Status>) {
-    let dialed = UnixStream::connect(socket).and_then(|connection| {
-        let other = connection.try_clone()?;
-        Ok((connection, other))
-    });
-    let mut status = status(shared);
-    match dialed {
-        // A sandbox deleted as it dialed has no session to serve.
-        Ok(_) if status.deleted => {}
-        Ok((mut connection, other)) => {
-            status.connection = Some(other);
-            drop(status);
-            if open(&mut connection, hello) {
-                serve(connection, model, shared);
+    match UnixStream::connect(socket).and_then(|connection| Wire::Unix(connection).cloned()) {
+        Ok(connection) => {
+            if let Some(session) = opened(connection, hello, None, shared) {
+                serve(session, model, shared);
             }
         }
         Err(error) => {
             let at = socket.display();
             let failed = format!("sandboxd: connecting to the gateway at {at} failed: {error}");
-            status.console.push_str(&failed);
+            status(shared).console.push_str(&failed);
         }
     }
 }
 
-fn open(connection: &mut UnixStream, hello: &Value) -> bool {
-    let sent = frame::write(connection, hello, &[]);
-    let answer = sent.and_then(|()| frame::read::<HelloReply>(connection));
+// Takes connections in turns, so that a delete ends the wait.
+fn listen(
+    listener: TcpListener,
+    grant: &RegistrationGrant,
+    hello: &Value,
+    model: bool,
+    shared: &Mutex<Status>,
+) {
+    listener.set_nonblocking(true).unwrap();
+    while !status(shared).deleted {
+        let taken = match listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(AWAIT_POLL);
+                continue;
+            }
+            Err(error) => {
+                let failed = format!("sandboxd: taking a connection failed: {error}");
+                status(shared).console.push_str(&failed);
+                return;
+            }
+        };
+        let connection = (taken.set_nonblocking(false))
+            .and_then(|()| Wire::Tcp(taken).cloned())
+            .unwrap();
+        if let Some(session) = opened(connection, hello, Some(grant), shared) {
+            // No other peer reaches the session's sandbox.
+            drop(listener);
+            serve(session, model, shared);
+            return;
+        }
+    }
+}
+
+// The session on `connection`, if it opens with a peer that presents `grant`. The clone is kept
+// for a delete to shut down.
+fn opened(
+    (mut connection, other): (Wire, Wire),
+    hello: &Value,
+    grant: Option<&RegistrationGrant>,
+    shared: &Mutex<Status>,
+) -> Option<Wire> {
+    let mut kept = status(shared);
+    // A sandbox deleted as it met the gateway has no session to serve.
+    if kept.deleted {
+        return None;
+    }
+    kept.connection = Some(other);
+    drop(kept);
+    let sent = frame::write(&mut connection, hello, &[]);
+    let answer = sent.and_then(|()| frame::read::<HelloReply>(&mut connection));
     // Unlike `sandboxd`, it prints no refusal: a run reads the console of a start that failed as
     // soon as the refusal is sent, so what it found would depend on a race. A connection may also
     // end before the session opens, as a delete ends it.
-    matches!(answer, Ok(Some((HelloReply::Accepted { grant: None }, _))))
+    let accepted = matches!(
+        answer,
+        Ok(Some((HelloReply::Accepted { grant: presented }, _))) if presented.as_ref() == grant
+    );
+    if !accepted {
+        // Its clone too, so that the connection closes.
+        status(shared).connection = None;
+        return None;
+    }
+    Some(connection)
 }
 
 enum Step {
@@ -2121,7 +2285,7 @@ fn stall_after(caller: Option<&Caller>, shared: &Mutex<Status>) {
     }
 }
 
-fn serve(mut connection: UnixStream, model: bool, shared: &Mutex<Status>) {
+fn serve(mut connection: Wire, model: bool, shared: &Mutex<Status>) {
     let (mut replies, mut crashed) = (Vec::<(FromSandbox, Vec<u8>)>::new(), false);
     let mut served = Served::default();
     let (freezing, mut frozen) = (status(shared).freezing, false);
@@ -2201,7 +2365,7 @@ fn serve(mut connection: UnixStream, model: bool, shared: &Mutex<Status>) {
 // Sends what is queued, then plays the steps that waited for it to go out, and sends what they
 // queue in turn.
 fn sent(
-    connection: &mut UnixStream,
+    connection: &mut Wire,
     served: &mut Served,
     replies: &mut Vec<(FromSandbox, Vec<u8>)>,
     (mut crashed, close): (bool, bool),
@@ -2219,7 +2383,7 @@ fn sent(
 }
 
 fn send(
-    connection: &mut UnixStream,
+    connection: &mut Wire,
     replies: &mut Vec<(FromSandbox, Vec<u8>)>,
     crashed: bool,
     close: bool,
