@@ -48,6 +48,7 @@ def participant(role, base):
         base,
         model = MODEL,
         tools = "native",
+        catalog_entry = None,
         effort = "low",
         workspace = "/workspace",
         prompt = PROMPT.format(role = role),

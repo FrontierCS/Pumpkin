@@ -19,7 +19,7 @@ pub(super) fn check(repo: &Repo<'_>, files: &[String]) -> Result<Vec<String>> {
             .extension()
             .and_then(|extension| extension.to_str());
         let text = |extension| SOURCES.contains(&extension) || matches!(extension, "md" | "toml");
-        if !extension.is_some_and(text) || path.starts_with(super::VENDORED) {
+        if !extension.is_some_and(text) || super::vendored(path) {
             continue;
         }
         for (index, line) in repo.read(path)?.lines().enumerate() {
