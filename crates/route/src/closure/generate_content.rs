@@ -19,7 +19,7 @@ const RESPONSE_HEADERS: [&str; 2] = ["content-type", "retry-after"];
 type Spelled = [&'static str; 2];
 
 const CACHED_CONTENT: Spelled = ["cachedContent", "cached_content"];
-const FILE_DATA: Spelled = ["fileData", "file_data"];
+const FILE_URI: Spelled = ["fileUri", "file_uri"];
 const FUNCTION_CALL: Spelled = ["functionCall", "function_call"];
 const FUNCTION_DECLARATIONS: Spelled = ["functionDeclarations", "function_declarations"];
 const FUNCTION_RESPONSE: Spelled = ["functionResponse", "function_response"];
@@ -90,11 +90,12 @@ fn declares_functions(tool: &Value) -> Result<(), Refusal> {
     )))
 }
 
-/// Refuses a part of the Gemini API's that names a file for the provider to fetch, by its URI. A
-/// function call is the client's own data, and so is a function response's `response`: of a
+/// Refuses a file part's URI, a string that names a file for the provider to fetch. A field of
+/// another type names nothing, such as a function's parameter that its schema calls `file_uri`.
+/// A function call is the client's own data, and so is a function response's `response`: of a
 /// response, only its `parts`, which hold media as a content's do, are checked.
 fn fetches_no_file(object: &Map<String, Value>) -> Result<Option<&'static str>, Refusal> {
-    if let Some((field, _)) = spelled(object, FILE_DATA) {
+    if let Some((field, Value::String(_))) = spelled(object, FILE_URI) {
         return Err(bad(format!(
             "`{field}` names a file that the provider would fetch, which the route refuses: send \
              the content inline, as `inlineData`"

@@ -1011,6 +1011,13 @@ fn generate_content_closure() {
                         json!([{ "file_data": { "file_uri": "files/f-1" } }]);
                 }),
             ),
+            (
+                "a function's parameter named as a file",
+                generate_content(|body| {
+                    let declared = &mut body["tools"][0]["functionDeclarations"][0];
+                    declared["parameters"]["properties"]["file_data"] = json!({ "type": "STRING" });
+                }),
+            ),
         ],
         &expect![[r#"
             the client's: went upstream, as POST /v1/models/m-large:streamGenerateContent?alt=sse HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "746"), ("user-agent", "ureq/<version>"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "*/*"), ("x-goog-api-key", "sk-test-0123")] and the body as sent, leaving ["user-agent", "x-goog-api-client"]
@@ -1028,7 +1035,8 @@ fn generate_content_closure() {
             the provider's search: 400 [("content-type", "application/json")] {"error":{"code":400,"message":"the tool `googleSearch` is one the provider defines or runs, which the route refuses: declare functions only, in `functionDeclarations`","status":"INVALID_ARGUMENT"}}
             code that the provider runs: 400 [("content-type", "application/json")] {"error":{"code":400,"message":"the tool `code_execution` is one the provider defines or runs, which the route refuses: declare functions only, in `functionDeclarations`","status":"INVALID_ARGUMENT"}}
             functions, as the protocol buffer names them: went upstream, as POST /v1/models/m-large:streamGenerateContent?alt=sse HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "747"), ("user-agent", "ureq/<version>"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "*/*"), ("x-goog-api-key", "sk-test-0123")] and the body as sent, leaving ["user-agent", "x-goog-api-client"]
-            a file by URI: 400 [("content-type", "application/json")] {"error":{"code":400,"message":"`fileData` names a file that the provider would fetch, which the route refuses: send the content inline, as `inlineData`","status":"INVALID_ARGUMENT"}}
-            a file by URI in a function's response: 400 [("content-type", "application/json")] {"error":{"code":400,"message":"`file_data` names a file that the provider would fetch, which the route refuses: send the content inline, as `inlineData`","status":"INVALID_ARGUMENT"}}"#]],
+            a file by URI: 400 [("content-type", "application/json")] {"error":{"code":400,"message":"`fileUri` names a file that the provider would fetch, which the route refuses: send the content inline, as `inlineData`","status":"INVALID_ARGUMENT"}}
+            a file by URI in a function's response: 400 [("content-type", "application/json")] {"error":{"code":400,"message":"`file_uri` names a file that the provider would fetch, which the route refuses: send the content inline, as `inlineData`","status":"INVALID_ARGUMENT"}}
+            a function's parameter named as a file: went upstream, as POST /v1/models/m-large:streamGenerateContent?alt=sse HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "776"), ("user-agent", "ureq/<version>"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "*/*"), ("x-goog-api-key", "sk-test-0123")] and the body as sent, leaving ["user-agent", "x-goog-api-client"]"#]],
     );
 }
