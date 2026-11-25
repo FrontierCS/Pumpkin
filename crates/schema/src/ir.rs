@@ -19,6 +19,7 @@ use std::num::{NonZeroU32, NonZeroU64};
 use serde::{Deserialize, Serialize};
 
 pub mod argument;
+mod container;
 mod final_call;
 mod grant;
 mod job;
@@ -28,6 +29,7 @@ mod session;
 pub(crate) mod values;
 
 pub use argument::{Argument, ArgumentType, ArgumentValue};
+pub use container::CompanionName;
 pub use final_call::{Final, FinalBody};
 pub use grant::{Body, Function, Grant};
 pub use job::JobFunction;

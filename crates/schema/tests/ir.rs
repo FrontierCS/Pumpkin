@@ -1232,6 +1232,51 @@ fn needs_values() {
     );
 }
 
+/// A name for a runner's companion, which it is, or why it isn't.
+struct CompanionNamed(String);
+
+impl Case for CompanionNamed {
+    fn outcome(self) -> String {
+        match ir::CompanionName::try_from(self.0) {
+            Ok(name) => format!("`{name}` names a companion"),
+            Err(error) => error,
+        }
+    }
+}
+
+#[test]
+fn companion_names() {
+    let longest = format!("a{}", "-0".repeat(31));
+    let names = [
+        "a",
+        "swe-000-candidate",
+        &longest,
+        &format!("{longest}0"),
+        "",
+        "0scheduler",
+        "scheduler-",
+        "Scheduler",
+        "swe_000",
+        "main",
+        "localhost",
+    ];
+    check(
+        names.map(|name| CompanionNamed(name.to_owned())),
+        &expect![[r#"
+            `a` names a companion
+            `swe-000-candidate` names a companion
+            `a-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0` names a companion
+            `a-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-00` is not a companion's name: use 1 to 63 characters from a-z, 0-9 and `-`, starting with a letter and ending with a letter or a digit
+            `` is not a companion's name: use 1 to 63 characters from a-z, 0-9 and `-`, starting with a letter and ending with a letter or a digit
+            `0scheduler` is not a companion's name: use 1 to 63 characters from a-z, 0-9 and `-`, starting with a letter and ending with a letter or a digit
+            `scheduler-` is not a companion's name: use 1 to 63 characters from a-z, 0-9 and `-`, starting with a letter and ending with a letter or a digit
+            `Scheduler` is not a companion's name: use 1 to 63 characters from a-z, 0-9 and `-`, starting with a letter and ending with a letter or a digit
+            `swe_000` is not a companion's name: use 1 to 63 characters from a-z, 0-9 and `-`, starting with a letter and ending with a letter or a digit
+            `main` names the runner's own container: give the companion another name
+            `localhost` names each container's own loopback address, so no other container reaches the companion by it: give the companion another name"#]],
+    );
+}
+
 #[test]
 fn agent_files() {
     let agent = "/roles/0/runtime/agent";

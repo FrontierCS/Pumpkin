@@ -44,6 +44,8 @@ macro_rules! checked_string {
     };
 }
 
+pub(super) use checked_string;
+
 checked_string!(
     /// The name of a role or grant, a provider, a class of sandbox, or a sandbox within its
     /// run: 1 to 64 characters from a-z, 0-9, `_` and `-`, starting with a letter.
