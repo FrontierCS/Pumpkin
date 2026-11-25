@@ -2228,7 +2228,15 @@ fn deleted_while_torn_down() {
 fn reported_before_the_hard_end() {
     // A deadline later than the agent's ops, so that the agent's exit ends the work phase, and
     // bounds the call's start.
-    let argv = ["ops", "call train 6", "exit", "call train 6"];
+    let argv = [
+        "ops",
+        // The launch is recorded before the first op, so only the agent's session sends what the
+        // hold counts.
+        "await_log agent_started",
+        "call train 6",
+        "exit",
+        "call train 6",
+    ];
     let mut ir = short_workflow(&argv, 2);
     ir["roles"][1]["image"] = json!(sim::image(HUNG).as_str());
     // Hold the driver as it records the exit. The command already sent its next request:
@@ -2382,6 +2390,14 @@ fn taken_past_the_deadline() {
 // The session's end, which reached the host at 0, is decided at 0, ahead of the core's tick.
 #[test]
 fn held_by_a_slow_sync() {
+    let argv = [
+        "ops",
+        // The launch is recorded before the first op, so only the agent's session sends what the
+        // hold counts.
+        "await_log agent_started",
+        "ops",
+        "close",
+    ];
     let slow = SlowSync {
         record: Synced::Seq(2),
         queued: 1,
@@ -2391,7 +2407,7 @@ fn held_by_a_slow_sync() {
         &SimHost::new().slow_sync(slow),
         "held-by-a-slow-sync",
         &[(PROVIDER, &Sim::new())],
-        &short_workflow(&["ops", "ops", "close"], 30),
+        &short_workflow(&argv, 30),
         SANDBOXD,
         &expect![[r#"
             finished, showing [score=0]
