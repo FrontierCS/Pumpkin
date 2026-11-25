@@ -2340,6 +2340,67 @@ fn traces_a_messages_exchange() {
             diff of steps 2 and 3's system: {"a":2,"b":3,"hunks":[{"at":[0,0],"lines":[[" ","You are a Claude agent."],["-","Assist with the task."],["+","Assist with the task, briefly."]]}],"lines":[2,2],"part":"system","same":false}"##]],
     );
 }
+
+#[test]
+fn traces_a_gemini_exchange() {
+    let scratch = Scratch::new();
+    let id = "20261110-191000-00000015";
+    let dir = scratch.0.join("runs").join(id);
+    let mut model = Model::new(&dir);
+    // The path names the model and whether the answer is a stream, so the body names neither.
+    let rest = json!({ "generationConfig": { "maxOutputTokens": 2000 } });
+    let asked = [json!({ "role": "user", "parts": [{ "text": "list the files" }] })];
+    let answer = json!({ "candidates": [{ "index": 0, "finishReason": "STOP",
+        "content": { "role": "model", "parts": [{ "text": "a.txt" }] } }] });
+    let kept = model.keep(
+        0,
+        "contents",
+        &asked,
+        &[],
+        rest.clone(),
+        Some(&answer.to_string()),
+    );
+    let mut log = vec![
+        started(1, "agent-0", 0),
+        answered(2, "agent-0", 0, 200, kept, Some("generate_content")),
+    ];
+    // Barred before it went upstream, which names no model.
+    let kept = model.keep(1, "contents", &asked, &[], rest, Some("{}"));
+    let mut barred = answered(3, "agent-0", 1, 0, kept, Some("generate_content"));
+    let event = barred["event"].as_object_mut().unwrap();
+    for field in ["usage", "model", "first_byte_ns", "first_token_ns"] {
+        event.remove(field);
+    }
+    let answer = json!({ "kind": "barred", "bar": "budget", "status": 400,
+        "message": "the model budget is exhausted" });
+    event.insert("answer".to_owned(), answer);
+    event.insert("upstream_status".to_owned(), Value::Null);
+    log.push(barred);
+    let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    write_run(
+        &scratch,
+        id,
+        since.checked_sub(Duration::from_secs(60)).unwrap(),
+        &log,
+        Some(json!({ "state": "failed", "reason": "stopped" })),
+        &lease_places(Prices::Both),
+    );
+    let served = Served::start(&scratch);
+    let said = (0..2).map(|n| {
+        let exchange = served.get(&format!("/api/runs/{id}/exchange/{n}"));
+        Step::Ran(format!("exchange {n}'s config: {}", exchange["config"]))
+    });
+    check(
+        &scratch,
+        said,
+        false,
+        &[(id, "<id>")],
+        &expect![[r#"
+        exchange 0's config: {"max_tokens":2000,"model":"model-a","reasoning_effort":null,"stop":[],"stream":null,"temperature":null,"tools":[]}
+        exchange 1's config: {"max_tokens":2000,"model":null,"reasoning_effort":null,"stop":[],"stream":null,"temperature":null,"tools":[]}"#]],
+    );
+}
+
 #[test]
 #[expect(
     clippy::too_many_lines,

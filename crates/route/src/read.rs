@@ -90,7 +90,8 @@ pub struct Config {
     pub max_tokens: Option<u64>,
     /// The sequences that stop the answer.
     pub stop: Vec<String>,
-    pub stream: bool,
+    /// Whether the answer is a stream, or `None` where the request's path says it.
+    pub stream: Option<bool>,
     /// The names of the tools it declares, or the type of one that has none.
     pub tools: Vec<String>,
 }
@@ -277,7 +278,7 @@ fn config_of(body: &Map<String, Value>, effort: Option<&Value>, max_tokens: &[&s
         temperature: body.get("temperature").and_then(Value::as_f64),
         max_tokens: (max_tokens.iter()).find_map(|field| body.get(*field)?.as_u64()),
         stop,
-        stream: body.get("stream").and_then(Value::as_bool) == Some(true),
+        stream: Some(body.get("stream").and_then(Value::as_bool) == Some(true)),
         tools: tool_names(body.get("tools")),
     }
 }

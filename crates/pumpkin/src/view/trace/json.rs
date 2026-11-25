@@ -490,7 +490,7 @@ pub(super) fn exchange_json(record: &Record, exchanges: &Exchanges, request: u64
     let said = &exchanges.by_request[&request];
     let event = &said.event();
     let api = api_of(event);
-    let config = config_json(record, request, api, said.answered.is_some());
+    let config = config_json(record, request, api, said.answered.is_some(), event);
     json!({
         "request": request,
         "caller": said.caller,
@@ -512,7 +512,13 @@ pub(super) fn exchange_json(record: &Record, exchanges: &Exchanges, request: u64
     })
 }
 
-fn config_json(record: &Record, request: u64, api: Option<Api>, answered: bool) -> Value {
+fn config_json(
+    record: &Record,
+    request: u64,
+    api: Option<Api>,
+    answered: bool,
+    event: &Value,
+) -> Value {
     match (api, answered) {
         (Some(api), true) => match record.model_request(request) {
             Ok(body) => {
@@ -526,6 +532,9 @@ fn config_json(record: &Record, request: u64, api: Option<Api>, answered: bool) 
                     stream,
                     tools,
                 } = read::config(api, &body);
+                // A body that names no model leaves it to the path, whose model the event names
+                // as the client did.
+                let model = model.map_or_else(|| event["model"].clone(), Value::from);
                 json!({
                     "model": model, "reasoning_effort": reasoning_effort,
                     "temperature": temperature, "max_tokens": max_tokens, "stop": stop,

@@ -177,7 +177,7 @@ fn config(body: &Map<String, Value>) -> Config {
         temperature: asked("temperature").and_then(Value::as_f64),
         max_tokens: asked("maxOutputTokens").and_then(Value::as_u64),
         stop: stops.map(str::to_owned).collect(),
-        stream: false,
+        stream: None,
         tools: declared
             .filter_map(|function| string(function, "name"))
             .collect(),
