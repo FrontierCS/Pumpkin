@@ -251,10 +251,11 @@ record.
 
 ### The run record
 
-Each run has a directory of its own, which `record` lays out. The run log (`log.jsonl`) holds each
-event that the core decided on, with the actions it took, so a run can be read back event by
-event. The log only grows, a whole line at a time. `ir.json`, `sources/` and `provider.json` are
-written before it and never again, so a reader of a live run reads only what the log gained.
+`record` lays out each run's own directory. The run log (`log.jsonl`) holds each event that the
+core decided on, with its actions, and what the runtime saw of the run's sandboxes, so a run can be
+read back event by event. The log only grows, a whole line at a time. `ir.json`, `sources/` and
+`provider.json` are written before it and never again, so a live run's reader reads only what the
+log gained.
 
 A record appears only once its driver holds its lock, which it holds until the run's last write.
 Only the lock's holder writes the record. Once it has let go, only `Record::reap` writes it, and

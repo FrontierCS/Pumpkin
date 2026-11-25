@@ -14,6 +14,7 @@ Every sandbox carries its run's tag and its role's (`RUN_TAG`, `ROLE_TAG`): a ru
 sandboxes by its tag, and a call on a sandbox that a request names refuses one of another run's.
 """
 
+import contextlib
 import hashlib
 import json
 import math
@@ -94,8 +95,8 @@ def imported(modal, request: dict) -> str:
 
 
 def create(modal, request: dict) -> dict:
-    """Creates the run's sandbox of the request's role, and returns its ID and its tunnel's host
-    and port.
+    """Creates the run's sandbox of the request's role, and returns its ID, its tunnel's host and
+    port, and the `phases` that it timed: `lookup`, `create`, `tunnels` and `list`, in order.
 
     Modal ends it at its `hard_end`, in seconds since the Unix epoch, if nothing ends it
     first. Its `sandboxd` ends it too if no gateway has claimed it a minute after its start's
@@ -113,7 +114,9 @@ def create(modal, request: dict) -> dict:
             f"the file whose SHA-256 is {sandboxd['sha256']}"
         )
     run = request["run"]
-    app = modal.App.lookup(APP, create_if_missing=True)
+    phases = []
+    with timed(phases, "lookup"):
+        app = modal.App.lookup(APP, create_if_missing=True)
     image = modal.Image.from_id(request["image"])
     image = image.add_local_file(sandboxd["path"], SANDBOXD_PATH, copy=False)
     args = [SANDBOXD_PATH, f"0.0.0.0:{PORT}", "--listen", "--by", str(request["by"])]
@@ -124,25 +127,38 @@ def create(modal, request: dict) -> dict:
     if request["model"]:
         args.append("--model")
     cpu, memory = cores(request["cpu_millis"]), request["memory_mib"]
-    sandbox = modal.Sandbox.create(
-        *args,
-        app=app,
-        tags={RUN_TAG: run, ROLE_TAG: request["role"]},
-        image=image,
-        env={"SANDBOXD_GRANT": request["grant"]},
-        timeout=timeout,
-        gpu=request["gpu"],
-        cpu=(cpu, cpu),
-        memory=(memory, memory),
-        runtime="gvisor",
-        outbound_cidr_allowlist=[],
-        inbound_cidr_allowlist=[request["source"]],
-        encrypted_ports=[PORT],
-    )
-    tunnel = sandbox.tunnels()[PORT]
-    while sandbox.object_id not in ids(modal, app, run) and sandbox.poll() is None:
-        time.sleep(LISTED_EVERY)
-    return {"id": sandbox.object_id, "host": tunnel.host, "port": tunnel.port}
+    with timed(phases, "create"):
+        sandbox = modal.Sandbox.create(
+            *args,
+            app=app,
+            tags={RUN_TAG: run, ROLE_TAG: request["role"]},
+            image=image,
+            env={"SANDBOXD_GRANT": request["grant"]},
+            timeout=timeout,
+            gpu=request["gpu"],
+            cpu=(cpu, cpu),
+            memory=(memory, memory),
+            runtime="gvisor",
+            outbound_cidr_allowlist=[],
+            inbound_cidr_allowlist=[request["source"]],
+            encrypted_ports=[PORT],
+        )
+    with timed(phases, "tunnels"):
+        tunnel = sandbox.tunnels()[PORT]
+    with timed(phases, "list"):
+        while sandbox.object_id not in ids(modal, app, run) and sandbox.poll() is None:
+            time.sleep(LISTED_EVERY)
+    return {"id": sandbox.object_id, "host": tunnel.host, "port": tunnel.port, "phases": phases}
+
+
+@contextlib.contextmanager
+def timed(phases: list[dict], name: str):
+    """Appends to `phases` the step that the block takes, if it returns: its `name`, when it began
+    by the machine's monotonic clock, which the crate reads too, and how long it took, each in
+    nanoseconds."""
+    began = time.monotonic_ns()
+    yield
+    phases.append({"name": name, "began_ns": began, "took_ns": time.monotonic_ns() - began})
 
 
 def cores(millis: int) -> float:

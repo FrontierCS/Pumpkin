@@ -110,7 +110,7 @@ impl Fixture {
     ) -> Result<Started, String> {
         let run = &create.run;
         let by = startup();
-        let Created { id } = provider().create(create, dial)?;
+        let Created { id, phases: _ } = provider().create(create, dial)?;
         let (sender, arrivals) = mpsc::channel();
         let accepted = registration.accept((&Machine, by), ops, model, sender, |a| a, || false);
         let set_up = accepted
@@ -827,7 +827,7 @@ fn console() {
             let published =
                 fixture.publish(&fixture.run, "stand-in", &stand_in, &image(), false, false);
             let (create, dial, _) = published.unwrap();
-            let Created { id } = provider().create(&create, dial).unwrap();
+            let Created { id, phases: _ } = provider().create(&create, dial).unwrap();
             // Docker finishes writing a container's log before it marks the container stopped,
             // which `docker wait` waits for, so the console then holds all the stand-in printed.
             run(&["wait", id.as_str()]);

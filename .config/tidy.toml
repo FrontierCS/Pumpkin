@@ -170,7 +170,7 @@
 "crates/runtime/src/interruption.rs" = 1
 "crates/runtime/src/lease.rs" = 4
 "crates/runtime/src/lib.rs" = 30
-"crates/runtime/src/log.rs" = 15
+"crates/runtime/src/log.rs" = 14
 "crates/runtime/src/log/call.rs" = 1
 "crates/runtime/src/log/fold.rs" = 7
 "crates/runtime/src/log/logged.rs" = 5

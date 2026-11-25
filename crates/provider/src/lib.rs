@@ -9,7 +9,7 @@ use std::path::Path;
 use schema::ir::Image;
 use schema::sandbox::{Attestation, Endpoint, Listening, PrivateDial, SocketDial};
 pub use values::{
-    Console, Create, Created, ImageRef, Listed, Ready, Role, RunTag, SandboxId, SandboxdRef,
+    Console, Create, Created, ImageRef, Listed, Phase, Ready, Role, RunTag, SandboxId, SandboxdRef,
     Undeleted, UnixTime,
 };
 

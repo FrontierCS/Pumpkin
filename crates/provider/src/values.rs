@@ -172,6 +172,24 @@ impl From<String> for SandboxdRef {
 #[derive(Debug)]
 pub struct Created {
     pub id: SandboxId,
+    /// The steps of the create that the provider timed, for the run's record alone. A provider
+    /// that times none gives none.
+    pub phases: Vec<Phase>,
+}
+
+/// A step of a create, timed by the provider's own monotonic clock.
+///
+/// It lies within the create: it begins no earlier than [`Creator::create`](crate::Creator::create)
+/// was called, and ends no later than it returned. A create's phases may overlap, and may leave
+/// gaps between them and at either end.
+#[derive(Debug)]
+pub struct Phase {
+    /// What the step did, in the provider's words, such as `lookup`.
+    pub name: String,
+    /// When the step began, since [`Creator::create`](crate::Creator::create) was called.
+    pub began: Duration,
+    /// How long the step took, from its start to its end.
+    pub took: Duration,
 }
 
 /// The id a provider gave a sandbox, such as a container's.

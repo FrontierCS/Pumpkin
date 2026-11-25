@@ -41,8 +41,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use provider::{
-    Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation,
-    Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted, UnixTime,
+    Console, Create, Created, Creator, ImageRef, Listed, Meeting, Phase, Provider, Ready,
+    Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted, UnixTime,
 };
 use schema::frame;
 use schema::ir::{AbsolutePath, Argv, CpuModel, Image, Mode, Name, Sha256Digest};
@@ -57,6 +57,7 @@ use schema::sandbox::{
 use schema::workflow::{Class, Offers, UsdPerHour};
 use serde_json::{Map, Value, json};
 use stdx::Deadline;
+use stdx::time::{Clock as _, Machine};
 use test_support::suite::{Locals, Subject};
 
 use crate::host::SimTime;
@@ -150,6 +151,8 @@ pub(crate) struct Sim {
     journal: Option<Journal>,
     set_ups: Option<Arc<SetUps>>,
     once_logged: Option<OnceLogged>,
+    // How long each step of a create takes, if any time.
+    step: Option<Duration>,
 }
 
 // What is called once the run log holds each part in a line.
@@ -354,7 +357,16 @@ impl Sim {
             journal: None,
             set_ups: None,
             once_logged: None,
+            step: None,
         }
+    }
+
+    /// Makes each create take `step` three times: before it makes its sandbox, as it makes it, and
+    /// after. On a simulated host, it moves the clock, as a `sleep` step does.
+    #[must_use]
+    pub(crate) fn taking(mut self, step: Duration) -> Self {
+        self.step = Some(step);
+        self
     }
 
     pub(crate) fn priced(mut self, usd_per_hour: f64) -> Self {
@@ -701,14 +713,48 @@ impl Provider for Sim {
 
 impl Creator<SocketDial> for Sim {
     fn create(&self, create: &Create, dial: SocketDial) -> Result<Created, String> {
-        self.made(create, dial.dir.join(SOCKET_NAME))
+        let called = self.now();
+        self.took();
+        let began = self.now();
+        self.took();
+        let made = self.made(create, dial.dir.join(SOCKET_NAME));
+        let ended = self.now();
+        self.took();
+        // The one phase that it times: its making of the sandbox.
+        let phase = Phase {
+            name: "make".to_owned(),
+            began: began.checked_sub(called).unwrap(),
+            took: ended.checked_sub(began).unwrap(),
+        };
+        made.map(|id| Created {
+            id,
+            phases: vec![phase],
+        })
     }
 }
 
 impl Sim {
+    // The time now, by the run's clock on a simulated host, and else by the machine's.
+    fn now(&self) -> Duration {
+        let time = self.state().time.clone();
+        time.map_or_else(|| Machine.now(), |time| time.now())
+    }
+
+    // Takes a step of a create's time, if it takes any.
+    fn took(&self) {
+        let Some(step) = self.step else {
+            return;
+        };
+        let time = self.state().time.clone();
+        match time {
+            Some(time) => time.reach(time.now() + step),
+            None => thread::sleep(step),
+        }
+    }
+
     // A sandbox, a thread of this process, ends with it, so the hard end needs nothing more; and
     // the name needs no use, as each sandbox is created once.
-    fn made(&self, create: &Create, socket: PathBuf) -> Result<Created, String> {
+    fn made(&self, create: &Create, socket: PathBuf) -> Result<SandboxId, String> {
         let by = self.by(create);
         if by.passed() {
             let passed =
@@ -777,9 +823,7 @@ impl Sim {
                  list to find it"
             ));
         }
-        Ok(Created {
-            id: SandboxId::from(id),
-        })
+        Ok(SandboxId::from(id))
     }
 
     // When `create` gives up, by the run's clock on a simulated host.
@@ -850,6 +894,7 @@ impl Subject for Sim {
             journal: self.journal.clone(),
             set_ups: self.set_ups.clone(),
             once_logged: self.once_logged.clone(),
+            step: self.step,
         }))
     }
 
