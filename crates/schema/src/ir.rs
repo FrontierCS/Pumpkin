@@ -29,7 +29,7 @@ mod session;
 pub(crate) mod values;
 
 pub use argument::{Argument, ArgumentType, ArgumentValue};
-pub use container::CompanionName;
+pub use container::{CompanionName, Container};
 pub use final_call::{Final, FinalBody};
 pub use grant::{Body, Function, Grant};
 pub use job::JobFunction;

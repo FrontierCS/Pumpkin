@@ -1272,6 +1272,33 @@ fn companion_names() {
     );
 }
 
+/// A container's name as JSON, which reads as the container shown and writes back as itself, or
+/// fails to read.
+struct ContainerNamed(&'static str);
+
+impl Case for ContainerNamed {
+    fn outcome(self) -> String {
+        let json = json!(self.0);
+        match serde_json::from_value::<ir::Container>(json.clone()) {
+            Ok(container) if json!(container) == json => format!("{container:?}"),
+            Ok(container) => format!("{container:?}, written back as {}", json!(container)),
+            Err(error) => error.to_string(),
+        }
+    }
+}
+
+// No companion is named `main`, so one string names either kind of container.
+#[test]
+fn container_names() {
+    check(
+        ["main", "scheduler", "Main"].map(ContainerNamed),
+        &expect![[r#"
+            Main
+            Companion(CompanionName("scheduler"))
+            `Main` is not a companion's name: use 1 to 63 characters from a-z, 0-9 and `-`, starting with a letter and ending with a letter or a digit"#]],
+    );
+}
+
 #[test]
 fn agent_files() {
     let agent = "/roles/0/runtime/agent";

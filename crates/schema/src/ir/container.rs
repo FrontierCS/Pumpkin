@@ -1,5 +1,6 @@
 //! The names of a sandbox's containers. Each sandbox holds one container that runs its role's
 //! image, named `main`. A runner's sandboxes also hold its companions, each by a [`CompanionName`].
+//! A [`Container`] names either.
 
 use std::borrow::Cow;
 use std::fmt;
@@ -18,8 +19,52 @@ checked_string!(
     check_companion_name
 );
 
+/// The name of the container that runs a sandbox's role's image.
+const MAIN: &str = "main";
+
 /// The most bytes of a DNS label (RFC 1035, section 2.3.4).
 const MAX_LABEL_BYTES: usize = 63;
+
+/// One of a sandbox's containers: `main`, or one of a runner's companions.
+///
+/// Its JSON form is a string: `main`, or the companion's name, which is never `main`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum Container {
+    #[default]
+    Main,
+    Companion(CompanionName),
+}
+
+impl TryFrom<String> for Container {
+    type Error = String;
+
+    fn try_from(name: String) -> Result<Self, Self::Error> {
+        if name == MAIN {
+            Ok(Self::Main)
+        } else {
+            CompanionName::try_from(name).map(Self::Companion)
+        }
+    }
+}
+
+impl From<Container> for String {
+    fn from(container: Container) -> Self {
+        match container {
+            Container::Main => MAIN.to_owned(),
+            Container::Companion(name) => name.into(),
+        }
+    }
+}
+
+impl fmt::Display for Container {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Main => f.write_str(MAIN),
+            Self::Companion(name) => name.fmt(f),
+        }
+    }
+}
 
 fn check_companion_name(name: &str) -> Result<(), String> {
     // A letter first. RFC 1123 allows a host name's leading digit only because its highest label
@@ -46,7 +91,7 @@ fn check_companion_name(name: &str) -> Result<(), String> {
         ));
     }
     let why = match name {
-        "main" => "names the runner's own container",
+        MAIN => "names the runner's own container",
         "localhost" => {
             "names each container's own loopback address, so no other container reaches the \
              companion by it"
