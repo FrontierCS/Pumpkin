@@ -1,9 +1,11 @@
-//! The check of a Markdown document's sentences, each one idea: at most [`SENTENCE_CAP`] words,
-//! and no semicolon that chains clauses. Paragraphs and list items hold sentences. Headings,
-//! tables, code, HTML, images and links' targets hold none.
+//! The check of the sentences of a Markdown document and of a Rust file's comments, each one
+//! idea: at most [`SENTENCE_CAP`] words, and no semicolon that chains clauses. Paragraphs and list
+//! items hold sentences. Headings, tables, code, HTML, images, links' targets and a line of a bare
+//! `https://` URL hold none.
 
 use std::mem;
 
+use super::Comment;
 use super::ceilings::{Cap, Counts};
 
 // GitLab's documentation caps a sentence at 25 words, and Coder's guide counts a code span as one
@@ -12,10 +14,10 @@ use super::ceilings::{Cap, Counts};
 // https://github.com/coder/coder/blob/8d5ad46e28bb73db8ec9d809ad400bc7f2e244c6/docs/.style/style-guide/voice-and-tone.md#L178-L179
 const SENTENCE_CAP: usize = 25;
 
-/// The cap of a document's sentences to split: none, unless its table lists the document.
+/// The cap of a file's sentences to split: none, unless its table lists the file.
 pub(super) const CAP: Cap = Cap {
     table: "sentences",
-    kind: "Markdown document",
+    kind: "Markdown document or Rust file",
     unit: ["sentence to split", "sentences to split"],
     limit: 0,
     fix: "split each that a line below names",
@@ -31,15 +33,53 @@ struct Block<'a> {
 /// The sentences to split of each of `documents`, each a path and its text.
 pub(super) fn counts(documents: &[(String, String)]) -> Counts {
     let counts = documents.iter().map(|(path, text)| {
-        let found = check(path, text);
+        let found = check(path, text, 0);
         (path.clone(), found.len(), found)
     });
     counts.collect()
 }
 
-/// The problems of `text`, the Markdown document at `path`: each sentence over [`SENTENCE_CAP`]
-/// words, or with a semicolon, at the line it starts on.
-fn check(path: &str, text: &str) -> Vec<String> {
+/// The sentences to split in `comments`, those of the Rust file at `path`. A run of `//`, `///`
+/// or `//!` comments, each alone on its line and of one kind, on lines one after another, reads as
+/// a Markdown document. So does a comment after code, by itself.
+pub(super) fn in_comments(path: &str, comments: &[Comment<'_>]) -> Vec<String> {
+    let mut problems = Vec::new();
+    // The comments of the run so far, each with its marker.
+    let mut run: Vec<(&str, &Comment<'_>)> = Vec::new();
+    for comment in comments {
+        let mut markers = ["//!", "///", "//"].into_iter();
+        let Some(marker) = markers.find(|marker| comment.text.starts_with(marker)) else {
+            continue;
+        };
+        let joins = run.last().is_some_and(|&(kind, last)| {
+            kind == marker && last.alone && comment.alone && last.line + 1 == comment.line
+        });
+        if !joins {
+            problems.extend(in_run(path, &mem::take(&mut run)));
+        }
+        run.push((marker, comment));
+    }
+    problems.extend(in_run(path, &run));
+    problems
+}
+
+/// The sentences to split in `run`, comments of the Rust file at `path`, each with its marker.
+fn in_run(path: &str, run: &[(&str, &Comment<'_>)]) -> Vec<String> {
+    let Some((_, first)) = run.first() else {
+        return Vec::new();
+    };
+    let mut text = String::new();
+    for (marker, comment) in run {
+        let rest = &comment.text[marker.len()..];
+        text.push_str(rest.strip_prefix(' ').unwrap_or(rest));
+        text.push('\n');
+    }
+    check(path, &text, first.line - 1)
+}
+
+/// The problems of `text`, the Markdown document at `path`, or its part after the first `skipped`
+/// lines: each sentence over [`SENTENCE_CAP`] words, or with a semicolon, at the line it starts on.
+fn check(path: &str, text: &str, skipped: usize) -> Vec<String> {
     let mut problems = Vec::new();
     for Block { lines, item } in blocks(text) {
         // Where each line starts in the text of the block, which joins them.
@@ -78,6 +118,7 @@ fn check(path: &str, text: &str) -> Vec<String> {
             } else {
                 continue;
             };
+            let line = skipped + line;
             problems.push(format!("{path}:{line}: {problem}"));
         }
     }
@@ -111,7 +152,7 @@ fn blocks(text: &str) -> Vec<Block<'_>> {
                 lines: vec![(index + 1, text)],
                 item: true,
             };
-        } else if trimmed.is_empty() || heading || trimmed.starts_with('|') {
+        } else if trimmed.is_empty() || heading || trimmed.starts_with('|') || url(trimmed) {
             blocks.extend(taken(&mut block));
         } else {
             block.lines.push((index + 1, trimmed));
@@ -119,6 +160,11 @@ fn blocks(text: &str) -> Vec<Block<'_>> {
     }
     blocks.extend(taken(&mut block));
     blocks
+}
+
+/// Whether `line` is a bare `https://` URL, a citation, which ends the sentence that it cites for.
+fn url(line: &str) -> bool {
+    line.starts_with("https://") && !line.contains(char::is_whitespace)
 }
 
 fn taken<'a>(block: &mut Block<'a>) -> Option<Block<'a>> {

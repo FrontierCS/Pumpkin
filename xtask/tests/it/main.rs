@@ -311,8 +311,11 @@ fn comments() {
                     fn f() {\n    /* f(v); */\n    let _ = \"// TODO: f(v);\";\n    \
                     let _ = r#\"\n// let x = 1;\n\"#;\n    let _ = '/';\n    let _ = 1 / 2;\n}\n"
         .to_owned();
+    // The sentences of the comments are `comment_sentences`' to check.
+    let ceilings = "[sentences]\n\"code.rs\" = 4\n\"widths.rs\" = 4\n".to_owned();
     check(
         &[
+            (".config/tidy.toml", ceilings, Tracked),
             ("markers.rs", markers, Tracked),
             ("code.rs", code, Tracked),
             ("literals.rs", literals, Tracked),
@@ -694,6 +697,53 @@ fn sentences() {
             docs/over.md:1: a sentence of 26 words, over the cap of 25: split it
             docs/over.md:2: a sentence of 27 words, over the cap of 25: split it
             docs/under.md: the file has 1 sentence to split, under its ceiling of 2 in .config/tidy.toml: lower the ceiling to 1"#]],
+    );
+}
+
+#[test]
+fn comment_sentences() {
+    // A sentence of `count` words, and `count` words without a stop.
+    let long = |count: usize| format!("A{}.", " a".repeat(count - 1));
+    let words = |count: usize| format!("A{}", " a".repeat(count - 1));
+    let rust = [
+        format!("//! {}", words(20)),
+        format!("//! {}", long(6)),
+        String::new(),
+        "/// A doc.".to_owned(),
+        "///".to_owned(),
+        "/// ```".to_owned(),
+        format!("/// {}", long(30)),
+        "/// ```".to_owned(),
+        format!("// {}", words(15)),
+        format!("/// {}", long(15)),
+        "fn f() {".to_owned(),
+        "    // A why.".to_owned(),
+        "    // One; two.".to_owned(),
+        format!("    let a = 1; // {}", words(15)),
+        format!("    // {}", long(15)),
+        format!("    let b = 2; // {}", long(26)),
+        "}".to_owned(),
+        format!("// {}", words(15)),
+        String::new(),
+        format!("// {}", long(15)),
+        format!("// {}, as a page says:", words(10)),
+        "// https://example.com/a".to_owned(),
+        format!("// {}", long(15)),
+    ];
+    let ceilings = "[sentences]\n\"src/invalid.rs\" = 1\n";
+    check(
+        &[
+            (".config/tidy.toml", ceilings.to_owned(), Standing::Tracked),
+            ("src/lib.rs", rust.join("\n"), Standing::Tracked),
+            ("src/invalid.rs", "fn f( {\n".to_owned(), Standing::Tracked),
+        ],
+        tidy,
+        &expect![[r#"
+            src/invalid.rs:1:7: the file is not valid Rust here, so it can't be checked: make it valid Rust
+            src/lib.rs: the file has 3 sentences to split, over the cap of 0: split each that a line below names
+            src/lib.rs:1: a sentence of 26 words, over the cap of 25: split it
+            src/lib.rs:13: a sentence chains clauses with a semicolon: make each a sentence, or each part an item of a list
+            src/lib.rs:16: a sentence of 26 words, over the cap of 25: split it"#]],
     );
 }
 
