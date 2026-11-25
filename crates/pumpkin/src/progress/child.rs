@@ -5,6 +5,7 @@ use std::fmt::Write as _;
 use std::time::Duration;
 
 use runtime::{CallEnd, CallOf, CallSpan, Closed, Direction, LeaseSpan, Work};
+use schema::ir::Container;
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::{CommandEnd, TransferEnd};
 
@@ -129,26 +130,34 @@ pub(super) fn lease_end(lease: &LeaseSpan) -> String {
 pub(super) fn command(work: &Work) -> String {
     let shown = |text: &str, bytes| clipped(crate::Escaped(text), bytes);
     let (what, ended) = match work {
-        Work::Command { argv, end } => {
+        Work::Command {
+            argv,
+            container,
+            end,
+        } => {
             let ended = end.map(|end| match end {
                 CommandEnd::TimedOut => "timed out".to_owned(),
                 CommandEnd::Unstarted => "didn't start".to_owned(),
                 CommandEnd::Exited(status) => exited(status),
             });
-            let what = format!("`{}`", shown(&argv.join(" "), COMMAND_SHOWN_BYTES));
+            let argv = shown(&argv.join(" "), COMMAND_SHOWN_BYTES);
+            let what = format!("`{argv}`{}", in_container(container));
             (what, ended)
         }
         Work::Transfer {
             direction,
+            container,
             from,
             to,
             end,
         } => {
             let (from, to) = (shown(from, PATH_SHOWN_BYTES), shown(to, PATH_SHOWN_BYTES));
+            // The container qualifies the path in the runner.
+            let within = in_container(container);
             let what = match direction {
-                Direction::Put => format!("put {from} to {to}"),
-                Direction::Replace => format!("put {from} to {to}, replacing it"),
-                Direction::Get => format!("get {from} to {to}"),
+                Direction::Put => format!("put {from} to {to}{within}"),
+                Direction::Replace => format!("put {from} to {to}{within}, replacing it"),
+                Direction::Get => format!("get {from}{within} to {to}"),
             };
             let ended = end.as_ref().map(|end| match end {
                 TransferEnd::Moved { entries, bytes } => format!(
@@ -162,6 +171,14 @@ pub(super) fn command(work: &Work) -> String {
         }
     };
     format!("{what} {}", ended.as_deref().unwrap_or("running"))
+}
+
+/// The companion that a lease's work ran in, as words that follow the work, or nothing for `main`.
+fn in_container(container: &Container) -> String {
+    match container {
+        Container::Main => String::new(),
+        Container::Companion(name) => format!(" in `{name}`"),
+    }
 }
 
 /// The most bytes of a lease's command that `ls` and a summary show.

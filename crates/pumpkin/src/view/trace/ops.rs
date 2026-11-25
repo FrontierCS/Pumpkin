@@ -24,7 +24,7 @@ struct Op {
     caller: CallerName,
     number: u64,
     kind: &'static str,
-    /// Its grant or function, or its lease as `lease <n>`.
+    /// Its grant or function, or its lease as `lease <n>`, and `in <container>` for a companion.
     name: Option<String>,
     start_ns: Option<u64>,
     end_ns: Option<u64>,
@@ -116,9 +116,10 @@ impl Ops {
         let reply = (actions.iter())
             .find(|action| action["kind"] == "reply")
             .map_or(&Value::Null, |action| &action["reply"]);
-        let name = match request["lease"].as_u64() {
-            Some(lease) => Some(format!("lease {lease}")),
-            None => request["grant"].as_str().map(str::to_owned),
+        let name = match (request["lease"].as_u64(), request["container"].as_str()) {
+            (Some(lease), None) => Some(format!("lease {lease}")),
+            (Some(lease), Some(container)) => Some(format!("lease {lease} in {container}")),
+            (None, _) => request["grant"].as_str().map(str::to_owned),
         };
         // A call's job may start later, once a slot frees; a lease's work starts at once.
         let work = if reply["kind"] == "call" {

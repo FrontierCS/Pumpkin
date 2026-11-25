@@ -182,6 +182,12 @@ struct Reading {
     directions: BTreeMap<(u64, u64), String>,
 }
 
+/// The companion that `request`, a lease's command or copy, names, as words to follow the command
+/// or its path in the runner. Nothing for `main`.
+fn within(request: &Value) -> String {
+    (request["container"].as_str()).map_or(String::new(), |name| format!(" in {name}"))
+}
+
 impl Talk {
     fn action(&mut self, at: f64, action: &Value, request: &Value) {
         if let Some(start) = CallStart::read(action) {
@@ -210,7 +216,8 @@ impl Talk {
                 if let Some((holder, runner)) = self.ends(lease) {
                     self.edge(&holder, &runner, "command").add(None, None);
                 }
-                self.started(lease, "command", argv.join(" "), at);
+                let label = format!("{}{}", argv.join(" "), within(request));
+                self.started(lease, "command", label, at);
             }
             ("transfer", Some(lease)) => {
                 let direction = action["direction"].as_str().unwrap_or_default();
@@ -221,8 +228,12 @@ impl Talk {
                 let from = request["tree"]
                     .as_str()
                     .or_else(|| request["from"].as_str());
-                let (from, to) = (from, request["to"].as_str());
-                let label = format!("{} → {}", from.unwrap_or("?"), to.unwrap_or("?"));
+                let (from, to) = (from.unwrap_or("?"), request["to"].as_str().unwrap_or("?"));
+                // The container qualifies the path in the runner.
+                let label = match direction {
+                    "get" => format!("{from}{} → {to}", within(request)),
+                    _ => format!("{from} → {to}{}", within(request)),
+                };
                 self.started(lease, direction, label, at);
             }
             _ => {}

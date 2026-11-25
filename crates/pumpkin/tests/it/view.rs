@@ -13,8 +13,8 @@ use schema::sandbox::RESULT_MAX_BYTES;
 use serde_json::{Value, json};
 
 use super::{
-    Prices, Scratch, Step, asked, check, cut, days_ago, lease_places, lock_driver, logged, payload,
-    poll, returned, whole_log, write_record, write_run,
+    Prices, Scratch, Step, asked, check, cut, days_ago, in_companion, lease_places, lock_driver,
+    logged, payload, poll, returned, whole_log, write_record, write_run,
 };
 
 /// A `pumpkin view` process that listens on loopback, and is killed when dropped.
@@ -1613,6 +1613,40 @@ fn answers_past_a_connection_that_sends_nothing() {
         &expect![[r#"
             past a spare and a closed connection: HTTP/1.1 200 OK
             the spare's, sent after: HTTP/1.1 200 OK"#]],
+    );
+}
+
+// A lease's work in a companion names it in the lease's lane.
+#[test]
+fn names_a_leases_containers() {
+    let scratch = Scratch::new();
+    let id = SERVED_ENDED;
+    let log = in_companion(whole_log());
+    let places = lease_places(Prices::Both);
+    write_run(
+        &scratch,
+        id,
+        asked(id, 30),
+        &log,
+        Some(returned(49.36)),
+        &places,
+    );
+    let served = Served::start(&scratch);
+    let run = served.get(&format!("/api/runs/{id}"));
+    let lanes = run["lanes"].as_array().unwrap().iter();
+    let work = lanes
+        .filter(|lane| lane["kind"] == "runner")
+        .map(|lane| format!("{}: {}", lane["lane"], lane["work"]));
+    check(
+        &scratch,
+        [Step::Ran(work.collect::<Vec<_>>().join("\n"))],
+        false,
+        &[],
+        &expect![[r#"
+            "lease 0": [{"end":null,"from":56.0,"kind":"put","label":"/pumpkin/in/payload → /work/in in scheduler","to":null},{"end":{"exited":{"code":0}},"from":58.0,"kind":"command","label":"sh -c set -e\nprint 7","to":62.0}]
+            "lease 1": [{"end":{"exited":{"code":0}},"from":130.0,"kind":"command","label":"nvidia-smi","to":132.0}]
+            "lease 2": [{"end":"timed_out","from":151.0,"kind":"command","label":"sleep 60","to":181.0}]
+            "lease 3": [{"end":{"exited":{"code":0}},"from":506.0,"kind":"command","label":"true in scheduler","to":507.0}]"#]],
     );
 }
 
@@ -3339,7 +3373,7 @@ fn times_a_callers_ops() {
             16,
             "agent-0",
             9,
-            json!({ "kind": "lease_get", "lease": 2 }),
+            json!({ "kind": "lease_get", "lease": 2, "container": "swe-000" }),
             json!([reply(9, json!({ "kind": "lease", "lease": 2 })),
             { "kind": "transfer", "lease": 2, "transfer": 1 }]),
         ),
@@ -3377,7 +3411,7 @@ fn times_a_callers_ops() {
             end_ns="12000000000" failed=true kind="lease_run" name="lease 2" op=6 result="timed_out" start_ns="9000000000"
             failed=false kind="call" name="train" op=7 start_ns="13000000000"
             end_ns="15000000000" failed=true kind="call" name="train" op=8 result="failed: the sandbox was lost" start_ns="14000000000"
-            end_ns="17000000000" failed=false kind="lease_get" name="lease 2" op=9 result="moved 96 bytes, 2 entries" start_ns="16000000000"
+            end_ns="17000000000" failed=false kind="lease_get" name="lease 2 in swe-000" op=9 result="moved 96 bytes, 2 entries" start_ns="16000000000"
             end_ns="18000000000" failed=false kind="now" name="final" op=10 result="returned" start_ns="18000000000"
             caller: "agent-0"
 

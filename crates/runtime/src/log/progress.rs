@@ -13,7 +13,7 @@ use std::time::Duration;
 use std::{fmt, mem};
 
 use provider::UnixTime;
-use schema::ir::Gpu;
+use schema::ir::{Container, Gpu};
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::{CommandEnd, TransferEnd};
 use serde_json::Value;
@@ -255,10 +255,12 @@ pub enum Closed {
 pub enum Work {
     Command {
         argv: Vec<String>,
+        container: Container,
         end: Option<CommandEnd>,
     },
     Transfer {
         direction: Direction,
+        container: Container,
         from: String,
         to: String,
         end: Option<TransferEnd>,
@@ -268,22 +270,34 @@ pub enum Work {
 impl Work {
     fn asked(request: &logged::Request) -> Option<Self> {
         match request {
-            logged::Request::LeaseRun { argv } => Some(Self::Command {
+            logged::Request::LeaseRun { argv, container } => Some(Self::Command {
                 argv: argv.clone(),
+                container: container.clone(),
                 end: None,
             }),
-            logged::Request::LeasePut { tree, to, replace } => Some(Self::Transfer {
+            logged::Request::LeasePut {
+                tree,
+                to,
+                replace,
+                container,
+            } => Some(Self::Transfer {
                 direction: if *replace {
                     Direction::Replace
                 } else {
                     Direction::Put
                 },
+                container: container.clone(),
                 from: tree.clone(),
                 to: to.clone(),
                 end: None,
             }),
-            logged::Request::LeaseGet { from, to } => Some(Self::Transfer {
+            logged::Request::LeaseGet {
+                from,
+                to,
+                container,
+            } => Some(Self::Transfer {
                 direction: Direction::Get,
+                container: container.clone(),
                 from: from.clone(),
                 to: to.clone(),
                 end: None,

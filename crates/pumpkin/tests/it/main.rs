@@ -1132,6 +1132,18 @@ fn whole_log() -> Vec<Value> {
 }
 
 /// The records of `log` written within `seconds` of the run's start.
+/// `log`, [`whole_log`], with lease 0's put and lease 3's command in the companion `scheduler`.
+fn in_companion(mut log: Vec<Value>) -> Vec<Value> {
+    for line in &mut log {
+        let request = &mut line["event"]["request"];
+        let (kind, lease) = (&request["kind"], &request["lease"]);
+        if (kind == "lease_put" && lease == 0) || (kind == "lease_run" && lease == 3) {
+            request["container"] = json!("scheduler");
+        }
+    }
+    log
+}
+
 fn cut(log: &[Value], seconds: u64) -> Vec<Value> {
     let written = |record: &&Value| {
         let at: u64 = record["at_ns"].as_str().unwrap().parse().unwrap();

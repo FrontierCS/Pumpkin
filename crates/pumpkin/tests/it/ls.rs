@@ -9,8 +9,8 @@ use serde_json::{Value, json};
 
 use super::{
     Prices, Scratch, Step, agent_answer, answered_log, asked, check, cut, days_ago, finished,
-    lease_places, lease_task, lock_driver, logged, masked, ran, returned, started_work, submission,
-    whole_log, write_record, write_run,
+    in_companion, lease_places, lease_task, lock_driver, logged, masked, ran, returned,
+    started_work, submission, whole_log, write_record, write_run,
 };
 
 #[test]
@@ -459,7 +459,9 @@ fn lists_phases() {
 #[test]
 fn lists_leases() {
     let scratch = Scratch::new();
-    let log = whole_log();
+    // Lease 0 puts its tree, and lease 3 runs its command, in a companion, which a lease's line
+    // names.
+    let log = in_companion(whole_log());
     // Live, cut at the second named, its last record written 2 seconds ago: as its train call's
     // box had a file put, ran a script, and was closed as its call ended; as the agent's runners
     // start, are ready, one running a command, and are closed by the agent or expire; and as the
@@ -493,7 +495,7 @@ fn lists_leases() {
                 20261114-090000-00000008  example/lease  work       <t> of 30m    $0.95+  1 agent working
                   solver      <t> of 30m     3 model requests, the last answered <t> ago
                   lease 2     <t> of 30m     cpu of agent 0 on aws/judge, ready, 30s busy; `sleep 60` timed out
-                  lease 3     <t>            gpu of agent 0 on modal/a100_80 with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB), expired; its sandbox isn't gone yet; `true` exited 0
+                  lease 3     <t>            gpu of agent 0 on modal/a100_80 with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB), expired; its sandbox isn't gone yet; `true` in `scheduler` exited 0
                 20261114-090000-00000007  example/lease  work       <t> of 30m    $0.74+  1 agent working
                   solver      <t> of 30m     3 model requests, the last answered <t> ago
                   lease 2     <t> of 30m     cpu of agent 0 on aws/judge, ready, 2s busy; `sleep 60` running
@@ -520,7 +522,7 @@ fn lists_leases() {
                 20261114-090000-00000001  example/lease  work       <t> of 30m    $0.68+  1 agent working
                   solver      <t> of 30m     3 model requests, the last answered <t> ago
                   job 0       <t> of 10m06s  train call on modal/a100_80 with unknown GPUs for agent 0
-                  lease 0     <t> of 1m      box of job 0 on aws/box, ready, 1s busy; put /pumpkin/in/payload to /work/in moved 1 entry, 1 byte
+                  lease 0     <t> of 1m      box of job 0 on aws/box, ready, 1s busy; put /pumpkin/in/payload to /work/in in `scheduler` moved 1 entry, 1 byte
 
               9 runs: 9 live · $6.99+"#]],
     );
