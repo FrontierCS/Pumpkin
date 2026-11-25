@@ -707,11 +707,15 @@ fn sandboxes_hold(
     providers: &[(&str, &Sim)],
 ) {
     let counted = usage["sandboxes"].as_array().unwrap();
-    let leased = record.join("leases").exists();
+    // A place times leased use once a lease's runner is placed there, whether created or not.
+    let leased: BTreeSet<_> = (opened(record, log).into_iter())
+        .map(|opened| opened.place)
+        .collect();
     let (mut creates, mut undeleted) = (BTreeMap::new(), BTreeMap::new());
     for counts in counted {
         let provider = counts["provider"].as_str().unwrap().to_owned();
         let class = counts["class"].as_str().unwrap().to_owned();
+        let leased = leased.contains(&(provider.clone(), class.clone()));
         creates.insert((provider.clone(), class), counts["count"].as_u64().unwrap());
         *undeleted.entry(provider).or_insert(0) += counts["undeleted"].as_u64().unwrap_or(0);
         let timed = ["busy_ns", "charged_ns"].map(|time| counts.get(time).is_some());
@@ -761,6 +765,66 @@ fn sandboxes_hold(
         undeleted, left,
         "{name}: usage {usage} counts other sandboxes undeleted"
     );
+}
+
+/// A lease that the run's log opened, as its record places it.
+struct Opened {
+    /// Its runner's provider and class.
+    place: (String, String),
+}
+
+// The leases of the log's `start_lease` actions, each with the runner that its holder's grant
+// names in `ir.json`, placed as `provider.json` says.
+fn opened(record: &Path, log: &[Value]) -> Vec<Opened> {
+    let read = |file: &str| -> Value {
+        serde_json::from_str(&fs::read_to_string(record.join(file)).unwrap()).unwrap()
+    };
+    let (ir, placed) = (read("ir.json"), read("provider.json"));
+    let roles = ir["roles"].as_array().unwrap();
+    let role = |name: &Value| roles.iter().find(|role| role["name"] == *name).unwrap();
+    let agent = |caller: &Value| {
+        let index = caller.as_str().unwrap().strip_prefix("agent-")?;
+        Some(&roles[index.parse::<usize>().unwrap()])
+    };
+    // Each job's target, by the job's name in the log.
+    let mut targets = BTreeMap::new();
+    let mut opened = Vec::new();
+    let actions = (log.iter()).flat_map(|line| line["actions"].as_array().into_iter().flatten());
+    for action in actions {
+        match action["kind"].as_str().unwrap() {
+            "start_call" => {
+                let caller = agent(&action["caller"]).unwrap();
+                let function = granted(&caller["runtime"]["agent"]["grants"], &action["grant"]);
+                let target = role(&function["job"]["target"]);
+                targets.insert(format!("job-{}", action["job"]), target);
+            }
+            "start_final_call" => {
+                let target = role(&ir["final"]["target"]);
+                targets.insert(format!("job-{}", action["job"]), target);
+            }
+            "start_lease" => {
+                let holder = &action["holder"];
+                let sessions = match agent(holder) {
+                    Some(agent) => &agent["runtime"]["agent"]["grants"],
+                    None => &targets[holder.as_str().unwrap()]["runtime"]["target"]["sessions"],
+                };
+                let runner = &granted(sessions, &action["grant"])["session"]["runner"];
+                let at = &placed["roles"][runner.as_str().unwrap()];
+                let field = |key: &str| at[key].as_str().unwrap().to_owned();
+                opened.push(Opened {
+                    place: (field("provider"), field("class")),
+                });
+            }
+            _ => {}
+        }
+    }
+    opened
+}
+
+// The grant named `name` among `grants`, as the IR lists a role's.
+fn granted<'g>(grants: &'g Value, name: &Value) -> &'g Value {
+    let grants = grants.as_array().unwrap();
+    grants.iter().find(|grant| grant["name"] == *name).unwrap()
 }
 
 // Each sandbox's hard end, as its create took it, after the run's start, which the log's first
