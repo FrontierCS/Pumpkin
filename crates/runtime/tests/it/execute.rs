@@ -3842,8 +3842,8 @@ fn deep_returns() {
     );
 }
 
-// A sandbox of the work phase, the agent's, a call's target's and a runner's that the agent
-// leases, ends by the agents' teardown's end, and the final call's target by the run's hard end.
+// A sandbox of the work phase ends by the agents' teardown's end: the agent's, a call's target's
+// and a runner's that the agent leases. The final call's target ends by the run's hard end.
 #[test]
 fn hard_ends() {
     let argv = [
