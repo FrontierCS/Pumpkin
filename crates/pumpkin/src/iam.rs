@@ -23,8 +23,8 @@ pub(crate) enum Principal {
     Client,
     /// What `pumpkin-admin check` needs to read the deployment.
     Check,
-    /// What a contributor's `cargo xtask live` needs: the client's, the check's and
-    /// `scheduler:ListSchedules`.
+    /// What a contributor's `cargo xtask live` needs: the client's, the check's,
+    /// `scheduler:ListSchedules`, and a read of the timer's schedules.
     Contributor,
 }
 
@@ -184,6 +184,7 @@ pub(crate) fn allows(principal: Principal) -> Vec<&'static Allow> {
             let mut allows = self::allows(Principal::Client);
             allows.extend(self::allows(Principal::Check));
             allows.push(&LIST_SCHEDULES);
+            allows.extend(ec2::iam::timers_reader());
             allows
         }
     }

@@ -67,6 +67,15 @@
       "Resource": [
         "*"
       ]
+    },
+    {
+      "Action": [
+        "scheduler:GetSchedule"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "arn:${partition}:scheduler:${region}:${account}:schedule/${timer_group}/*"
+      ]
     }
   ],
   "Version": "2012-10-17"

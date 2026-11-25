@@ -3,6 +3,7 @@
 //! configuration names.
 
 mod controller;
+mod timers;
 
 use std::io::{BufRead as _, BufReader};
 use std::path::{Path, PathBuf};
@@ -96,8 +97,9 @@ pub(crate) fn docker() -> Result<()> {
 /// Runs `examples/smoke` at `HEAD` on `provider` through the controller, and fails unless every
 /// probe passed, every sandbox was deleted and nothing of the run is left on the provider. It
 /// first runs `pumpkin-admin check` on the controller's deployment, and fails if that finds a
-/// problem. With `lost`, it loses the run instead, and checks that its sandboxes end by
-/// themselves and that a reap removes the rest. `again` names the command that repeats it.
+/// problem. With `lost`, it loses the run instead. It checks that EC2's timers of the run's
+/// instances are set for the hard ends that the run's log records. It checks that the sandboxes
+/// end by themselves, and that a reap removes the rest. `again` names the command that repeats it.
 pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> Result<()> {
     let again = match provider {
         Provider::Ec2 => "cargo xtask live ec2",
@@ -119,7 +121,7 @@ pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> 
     let repo = task_repository("live/repo")?;
     checked_deployment(&settings, &repo, again)?;
     if lost {
-        return self::lost(&settings, &repo, again);
+        return self::lost(&settings, provider, &repo, again);
     }
     let mut run = controlled(&repo, &settings.name, &["run", "--wait"]);
     if let Some(modal) = &settings.modal {
@@ -173,7 +175,7 @@ const LOST_BY: Duration = Duration::from_mins(94 + 2 + 10);
 
 const LOST_EVERY: Duration = Duration::from_mins(1);
 
-fn lost(settings: &Settings, repo: &Path, again: &str) -> Result<()> {
+fn lost(settings: &Settings, provider: Provider, repo: &Path, again: &str) -> Result<()> {
     let pumpkin = |args: &[&str]| controlled(repo, &settings.name, args);
     let gpu = settings
         .modal
@@ -195,6 +197,8 @@ fn lost(settings: &Settings, repo: &Path, again: &str) -> Result<()> {
     kill_job(Path::new(&home), address, None, &alias, &id)?;
     let killed = Instant::now();
     println!("xtask: run {id} is lost: its job was killed");
+    let on = (Path::new(&home), address, alias.as_str());
+    let mut wrong = mistimed(settings, provider, on, &id);
     let before = ended_by_themselves(settings, repo, &id, killed)?;
     if before.is_empty() {
         println!(
@@ -229,10 +233,37 @@ fn lost(settings: &Settings, repo: &Path, again: &str) -> Result<()> {
             left.join(", ")
         }
     );
-    if !failed && left.is_empty() {
+    if failed || !left.is_empty() {
+        wrong.push(format!(
+            "the reap of lost run {id} failed, or left something, as said above"
+        ));
+    }
+    if wrong.is_empty() {
         return Ok(());
     }
-    Err(format!("the reap of lost run {id} failed, or left something, as said above: fix it, and run `{again} --lost` again").into())
+    Err(format!(
+        "{}: fix it, and run `{again} --lost` again",
+        wrong.join("; ")
+    )
+    .into())
+}
+
+/// What is wrong with the EC2 timers of lost run `id` on `provider`, whose log [`run_log`] reads
+/// on the controller `on`. It prints each finding, so that no later failure of the check hides it.
+fn mistimed(
+    settings: &Settings,
+    provider: Provider,
+    (home, host, alias): (&Path, &str, &str),
+    id: &str,
+) -> Vec<String> {
+    let log = run_log(home, host, alias, id);
+    let wrong = log.and_then(|log| timers::mistimed(settings, provider, id, &log));
+    let wrong = wrong
+        .unwrap_or_else(|error| vec![format!("checking run {id}'s EC2 timers failed: {error}")]);
+    for finding in &wrong {
+        println!("xtask: {finding}");
+    }
+    wrong
 }
 
 /// Starts a smoke run with `pumpkin`, which makes a `./pumpkin` command of its arguments, whose
@@ -325,6 +356,31 @@ fn held(mut wait: Command, id: &str, leases: usize) -> Result<()> {
 /// run, with the key and the host key pinned as `alias` of the client whose home is `home`.
 fn kill_job(home: &Path, host: &str, port: Option<u16>, alias: &str, id: &str) -> Result<()> {
     let kill = format!("systemctl --user kill --signal=KILL pumpkin-job-{id}");
+    let mut ssh = ssh(home, host, port, alias);
+    ssh.arg(&kill);
+    // Its output captured, as `ssh` makes its standard streams non-blocking, and leaves them so
+    // when killed at the bound or ended by a fatal error.
+    let how = Run::new(Bound::Within(STEP_TIMEOUT), Echo::Line).named("ssh");
+    process::run(&mut ssh, how).map_err(|failure| failure.to_string())?;
+    Ok(())
+}
+
+/// The log of run `id` on the controller at `host`, as it stands, read as [`kill_job`] reaches
+/// the controller.
+fn run_log(home: &Path, host: &str, alias: &str, id: &str) -> Result<String> {
+    // The run's record on the controller, in its user's home, as `pumpkin`'s `job::runs` names it.
+    let mut ssh = ssh(home, host, None, alias);
+    ssh.arg(format!("cat .pumpkin/runs/{id}/log.jsonl"));
+    let how = Run::new(Bound::Within(STEP_TIMEOUT), Echo::Silent).named("ssh");
+    let output = process::run(&mut ssh, how).map_err(|failure| failure.to_string())?;
+    String::from_utf8(output.stdout)
+        .map_err(|error| format!("run {id}'s log on the controller isn't UTF-8: {error}").into())
+}
+
+/// An `ssh` to the controller at `host` and `port`, 22 if `None`, which runs the command that
+/// follows it. It has the key of the client whose home is `home`, and pins the host key as
+/// `alias`.
+fn ssh(home: &Path, host: &str, port: Option<u16>, alias: &str) -> Command {
     let kept = home.join(".config/pumpkin/ssh");
     let known_hosts = format!("UserKnownHostsFile={}", kept.join("known_hosts").display());
     let mut ssh = process::command("ssh", Environment::Inherited);
@@ -345,12 +401,8 @@ fn kill_job(home: &Path, host: &str, port: Option<u16>, alias: &str, id: &str) -
     if let Some(port) = port {
         ssh.args(["-o", &format!("Port={port}")]);
     }
-    ssh.arg(format!("pumpkin@{host}")).arg(&kill);
-    // Its output captured, as `ssh` makes its standard streams non-blocking, and leaves them so
-    // when killed at the bound or ended by a fatal error.
-    let how = Run::new(Bound::Within(STEP_TIMEOUT), Echo::Line).named("ssh");
-    process::run(&mut ssh, how).map_err(|failure| failure.to_string())?;
-    Ok(())
+    ssh.arg(format!("pumpkin@{host}"));
+    ssh
 }
 
 /// Fails, saying what to give, unless the credentials that the smoke's checks use reach AWS,
@@ -707,22 +759,7 @@ fn unphased(line: &serde_json::Value) -> Option<String> {
 /// What of run `id` the providers still hold: an instance not terminated, a schedule, a sandbox.
 fn left(settings: &Settings, id: &str) -> Result<Vec<String>> {
     let mut left = Vec::new();
-    let filter = format!("Name=tag:pumpkin:run,Values={id}");
-    let mut described = aws(
-        settings,
-        &["ec2", "describe-instances", "--filters", &filter],
-    );
-    let described = listed(&mut described, None)?;
-    let reservations = described["Reservations"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    for instance in reservations.iter().flat_map(|reservation| {
-        reservation["Instances"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default()
-    }) {
+    for instance in instances(settings, id)? {
         let state = instance["State"]["Name"].as_str().unwrap_or_default();
         println!(
             "EC2 instance {} of the run: {state}",
@@ -744,16 +781,44 @@ fn left(settings: &Settings, id: &str) -> Result<Vec<String>> {
     Ok(left)
 }
 
+/// Each instance of run `id`, terminated or not, as `aws ec2 describe-instances` prints it.
+fn instances(settings: &Settings, id: &str) -> Result<Vec<serde_json::Value>> {
+    let filter = format!("Name=tag:pumpkin:run,Values={id}");
+    let mut described = aws(
+        settings,
+        &["ec2", "describe-instances", "--filters", &filter],
+    );
+    let described = listed(&mut described, None)?;
+    let reservations = described["Reservations"].as_array().into_iter().flatten();
+    let instances = reservations.flat_map(|reservation| {
+        reservation["Instances"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    });
+    Ok(instances.collect())
+}
+
 /// The schedules of `EventBridge` Scheduler whose names start with `id`, each as
 /// `schedule <group>/<name>`.
 fn schedules(settings: &Settings, id: &str, expected: Option<&str>) -> Result<Vec<String>> {
-    let list = ["scheduler", "list-schedules", "--name-prefix", id];
-    let listed = listed(&mut aws(settings, &list), expected)?;
-    let listed = listed["Schedules"].as_array().cloned().unwrap_or_default();
+    let listed = listed_schedules(settings, id, expected)?;
     let named = listed
         .iter()
         .map(|schedule| format!("schedule {}/{}", schedule["GroupName"], schedule["Name"]));
     Ok(named.collect())
+}
+
+/// The schedules of `EventBridge` Scheduler whose names start with `id`, each as
+/// `aws scheduler list-schedules` prints it.
+fn listed_schedules(
+    settings: &Settings,
+    id: &str,
+    expected: Option<&str>,
+) -> Result<Vec<serde_json::Value>> {
+    let list = ["scheduler", "list-schedules", "--name-prefix", id];
+    let listed = listed(&mut aws(settings, &list), expected)?;
+    Ok(listed["Schedules"].as_array().cloned().unwrap_or_default())
 }
 
 /// An `aws` with `args`, in the controller's region, which prints JSON.
