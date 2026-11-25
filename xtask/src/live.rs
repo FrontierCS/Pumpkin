@@ -5,6 +5,7 @@
 mod controller;
 mod timers;
 
+use std::collections::BTreeMap;
 use std::io::{BufRead as _, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
@@ -141,7 +142,7 @@ pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> 
     if settings.modal.is_some() {
         failed.extend(phased(&record));
     }
-    let left = left(&settings, &id)?;
+    let left = left(&settings, &id, &mut BTreeMap::new())?;
     if !left.is_empty() {
         failed.push(format!("left after the run: {}", left.join(", ")));
         let mut cancel = controlled(&repo, &settings.name, &["cancel", &id]);
@@ -150,7 +151,7 @@ pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> 
             Ok(_) => eprintln!("xtask: `./pumpkin cancel {id}` passed"),
             Err(failure) => eprintln!("xtask: {failure}"),
         }
-        let still = self::left(&settings, &id)?;
+        let still = self::left(&settings, &id, &mut BTreeMap::new())?;
         if !still.is_empty() {
             failed.push(format!("left after `pumpkin cancel`: {}", still.join(", ")));
         }
@@ -172,6 +173,14 @@ pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> 
 // check sets to 2, and the final call's timeout, 5. Then an EC2 timer fires within 2 minutes, as it
 // is set for the minute after, and an instance takes up to 10 to be terminated.
 const LOST_BY: Duration = Duration::from_mins(94 + 2 + 10);
+
+// A lost run's sandbox ends seconds after its session does, or minutes for a slow shutdown, so the
+// looks come often at first. A sandbox left after that waits for its timer, at its hard end. A
+// look runs `aws` twice, and on Modal also a Python that imports Modal's SDK, so it takes from one
+// to a few seconds.
+const LOST_SOON_EVERY: Duration = Duration::from_secs(5);
+
+const LOST_SOON: Duration = Duration::from_mins(5);
 
 const LOST_EVERY: Duration = Duration::from_mins(1);
 
@@ -223,7 +232,7 @@ fn lost(settings: &Settings, provider: Provider, repo: &Path, again: &str) -> Re
     // `reap` reaps every run on the controller, and fails if any one can't be reaped: only a
     // failure that names other runs alone isn't this check's.
     let failed = !reaped.status.success() && !wait::others_failed(&said, &id);
-    let left = left(settings, &id)?;
+    let left = left(settings, &id, &mut BTreeMap::new())?;
     println!(
         "xtask: `./pumpkin reap` ended with {}; left of run {id}: {}",
         reaped.status,
@@ -292,27 +301,37 @@ fn holding(pumpkin: &dyn Fn(&[&str]) -> Command, gpu_model: Option<&str>) -> Res
     Ok(id)
 }
 
-/// Waits until no sandbox of run `id` is left, looking every `LOST_EVERY`, and returns what else of
-/// it the providers hold, its schedules. Fails if a sandbox is left `LOST_BY` after `killed`.
+/// Waits until no sandbox of run `id` is left, and returns what else of it the providers hold, its
+/// schedules. It looks every `LOST_SOON_EVERY` until `LOST_SOON` after `killed`, then every
+/// `LOST_EVERY`. Says between which times the sandboxes ended. Fails if a sandbox is left
+/// `LOST_BY` after `killed`.
 fn ended_by_themselves(
     settings: &Settings,
     repo: &Path,
     id: &str,
     killed: Instant,
 ) -> Result<Vec<String>> {
+    let mut shown = BTreeMap::new();
+    // When the last look that found a sandbox began, after which that sandbox ended.
+    let mut found = Duration::ZERO;
     loop {
-        let left = left(settings, id)?;
+        let began = killed.elapsed();
+        let left = left(settings, id, &mut shown)?;
         let sandboxes: Vec<&String> = left
             .iter()
             .filter(|left| !left.starts_with("schedule "))
             .collect();
         if sandboxes.is_empty() {
+            let by = killed.elapsed();
             println!(
-                "xtask: every sandbox of run {id} ended by itself, by {} s after its job was killed",
-                killed.elapsed().as_secs(),
+                "xtask: every sandbox of run {id} ended by itself, between {} s and {} s after its \
+                 job was killed",
+                found.as_secs(),
+                by.as_secs() + u64::from(by.subsec_nanos() > 0),
             );
             return Ok(left);
         }
+        found = began;
         if killed.elapsed() > LOST_BY {
             return Err(format!(
                 "{} s after its job was killed, run {id} still has {}: remove them with `./pumpkin cancel {id}` in {}, and find out why they outlived the run's hard end",
@@ -322,7 +341,12 @@ fn ended_by_themselves(
             )
             .into());
         }
-        thread::sleep(LOST_EVERY);
+        let every = if began < LOST_SOON {
+            LOST_SOON_EVERY
+        } else {
+            LOST_EVERY
+        };
+        thread::sleep(every);
     }
 }
 
@@ -757,14 +781,20 @@ fn unphased(line: &serde_json::Value) -> Option<String> {
 }
 
 /// What of run `id` the providers still hold: an instance not terminated, a schedule, a sandbox.
-fn left(settings: &Settings, id: &str) -> Result<Vec<String>> {
+/// It prints each instance's state that differs from the one in `shown`, and keeps it there.
+fn left(
+    settings: &Settings,
+    id: &str,
+    shown: &mut BTreeMap<String, String>,
+) -> Result<Vec<String>> {
     let mut left = Vec::new();
     for instance in instances(settings, id)? {
         let state = instance["State"]["Name"].as_str().unwrap_or_default();
-        println!(
-            "EC2 instance {} of the run: {state}",
-            instance["InstanceId"]
-        );
+        let instance_id = instance["InstanceId"].to_string();
+        if shown.get(&instance_id).map(String::as_str) != Some(state) {
+            println!("EC2 instance {instance_id} of the run: {state}");
+            shown.insert(instance_id, state.to_owned());
+        }
         if state != "terminated" {
             left.push(format!("EC2 instance {} ({state})", instance["InstanceId"]));
         }
