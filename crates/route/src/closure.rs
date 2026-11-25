@@ -540,13 +540,13 @@ impl Refusal {
         refusal(Status::BadRequest, message.to_owned())
     }
 
-    /// The refusal of a request once the model provider has refused the route's key with a 401,
-    /// which ends the route.
+    /// The refusal of a request once the model provider has refused the route's key, which ends
+    /// the route.
     pub(crate) fn key_refused() -> Self {
         // A 400, as for the route's end, so that the harness ends its turn rather than try
         // again with the same key, which every later request would carry.
-        let message = "the model provider refused the route's key, with a 401, which ends the \
-                       model route: make no more model requests";
+        let message = "the model provider refused the route's key, which ends the model route: \
+                       make no more model requests";
         refusal(Status::BadRequest, message.to_owned())
     }
 

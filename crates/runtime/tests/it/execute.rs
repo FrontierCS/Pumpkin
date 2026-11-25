@@ -3146,7 +3146,7 @@ fn call_key_refused() {
         finished, showing [score=6]
         payloads hold: ["xxx", "xxxxxx"]
         provider.json routes: {"trainer":[{"api":"responses","models":{"m-small":{"upstream_name":"vendor/m-small","usd_per_mtok":{"cache_write":3.75,"cached":0.3,"input":3.0,"output":15.0}}},"upstream":"stand-in"}]}
-        outcome.json: {"agents":[{"role":"agent","route_failure":"the upstream `stand-in` refused its key, with a 401, which ended job 0's model route: give it a key that it takes, and run again","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
+        outcome.json: {"agents":[{"role":"agent","route_failure":"the upstream `stand-in` refused its key, which ended job 0's model route: give it a key that it takes, and run again","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
         outcome.json's usage: {"calls":[{"grant":"train","job":0,"model_requests":1,"tokens":{"input":0,"output":0,"responses":0}}],"model_requests":1,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":3,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}}
         log.jsonl:
         {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
@@ -3157,7 +3157,7 @@ fn call_key_refused() {
         {"actions":[],"at_ns":"0","event":{"bytes":3,"digest":"sha256:cd2eb0837c9b4c962c22d2ff8b5441b7b45805887f051d39bf133b583baf6860","job":0,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"0","seq":5}
         {"actions":[],"at_ns":"0","event":{"argv":["ops","model m-small expired"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"0","seq":6}
         {"actions":[],"at_ns":"0","event":{"caller":"job-0","kind":"model_request_started","request":0},"observed_ns":"0","seq":7}
-        {"actions":[],"at_ns":"0","event":{"answer":{"kind":"refused","message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","status":400},"api":"responses","caller":"job-0","first_byte_ns":"0","kept":{"request":{"body_bytes":175,"body_sha256":"3c0cdf32d3c30701e3f2321e9bdb0d6bf020435c0f7bb528cc43be1139395b72","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":7}},"kind":"model_answered","request":0,"upstream":"stand-in","upstream_status":401},"observed_ns":"0","seq":8}
+        {"actions":[],"at_ns":"0","event":{"answer":{"kind":"refused","message":"the model provider refused the route's key, which ends the model route: make no more model requests","status":400},"api":"responses","caller":"job-0","first_byte_ns":"0","kept":{"request":{"body_bytes":175,"body_sha256":"3c0cdf32d3c30701e3f2321e9bdb0d6bf020435c0f7bb528cc43be1139395b72","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":7}},"kind":"model_answered","request":0,"upstream":"stand-in","upstream_status":401},"observed_ns":"0","seq":8}
         {"actions":[],"at_ns":"0","event":{"command":0,"end":{"exited":{"code":0}},"job":0,"kind":"command_ended"},"observed_ns":"0","seq":9}
         {"actions":[],"at_ns":"0","event":{"job":0,"kind":"call_returned","returned":[]},"observed_ns":"0","seq":10}
         {"actions":[],"at_ns":"0","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":11}
@@ -4676,7 +4676,7 @@ fn judge_sees_missing_inputs_and_each_agent_keeps_its_model_failure_and_usage() 
     let [alpha, beta] = agents.as_slice() else {
         panic!("expected both agents")
     };
-    assert!(alpha.route_failure.as_ref().unwrap().contains("401"));
+    assert!(alpha.route_failure.as_ref().unwrap().contains("its key"));
     assert!(beta.route_failure.is_none());
     assert!(agents.iter().all(|agent| agent.submission.is_none()));
     let [(.., files)] = result.values() else {

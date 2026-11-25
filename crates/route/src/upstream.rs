@@ -1,7 +1,7 @@
 //! Sending a closed model request to the model provider, and streaming its response back.
 
 use std::collections::BTreeMap;
-use std::io::{self, Read};
+use std::io::{self, Cursor, Read};
 use std::net::IpAddr;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -42,6 +42,11 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 // request for as long has stalled too. A long response that keeps coming is never cut by it.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// How much of a 400's body the upstream reads before its client hears the head, of an API whose
+/// 400 may refuse the key.
+// A refusal of the key is one short JSON error. A body past this refuses none, and is relayed.
+const MAX_KEY_REFUSAL_BYTES: u64 = 16 * 1024;
+
 /// The model provider's endpoint: an `https` URL that names no user, or an `http` URL to a
 /// loopback IP address. A port, if it names one, is a number up to 65535.
 #[derive(Clone, Debug)]
@@ -61,10 +66,13 @@ pub struct Upstream {
     // Set before `shutdown` ends the exchanges in flight, so that one it ends before the head is
     // refused for the route's end, not as unanswered, and a later one never goes upstream.
     shut_down: OnceLock<()>,
-    // Set once the provider refuses the key with a 401, which no later request can mend: each
-    // carries the same key, read once for the run. Exchanges run on threads of their own, which
-    // share the upstream, so the first to hear the refusal sets it for the others to see.
+    // Set once the provider refuses the key, which no later request can mend: each carries the
+    // same key, read once for the run. Exchanges run on threads of their own, which share the
+    // upstream, so the first to hear the refusal sets it for the others to see.
     refused: OnceLock<()>,
+    // Whether a 400's body refuses the key, of an API that may refuse one so rather than with a
+    // 401.
+    refuses_key: Option<fn(&[u8]) -> bool>,
 }
 
 /// How the route answered a model request: never with what the request or the response held.
@@ -266,12 +274,17 @@ impl Upstream {
             Api::GenerateContent => (HeaderName::from_static("x-goog-api-key"), key.clone()),
         };
         authorization.1.set_sensitive(true);
+        let refuses_key: Option<fn(&[u8]) -> bool> = match api {
+            Api::Responses | Api::Chat | Api::Messages => None,
+            Api::GenerateContent => Some(generate_content_refuses_key),
+        };
         Self {
             url: url.clone(),
             authorization,
             agent,
             shut_down: OnceLock::new(),
             refused: OnceLock::new(),
+            refuses_key,
         }
     }
 
@@ -313,12 +326,13 @@ impl Upstream {
         };
         let status = response.status().as_u16();
         let request_id = request_id(response.headers());
-        if let Some(refusal) = self.refusal(status, response.headers()) {
-            let mut body = response.into_body().into_reader();
+        let (head, body) = response.into_parts();
+        let (key_refused, mut body) = key_refusal(self.refuses_key, status, body.into_reader());
+        if let Some(refusal) = self.refusal(status, key_refused, &head.headers) {
             let upstream = (status, request_id);
             return replaced(refusal, upstream, closed, &mut body, client, answered);
         }
-        let headers = returned(response.headers(), closed);
+        let headers = returned(&head.headers, closed);
         let Client { request, by, keep } = client;
         let mut client = match request.respond(status, headers, by) {
             Ok(client) => client,
@@ -334,7 +348,6 @@ impl Upstream {
             }
         };
         let mut scan = closed.scan();
-        let mut body = response.into_body().into_reader();
         let relayed = relay(&mut body, &mut client, &mut scan, keep);
         let (usage, failed) = scan.finish();
         let model = closed.model().clone();
@@ -376,13 +389,13 @@ impl Upstream {
     }
 
     /// The refusal that answers in place of the upstream's response with `status` and
-    /// `headers`, if one does: a 401, which refuses the key, and which the upstream keeps, a 403,
-    /// or a coded body.
-    fn refusal(&self, status: u16, headers: &HeaderMap) -> Option<Refusal> {
+    /// `headers`, if one does: a 401 or a body that refuses the key (`key_refused`), which the
+    /// upstream keeps, a 403, or a coded body.
+    fn refusal(&self, status: u16, key_refused: bool, headers: &HeaderMap) -> Option<Refusal> {
         // Passed on, either would be a status that a harness tries again until its deadline. A
-        // 401 refuses the deployment's key, which every later request carries; a 403 may turn on
-        // what the request asked for, which the agent chose, so it ends no route.
-        if status == 401 {
+        // refusal of the key refuses the deployment's key, which every later request carries; a
+        // 403 may turn on what the request asked for, which the agent chose, so it ends no route.
+        if status == 401 || key_refused {
             let _ = self.refused.set(());
             Some(Refusal::key_refused())
         } else if status == 403 {
@@ -434,7 +447,7 @@ impl Upstream {
         };
     }
 
-    /// Whether the model provider has refused the key with a 401, which ends the route.
+    /// Whether the model provider has refused the key, which ends the route.
     pub fn key_was_refused(&self) -> bool {
         self.refused.get().is_some()
     }
@@ -635,6 +648,56 @@ fn replaced(
     }
     answered(refusal.answered(Some(status), request_id));
     refusal.answer(closed.route().api(), request, by)
+}
+
+/// Whether `body`, a response's with `status`, refuses the key by `refuses_key`, which judges a
+/// 400's, and `body` as it came. It reads what it judges before the client hears the head, which
+/// a refusal of the key replaces.
+fn key_refusal(
+    refuses_key: Option<fn(&[u8]) -> bool>,
+    status: u16,
+    mut body: impl Read,
+) -> (bool, impl Read) {
+    let refuses_key = refuses_key.filter(|_| status == 400);
+    let mut opening = Vec::new();
+    let mut broke = None;
+    if refuses_key.is_some() {
+        let read = (&mut body)
+            .take(MAX_KEY_REFUSAL_BYTES)
+            .read_to_end(&mut opening);
+        broke = read.err();
+    }
+    let refused = refuses_key.is_some_and(|refuses| broke.is_none() && refuses(&opening));
+    (
+        refused,
+        Cursor::new(opening).chain(Broken(broke)).chain(body),
+    )
+}
+
+/// Whether `body`, a response's with a 400 from the Gemini API, refuses the key.
+// The Gemini API answers a key that it doesn't take with a 400, as
+// https://ai.google.dev/gemini-api/docs/troubleshooting has it, rather than with a 401. It names
+// why in an `ErrorInfo`, whose reason and domain identify the error: https://google.aip.dev/193
+fn generate_content_refuses_key(body: &[u8]) -> bool {
+    let Ok(body) = serde_json::from_slice::<Value>(body) else {
+        return false;
+    };
+    let details = body.pointer("/error/details").and_then(Value::as_array);
+    details.into_iter().flatten().any(|detail| {
+        let field = |name: &str| detail.get(name).and_then(Value::as_str);
+        field("@type") == Some("type.googleapis.com/google.rpc.ErrorInfo")
+            && field("reason") == Some("API_KEY_INVALID")
+            && field("domain") == Some("googleapis.com")
+    })
+}
+
+/// A reader that fails once with the error, if any, that cut a body's read short, and then ends.
+struct Broken(Option<io::Error>);
+
+impl Read for Broken {
+    fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+        self.0.take().map_or(Ok(0), Err)
+    }
 }
 
 enum Relayed {
