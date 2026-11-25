@@ -63,8 +63,8 @@ pub use logged::{CallerName, Direction};
 pub use model_use::{ModelUse, Tokens};
 pub(super) use progress::places;
 pub use progress::{
-    AgentEnd, AgentSpan, Closed, LeaseSpan, Part, Place, Progress, Readout, Sandbox, SharedSpan,
-    Unread, Work,
+    AgentEnd, AgentSpan, Closed, LeaseSpan, Part, Place, Progress, Readout, Sandbox, SandboxStart,
+    SharedSpan, StartPhase, Unread, Work,
 };
 pub(super) use roles::ir_in;
 pub use usage::{Cost, PlaceUse, Priced, TokensCost, Used};

@@ -8,9 +8,9 @@
 //! run's clock.
 
 use std::collections::BTreeMap;
-use std::fmt;
 use std::path::Path;
 use std::time::Duration;
+use std::{fmt, mem};
 
 use provider::UnixTime;
 use schema::ir::Gpu;
@@ -130,6 +130,9 @@ pub struct Sandbox {
     pub asked: Duration,
     /// When its command started, or its runner was ready.
     pub started: Option<Duration>,
+    /// Its start as the runtime timed it, once the log says that its provider's create returned.
+    /// `None` before then, for a create that failed, and in a log of a build that didn't time it.
+    pub start: Option<SandboxStart>,
     /// When the agent's sandbox was deleted or its teardown finished without a sandbox, a call's
     /// sandbox was deleted, a call with no sandbox of its own ended, or a lease ended. The deletion
     /// also ends a sandbox when its run stops early.
@@ -137,6 +140,46 @@ pub struct Sandbox {
     /// Whether its `sandbox.json` records the provider's delete as done; `None` if it has no
     /// `sandbox.json`, so was never created.
     pub deleted: Option<bool>,
+}
+
+/// A sandbox's start, between when the core asked for it ([`Sandbox::asked`]) and when it started
+/// ([`Sandbox::started`]).
+#[derive(Clone, Debug)]
+pub struct SandboxStart {
+    /// When the runtime began its provider's create.
+    pub began: Duration,
+    /// When its provider's create returned.
+    pub created: Duration,
+    /// When its session met the gateway, once the log says so.
+    pub met: Option<Duration>,
+    /// The steps of the create that its provider timed, in the order it gave them. They may
+    /// overlap or leave gaps.
+    pub phases: Vec<StartPhase>,
+}
+
+/// A step of a sandbox's create, as its provider named and timed it.
+#[derive(Clone, Debug)]
+pub struct StartPhase {
+    /// What the step did, in its provider's words, such as `lookup`.
+    pub name: String,
+    pub began: Duration,
+    /// How long it took: a duration, not a time since the run started.
+    pub took: Duration,
+}
+
+impl From<&logged::Phase> for StartPhase {
+    fn from(phase: &logged::Phase) -> Self {
+        let logged::Phase {
+            name,
+            began_ns,
+            took_ns,
+        } = phase;
+        Self {
+            name: name.clone(),
+            began: *began_ns,
+            took: *took_ns,
+        }
+    }
 }
 
 /// The agent: its sandbox, its command's end, and its model requests.
@@ -368,11 +411,25 @@ fn set_place(
     role: &str,
     dir: &Path,
 ) -> Result<(), ReadError> {
+    let deleted = deleted(dir)?;
+    // What the log told of the sandbox stays, and its role gives the rest.
+    let Sandbox {
+        place: _,
+        startup: _,
+        needs: _,
+        gpus,
+        asked: _,
+        started,
+        start,
+        gone,
+        deleted: _,
+    } = mem::take(sandbox);
     *sandbox = Sandbox {
-        started: sandbox.started,
-        gone: sandbox.gone,
-        deleted: deleted(dir)?,
-        gpus: sandbox.gpus.take(),
+        gpus,
+        started,
+        start,
+        gone,
+        deleted,
         ..roles.sandbox(Some(role), Duration::ZERO)
     };
     Ok(())
@@ -634,6 +691,29 @@ impl Reading {
                 // The caller's own, which the run's count too.
                 if let Some(model) = caller.and_then(|caller| self.model_of(caller)) {
                     model.take(at, &answered);
+                }
+            }
+            logged::Event::SandboxCreated {
+                sandbox,
+                began_ns,
+                phases,
+            } => {
+                // The runtime creates each sandbox once. A second line for one replaces the first.
+                if let Some(sandbox) = self.named(*sandbox) {
+                    sandbox.start = Some(SandboxStart {
+                        began: *began_ns,
+                        created: at,
+                        met: None,
+                        phases: phases.iter().map(StartPhase::from).collect(),
+                    });
+                }
+            }
+            logged::Event::SandboxMet { sandbox } => {
+                if let Some(start) = self
+                    .named(*sandbox)
+                    .and_then(|sandbox| sandbox.start.as_mut())
+                {
+                    start.met = Some(at);
                 }
             }
             logged::Event::SandboxGpus { sandbox, gpus } => {

@@ -1019,6 +1019,138 @@ fn counts_a_jobs_answers_under_its_caller_name() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the log, and the polls that read it"
+)]
+fn shows_a_sandboxs_start() {
+    let scratch = Scratch::new();
+    let id = "20261110-175000-00000014";
+    let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    let dir = write_run(
+        &scratch,
+        id,
+        since.checked_sub(Duration::from_secs(120)).unwrap(),
+        &[],
+        None,
+        &lease_places(Prices::Both),
+    );
+    let driver = lock_driver(&dir);
+    // Each stamp is written after it was observed, as the runtime writes it. A reader that takes
+    // `at_ns` for `observed_ns` shows the later time.
+    let stamp = |written: u64, observed_ms: u64, event: Value| {
+        assert!(observed_ms < written * 1000);
+        let mut line = logged(written, event, json!([]));
+        line["observed_ns"] = json!((observed_ms * 1_000_000).to_string());
+        line
+    };
+    // As the runtime writes it: with no `phases` where its provider timed none.
+    let created = |sandbox: &str, began_ms: u64, phases: Vec<Value>| {
+        let began_ns = (began_ms * 1_000_000).to_string();
+        let mut event =
+            json!({ "kind": "sandbox_created", "sandbox": sandbox, "began_ns": began_ns });
+        if !phases.is_empty() {
+            event["phases"] = json!(phases);
+        }
+        event
+    };
+    let phase = |name: &str, began_ms: u64, took_ms: u64| {
+        let (began_ns, took_ns) = (began_ms * 1_000_000, took_ms * 1_000_000);
+        json!({ "name": name, "began_ns": began_ns.to_string(), "took_ns": took_ns.to_string() })
+    };
+    let met = |sandbox: &str| json!({ "kind": "sandbox_met", "sandbox": sandbox });
+    let call = |seconds: u64, job: u64| {
+        let start = json!({ "kind": "start_call", "caller": "agent-0", "job": job,
+            "grant": "train", "payload": payload(), "timeout_ns": "600000000000" });
+        logged(seconds, json!({ "kind": "tick" }), json!([start]))
+    };
+    let two = vec![phase("lookup", 11_500, 500), phase("create", 12_000, 2000)];
+    // A first name past the 8 KiB at which the page cuts a string, and one phase more than the
+    // 16 that a lane gives.
+    let mut many = vec![phase(&"x".repeat(8 * 1024 + 1), 81_000, 100)];
+    many.extend((1..17).map(|index| phase(&format!("p{index}"), 81_000 + 100 * index, 100)));
+    let lease = json!({ "kind": "start_lease", "lease": 2, "holder": "agent-0", "grant": "cpu" });
+    let failed = json!({ "kind": "call_failed", "job": 4, "reason": "it never met the gateway" });
+    let [work, agent] = super::started_work(5);
+    let log = [
+        stamp(4, 3_000, created("agent-0", 1_000, vec![])),
+        stamp(5, 4_500, met("agent-0")),
+        work,
+        agent,
+        call(10, 0),
+        stamp(16, 15_000, created("job-0", 11_000, two)),
+        stamp(18, 17_000, met("job-0")),
+        logged(19, json!({ "kind": "call_started", "job": 0 }), json!([])),
+        call(20, 1),
+        stamp(26, 25_000, created("job-1", 21_000, vec![])),
+        logged(30, json!({ "kind": "tick" }), json!([lease])),
+        stamp(32, 31_000, created("lease-2", 30_500, vec![])),
+        stamp(34, 33_000, met("lease-2")),
+        logged(35, json!({ "kind": "lease_ready", "lease": 2 }), json!([])),
+        call(40, 2),
+        call(50, 3),
+        stamp(52, 51_000, met("job-3")),
+        call(60, 4),
+        stamp(64, 63_000, created("job-4", 61_000, vec![])),
+        logged(70, failed, json!([])),
+        call(80, 5),
+        stamp(86, 85_000, created("job-5", 81_000, many)),
+    ];
+    let log_path = dir.join("log.jsonl");
+    let mut written = fs::read_to_string(&log_path).unwrap();
+    for (seq, line) in (1_u64..).zip(&log) {
+        let mut line = line.clone();
+        line["seq"] = json!(seq);
+        let _ = writeln!(written, "{line}");
+    }
+    fs::write(&log_path, &written).unwrap();
+    let served = Served::start(&scratch);
+    let first = served.get(&format!("/api/runs/{id}/since?log=0"));
+    let mut said = vec!["the first poll:".to_owned()];
+    for lane in first["run"]["lanes"].as_array().unwrap() {
+        let mut sandbox = lane["sandbox"].clone();
+        if lane["lane"] == "job 5" {
+            let phases = sandbox["start"]["phases"].take();
+            let phases = phases.as_array().unwrap();
+            let last = &phases[phases.len() - 1]["name"];
+            sandbox["start"]["phases"] =
+                json!(format!("<{} phases, the last {last}>", phases.len()));
+            let name = phases[0]["name"].as_str().unwrap();
+            said.push(ending("job 5's first phase", name).trim_end().to_owned());
+        }
+        said.push(format!("{}: {sandbox}", lane["lane"]));
+    }
+    // The meeting of job 1, which the first poll's log lacked.
+    let mut line = stamp(90, 27_000, met("job-1"));
+    line["seq"] = json!(1 + log.len());
+    let mut appended = OpenOptions::new().append(true).open(&log_path).unwrap();
+    writeln!(appended, "{line}").unwrap();
+    let next = served.get(&format!("/api/runs/{id}/since?log={}", first["end"]));
+    let lanes = next["run"]["lanes"].as_array().unwrap();
+    let job_1 = lanes.iter().find(|lane| lane["lane"] == "job 1").unwrap();
+    said.push(format!("the next poll: \"job 1\": {}", job_1["sandbox"]));
+    drop(driver);
+    check(
+        &scratch,
+        said.into_iter().map(Step::Ran),
+        false,
+        &[],
+        &expect![[r#"
+            the first poll:
+            "agent 0": {"asked":0.0,"deleted":null,"gone":null,"place":"aws/judge","start":{"began":1.0,"created":3.0,"met":4.5,"more_phases":0,"phases":[]},"started":5.0}
+            "job 0": {"asked":10.0,"deleted":null,"gone":null,"place":"modal/a100_80 with unknown GPUs","start":{"began":11.0,"created":15.0,"met":17.0,"more_phases":0,"phases":[{"from":11.5,"name":"lookup","to":12.0},{"from":12.0,"name":"create","to":14.0}]},"started":19.0}
+            "job 1": {"asked":20.0,"deleted":null,"gone":null,"place":"modal/a100_80","start":{"began":21.0,"created":25.0,"met":null,"more_phases":0,"phases":[]},"started":null}
+            "lease 2": {"asked":30.0,"deleted":null,"gone":null,"place":"aws/judge","start":{"began":30.5,"created":31.0,"met":33.0,"more_phases":0,"phases":[]},"started":35.0}
+            "job 2": {"asked":40.0,"deleted":null,"gone":null,"place":"modal/a100_80","started":null}
+            "job 3": {"asked":50.0,"deleted":null,"gone":null,"place":"modal/a100_80","started":null}
+            "job 4": {"asked":60.0,"deleted":null,"gone":70.0,"place":"modal/a100_80","start":{"began":61.0,"created":63.0,"met":null,"more_phases":0,"phases":[]},"started":null}
+            job 5's first phase: `xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`, 8215 bytes, ending `xxx… [8193 bytes in all]`
+            "job 5": {"asked":80.0,"deleted":null,"gone":null,"place":"modal/a100_80","start":{"began":81.0,"created":85.0,"met":null,"more_phases":1,"phases":"<16 phases, the last \"p15\">"},"started":null}
+            the next poll: "job 1": {"asked":20.0,"deleted":null,"gone":null,"place":"modal/a100_80","start":{"began":21.0,"created":25.0,"met":27.0,"more_phases":0,"phases":[]},"started":null}"#]],
+    );
+}
+
+#[test]
 #[expect(clippy::too_many_lines, reason = "most of it is the three runs' logs")]
 fn states_failures() {
     let scratch = Scratch::new();
