@@ -36,8 +36,8 @@ _FUNCTIONS = {
     "apply_patch_tool_type": None,
     # Sub-agents' tools are a `namespace` under either multi-agent version.
     "multi_agent_version": "disabled",
-    # `clock` is a `namespace`, and `send_user_message_async` adds a second way to ask a user,
-    # beside `request_user_input`, which stays.
+    # The tools an entry adds to Codex's own, such as `clock`, a `namespace`, and second ways to
+    # ask a user, beside `request_user_input`, which stays.
     "experimental_supported_tools": [],
 }
 
@@ -163,7 +163,8 @@ def codex(
       catalog_entry: Codex's catalog entry for `model`, a dict of the JSON object that its
         `model_catalog_json` lists, with `slug` set to `model`; or `None`, to leave Codex its own
         entry for `model`, or its defaults for a model it lacks one for. An entry holds as Codex
-        reads it at the version `codex` installs.
+        reads it at the version `codex` installs. Codex keeps a given entry's instructions as they
+        are, even its own entry's, where with `None` it may drop those of a tool it leaves out.
 
     Returns:
       A dict of `image`, `base` with Codex added; and `runtime`, the agent's runtime that runs it,
@@ -174,9 +175,16 @@ def codex(
         fail("`{}` is not a reasoning effort: use one of {}".format(effort, ", ".join(_EFFORTS)))
     if prompt == None:
         fail("`None` is not a prompt: give a string, which may be empty")
-    if catalog_entry != None and catalog_entry.get("slug") != model:
-        message = "the catalog entry's slug is `{}`, so Codex wouldn't use it: set it to `{}`"
-        fail(message.format(catalog_entry.get("slug"), model))
+    if catalog_entry != None:
+        # The subset has no `type`, and only a dict encodes as a JSON object.
+        if not json.encode(catalog_entry).startswith("{"):
+            fail("the catalog entry isn't a dict: give one entry, a dict, or `None`")
+        if "slug" not in catalog_entry:
+            message = "the catalog entry has no `slug`: give the one entry of `{}`, with its `slug`"
+            fail(message.format(model))
+        if catalog_entry["slug"] != model:
+            message = "the catalog entry's slug is `{}`, not the model's: set it to `{}`"
+            fail(message.format(catalog_entry["slug"], model))
     if tools == "native":
         catalog = [] if catalog_entry == None else [catalog_entry]
     elif tools == "functions":

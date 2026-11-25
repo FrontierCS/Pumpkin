@@ -49,8 +49,7 @@ const WORD_CAP: usize = 1_500;
 
 const SOURCES: [&str; 8] = ["rs", "star", "js", "css", "html", "py", "sh", "tf"];
 
-/// Where what a third party wrote is vendored, unchanged, which the checks leave as they are:
-/// `crates/lang`'s conformance suites and Codex's model catalog.
+/// Where what a third party wrote is vendored, which the checks leave as they are.
 const VENDORED: [&str; 2] = [
     "crates/lang/tests/conformance/",
     "crates/library/tests/it/codex/",

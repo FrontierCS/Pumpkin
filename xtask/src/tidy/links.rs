@@ -8,7 +8,7 @@ use crate::repo::Repo;
 
 const GITHUB: &str = "https://github.com/";
 
-/// The problems of the links in `files`, the repository's but for the vendored suites, to code on
+/// The problems of the links in `files`, the repository's but for the vendored files, to code on
 /// GitHub at a revision that moves, a branch, a tag or a short SHA, where a citation must show the
 /// code that was read. A link to a Markdown document may follow its branch, as the help's links to
 /// the guides do.

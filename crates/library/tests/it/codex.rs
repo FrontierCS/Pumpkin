@@ -11,9 +11,9 @@ use serde_json::Value;
 use super::{check_refusals, check_roles};
 
 /// The arguments `codex()` takes besides `SHARED`, with the Starlark of their values. A case
-/// names its catalog entry by its slug, one of `models.json`'s, or as `none`.
+/// names its catalog entry by its slug, one of `models.json`'s, or gives it as JSON.
 fn own() -> [(&'static str, String); 2] {
-    // On one line, so that the entry's lines number as the test's task writes them.
+    // On one line, so that the call keeps its line in the test's task, whatever the JSON's length.
     let models: Value = serde_json::from_str(include_str!("codex/models.json")).unwrap();
     let models = models.to_string();
     assert!(
@@ -23,7 +23,7 @@ fn own() -> [(&'static str, String); 2] {
     // The string isn't raw, as the subset refuses a raw string with a backslash before a quote.
     let models = models.replace('\\', r"\\");
     let entry = format!(
-        r#"{{entry["slug"]: entry for entry in json.decode("""{models}""")["models"]}}.get(arg("catalog_entry", str))"#
+        r#"[([entry for entry in json.decode("""{models}""")["models"] if entry["slug"] == given] or [json.decode(given)])[0] for given in [arg("catalog_entry", str)]][0]"#
     );
     [
         ("tools", r#"arg("tools", str)"#.to_owned()),
@@ -59,7 +59,7 @@ fn cases() -> Vec<[&'static str; 8]> {
             "60",
             "0",
             "native",
-            "none",
+            "null",
         ],
         [
             "gpt-6.2-astra",
@@ -69,7 +69,7 @@ fn cases() -> Vec<[&'static str; 8]> {
             "60",
             "0",
             "native",
-            "none",
+            "null",
         ],
         [
             "gpt-6.1-terra",
@@ -99,7 +99,7 @@ fn cases() -> Vec<[&'static str; 8]> {
             "60",
             "0",
             "native",
-            "none",
+            "null",
         ],
         [
             "gpt-6.2-astra",
@@ -128,7 +128,7 @@ fn roles() {
         true,
         excerpt,
         &expect![[r#"
-            gpt-6.2-sol high /workspace native none:
+            gpt-6.2-sol high /workspace native null:
             argv: /harness/codex-0.172.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
             env: CODEX_HOME=/workspace/.codex TMPDIR=/workspace/.tmp
             cwd: /workspace
@@ -147,7 +147,7 @@ fn roles() {
             image 1: //images's Dockerfile, in pumpkin/images
             image 2: @pumpkin//harness/codex/layer's Dockerfile, image 1 as base, in pumpkin-library/harness/codex/layer
             the agent's image: image 2
-            gpt-6.2-astra low /home/agent native none:
+            gpt-6.2-astra low /home/agent native null:
             argv: /harness/codex-0.172.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
             env: CODEX_HOME=/home/agent/.codex TMPDIR=/home/agent/.tmp
             cwd: /home/agent
@@ -199,7 +199,7 @@ fn roles() {
                 multi_agent_version: "v2"
                 experimental_supported_tools: ["request_user_input_async","send_message_to_user_async","clock","literature_search_query","multi_agent_v2_in_code_mode"]
             route: responses gpt-6.2-sol
-            gpt-6.1-terra xhigh /srv/work native none:
+            gpt-6.1-terra xhigh /srv/work native null:
             argv: /harness/codex-0.172.0/bin/codex exec --ephemeral --ignore-rules --skip-git-repo-check -
             env: CODEX_HOME=/srv/work/.codex TMPDIR=/srv/work/.tmp
             cwd: /srv/work
@@ -259,33 +259,43 @@ fn refusals() {
             ("effort", "extreme"),
             ("tools", "both"),
             ("model", "gpt-6.2-sol"),
-            ("catalog_entry", "none"),
+            ("catalog_entry", "null"),
+            ("catalog_entry", r#""gpt-6.1-terra""#),
+            ("catalog_entry", r#"{"models": []}"#),
             ("workspace", "/pumpkin/home"),
         ],
         &["prompt"],
         &expect![[r#"
-            @pumpkin//harness/codex/codex.star:174:9: fail: `extreme` is not a reasoning effort: use one of none, minimal, low, medium, high, xhigh, max, ultra
-                174 |         fail("`{}` is not a reasoning effort: use one of {}".format(effort, ", ".join(_EFFORTS)))
+            @pumpkin//harness/codex/codex.star:175:9: fail: `extreme` is not a reasoning effort: use one of none, minimal, low, medium, high, xhigh, max, ultra
+                175 |         fail("`{}` is not a reasoning effort: use one of {}".format(effort, ", ".join(_EFFORTS)))
                     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `codex()`, called at task.star:16:9
-            @pumpkin//harness/codex/codex.star:187:9: fail: `both` is not a way to send Codex's tools: use one of native, functions
-                187 |         fail("`{}` is not a way to send Codex's tools: use one of {}".format(tools, ", ".join(_TOOLS)))
+            @pumpkin//harness/codex/codex.star:195:9: fail: `both` is not a way to send Codex's tools: use one of native, functions
+                195 |         fail("`{}` is not a way to send Codex's tools: use one of {}".format(tools, ", ".join(_TOOLS)))
                     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `codex()`, called at task.star:16:9
-            @pumpkin//harness/codex/codex.star:179:9: fail: the catalog entry's slug is `gpt-6.1-terra`, so Codex wouldn't use it: set it to `gpt-6.2-sol`
-                179 |         fail(message.format(catalog_entry.get("slug"), model))
-                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            @pumpkin//harness/codex/codex.star:187:13: fail: the catalog entry's slug is `gpt-6.1-terra`, not the model's: set it to `gpt-6.2-sol`
+                187 |             fail(message.format(catalog_entry["slug"], model))
+                    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `codex()`, called at task.star:16:9
-            @pumpkin//harness/codex/codex.star:184:13: fail: sending Codex's tools as functions needs the model's catalog entry: give one
-                184 |             fail("sending Codex's tools as functions needs the model's catalog entry: give one")
+            @pumpkin//harness/codex/codex.star:192:13: fail: sending Codex's tools as functions needs the model's catalog entry: give one
+                192 |             fail("sending Codex's tools as functions needs the model's catalog entry: give one")
                     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `codex()`, called at task.star:16:9
-            @pumpkin//harness/codex/codex.star:194:12: `/pumpkin/home/.codex` is in `/pumpkin`, which holds Pumpkin's own files: name a path outside it
-                194 |     home = below + "/.codex"
+            @pumpkin//harness/codex/codex.star:181:13: fail: the catalog entry isn't a dict: give one entry, a dict, or `None`
+                181 |             fail("the catalog entry isn't a dict: give one entry, a dict, or `None`")
+                    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                in `codex()`, called at task.star:16:9
+            @pumpkin//harness/codex/codex.star:184:13: fail: the catalog entry has no `slug`: give the one entry of `gpt-6.1-terra`, with its `slug`
+                184 |             fail(message.format(model))
+                    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                in `codex()`, called at task.star:16:9
+            @pumpkin//harness/codex/codex.star:202:12: `/pumpkin/home/.codex` is in `/pumpkin`, which holds Pumpkin's own files: name a path outside it
+                202 |     home = below + "/.codex"
                     |            ^^^^^^^^^^^^^^^^^
                 the IR's /roles/0/runtime/agent/dirs/0/path
-            @pumpkin//harness/codex/codex.star:176:9: fail: `None` is not a prompt: give a string, which may be empty
-                176 |         fail("`None` is not a prompt: give a string, which may be empty")
+            @pumpkin//harness/codex/codex.star:177:9: fail: `None` is not a prompt: give a string, which may be empty
+                177 |         fail("`None` is not a prompt: give a string, which may be empty")
                     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `codex()`, called at task.star:16:9"#]],
     );
