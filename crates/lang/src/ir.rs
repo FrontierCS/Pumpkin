@@ -24,7 +24,7 @@ use core::fmt;
 use core::num::NonZeroU64;
 
 use schema::ir::{self, JsonPointer};
-use schema::workflow::ParseError;
+use schema::workflow::{At, ParseError};
 use serde::de::value::StrDeserializer;
 use serde::de::{
     self, DeserializeSeed, EnumAccess, MapAccess, SeqAccess, Unexpected, VariantAccess, Visitor,
@@ -88,28 +88,46 @@ pub(crate) fn workflow(
 
 /// The faults of `errors`, which `schema` gives for the IR that `fields` made, each at the span of
 /// the value its pointer reaches, or of the deepest one that exists, when the value lacks what
-/// the pointer names. Errors with one message at one span make one fault, which notes each of
-/// their pointers.
+/// the pointer names. Errors that say the same at one span make one fault. It notes each of their
+/// pointers, with what the IR holds there, then each why and each help.
 pub(crate) fn locate(fields: &Value, errors: &[ParseError]) -> Vec<Fault> {
-    let mut located: Vec<(Span, &str, Vec<String>)> = Vec::new();
-    for ParseError { at, message } in errors {
+    let mut located: Vec<(Span, &ParseError, Vec<String>)> = Vec::new();
+    for error in errors {
+        // The evaluation finds the place in the source itself, from the pointer.
+        let ParseError {
+            at: At { ir: at, source: _ },
+            message,
+            label,
+            why,
+            help,
+        } = error;
         let mut tokens = at.tokens();
         let mut reached = fields;
         while let Some(child) = tokens.next().and_then(|token| child(reached, &token)) {
             reached = child;
         }
-        let same = |(span, said, _): &&mut (Span, &str, Vec<String>)| {
-            *span == reached.span && *said == message.as_str()
+        let place = match label {
+            Some(label) => format!("{}: {label}", place(at)),
+            None => place(at),
+        };
+        let same = |(span, said, _): &&mut (Span, &ParseError, Vec<String>)| {
+            *span == reached.span
+                && (&said.message, &said.label, &said.why, &said.help)
+                    == (message, label, why, help)
         };
         match located.iter_mut().find(same) {
-            Some((_, _, places)) => places.push(place(at)),
-            None => located.push((reached.span, message, Vec::from([place(at)]))),
+            Some((_, _, places)) => places.push(place),
+            None => located.push((reached.span, error, Vec::from([place]))),
         }
     }
     (located.into_iter())
-        .map(|(span, message, places)| {
-            let fault = Fault::new(span, message);
-            (places.into_iter()).fold(fault, |fault, place| fault.note(place, None))
+        .map(|(span, error, places)| {
+            let whys = error.why.iter().map(|why| format!("= {why}"));
+            let helps = error.help.iter().map(|help| format!("= help: {help}"));
+            let notes = places.into_iter().chain(whys).chain(helps);
+            notes.fold(Fault::new(span, &error.message), |fault, note| {
+                fault.note(note, None)
+            })
         })
         .collect()
 }

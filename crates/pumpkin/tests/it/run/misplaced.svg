@@ -1,0 +1,61 @@
+<svg width="1196px" height="344px" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .fg { fill: #AAAAAA }
+    .bg { fill: #000000 }
+    .fg-cyan { fill: #00AAAA }
+    .fg-red { fill: #AA0000 }
+    .container {
+      padding: 0 10px;
+      line-height: 18px;
+    }
+    .bold { font-weight: bold; }
+    .dimmed { opacity: 0.4; }
+    tspan {
+      font: 14px SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace;
+      white-space: pre;
+      line-height: 18px;
+    }
+  </style>
+
+  <rect width="100%" height="100%" y="0" rx="4.5" class="bg" />
+
+  <text xml:space="preserve" class="container fg">
+    <tspan x="10px" y="28px"><tspan>pumpkin: </tspan><tspan class="fg-red bold">error:</tspan><tspan> </tspan><tspan class="bold">role `agent` fits no class of sandbox</tspan>
+</tspan>
+    <tspan x="10px" y="46px"><tspan>  </tspan><tspan class="dimmed">--&gt;</tspan><tspan> misfit/task.star: roles[0].needs: 8 CPUs, 32.0 GiB, 1 × `NVIDIA H100 80GB HBM3`</tspan>
+</tspan>
+    <tspan x="10px" y="64px"><tspan>  </tspan><tspan class="dimmed">=</tspan><tspan> `a100/a100`: 1 × `NVIDIA A100-SXM4-80GB`</tspan>
+</tspan>
+    <tspan x="10px" y="82px"><tspan>  </tspan><tspan class="dimmed">=</tspan><tspan> `aws/agent`: no GPU</tspan>
+</tspan>
+    <tspan x="10px" y="100px"><tspan>  </tspan><tspan class="dimmed">=</tspan><tspan> `aws/judge`: 13.4 GiB, no GPU</tspan>
+</tspan>
+    <tspan x="10px" y="118px"><tspan>  </tspan><tspan class="dimmed">=</tspan><tspan> </tspan><tspan class="fg-cyan">help:</tspan><tspan> add a class with 1 × `NVIDIA H100 80GB HBM3`, and at least 8 CPUs and 32.0 GiB,</tspan>
+</tspan>
+    <tspan x="10px" y="136px"><tspan>          or change the role's `gpu` to 1 × `NVIDIA A100-SXM4-80GB`, which `a100/a100` has</tspan>
+</tspan>
+    <tspan x="10px" y="154px"><tspan>pumpkin: </tspan><tspan class="fg-red bold">error:</tspan><tspan> </tspan><tspan class="bold">role `trainer` fits no class of sandbox</tspan>
+</tspan>
+    <tspan x="10px" y="172px"><tspan>  </tspan><tspan class="dimmed">--&gt;</tspan><tspan> misfit/task.star: roles[1].needs: 64 CPUs, 2.0 GiB</tspan>
+</tspan>
+    <tspan x="10px" y="190px"><tspan>  </tspan><tspan class="dimmed">=</tspan><tspan> `a100/a100`: 8 CPUs, 1 × `NVIDIA A100-SXM4-80GB` (only for roles that need it)</tspan>
+</tspan>
+    <tspan x="10px" y="208px"><tspan>  </tspan><tspan class="dimmed">=</tspan><tspan> `aws/agent`: 32 CPUs</tspan>
+</tspan>
+    <tspan x="10px" y="226px"><tspan>  </tspan><tspan class="dimmed">=</tspan><tspan> `aws/judge`: 8 CPUs</tspan>
+</tspan>
+    <tspan x="10px" y="244px"><tspan>  </tspan><tspan class="dimmed">=</tspan><tspan> </tspan><tspan class="fg-cyan">help:</tspan><tspan> add a class with at least 64 CPUs and 2.0 GiB,</tspan>
+</tspan>
+    <tspan x="10px" y="262px"><tspan>          or lower the role's `cpu_millis` to 32000, which `aws/agent` offers</tspan>
+</tspan>
+    <tspan x="10px" y="280px"><tspan>pumpkin: misfit/task.star: placing the workflow's roles in the classes that pumpkin.toml's providers offer has 2 problems</tspan>
+</tspan>
+    <tspan x="10px" y="298px"><tspan>pumpkin: to read how a configuration offers a class: pumpkin help config</tspan>
+</tspan>
+    <tspan x="10px" y="316px"><tspan>pumpkin: to run it again: pumpkin run --runs &lt;scratch&gt;/runs --config &lt;scratch&gt;/pumpkin.toml --sandboxd &lt;sandboxd&gt; &lt;scratch&gt;/misfit/task.star</tspan>
+</tspan>
+    <tspan x="10px" y="334px">
+</tspan>
+  </text>
+
+</svg>

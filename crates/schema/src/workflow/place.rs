@@ -5,7 +5,9 @@ use std::num::NonZeroU64;
 
 use super::errors::{Errors, Reported};
 use super::{ByProvider, ByRole, Class, Offers, ParseErrors, Placed, Placement, Sandbox, Workflow};
-use crate::ir::{Gpu, Name, Needs};
+use crate::ir::Name;
+
+mod misfit;
 
 impl Workflow {
     /// Places each role in the smallest class that a provider of `offered`, by name, offers, as
@@ -15,7 +17,8 @@ impl Workflow {
     /// GPUs and CPU model it needs, so a class with GPUs, or a stated CPU model, goes only to roles
     /// that need them.
     ///
-    /// Fails with each role that fits no class, [at](super::ParseError::at) its needs, saying why.
+    /// Fails with each role that fits no class, [at](super::ParseError::at) its needs. Each error
+    /// says what each class offers short of them, and the changes that would place the role.
     pub fn place<P>(
         self,
         offered: BTreeMap<Name, P>,
@@ -63,30 +66,19 @@ fn smallest<'p>(
     } = sandbox;
     let (mut fits, mut misfits) = (Vec::new(), Vec::new());
     for placement in offered {
-        match misfit(needs, &placement.declared.offers) {
-            None => fits.push(placement),
-            Some(why) => misfits.push(format!(
-                "`{}`'s `{}` {why}",
-                placement.provider, placement.class
-            )),
+        let unmet = misfit::unmet(needs, &placement.declared.offers);
+        if unmet.is_empty() {
+            fits.push(placement);
+        } else {
+            misfits.push((placement, unmet));
         }
     }
     let smallest = fits.into_iter().min_by_key(|placement| size(placement));
     if let Some(smallest) = smallest {
         return Ok(smallest);
     }
-    let why = if misfits.is_empty() {
-        "no class is offered".to_owned()
-    } else {
-        misfits.join("; ")
-    };
-    Err(errors.report(
-        at.token("needs"),
-        format!(
-            "`{name}` fits no class of sandbox, as {why}: change its needs, or run it where \
-             sandboxes are larger"
-        ),
-    ))
+    let refused = misfit::refusal(name, needs, &at.token("needs"), &misfits);
+    Err(errors.add(refused))
 }
 
 /// How [`Workflow::place`] orders the classes that a role fits, smallest first.
@@ -103,70 +95,4 @@ fn size(placement: &Placement) -> (NonZeroU64, NonZeroU64, &Name, &Name) {
         &placement.provider,
         &placement.class,
     )
-}
-
-/// Why a role that has `needs` doesn't fit a class that `offers` them: the first of its needs, in
-/// the IR's order, that the class doesn't meet; or `None` if it fits.
-fn misfit(needs: &Needs, offers: &Offers) -> Option<String> {
-    let Needs {
-        cpu_millis,
-        memory_bytes,
-        gpu,
-        cpu_features,
-        cpu_model,
-    } = needs;
-    if *cpu_millis > offers.cpu_millis {
-        return Some(format!(
-            "offers {} thousandths of a CPU, fewer than its {cpu_millis}",
-            offers.cpu_millis
-        ));
-    }
-    if *memory_bytes > offers.memory_bytes {
-        return Some(format!(
-            "offers {} bytes of memory, fewer than its {memory_bytes}",
-            offers.memory_bytes
-        ));
-    }
-    match (gpu, &offers.gpu) {
-        (None, None) => {}
-        (Some(needed), Some(offered)) if needed == offered => {}
-        (None, Some(offered)) => {
-            return Some(format!("has GPUs, {}, and it needs none", gpus(offered)));
-        }
-        (Some(needed), None) => return Some(format!("has no GPU, and it needs {}", gpus(needed))),
-        (Some(needed), Some(offered)) => {
-            return Some(format!(
-                "has GPUs, {}, and it needs {}",
-                gpus(offered),
-                gpus(needed)
-            ));
-        }
-    }
-    let lacking: Vec<String> = (cpu_features.difference(&offers.cpu_features))
-        .map(|flag| format!("`{flag}`"))
-        .collect();
-    if !lacking.is_empty() {
-        return Some(format!(
-            "lacks the CPU flags {}, which it needs",
-            lacking.join(", ")
-        ));
-    }
-    match (cpu_model, &offers.cpu_model) {
-        (None, None) => None,
-        (Some(needed), Some(offered)) if needed == offered => None,
-        (None, Some(offered)) => Some(format!(
-            "states its CPU's model, `{offered}`, so it is offered only to roles that need that \
-             model"
-        )),
-        (Some(needed), None) => Some(format!("states no CPU model, and it needs `{needed}`")),
-        (Some(needed), Some(offered)) => Some(format!(
-            "states the CPU model `{offered}`, and it needs `{needed}`"
-        )),
-    }
-}
-
-/// `gpu`, as a count and a model, such as ``4 × `NVIDIA H100 80GB HBM3` ``.
-fn gpus(gpu: &Gpu) -> String {
-    let Gpu { count, model } = gpu;
-    format!("{count} × `{model}`")
 }

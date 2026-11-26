@@ -201,8 +201,8 @@ fn listed(repo: &Repo<'_>) -> Result<Vec<String>> {
 
 /// The problems of `paths`: a file under a `tests/` directory that isn't Rust, but for
 /// `crates/lang`'s vendored suites and the `.star` fixtures, which are input and not test data.
-/// The `.svg` snapshots of `pumpkin`'s styled output, its help and its listing, are allowed too, as
-/// `cargo xtask refill` writes them.
+/// The `.svg` snapshots of `pumpkin`'s styled output, its help, its listing and its refusals, are
+/// allowed too, as `cargo xtask refill` writes them.
 fn test_data(paths: &[String]) -> Vec<String> {
     let mut problems = Vec::new();
     for path in paths {
@@ -213,6 +213,7 @@ fn test_data(paths: &[String]) -> Vec<String> {
         let snapshot = [
             "crates/pumpkin/tests/it/help/",
             "crates/pumpkin/tests/it/ls/",
+            "crates/pumpkin/tests/it/run/",
         ]
         .iter()
         .any(|dir| path.starts_with(dir))

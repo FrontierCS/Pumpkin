@@ -22,7 +22,7 @@ use schema::sandbox::{
     MAX_TRANSFER_BYTES, RegistrationGrant, RelativePath, ToSandbox, command_env, command_stderr,
     command_stdin, command_stdout, pumpkin_dir, pumpkin_subdirs, read_hello,
 };
-use schema::workflow::{Class, Offers, Placement, UsdPerHour, Workflow};
+use schema::workflow::{Class, Offers, Part, Placement, UsdPerHour, Workflow};
 use schema::{ec2_boot, frame, ir};
 use serde_json::{Value, json};
 use test_support::workflow;
@@ -67,7 +67,7 @@ impl Case for Result<ir::Workflow, serde_json::Error> {
                     let json = serde_json::to_value(&ir).unwrap();
                     for error in errors.as_slice() {
                         assert!(
-                            json.pointer(error.at.as_str()).is_some(),
+                            json.pointer(error.at.ir.as_str()).is_some(),
                             "{error} resolves"
                         );
                     }
@@ -136,6 +136,28 @@ impl Case for Needing {
             Err(errors) => errors.to_string(),
         };
         format!("{}: {at}", self.0)
+    }
+}
+
+/// The trainer, needing what the case gives, refused by [`offered`]: each error, at `task.star`,
+/// with each part of it marked as [`schema::workflow::ParseError::styled`] gives it.
+struct Styled(Value);
+
+impl Case for Styled {
+    fn outcome(self) -> String {
+        let mut ir = workflow();
+        ir["roles"][1]["needs"] = self.0;
+        let ir = serde_json::from_value::<ir::Workflow>(ir).unwrap();
+        let placed = Workflow::parse(&ir)
+            .unwrap()
+            .place(offered(), |classes| classes);
+        let errors = placed
+            .err()
+            .unwrap()
+            .in_source(|at| format!("task.star (at {at})"));
+        let marked = |part: Part, text: &str| format!("<{part:?}>{text}</{part:?}>");
+        let styled = errors.as_slice().iter().map(|error| error.styled(marked));
+        styled.collect::<Vec<String>>().join("\n")
     }
 }
 
@@ -335,6 +357,7 @@ impl Case for CommandEnv {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "most of it is the snapshots")]
 fn placement() {
     let gib = |gib: u64| gib << 30;
     let h100 = |count: u32| json!({ "count": count, "model": "NVIDIA H100 80GB HBM3" });
@@ -379,12 +402,72 @@ fn placement() {
             small(json!({ "gpu": h100(2) })),
         ],
         &expect![[r#"
-            {"cpu_millis":128000,"memory_bytes":2147483648}: /roles/1/needs: `trainer` fits no class of sandbox, as `aws`'s `agent` offers 8000 thousandths of a CPU, fewer than its 128000; `aws`'s `ice_lake` offers 4000 thousandths of a CPU, fewer than its 128000; `aws`'s `judge` offers 8000 thousandths of a CPU, fewer than its 128000; `aws`'s `judge_60` offers 64000 thousandths of a CPU, fewer than its 128000; `aws`'s `judge_memory` offers 8000 thousandths of a CPU, fewer than its 128000; `gpus`'s `h100` offers 8000 thousandths of a CPU, fewer than its 128000; `gpus`'s `h100_4` offers 32000 thousandths of a CPU, fewer than its 128000: change its needs, or run it where sandboxes are larger
-            {"cpu_millis":2000,"memory_bytes":549755813888}: /roles/1/needs: `trainer` fits no class of sandbox, as `aws`'s `agent` offers 68719476736 bytes of memory, fewer than its 549755813888; `aws`'s `ice_lake` offers 17179869184 bytes of memory, fewer than its 549755813888; `aws`'s `judge` offers 17179869184 bytes of memory, fewer than its 549755813888; `aws`'s `judge_60` offers 137438953472 bytes of memory, fewer than its 549755813888; `aws`'s `judge_memory` offers 68719476736 bytes of memory, fewer than its 549755813888; `gpus`'s `h100` offers 68719476736 bytes of memory, fewer than its 549755813888; `gpus`'s `h100_4` offers 274877906944 bytes of memory, fewer than its 549755813888: change its needs, or run it where sandboxes are larger
-            {"cpu_features":["amx_tile","avx512f"],"cpu_millis":2000,"memory_bytes":2147483648}: /roles/1/needs: `trainer` fits no class of sandbox, as `aws`'s `agent` lacks the CPU flags `amx_tile`, `avx512f`, which it needs; `aws`'s `ice_lake` lacks the CPU flags `amx_tile`, which it needs; `aws`'s `judge` lacks the CPU flags `amx_tile`, `avx512f`, which it needs; `aws`'s `judge_60` lacks the CPU flags `amx_tile`, which it needs; `aws`'s `judge_memory` lacks the CPU flags `amx_tile`, `avx512f`, which it needs; `gpus`'s `h100` has GPUs, 1 × `NVIDIA H100 80GB HBM3`, and it needs none; `gpus`'s `h100_4` has GPUs, 4 × `NVIDIA H100 80GB HBM3`, and it needs none: change its needs, or run it where sandboxes are larger
-            {"cpu_millis":8000,"cpu_model":"Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz","memory_bytes":2147483648}: /roles/1/needs: `trainer` fits no class of sandbox, as `aws`'s `agent` states no CPU model, and it needs `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`; `aws`'s `ice_lake` offers 4000 thousandths of a CPU, fewer than its 8000; `aws`'s `judge` states no CPU model, and it needs `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`; `aws`'s `judge_60` states no CPU model, and it needs `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`; `aws`'s `judge_memory` states no CPU model, and it needs `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`; `gpus`'s `h100` has GPUs, 1 × `NVIDIA H100 80GB HBM3`, and it needs none; `gpus`'s `h100_4` has GPUs, 4 × `NVIDIA H100 80GB HBM3`, and it needs none: change its needs, or run it where sandboxes are larger
-            {"cpu_millis":2000,"cpu_model":"AMD EPYC 7R13 Processor","memory_bytes":2147483648}: /roles/1/needs: `trainer` fits no class of sandbox, as `aws`'s `agent` states no CPU model, and it needs `AMD EPYC 7R13 Processor`; `aws`'s `ice_lake` states the CPU model `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`, and it needs `AMD EPYC 7R13 Processor`; `aws`'s `judge` states no CPU model, and it needs `AMD EPYC 7R13 Processor`; `aws`'s `judge_60` states no CPU model, and it needs `AMD EPYC 7R13 Processor`; `aws`'s `judge_memory` states no CPU model, and it needs `AMD EPYC 7R13 Processor`; `gpus`'s `h100` has GPUs, 1 × `NVIDIA H100 80GB HBM3`, and it needs none; `gpus`'s `h100_4` has GPUs, 4 × `NVIDIA H100 80GB HBM3`, and it needs none: change its needs, or run it where sandboxes are larger
-            {"cpu_millis":2000,"gpu":{"count":2,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":2147483648}: /roles/1/needs: `trainer` fits no class of sandbox, as `aws`'s `agent` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `aws`'s `ice_lake` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `aws`'s `judge` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `aws`'s `judge_60` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `aws`'s `judge_memory` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `gpus`'s `h100` has GPUs, 1 × `NVIDIA H100 80GB HBM3`, and it needs 2 × `NVIDIA H100 80GB HBM3`; `gpus`'s `h100_4` has GPUs, 4 × `NVIDIA H100 80GB HBM3`, and it needs 2 × `NVIDIA H100 80GB HBM3`: change its needs, or run it where sandboxes are larger"#]],
+            {"cpu_millis":128000,"memory_bytes":2147483648}: error: role `trainer` fits no class of sandbox
+              --> roles[1].needs: 128 CPUs, 2.0 GiB
+              = `aws/agent`: 8 CPUs
+              = `aws/ice_lake`: 4 CPUs, CPU `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz` (only for roles that need it)
+              = `aws/judge`: 8 CPUs
+              = `aws/judge_60`: 64 CPUs
+              = `aws/judge_memory`: 8 CPUs
+              = `gpus/h100`: 8 CPUs, 1 × `NVIDIA H100 80GB HBM3` (only for roles that need it)
+              = `gpus/h100_4`: 32 CPUs, 4 × `NVIDIA H100 80GB HBM3` (only for roles that need it)
+              = help: add a class with at least 128 CPUs and 2.0 GiB,
+                      or lower the role's `cpu_millis` to 64000, which `aws/judge_60` offers
+            {"cpu_millis":2000,"memory_bytes":549755813888}: error: role `trainer` fits no class of sandbox
+              --> roles[1].needs: 2 CPUs, 512.0 GiB
+              = `aws/agent`: 64.0 GiB
+              = `aws/ice_lake`: 16.0 GiB, CPU `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz` (only for roles that need it)
+              = `aws/judge`: 16.0 GiB
+              = `aws/judge_60`: 128.0 GiB
+              = `aws/judge_memory`: 64.0 GiB
+              = `gpus/h100`: 64.0 GiB, 1 × `NVIDIA H100 80GB HBM3` (only for roles that need it)
+              = `gpus/h100_4`: 256.0 GiB, 4 × `NVIDIA H100 80GB HBM3` (only for roles that need it)
+              = help: add a class with at least 2 CPUs and 512.0 GiB,
+                      or lower the role's `memory_bytes` to 137438953472 (128.0 GiB), which `aws/judge_60` offers
+            {"cpu_features":["amx_tile","avx512f"],"cpu_millis":2000,"memory_bytes":2147483648}: error: role `trainer` fits no class of sandbox
+              --> roles[1].needs: 2 CPUs, 2.0 GiB, the CPU flags `amx_tile`, `avx512f`
+              = `aws/agent`: without `amx_tile`, `avx512f`
+              = `aws/ice_lake`: without `amx_tile`, CPU `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz` (only for roles that need it)
+              = `aws/judge`: without `amx_tile`, `avx512f`
+              = `aws/judge_60`: without `amx_tile`
+              = `aws/judge_memory`: without `amx_tile`, `avx512f`
+              = `gpus/h100`: 1 × `NVIDIA H100 80GB HBM3` (only for roles that need it), without `amx_tile`, `avx512f`
+              = `gpus/h100_4`: 4 × `NVIDIA H100 80GB HBM3` (only for roles that need it), without `amx_tile`, `avx512f`
+              = help: add a class with the CPU flags `amx_tile`, `avx512f`, and at least 2 CPUs and 2.0 GiB
+            {"cpu_millis":8000,"cpu_model":"Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz","memory_bytes":2147483648}: error: role `trainer` fits no class of sandbox
+              --> roles[1].needs: 8 CPUs, 2.0 GiB, CPU `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`
+              = `aws/agent`: no stated CPU model
+              = `aws/ice_lake`: 4 CPUs
+              = `aws/judge`: no stated CPU model
+              = `aws/judge_60`: no stated CPU model
+              = `aws/judge_memory`: no stated CPU model
+              = `gpus/h100`: 1 × `NVIDIA H100 80GB HBM3` (only for roles that need it), no stated CPU model
+              = `gpus/h100_4`: 4 × `NVIDIA H100 80GB HBM3` (only for roles that need it), no stated CPU model
+              = help: add a class with CPU `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`, and at least 8 CPUs and 2.0 GiB,
+                      or lower the role's `cpu_millis` to 4000, which `aws/ice_lake` offers
+            {"cpu_millis":2000,"cpu_model":"AMD EPYC 7R13 Processor","memory_bytes":2147483648}: error: role `trainer` fits no class of sandbox
+              --> roles[1].needs: 2 CPUs, 2.0 GiB, CPU `AMD EPYC 7R13 Processor`
+              = `aws/agent`: no stated CPU model
+              = `aws/ice_lake`: CPU `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`
+              = `aws/judge`: no stated CPU model
+              = `aws/judge_60`: no stated CPU model
+              = `aws/judge_memory`: no stated CPU model
+              = `gpus/h100`: 1 × `NVIDIA H100 80GB HBM3` (only for roles that need it), no stated CPU model
+              = `gpus/h100_4`: 4 × `NVIDIA H100 80GB HBM3` (only for roles that need it), no stated CPU model
+              = help: add a class with CPU `AMD EPYC 7R13 Processor`, and at least 2 CPUs and 2.0 GiB,
+                      or change the role's `cpu_model` to `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`, which `aws/ice_lake` states
+            {"cpu_millis":2000,"gpu":{"count":2,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":2147483648}: error: role `trainer` fits no class of sandbox
+              --> roles[1].needs: 2 CPUs, 2.0 GiB, 2 × `NVIDIA H100 80GB HBM3`
+              = `aws/agent`: no GPU
+              = `aws/ice_lake`: no GPU, CPU `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz` (only for roles that need it)
+              = `aws/judge`: no GPU
+              = `aws/judge_60`: no GPU
+              = `aws/judge_memory`: no GPU
+              = `gpus/h100`: 1 × `NVIDIA H100 80GB HBM3`
+              = `gpus/h100_4`: 4 × `NVIDIA H100 80GB HBM3`
+              = help: add a class with 2 × `NVIDIA H100 80GB HBM3`, and at least 2 CPUs and 2.0 GiB,
+                      or change the role's `gpu` to 1 × `NVIDIA H100 80GB HBM3`, which `gpus/h100` has,
+                      or change the role's `gpu` to 4 × `NVIDIA H100 80GB HBM3`, which `gpus/h100_4` has"#]],
     );
     // Past what any class offers: 8 GPUs, where the most is 4, and one thousandth of a CPU over
     // the most, 64.
@@ -395,8 +478,47 @@ fn placement() {
         [Placing(workflow()), Placing(unplaced)],
         &expect![[r#"
             agent, on `aws` in `agent`, whose starts take at most 30s; trainer, on `aws` in `judge`, whose starts take at most 60s; final_judge, on `aws` in `judge`, whose starts take at most 60s; providers `aws`
-            /roles/0/needs: `agent` fits no class of sandbox, as `aws`'s `agent` has no GPU, and it needs 8 × `NVIDIA H100 80GB HBM3`; `aws`'s `ice_lake` offers 4000 thousandths of a CPU, fewer than its 8000; `aws`'s `judge` offers 17179869184 bytes of memory, fewer than its 34359738368; `aws`'s `judge_60` has no GPU, and it needs 8 × `NVIDIA H100 80GB HBM3`; `aws`'s `judge_memory` has no GPU, and it needs 8 × `NVIDIA H100 80GB HBM3`; `gpus`'s `h100` has GPUs, 1 × `NVIDIA H100 80GB HBM3`, and it needs 8 × `NVIDIA H100 80GB HBM3`; `gpus`'s `h100_4` has GPUs, 4 × `NVIDIA H100 80GB HBM3`, and it needs 8 × `NVIDIA H100 80GB HBM3`: change its needs, or run it where sandboxes are larger
-            /roles/2/needs: `final_judge` fits no class of sandbox, as `aws`'s `agent` offers 8000 thousandths of a CPU, fewer than its 64001; `aws`'s `ice_lake` offers 4000 thousandths of a CPU, fewer than its 64001; `aws`'s `judge` offers 8000 thousandths of a CPU, fewer than its 64001; `aws`'s `judge_60` offers 64000 thousandths of a CPU, fewer than its 64001; `aws`'s `judge_memory` offers 8000 thousandths of a CPU, fewer than its 64001; `gpus`'s `h100` offers 8000 thousandths of a CPU, fewer than its 64001; `gpus`'s `h100_4` offers 32000 thousandths of a CPU, fewer than its 64001: change its needs, or run it where sandboxes are larger"#]],
+            error: role `agent` fits no class of sandbox
+              --> roles[0].needs: 8 CPUs, 32.0 GiB, 8 × `NVIDIA H100 80GB HBM3`
+              = `aws/agent`: no GPU
+              = `aws/ice_lake`: 4 CPUs, 16.0 GiB, no GPU, CPU `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz` (only for roles that need it)
+              = `aws/judge`: 16.0 GiB, no GPU
+              = `aws/judge_60`: no GPU
+              = `aws/judge_memory`: no GPU
+              = `gpus/h100`: 1 × `NVIDIA H100 80GB HBM3`
+              = `gpus/h100_4`: 4 × `NVIDIA H100 80GB HBM3`
+              = help: add a class with 8 × `NVIDIA H100 80GB HBM3`, and at least 8 CPUs and 32.0 GiB,
+                      or change the role's `gpu` to 1 × `NVIDIA H100 80GB HBM3`, which `gpus/h100` has,
+                      or change the role's `gpu` to 4 × `NVIDIA H100 80GB HBM3`, which `gpus/h100_4` has
+            error: role `final_judge` fits no class of sandbox
+              --> roles[2].needs: 64.001 CPUs, 2.0 GiB
+              = `aws/agent`: 8 CPUs
+              = `aws/ice_lake`: 4 CPUs, CPU `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz` (only for roles that need it)
+              = `aws/judge`: 8 CPUs
+              = `aws/judge_60`: 64 CPUs
+              = `aws/judge_memory`: 8 CPUs
+              = `gpus/h100`: 8 CPUs, 1 × `NVIDIA H100 80GB HBM3` (only for roles that need it)
+              = `gpus/h100_4`: 32 CPUs, 4 × `NVIDIA H100 80GB HBM3` (only for roles that need it)
+              = help: add a class with at least 64.001 CPUs and 2.0 GiB,
+                      or lower the role's `cpu_millis` to 64000, which `aws/judge_60` offers"#]],
+    );
+    check(
+        [Styled(
+            json!({ "cpu_millis": 2000, "memory_bytes": gib(2), "gpu": h100(2) }),
+        )],
+        &expect![[r#"
+        <Error>error:</Error> <Message>role `trainer` fits no class of sandbox</Message>
+          <Margin>--></Margin> task.star (at /roles/1/needs): roles[1].needs: 2 CPUs, 2.0 GiB, 2 × `NVIDIA H100 80GB HBM3`
+          <Margin>=</Margin> `aws/agent`: no GPU
+          <Margin>=</Margin> `aws/ice_lake`: no GPU, CPU `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz` (only for roles that need it)
+          <Margin>=</Margin> `aws/judge`: no GPU
+          <Margin>=</Margin> `aws/judge_60`: no GPU
+          <Margin>=</Margin> `aws/judge_memory`: no GPU
+          <Margin>=</Margin> `gpus/h100`: 1 × `NVIDIA H100 80GB HBM3`
+          <Margin>=</Margin> `gpus/h100_4`: 4 × `NVIDIA H100 80GB HBM3`
+          <Margin>=</Margin> <Help>help:</Help> add a class with 2 × `NVIDIA H100 80GB HBM3`, and at least 2 CPUs and 2.0 GiB,
+                  or change the role's `gpu` to 1 × `NVIDIA H100 80GB HBM3`, which `gpus/h100` has,
+                  or change the role's `gpu` to 4 × `NVIDIA H100 80GB HBM3`, which `gpus/h100_4` has"#]],
     );
 }
 
@@ -886,9 +1008,9 @@ fn ops_frame_bound() {
     );
     check(
         [ir],
-        &expect![
-            "/roles/0: the role's ops reply cannot be sent: the message is 65968 bytes: a frame's message holds at most 65536: shorten its public grant interface"
-        ],
+        &expect![[r#"
+            error: the role's ops reply cannot be sent: the message is 65968 bytes: a frame's message holds at most 65536: shorten its public grant interface
+              --> roles[0]"#]],
     );
 }
 
@@ -975,7 +1097,8 @@ fn checked_values() {
             `gpt-6-astra` is listed more than once: list each model once
             no APIs: a model route has an entry for one at least
             `gpt-6-astra` is in more than one `responses` entry: list each model in one entry for its API
-            /final/payload_max_bytes: the final call's `payload_max_bytes` is 67108865, over the op payload limit of 67108864: give at most that
+            error: the final call's `payload_max_bytes` is 67108865, over the op payload limit of 67108864: give at most that
+              --> final.payload_max_bytes
             parsed"#]],
     );
 }
@@ -1148,9 +1271,12 @@ fn agent_files() {
             `/.pumpkin/bin/sandboxctl` is in `/.pumpkin`, which holds Pumpkin's own files: name a path outside it
             parsed
             parsed
-            /roles/0/runtime/agent/dirs/1/path: `/workspace/a` is also the path of /roles/0/runtime/agent/dirs/0: put each path once
-            /roles/0/runtime/agent/dirs/2/path: `/workspace/b/d` is below `/workspace/b`, the file at /roles/0/runtime/agent/files/1: put it in a directory
-            /roles/0/runtime/agent/files/0/path: `/workspace/a` is also the path of /roles/0/runtime/agent/dirs/0: put each path once"#]],
+            error: `/workspace/a` is also the path of /roles/0/runtime/agent/dirs/0: put each path once
+              --> roles[0].runtime.agent.dirs[1].path
+            error: `/workspace/b/d` is below `/workspace/b`, the file at /roles/0/runtime/agent/files/1: put it in a directory
+              --> roles[0].runtime.agent.dirs[2].path
+            error: `/workspace/a` is also the path of /roles/0/runtime/agent/dirs/0: put each path once
+              --> roles[0].runtime.agent.files[0].path"#]],
     );
 }
 
@@ -1167,12 +1293,18 @@ fn broken_references() {
     check(
         [ir],
         &expect![[r#"
-            /roles/3/name: `trainer` also names /roles/1: give each a unique name
-            /roles/0/runtime/agent/grants/2/name: `train` also names /roles/0/runtime/agent/grants/0: give each a unique name
-            /roles/0/runtime/agent/grants/0/job/target: no role is named `ghost`: name one listed in `roles`
-            /final/target: `agent` is an agent: name a target as the final call's target
-            /roles/2: `final_judge` is a target that no job function or final call names: name it from one
-            /roles/3: `trainer` is a target that no job function or final call names: name it from one"#]],
+            error: `trainer` also names /roles/1: give each a unique name
+              --> roles[3].name
+            error: `train` also names /roles/0/runtime/agent/grants/0: give each a unique name
+              --> roles[0].runtime.agent.grants[2].name
+            error: no role is named `ghost`: name one listed in `roles`
+              --> roles[0].runtime.agent.grants[0].job.target
+            error: `agent` is an agent: name a target as the final call's target
+              --> final.target
+            error: `final_judge` is a target that no job function or final call names: name it from one
+              --> roles[2]
+            error: `trainer` is a target that no job function or final call names: name it from one
+              --> roles[3]"#]],
     );
 }
 
@@ -1272,18 +1404,30 @@ fn broken_leases() {
         ],
         &expect![[r#"
             parsed
-            /roles/0/runtime/agent/grants/1/session/runner: `final_judge` is a target: name a runner
-            /roles/3: `gpu` is a runner that no session names: name it from one
-            /roles/0/runtime/agent/grants/3/session/runner: `gpu` is named by `agent`'s session `gpu` and `agent`'s `again`: name each runner from one session
-            /roles/3: `gpu` is a runner that no session names: name it from one
-            /roles/0/runtime/agent/grants/1/session/runner: `gpu` runs target `trainer`'s image, sha256:2222222222222222222222222222222222222222222222222222222222222222: give the runner an image no target has
-            /roles/0/runtime/agent/grants/1/session/runner: no role is named `ghost`: name one listed in `roles`
-            /roles/3: `gpu` is a runner that no session names: name it from one
-            /final/target: `gpu` is a runner: name a target as the final call's target
-            /roles/2: `final_judge` is a target that no job function or final call names: name it from one
-            /roles/0/runtime/agent/grants/1/session/runner: `agent` is an agent: name a runner
-            /roles/3: `gpu` is a runner that no session names: name it from one
-            /roles/0/runtime/agent/grants/1/session/transfer_bytes: `gpu`'s `transfer_bytes` is 1073741825, over the transfer limit of 1073741824: give at most that
+            error: `final_judge` is a target: name a runner
+              --> roles[0].runtime.agent.grants[1].session.runner
+            error: `gpu` is a runner that no session names: name it from one
+              --> roles[3]
+            error: `gpu` is named by `agent`'s session `gpu` and `agent`'s `again`: name each runner from one session
+              --> roles[0].runtime.agent.grants[3].session.runner
+            error: `gpu` is a runner that no session names: name it from one
+              --> roles[3]
+            error: `gpu` runs target `trainer`'s image, sha256:2222222222222222222222222222222222222222222222222222222222222222: give the runner an image no target has
+              --> roles[0].runtime.agent.grants[1].session.runner
+            error: no role is named `ghost`: name one listed in `roles`
+              --> roles[0].runtime.agent.grants[1].session.runner
+            error: `gpu` is a runner that no session names: name it from one
+              --> roles[3]
+            error: `gpu` is a runner: name a target as the final call's target
+              --> final.target
+            error: `final_judge` is a target that no job function or final call names: name it from one
+              --> roles[2]
+            error: `agent` is an agent: name a runner
+              --> roles[0].runtime.agent.grants[1].session.runner
+            error: `gpu` is a runner that no session names: name it from one
+              --> roles[3]
+            error: `gpu`'s `transfer_bytes` is 1073741825, over the transfer limit of 1073741824: give at most that
+              --> roles[0].runtime.agent.grants[1].session.transfer_bytes
             parsed"#]],
     );
 }
@@ -1327,6 +1471,7 @@ fn target_holding() -> Value {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
 fn job_functions() {
     let with = |change: fn(&mut Value)| {
         let mut ir = calling();
@@ -1374,24 +1519,39 @@ fn job_functions() {
         ],
         &expect![[r#"
             parsed
-            /final/target: `final_judge` is the final call's target and `check`'s: give the final call a role no job names
-            /roles/4: `verifier` is a target that no job function or final call names: name it from one
-            /roles/0/runtime/agent/grants/3/job/target: `gpu` is a runner: name a target as a job's target
-            /roles/4: `verifier` is a target that no job function or final call names: name it from one
-            /roles/0/runtime/agent/grants/3/job/payload_max_bytes: `check`'s `payload_max_bytes` is 67108865, over the op payload limit of 67108864: give at most that
+            error: `final_judge` is the final call's target and `check`'s: give the final call a role no job names
+              --> final.target
+            error: `verifier` is a target that no job function or final call names: name it from one
+              --> roles[4]
+            error: `gpu` is a runner: name a target as a job's target
+              --> roles[0].runtime.agent.grants[3].job.target
+            error: `verifier` is a target that no job function or final call names: name it from one
+              --> roles[4]
+            error: `check`'s `payload_max_bytes` is 67108865, over the op payload limit of 67108864: give at most that
+              --> roles[0].runtime.agent.grants[3].job.payload_max_bytes
             `lib/verify.star` is no label: start it with `//`, the root
-            /roles/0/runtime/agent/grants/1/session/runner: `verifier` is a target: name a runner
-            /roles/3: `gpu` is a runner that no session names: name it from one
-            /roles/0/runtime/agent/grants/1/session/runner: `gpu` runs target `verifier`'s image, sha256:3333333333333333333333333333333333333333333333333333333333333333: give the runner an image no target has
-            /roles/0/runtime/agent/grants/4/job/target: `verifier` is the target of job functions `check` and `again`: name each target from one function
-            /roles/4: `verifier` is a target that no job function or final call names: name it from one
+            error: `verifier` is a target: name a runner
+              --> roles[0].runtime.agent.grants[1].session.runner
+            error: `gpu` is a runner that no session names: name it from one
+              --> roles[3]
+            error: `gpu` runs target `verifier`'s image, sha256:3333333333333333333333333333333333333333333333333333333333333333: give the runner an image no target has
+              --> roles[0].runtime.agent.grants[1].session.runner
+            error: `verifier` is the target of job functions `check` and `again`: name each target from one function
+              --> roles[0].runtime.agent.grants[4].job.target
+            error: `verifier` is a target that no job function or final call names: name it from one
+              --> roles[4]
             parsed
-            /final/target: `verifier` is the final call's target and `check`'s: give the final call a role no job names
-            /roles/2: `final_judge` is a target that no job function or final call names: name it from one
+            error: `verifier` is the final call's target and `check`'s: give the final call a role no job names
+              --> final.target
+            error: `final_judge` is a target that no job function or final call names: name it from one
+              --> roles[2]
             parsed
-            /final/target: `verifier` is a shared work sandbox: give the final call a fresh target
-            /roles/2: `final_judge` is a target that no job function or final call names: name it from one
-            /roles/4/runtime/target/egress: model egress requires a call-lifetime target"#]],
+            error: `verifier` is a shared work sandbox: give the final call a fresh target
+              --> final.target
+            error: `final_judge` is a target that no job function or final call names: name it from one
+              --> roles[2]
+            error: model egress requires a call-lifetime target
+              --> roles[4].runtime.target.egress"#]],
     );
 }
 
@@ -1420,17 +1580,28 @@ fn target_leases() {
     let mut twice = target_leasing();
     let grants = &mut twice["roles"][2]["runtime"]["target"]["sessions"];
     let mut again = grants[0].clone();
-    again["session"]["runner"] = json!("trainer");
+    again["session"]["runner"] = json!([r#"
+        parsed
+        parsed
+        error: `gpu` is named by `agent`'s session `gpu` and `final_judge`'s `box`: name each runner from one session
+          --> roles[2].runtime.target.sessions[0].session.runner
+        error: `checker` is a runner that no session names: name it from one
+          --> roles[4]
+        error: `box` also names /roles/2/runtime/target/sessions/0: give each a unique name
+          --> roles[2].runtime.target.sessions[1].name
+        error: `trainer` is a target: name a runner
+          --> roles[2].runtime.target.sessions[0].session.runner"#]);
     grants.as_array_mut().unwrap().insert(0, again);
     check(
         [target_leasing(), same_image, both, twice],
         &expect![[r#"
             parsed
             parsed
-            /roles/2/runtime/target/sessions/0/session/runner: `gpu` is named by `agent`'s session `gpu` and `final_judge`'s `box`: name each runner from one session
-            /roles/4: `checker` is a runner that no session names: name it from one
-            /roles/2/runtime/target/sessions/1/name: `box` also names /roles/2/runtime/target/sessions/0: give each a unique name
-            /roles/2/runtime/target/sessions/0/session/runner: `trainer` is a target: name a runner"#]],
+            error: `gpu` is named by `agent`'s session `gpu` and `final_judge`'s `box`: name each runner from one session
+              --> roles[2].runtime.target.sessions[0].session.runner
+            error: `checker` is a runner that no session names: name it from one
+              --> roles[4]
+            invalid type: sequence, expected a string"#]],
     );
 }
 
@@ -1454,11 +1625,16 @@ fn broken_roles() {
     check(
         [ir, none],
         &expect![[r#"
-            /roles/0/runtime/agent/grants/2/now/payload_max_bytes: `resubmit`'s `payload_max_bytes` is 67108865, over the op payload limit of 67108864: give at most that
-            /roles/0/runtime/agent/grants/3/job/target: `trainer` is the target of job functions `train` and `retrain`: name each target from one function
-            /final/target: `trainer` is the final call's target and `train`'s: give the final call a role no job names
-            /roles/2: `final_judge` is a target that no job function or final call names: name it from one
-            /roles: no role is an agent: declare an agent"#]],
+            error: `resubmit`'s `payload_max_bytes` is 67108865, over the op payload limit of 67108864: give at most that
+              --> roles[0].runtime.agent.grants[2].now.payload_max_bytes
+            error: `trainer` is the target of job functions `train` and `retrain`: name each target from one function
+              --> roles[0].runtime.agent.grants[3].job.target
+            error: `trainer` is the final call's target and `train`'s: give the final call a role no job names
+              --> final.target
+            error: `final_judge` is a target that no job function or final call names: name it from one
+              --> roles[2]
+            error: no role is an agent: declare an agent
+              --> roles"#]],
     );
 }
 

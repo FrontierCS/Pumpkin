@@ -6,10 +6,11 @@
 //! alone, because `sandboxd`, a small static binary, depends on it.
 //!
 //! Another program's format, such as `docker info`'s, stays with the code that reads it, never
-//! here.
+//! here. How Pumpkin words a size or a count is here ([`words`]), as placing's refusals say them.
 
 pub mod ec2_boot;
 pub mod frame;
 pub mod ir;
 pub mod sandbox;
+pub mod words;
 pub mod workflow;

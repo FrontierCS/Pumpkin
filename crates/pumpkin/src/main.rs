@@ -17,6 +17,7 @@ use provider::UnixTime;
 use runtime::{ReadError, Record};
 use rustix::fs::Mode;
 use rustix::process::umask;
+pub(crate) use schema::words::{counted, size};
 use stdx::Context;
 use workspace::Workspace;
 
@@ -36,6 +37,7 @@ mod keydir;
 mod link;
 mod manifest;
 mod next;
+mod paint;
 mod progress;
 mod reaping;
 mod run;
@@ -300,10 +302,7 @@ fn printed_listing(
 // https://github.com/git/git/blob/73876f4861cd3d187a4682290ab75c9dccadbc56/pager.c#L158-L187
 fn terminal() -> (bool, Option<usize>) {
     let stdout = io::stdout();
-    let styled = match AutoStream::choice(&stdout) {
-        ColorChoice::Never => false,
-        ColorChoice::Auto | ColorChoice::AlwaysAnsi | ColorChoice::Always => true,
-    };
+    let styled = paint::styled(&stdout);
     let columns = env::var("COLUMNS")
         .ok()
         .and_then(|columns| columns.parse().ok());
@@ -618,35 +617,6 @@ fn modal_helper() -> Result<PathBuf, String> {
 fn closing_problems(has: fmt::Arguments<'_>, count: usize) -> String {
     let problems = counted(count, "problem");
     format!("{has} {problems}")
-}
-
-/// `bytes` in the largest binary unit that holds at least one of it, to a tenth, as "16.0 MiB".
-/// Below a KiB, it counts the bytes. Every size that Pumpkin says is said so.
-fn size(bytes: u64) -> String {
-    let units = [(1 << 30, "GiB"), (1 << 20, "MiB"), (1 << 10, "KiB")];
-    let Some((unit, name)) = units.into_iter().find(|(unit, _)| bytes >= *unit) else {
-        return counted(bytes, "byte");
-    };
-    let tenths = bytes * 10 / unit;
-    format!("{}.{} {name}", tenths / 10, tenths % 10)
-}
-
-/// `count` and `noun`, plural unless `count` is 1, as "1 problem", "2 problems", "2 entries" or
-/// "2 sandboxes": every count of a thing that Pumpkin says is said so.
-fn counted<C: Copy + fmt::Display + PartialEq + From<u8>>(count: C, noun: &str) -> String {
-    if count == C::from(1) {
-        return format!("{count} {noun}");
-    }
-    let consonant_y = noun
-        .strip_suffix('y')
-        .filter(|stem| !stem.ends_with(['a', 'e', 'o', 'u']));
-    match consonant_y {
-        Some(stem) => format!("{count} {stem}ies"),
-        None if noun.ends_with(['s', 'x']) || noun.ends_with("sh") || noun.ends_with("ch") => {
-            format!("{count} {noun}es")
-        }
-        None => format!("{count} {noun}s"),
-    }
 }
 
 fn engine(context: ContextName, reader: Reader) -> Result<Engine, String> {

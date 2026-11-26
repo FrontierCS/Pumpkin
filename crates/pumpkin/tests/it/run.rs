@@ -14,7 +14,7 @@ use std::process::{Command, Output};
 use std::thread::{self, JoinHandle};
 use std::{env, fs};
 
-use expect_test::expect;
+use expect_test::{expect, expect_file};
 use provider::{RunTag, Sweep as _};
 use schema::sandbox::{MODEL_PORT, SANDBOXCTL_PATH};
 use serde_json::{Value, json};
@@ -1504,13 +1504,7 @@ fn unplaced_provider_unreached_on_docker() {
     let context = docker_context();
     // `a100`'s one class has GPUs, which no role needs, and it sorts before `aws`, which the AWS
     // guard keeps unreachable, so a run that reached every provider would reach `a100` first.
-    let a100 = r#"[providers.a100.modal]
-profile = "pumpkin"
-images = { region = "us-west-1", repository = "pumpkin/roles", role_arn = "arn:aws:iam::123456789012:role/pumpkin-modal-pull" }
-dials_from = "203.0.113.7"
-classes.a100 = { gpu = "A100-80GB", gpu_model = "NVIDIA A100-SXM4-80GB", cpu_millis = 8000, memory_bytes = 85899345920, startup_seconds = 1800 }
-"#;
-    let config = format!("{}\n{EC2}\n{a100}", docker_table(&context));
+    let config = format!("{}\n{EC2}\n{A100}", docker_table(&context));
     scratch.write("pumpkin.toml", &config);
     let rootful = !engine(&scratch, &context).report().security.rootless;
     let mut run = scratch.pumpkin(&["run", "unbuilt/task.star", "--sandboxd", &sandboxd]);
@@ -1532,6 +1526,77 @@ classes.a100 = { gpu = "A100-80GB", gpu_model = "NVIDIA A100-SXM4-80GB", cpu_mil
             a record was made: false"#]],
     );
 }
+
+// Each role that fits no class is refused before any build, with what each class lacks and the
+// changes that would place it. A pipe gets it plain, and a terminal styled.
+#[test]
+#[ignore = "needs Docker: run cargo xtask live docker"]
+fn misplaced_on_docker() {
+    let scratch = Scratch::new();
+    let sandboxd = sandboxd().into_os_string().into_string().unwrap();
+    let mut ir = workflow("", &["true"]);
+    let h100 = json!({ "count": 1, "model": "NVIDIA H100 80GB HBM3" });
+    ir["roles"][0]["needs"] =
+        json!({ "cpu_millis": 8000, "memory_bytes": 32_u64 << 30, "gpu": h100 });
+    ir["roles"][1]["needs"] = json!({ "cpu_millis": 64_000, "memory_bytes": 2_u64 << 30 });
+    scratch.write_task("misfit", &ir);
+    let context = docker_context();
+    scratch.write(
+        "pumpkin.toml",
+        &format!("{}\n{EC2}\n{A100}", docker_table(&context)),
+    );
+    let rootful = !engine(&scratch, &context).report().security.rootless;
+    let run = || {
+        let mut run = scratch.pumpkin(&["run", "misfit/task.star", "--sandboxd", &sandboxd]);
+        run.args(["--runs", "runs", "--config", "pumpkin.toml"]);
+        run
+    };
+    let shown = [(&sandboxd[..], "<sandboxd>")];
+    check(
+        &scratch,
+        [run()],
+        rootful,
+        &shown,
+        &expect![[r#"
+        $ pumpkin run misfit/task.star --sandboxd <sandboxd> --runs runs --config pumpkin.toml
+        exit status: Some(1)
+        pumpkin: error: role `agent` fits no class of sandbox
+          --> misfit/task.star: roles[0].needs: 8 CPUs, 32.0 GiB, 1 × `NVIDIA H100 80GB HBM3`
+          = `a100/a100`: 1 × `NVIDIA A100-SXM4-80GB`
+          = `aws/agent`: no GPU
+          = `aws/judge`: 13.4 GiB, no GPU
+          = help: add a class with 1 × `NVIDIA H100 80GB HBM3`, and at least 8 CPUs and 32.0 GiB,
+                  or change the role's `gpu` to 1 × `NVIDIA A100-SXM4-80GB`, which `a100/a100` has
+        pumpkin: error: role `trainer` fits no class of sandbox
+          --> misfit/task.star: roles[1].needs: 64 CPUs, 2.0 GiB
+          = `a100/a100`: 8 CPUs, 1 × `NVIDIA A100-SXM4-80GB` (only for roles that need it)
+          = `aws/agent`: 32 CPUs
+          = `aws/judge`: 8 CPUs
+          = help: add a class with at least 64 CPUs and 2.0 GiB,
+                  or lower the role's `cpu_millis` to 32000, which `aws/agent` offers
+        pumpkin: misfit/task.star: placing the workflow's roles in the classes that pumpkin.toml's providers offer has 2 problems
+        pumpkin: to read how a configuration offers a class: pumpkin help config
+        pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <sandboxd> <scratch>/misfit/task.star"#]],
+    );
+    let mut styled = run();
+    styled.env("CLICOLOR_FORCE", "1");
+    let output = styled.output().unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let said = (stderr.lines()).filter(|line| !line.contains(" runs as root, "));
+    let said: String = said.flat_map(|line| [line, "\n"]).collect();
+    let said =
+        (said.replace(scratch.0.to_str().unwrap(), "<scratch>")).replace(&sandboxd, "<sandboxd>");
+    let svg = anstyle_svg::Term::new().render_svg(&said);
+    expect_file!["run/misplaced.svg"].assert_eq(&svg);
+}
+
+/// A Modal provider whose one class has an A100 GPU.
+const A100: &str = r#"[providers.a100.modal]
+profile = "pumpkin"
+images = { region = "us-west-1", repository = "pumpkin/roles", role_arn = "arn:aws:iam::123456789012:role/pumpkin-modal-pull" }
+dials_from = "203.0.113.7"
+classes.a100 = { gpu = "A100-80GB", gpu_model = "NVIDIA A100-SXM4-80GB", cpu_millis = 8000, memory_bytes = 85899345920, startup_seconds = 1800 }
+"#;
 
 /// Writes `examples/hello` into `scratch`, with the marker of its root, and with `label` on its
 /// image.
