@@ -240,26 +240,78 @@ fn ls(flags: cli::Ls) -> Result<Exit, String> {
     let cli::Ls {
         runs,
         controller,
+        all,
+        json,
         prefixes,
     } = flags;
     if runs.is_none()
         && let Some(client) = config::client(None, controller.as_ref())?
     {
-        return controller::ls(&client, &prefixes);
+        return controller::ls(&client, &prefixes, all, json);
     }
     let (runs, named) = runs_dir(runs)?;
     let at = next::At::runs(named.as_deref());
     let now = unix_now();
-    let since = progress::listed_since(&prefixes, now);
+    let since = progress::listed_since(&prefixes, all, now);
     let (listing, unlisted) = listed_in(Path::new(&runs), &prefixes, since, now, &at)?;
     said_beside(&listing, &unlisted);
-    let lines = progress::lines(&listing, &at);
-    print(lines.as_bytes()).context("printing the runs failed")?;
+    printed_listing(&listing, &unlisted, &at, since, json)?;
     if !unlisted.is_empty() {
         let runs = counted(unlisted.len(), "run");
         return Err(format!("{runs} can't be listed, as said above"));
     }
     Ok(Exit::Success)
+}
+
+/// Prints `listing` and `unlisted`, the runs it couldn't list, as `ls` does. Its runs that ended
+/// before `since` are older. It prints JSON if `json`, else lines laid out for the standard output.
+fn printed_listing(
+    listing: &progress::Listing,
+    unlisted: &[progress::Unlisted],
+    at: &next::At,
+    since: Option<UnixTime>,
+    json: bool,
+) -> Result<(), String> {
+    let (styled, width) = terminal();
+    let printed = if json {
+        // Indented where the output is styled, for a person, and compact for a program, as gh
+        // prints its own:
+        // https://github.com/cli/cli/blob/529111a21612ff1e29dc45e567a157df24e0e243/pkg/cmdutil/json_flags.go#L225-L257
+        progress::json(listing, unlisted, styled)
+    } else {
+        let scope = match since {
+            Some(_) => progress::Scope::Day,
+            None => progress::Scope::Every,
+        };
+        let layout = progress::Layout {
+            scope,
+            width,
+            styled,
+        };
+        progress::lines(listing, at, &layout)
+    };
+    print(printed.as_bytes()).context("printing the runs failed")
+}
+
+/// Whether what goes to the standard output is styled, as anstream decides it for clap's help. Then
+/// how many columns a line there may take: as many as `COLUMNS` says, else as many as its terminal
+/// has, else no bound.
+// `COLUMNS` comes first, as POSIX has it override the terminal's width, and as git reads it:
+// https://github.com/git/git/blob/73876f4861cd3d187a4682290ab75c9dccadbc56/pager.c#L158-L187
+fn terminal() -> (bool, Option<usize>) {
+    let stdout = io::stdout();
+    let styled = match AutoStream::choice(&stdout) {
+        ColorChoice::Never => false,
+        ColorChoice::Auto | ColorChoice::AlwaysAnsi | ColorChoice::Always => true,
+    };
+    let columns = env::var("COLUMNS")
+        .ok()
+        .and_then(|columns| columns.parse().ok());
+    let width = columns.filter(|&columns: &usize| columns > 0).or_else(|| {
+        let size = rustix::termios::tcgetwinsize(&stdout).ok()?;
+        (size.ws_col > 0).then_some(usize::from(size.ws_col))
+    });
+    (styled, width)
 }
 
 /// Says what `ls` says before the table of `listing`, by id: each run that `unlisted` holds, and
@@ -330,7 +382,8 @@ fn listed_in(
                     unread: parts,
                 } = record.progress()?;
                 unread = progress::unread(&parts);
-                let listed = progress::Listed::of(&record, record.task()?, ending, progress);
+                let used = record.used()?;
+                let listed = progress::Listed::of(&record, record.task()?, ending, progress, used);
                 Ok(Some(listed))
             })
             .or_else(|error| {

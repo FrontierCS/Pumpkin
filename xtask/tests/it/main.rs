@@ -558,6 +558,7 @@ fn test_data() {
             file("crates/lang/tests/fixtures/lib/parts.json"),
             file("crates/pumpkin/tests/it/help/run.svg"),
             file("crates/pumpkin/tests/it/help/run.txt"),
+            file("crates/pumpkin/tests/it/ls/styled.svg"),
             file("crates/pumpkin/tests/it/records/run.svg"),
         ],
         tidy,

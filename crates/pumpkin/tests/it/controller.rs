@@ -18,8 +18,7 @@ use stdx::process::Environment;
 use super::view::Served;
 use super::{
     PUMPKIN, Prices, Scratch, asked, cut, days_ago, ended, install, invocation, lease_places,
-    lock_driver, masked_members, poll, report, returned, whole_log, workflow, write_record,
-    write_run,
+    lock_driver, masked, poll, report, returned, whole_log, workflow, write_record, write_run,
 };
 
 const SENT_MODAL: &str = r#"[modal]
@@ -2127,11 +2126,7 @@ fn ls_answered_there() {
     write_record(&scratch, lacked, true, Some(returned(3.0)));
     write_record(&scratch, ended, true, Some(failed));
     move_runs(&scratch, "repo/.pumpkin/runs/alice");
-    let mut steps = [&[][..], &["20261106"]].map(|args| ls_ran(&scratch, &client, args));
-    // The rows whose times are relative to now.
-    for varying in ["20261107-1201", "20261107-13", "20261106-13"] {
-        steps = steps.map(|ran| masked_members(&ran, varying, "alice ".len()));
-    }
+    let steps = [&[][..], &["20261106"]].map(|args| masked(&ls_ran(&scratch, &client, args)));
     drop(driver);
     check(
         &scratch,
@@ -2142,20 +2137,27 @@ fn ls_answered_there() {
             exit status: Some(0)
             pumpkin: controller `alice`: up <t>, 4 jobs, disk <n>% used
             printed:
-              20261107-110000-0d0c0008 -     finished          -  -               -  -: score=3 metrics={"solved":3}
-              20261107-120000-1b8a0001 alice finished          -  -               -  -: score=7 metrics={"solved":3}
-              20261107-120100-1b8a0002 -     publishing      <t>                  -  -
-              20261107-130000-2c9b0004 alice waiting         <t>                  -  waiting 24h for a build slot
-              20261107-130100-2c9b0005 alice building        <t>                  -  holding a build slot for 48h
-              20261107-130101-2c9b0008 alice building        <t>                  -  -
-              20261107-130200-2c9b0006 alice unstarted       <t>                  -  -: its job ended before the run started: to see why: pumpkin wait --controller alice 20261107-130200-2c9b0006
-              7 runs: 1 waiting, 2 building, 1 running, 2 finished, 1 unstarted; 2 runs that ended over a day ago aren't listed: to list them: pumpkin ls --controller alice 20261106
+              live
+                20261107-130101-2c9b0008  alice  -  building       <t>   -
+                20261107-130100-2c9b0005  alice  -  building       <t>   -  holding a build slot
+                20261107-130000-2c9b0004  alice  -  waiting        <t>   -  for a build slot
+                20261107-120100-1b8a0002  -      -  publishing     <t>   -
+
+              ended
+                20261107-130200-2c9b0006  alice  -  unstarted       -  -  its job ended before the run started: to see why: pumpkin wait --controller alice 20261107-130200-2c9b0006
+                20261107-120000-1b8a0001  alice  -  finished        -  -  score=7 +1
+                20261107-110000-0d0c0008  -      -  finished        -  -  score=3 +1
+              +n counts the values of a result left out: to see them: pumpkin wait --outcome --controller alice <run>
+
+              7 runs: 4 live, 2 finished, 1 unstarted · to list the 2 older runs too: pumpkin ls --controller alice --all
             $ pumpkin ls 20261106
             exit status: Some(0)
             pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
             printed:
-              20261106-120000-1b8a0003 -     failed            -  -               -  -
-              20261106-130300-2c9b0007 alice unstarted       <t>                  -  -: its job ended before the run started: to see why: pumpkin wait --controller alice 20261106-130300-2c9b0007
+              ended
+                20261106-130300-2c9b0007  alice  -  unstarted       -  -  its job ended before the run started: to see why: pumpkin wait --controller alice 20261106-130300-2c9b0007
+                20261106-120000-1b8a0003  -      -  failed          -  -
+
               2 runs: 1 failed, 1 unstarted"#]],
     );
 }
@@ -2191,7 +2193,10 @@ fn ls_leaves_its_streams_blocking() {
         &expect![[r#"
             exit status: 0
             pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
-            20261107-120000-1b8a0001 finished          -  -               -  -: score=7 metrics={"solved":3}
+            ended
+              20261107-120000-1b8a0001  -  finished       -  -  score=7 +1
+            +n counts the values of a result left out: to see them: pumpkin wait --outcome --controller alice <run>
+
             1 run: 1 finished
             blocking: true"#]],
     );
@@ -2293,7 +2298,10 @@ fn ls_refusals() {
             pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
             pumpkin: 1 run can't be listed, as said above
             printed:
-              20261107-120000-1b8a0001 finished          -  -               -  -: score=7 metrics={"solved":3}
+              ended
+                20261107-120000-1b8a0001  -  finished       -  -  score=7 +1
+              +n counts the values of a result left out: to see them: pumpkin wait --outcome --controller alice <run>
+
               1 run: 1 finished
             $ pumpkin ls
             exit status: Some(1)
@@ -2517,7 +2525,9 @@ fn members_attributed() {
             exit status: Some(0)
             pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
             printed:
-              <id> alice unstarted         -                  -  -: its job ended before the run started: to see why: pumpkin wait --controller alice <id>
+              ended
+                <id>  -  unstarted       -  -  its job ended before the run started: to see why: pumpkin wait --controller alice <id>
+
               1 run: 1 unstarted"#]],
     );
 }
@@ -2730,7 +2740,9 @@ fn member_unread() {
             pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
             pumpkin: 1 run can't be listed, as said above
             printed:
-              <other> bob unstarted         -                  -  -: its job ended before the run started: to see why: pumpkin wait --controller alice <other>
+              ended
+                <other>  -  unstarted       -  -  its job ended before the run started: to see why: pumpkin wait --controller alice <other>
+
               1 run: 1 unstarted
             $ pumpkin cancel <unread>
             exit status: Some(1)
@@ -3416,7 +3428,7 @@ fn views_the_controllers_runs_over_a_reopened_connection() {
             next: <log bytes>, end: <log bytes>
             GET /api/runs
             HTTP/1.1 200 OK
-            "<live>" "work" null
+            "<live>" "running" null
             "<ended>" "finished" "alice"
             GET /api/runs/<ended>
             HTTP/1.1 200 OK

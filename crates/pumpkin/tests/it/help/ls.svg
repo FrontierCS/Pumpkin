@@ -1,4 +1,4 @@
-<svg width="860px" height="740px" xmlns="http://www.w3.org/2000/svg">
+<svg width="860px" height="992px" xmlns="http://www.w3.org/2000/svg">
   <style>
     .fg { fill: #AAAAAA }
     .bg { fill: #000000 }
@@ -24,19 +24,19 @@
 </tspan>
     <tspan x="10px" y="46px">
 </tspan>
-    <tspan x="10px" y="64px"><tspan>`ls` prints a line for each run, oldest first, then a line of totals. Without a prefix, it lists the</tspan>
+    <tspan x="10px" y="64px"><tspan>`ls` prints the live runs, newest first, each with its phase and each agent, call and lease under</tspan>
 </tspan>
-    <tspan x="10px" y="82px"><tspan>runs that are live or ended within the last day, and the totals say how to list the others. A live</tspan>
+    <tspan x="10px" y="82px"><tspan>it. Then come the runs that ended, newest first, and a line of totals. A result shows its numbers,</tspan>
 </tspan>
-    <tspan x="10px" y="100px"><tspan>run's line gives its phase and the bound on it. An ended run's line gives its state, how long it ran</tspan>
+    <tspan x="10px" y="100px"><tspan>booleans and strings of one line, as far as its line allows, and `+n` counts the values left out. On</tspan>
 </tspan>
-    <tspan x="10px" y="118px"><tspan>and its result's values, cut short if they are long. `pumpkin wait --outcome` prints them whole. If</tspan>
+    <tspan x="10px" y="118px"><tspan>a terminal, `ls` colours each state and draws each step's time against its bound as a bar, unless</tspan>
 </tspan>
-    <tspan x="10px" y="136px"><tspan>a run can't be listed, `ls` says why and lists the others. With `[controllers.&lt;name&gt;]` in the</tspan>
+    <tspan x="10px" y="136px"><tspan>`NO_COLOR` is set. If a run can't be listed, `ls` says why and lists the others. With</tspan>
 </tspan>
-    <tspan x="10px" y="154px"><tspan>configuration and no `--runs`, `ls` lists the controller's runs beside this machine's copies of</tspan>
+    <tspan x="10px" y="154px"><tspan>`[controllers.&lt;name&gt;]` in the configuration and no `--runs`, `ls` lists the controller's runs beside</tspan>
 </tspan>
-    <tspan x="10px" y="172px"><tspan>them.</tspan>
+    <tspan x="10px" y="172px"><tspan>this machine's copies of them.</tspan>
 </tspan>
     <tspan x="10px" y="190px">
 </tspan>
@@ -68,37 +68,65 @@
 </tspan>
     <tspan x="10px" y="442px">
 </tspan>
-    <tspan x="10px" y="460px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">-h</tspan><tspan>, </tspan><tspan class="fg-bright-cyan bold">--help</tspan>
+    <tspan x="10px" y="460px"><tspan>      </tspan><tspan class="fg-bright-cyan bold">--all</tspan>
 </tspan>
-    <tspan x="10px" y="478px"><tspan>          Print help</tspan>
+    <tspan x="10px" y="478px"><tspan>          List every run, however long ago it ended. Without it or a prefix, `ls` lists the runs</tspan>
 </tspan>
-    <tspan x="10px" y="496px">
+    <tspan x="10px" y="496px"><tspan>          that are live or ended within the last day. It shows the newest 5 that ended</tspan>
 </tspan>
-    <tspan x="10px" y="514px"><tspan class="fg-bright-green bold">Examples:</tspan>
+    <tspan x="10px" y="514px">
 </tspan>
-    <tspan x="10px" y="532px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">pumpkin ls</tspan>
+    <tspan x="10px" y="532px"><tspan>      </tspan><tspan class="fg-bright-cyan bold">--json</tspan>
 </tspan>
-    <tspan x="10px" y="550px"><tspan>          List the runs that are live or ended within the last day</tspan>
+    <tspan x="10px" y="550px"><tspan>          Print the listing as JSON: each run's row, the newest first, with its whole result, as</tspan>
 </tspan>
-    <tspan x="10px" y="568px">
+    <tspan x="10px" y="568px"><tspan>          `pumpkin wait --outcome` prints it</tspan>
 </tspan>
-    <tspan x="10px" y="586px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">pumpkin ls 20261110-1</tspan>
+    <tspan x="10px" y="586px">
 </tspan>
-    <tspan x="10px" y="604px"><tspan>          List the runs whose ids start with `20261110-1`</tspan>
+    <tspan x="10px" y="604px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">-h</tspan><tspan>, </tspan><tspan class="fg-bright-cyan bold">--help</tspan>
 </tspan>
-    <tspan x="10px" y="622px">
+    <tspan x="10px" y="622px"><tspan>          Print help</tspan>
 </tspan>
-    <tspan x="10px" y="640px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">pumpkin ls --runs runs</tspan>
+    <tspan x="10px" y="640px">
 </tspan>
-    <tspan x="10px" y="658px"><tspan>          List the runs recorded in `runs`</tspan>
+    <tspan x="10px" y="658px"><tspan class="fg-bright-green bold">Examples:</tspan>
 </tspan>
-    <tspan x="10px" y="676px">
+    <tspan x="10px" y="676px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">pumpkin ls</tspan>
 </tspan>
-    <tspan x="10px" y="694px"><tspan>The phases and states:</tspan>
+    <tspan x="10px" y="694px"><tspan>          List the runs that are live or ended within the last day</tspan>
 </tspan>
-    <tspan x="10px" y="712px"><tspan>https://github.com/FrontierCS/Pumpkin/blob/main/docs/running.md#following-and-listing-runs</tspan>
+    <tspan x="10px" y="712px">
 </tspan>
-    <tspan x="10px" y="730px">
+    <tspan x="10px" y="730px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">pumpkin ls 20261110-1</tspan>
+</tspan>
+    <tspan x="10px" y="748px"><tspan>          List the runs whose ids start with `20261110-1`</tspan>
+</tspan>
+    <tspan x="10px" y="766px">
+</tspan>
+    <tspan x="10px" y="784px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">pumpkin ls --runs runs</tspan>
+</tspan>
+    <tspan x="10px" y="802px"><tspan>          List the runs recorded in `runs`</tspan>
+</tspan>
+    <tspan x="10px" y="820px">
+</tspan>
+    <tspan x="10px" y="838px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">pumpkin ls --all</tspan>
+</tspan>
+    <tspan x="10px" y="856px"><tspan>          List every run, however long ago it ended</tspan>
+</tspan>
+    <tspan x="10px" y="874px">
+</tspan>
+    <tspan x="10px" y="892px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">pumpkin ls --json | jq '.runs[] | {id, state, result}'</tspan>
+</tspan>
+    <tspan x="10px" y="910px"><tspan>          Give each run of the last day's state and whole result</tspan>
+</tspan>
+    <tspan x="10px" y="928px">
+</tspan>
+    <tspan x="10px" y="946px"><tspan>The phases and states:</tspan>
+</tspan>
+    <tspan x="10px" y="964px"><tspan>https://github.com/FrontierCS/Pumpkin/blob/main/docs/running.md#following-and-listing-runs</tspan>
+</tspan>
+    <tspan x="10px" y="982px">
 </tspan>
   </text>
 

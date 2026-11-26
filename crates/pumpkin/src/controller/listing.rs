@@ -5,7 +5,6 @@
 use std::time::Duration;
 
 use provider::UnixTime;
-use stdx::Context as _;
 use tempfile::TempDir;
 
 use super::linking::Build;
@@ -25,21 +24,27 @@ pub(crate) fn scratch() -> Result<TempDir, String> {
     Workspace::find()?.scratch("pumpkin-")
 }
 
-/// Lists the runs of the controller whose ids start with one of `prefixes`, or, with none, all but
-/// those that ended over a day ago (`progress::listed_since`), as `ls` lists those of this machine,
-/// and the jobs yet to start a run, as `waiting` for a build slot, `building`, or `unstarted` once
-/// they have ended, with the copies here of the runs that the controller lacks. Fails, after
-/// listing the rest, if a run can't be listed.
-pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<Exit, String> {
+/// Lists the runs of the controller whose ids start with one of `prefixes`, as `ls` lists those
+/// of this machine, and as JSON if `json`. With no prefix and not `all`, it leaves out those that
+/// ended over a day ago (`progress::listed_since`). It lists the jobs yet to start a run, as
+/// `waiting` for a build slot, `building`, or `unstarted` once they have ended. It adds the copies
+/// here of the runs that the controller lacks. Fails, after listing the rest, if a run can't be
+/// listed.
+pub(crate) fn ls(
+    client: &config::Client,
+    prefixes: &[String],
+    all: bool,
+    json: bool,
+) -> Result<Exit, String> {
     let mut reached = Reached::reach(&client.controller)?;
     let now = crate::unix_now();
-    let since = crate::progress::listed_since(prefixes, now);
+    let since = crate::progress::listed_since(prefixes, all, now);
     let Answers {
         health,
         mut listing,
-        unlisted,
+        mut unlisted,
         asked,
-    } = answered(&mut reached, prefixes)?;
+    } = answered(&mut reached, prefixes, all)?;
     crate::said_beside(&listing, &unlisted);
     let at = next::At::Controller(reached.name.clone());
     let runs = super::copies(&reached.name)?;
@@ -56,19 +61,18 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<Exit, S
         |refused| refused,
         |health| said(&reached.name, &health, jobs),
     ));
-    let lines = crate::progress::lines(&listing, &at);
-    crate::print(lines.as_bytes()).context("printing the runs failed")?;
+    unlisted.extend(unlisted_here);
+    crate::printed_listing(&listing, &unlisted, &at, since, json)?;
     said_when(asked);
-    let unlisted = unlisted.len() + unlisted_here.len();
-    if unlisted > 0 {
-        let runs = crate::counted(unlisted, "run");
+    if !unlisted.is_empty() {
+        let runs = crate::counted(unlisted.len(), "run");
         return Err(format!("{runs} can't be listed, as said above"));
     }
     Ok(Exit::Success)
 }
 
 /// What the controller's `serve` answers, as [`Reached::asked`] asks it.
-fn answered(reached: &mut Reached, prefixes: &[String]) -> Result<Answers, String> {
+fn answered(reached: &mut Reached, prefixes: &[String], all: bool) -> Result<Answers, String> {
     let build = Build::of_this("expected to send it to the controller, to list the runs there")?;
     let (health, listed, asked) =
         reached.asked(&build, "listing the runs", |reached, linked| {
@@ -80,6 +84,7 @@ fn answered(reached: &mut Reached, prefixes: &[String]) -> Result<Answers, Strin
                 reached,
                 ListRequest {
                     prefixes,
+                    all,
                     controller,
                 },
             )?;

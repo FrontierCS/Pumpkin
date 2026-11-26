@@ -4,12 +4,13 @@ use std::fs::{self, File, Permissions};
 use std::os::unix::fs::PermissionsExt as _;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use expect_test::expect;
+use expect_test::{expect, expect_file};
 use serde_json::{Value, json};
 
 use super::{
-    Prices, Scratch, Step, agent_answer, answered_log, asked, check, cut, lease_places, lease_task,
-    lock_driver, logged, masked, ran, returned, started_work, whole_log, write_record, write_run,
+    Prices, Scratch, Step, agent_answer, answered_log, asked, check, cut, days_ago, finished,
+    lease_places, lease_task, lock_driver, logged, masked, ran, returned, started_work, submission,
+    whole_log, write_record, write_run,
 };
 
 #[test]
@@ -60,14 +61,11 @@ fn lists() {
     let ls = |runs: &str| Step::from(scratch.pumpkin(&["ls", "--runs", runs]));
     // Nothing is listed for a default runs directory that isn't there yet.
     let fresh = scratch.pumpkin(&["ls"]);
-    let listed = masked(
-        &ran(
-            scratch.pumpkin(&["ls", "--runs", "runs"]),
-            &scratch.0,
-            false,
-        ),
-        live,
-    );
+    let listed = masked(&ran(
+        scratch.pumpkin(&["ls", "--runs", "runs"]),
+        &scratch.0,
+        false,
+    ));
     check(
         &scratch,
         [Step::Ran(listed), ls("nowhere"), Step::from(fresh)],
@@ -79,13 +77,18 @@ fn lists() {
             pumpkin: <scratch>/runs/20261107-120600-7130006/driver.pid isn't there: expected the record of a run to have it
             pumpkin: 1 run can't be listed, as said above
             printed:
-              20261107-120000-1b8a6389 finished          -  -               -  examples/hello: score=7 metrics={"solved":3}
-              20261107-120100-2c9b0001 finished          -  -               -  examples/hello
-              20261107-120200-3d0c0002 failed            -  -               -  examples/codex
-              20261107-120300-4e1d0003 interrupted       -  -               -  examples/codex
-              20261107-120400-5f2e0004 publishing      <t>                  -  examples/hello
-              20261107-120500-602f0005 lost              -  -               -  -
-              6 runs: 1 running, 2 finished, 1 failed, 1 interrupted, 1 lost
+              live
+                20261107-120400-5f2e0004  examples/hello  publishing     <t>   -
+
+              ended
+                20261107-120500-602f0005  -               lost              -  -
+                20261107-120300-4e1d0003  examples/codex  interrupted       -  -
+                20261107-120200-3d0c0002  examples/codex  failed            -  -
+                20261107-120100-2c9b0001  examples/hello  finished          -  -
+                20261107-120000-1b8a6389  examples/hello  finished          -  -  score=7 +1
+              +n counts the values of a result left out: to see them: pumpkin wait --outcome --runs <scratch>/runs <run>
+
+              6 runs: 1 live, 2 finished, 1 failed, 1 interrupted, 1 lost
             $ pumpkin ls --runs nowhere
             exit status: Some(1)
             pumpkin: nowhere: No such file or directory (os error 2): expected the directory that runs are recorded in, as `--runs` names it
@@ -151,25 +154,35 @@ fn lists_other_builds_unread() {
             $ pumpkin ls --runs runs
             exit status: Some(0)
             printed:
-              20261107-120000-1b8a6389 finished          -  -               -  -: score=7 metrics={"solved":3}
-              20261107-120100-2c9b0001 unread            -                  -  made by pumpkin 9.9.9 (0f3a2b1c9 2026-11-08)
-              20261107-120200-3d0c0002 unread            -                  -  made by pumpkin 9.9.9 (0f3a2b1c9 2026-11-08)
-              20261107-120300-4e1d0003 unread            -                  -  made by an older pumpkin
+              ended
+                20261107-120300-4e1d0003  -  unread         -  -  made by an older pumpkin
+                20261107-120200-3d0c0002  -  unread         -  -  made by pumpkin 9.9.9 (0f3a2b1c9 2026-11-08)
+                20261107-120100-2c9b0001  -  unread         -  -  made by pumpkin 9.9.9 (0f3a2b1c9 2026-11-08)
+                20261107-120000-1b8a6389  -  finished       -  -  score=7 +1
+              +n counts the values of a result left out: to see them: pumpkin wait --outcome --runs <scratch>/runs <run>
+
               4 runs: 1 finished, 3 unread
             $ pumpkin ls --runs runs
             exit status: Some(1)
             pumpkin: <scratch>/runs/20261107-120400-5f2e0004/outcome.json: Permission denied (os error 13)
             pumpkin: 1 run can't be listed, as said above
             printed:
-              20261107-120000-1b8a6389 finished          -  -               -  -: score=7 metrics={"solved":3}
-              20261107-120100-2c9b0001 unread            -                  -  made by pumpkin 9.9.9 (0f3a2b1c9 2026-11-08)
-              20261107-120200-3d0c0002 unread            -                  -  made by pumpkin 9.9.9 (0f3a2b1c9 2026-11-08)
-              20261107-120300-4e1d0003 unread            -                  -  made by an older pumpkin
+              ended
+                20261107-120300-4e1d0003  -  unread         -  -  made by an older pumpkin
+                20261107-120200-3d0c0002  -  unread         -  -  made by pumpkin 9.9.9 (0f3a2b1c9 2026-11-08)
+                20261107-120100-2c9b0001  -  unread         -  -  made by pumpkin 9.9.9 (0f3a2b1c9 2026-11-08)
+                20261107-120000-1b8a6389  -  finished       -  -  score=7 +1
+              +n counts the values of a result left out: to see them: pumpkin wait --outcome --runs <scratch>/runs <run>
+
               4 runs: 1 finished, 3 unread"#]],
     );
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the cases and their snapshot"
+)]
 fn lists_the_last_day() {
     let scratch = Scratch::new();
     let ended = |id: &str, days: u64| {
@@ -187,6 +200,11 @@ fn lists_the_last_day() {
     ended("20261106-120000-1b8a0001", 2);
     ended("20261107-110000-1b8a0002", 3);
     ended("20261107-120000-1b8a0003", 0);
+    // More that ended within the day than `ls` shows of them.
+    for minute in 1..=5 {
+        let id = format!("20261107-12{minute:02}00-1b8a0003");
+        write_record(&scratch, &id, true, Some(returned(f64::from(minute))));
+    }
     // Another build's run that this build can't read, which ended over a day ago too.
     let unread = "20261106-130000-2c9b0004";
     let other = json!({ "version": "9.9.9", "commit": null });
@@ -207,9 +225,20 @@ fn lists_the_last_day() {
         ls.args(args);
         Step::Ran(ran(ls, &scratch.0, false))
     };
-    let mut steps = vec![ls(&[]), ls(&["20261106"])];
+    let mut steps = vec![ls(&[]), ls(&["--all"]), ls(&["20261106"])];
     // Only runs that ended over a day ago.
-    fs::remove_dir_all(scratch.0.join("runs/20261107-120000-1b8a0003")).unwrap();
+    for entry in fs::read_dir(scratch.0.join("runs")).unwrap() {
+        let dir = entry.unwrap().path();
+        if dir
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("20261107-12")
+        {
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
     steps.push(ls(&[]));
     check(
         &scratch,
@@ -220,18 +249,43 @@ fn lists_the_last_day() {
             $ pumpkin ls --runs runs
             exit status: Some(0)
             printed:
-              20261107-120000-1b8a0003 failed            -  -               -  -
-              1 run: 1 failed; 3 runs that ended over a day ago aren't listed: to list them: pumpkin ls --runs <scratch>/runs 2026110
+              ended, newest 5 of 6
+                20261107-120500-1b8a0003  -  finished       -  -  score=5 +1
+                20261107-120400-1b8a0003  -  finished       -  -  score=4 +1
+                20261107-120300-1b8a0003  -  finished       -  -  score=3 +1
+                20261107-120200-1b8a0003  -  finished       -  -  score=2 +1
+                20261107-120100-1b8a0003  -  finished       -  -  score=1 +1
+              +n counts the values of a result left out: to see them: pumpkin wait --outcome --runs <scratch>/runs <run>
+
+              6 runs: 5 finished, 1 failed · to list them all: pumpkin ls --runs <scratch>/runs 20261107 · to list the 3 older runs too: pumpkin ls --runs <scratch>/runs --all
+            $ pumpkin ls --runs runs --all
+            exit status: Some(0)
+            printed:
+              ended
+                20261107-120500-1b8a0003  -  finished       -  -  score=5 +1
+                20261107-120400-1b8a0003  -  finished       -  -  score=4 +1
+                20261107-120300-1b8a0003  -  finished       -  -  score=3 +1
+                20261107-120200-1b8a0003  -  finished       -  -  score=2 +1
+                20261107-120100-1b8a0003  -  finished       -  -  score=1 +1
+                20261107-120000-1b8a0003  -  failed         -  -
+                20261107-110000-1b8a0002  -  failed         -  -
+                20261106-130000-2c9b0004  -  unread         -  -  made by pumpkin 9.9.9
+                20261106-120000-1b8a0001  -  failed         -  -
+              +n counts the values of a result left out: to see them: pumpkin wait --outcome --runs <scratch>/runs <run>
+
+              9 runs: 5 finished, 3 failed, 1 unread
             $ pumpkin ls --runs runs 20261106
             exit status: Some(0)
             printed:
-              20261106-120000-1b8a0001 failed            -  -               -  -
-              20261106-130000-2c9b0004 unread            -                  -  made by pumpkin 9.9.9
+              ended
+                20261106-130000-2c9b0004  -  unread       -  -  made by pumpkin 9.9.9
+                20261106-120000-1b8a0001  -  failed       -  -
+
               2 runs: 1 failed, 1 unread
             $ pumpkin ls --runs runs
             exit status: Some(0)
             printed:
-              no run is live, or ended within a day; 3 runs that ended over a day ago aren't listed: to list them: pumpkin ls --runs <scratch>/runs 2026110"#]],
+              no run is live, or ended within a day · to list the 3 older runs: pumpkin ls --runs <scratch>/runs --all"#]],
     );
 }
 
@@ -346,7 +400,7 @@ fn lists_phases() {
     let ls = |prefixes: &[&str]| {
         let mut args = vec!["ls", "--runs", "runs"];
         args.extend(prefixes);
-        masked(&ran(scratch.pumpkin(&args), &scratch.0, false), "20261111-")
+        masked(&ran(scratch.pumpkin(&args), &scratch.0, false))
     };
     check(
         &scratch,
@@ -360,37 +414,45 @@ fn lists_phases() {
             $ pumpkin ls --runs runs 20261110
             exit status: Some(0)
             printed:
-              20261110-100000-0000000a finished     18m20s  -          $1.11+  example/lease: score=49.36 metrics={"solved":3}
-              20261110-110000-0000000b finished     30m06s  -               -  example/lease
-              20261110-120000-0000000c finished     18m20s  -          $0.66+  example/lease: score=49.36 metrics={"solved":3}
-              20261110-120000-0000000d finished     18m20s  -          $0.45+  example/lease: score=49.36 metrics={"solved":3}
-              20261110-120000-0000000e finished     18m20s  -               -  example/lease: score=49.36 metrics={"solved":3}
-              5 runs: 5 finished (1 without a result); $2.22 so far, and more without a price, and for 2 responses' unreported tokens
+              ended
+                20261110-120000-0000000e  example/lease  finished  18m20s       -  score=49.36 +1
+                20261110-120000-0000000d  example/lease  finished  18m20s  $0.45+  score=49.36 +1
+                20261110-120000-0000000c  example/lease  finished  18m20s  $0.66+  score=49.36 +1
+                20261110-110000-0000000b  example/lease  finished  30m06s       -  no result
+                20261110-100000-0000000a  example/lease  finished  18m20s  $1.11+  score=49.36 +1
+              +n counts the values of a result left out: to see them: pumpkin wait --outcome --runs <scratch>/runs <run>
+
+              5 runs: 5 finished (1 without a result) · $2.22+
             $ pumpkin ls --runs runs 20261110-10 20261111
             exit status: Some(0)
             printed:
-              20261110-100000-0000000a finished     18m20s  -          $1.11+  example/lease: score=49.36 metrics={"solved":3}
-              20261111-090000-0000000a starting        <t>  of 2m       $0.00  example/lease: 1 agent
-                                       starting        <t>  of 2m              solver on aws/judge
-              20261111-090000-0000000b work            <t>  of 30m      $0.66  example/lease: 1 agent working; model request 2 in flight for <t>
-                                       solver          <t>  of 30m             2 model requests, the last answered <t> ago; model request 2 in flight for <t>
-              20261111-090000-0000000c work            <t>  of 30m     $0.68+  example/lease: 1 agent working
-                                       solver          <t>  of 30m             3 model requests, the last answered <t> ago
-                                       job 0           <t>  of 10m06s          train call on modal/a100_80 with unknown GPUs for agent 0
-                                       lease 0         <t>  of 1m              box of job 0 on aws/box, ready, 5s busy; `sh -c set -e\nprint 7` exited 0
-              20261111-090000-0000000d final call      <t>  of 15m04s  $1.05+  example/lease: job 4 on modal/a100_80 with NVIDIA A100-SXM4-80GB; model request 3 in flight for <t>
-              20261111-090000-0000000e work            <t>  of 30m      $0.66  example/lease: 1 agent working; model request 2 in flight for <t>; it is past its bound, which is a bug: to stop it: pumpkin cancel --runs <scratch>/runs 20261111-090000-0000000e
-                                       solver          <t>  of 30m             2 model requests, the last answered <t> ago; model request 2 in flight for <t>; it is past its bound, which is a bug: to stop it: pumpkin cancel --runs <scratch>/runs 20261111-090000-0000000e
-              20261111-090000-0000000f publishing      <t>                  -  example/lease
-              20261111-090000-0000000g work            <t>  of 30m      $0.00  example/lease: 1 agent working
-                                       solver          <t>  of 30m             3 model requests, 2 failed upstream: rate_limit_exceeded; the last good one answered <t> ago
-              20261111-090000-0000000h work            <t>  of 30m      $0.00  example/lease: 1 agent working
-                                       solver          <t>  of 30m             3 model requests, 3 failed upstream: 1 with no code, 2 rate_limit_exceeded; no good one answered yet
-              20261111-090000-0000000i work            <t>  of 30m      $0.00  example/lease: 1 agent working
-                                       solver          <t>  of 30m             2 model requests, answered 1 200, 1 429; the last good one answered <t> ago
-              20261111-090000-0000000j work            <t>  of 30m      $0.00  example/lease: 1 agent working
-                                       solver          <t>  of 30m             2 model requests, answered 1 200, 1 200 cut; the last good one answered <t> ago
-              11 runs: 10 running, 1 finished; $4.17 so far, and more without a price, and for 3 responses' unreported tokens; every live run ends by <t> UTC"#]],
+              live
+                20261111-090000-0000000j  example/lease  work           <t> of 30m      $0.00  1 agent working
+                  solver       <t> of 30m     2 model requests, answered 1 200, 1 200 cut; the last good one answered <t> ago
+                20261111-090000-0000000i  example/lease  work           <t> of 30m      $0.00  1 agent working
+                  solver       <t> of 30m     2 model requests, answered 1 200, 1 429; the last good one answered <t> ago
+                20261111-090000-0000000h  example/lease  work           <t> of 30m      $0.00  1 agent working
+                  solver       <t> of 30m     3 model requests, 3 failed upstream: 1 with no code, 2 rate_limit_exceeded; no good one answered yet
+                20261111-090000-0000000g  example/lease  work           <t> of 30m      $0.00  1 agent working
+                  solver       <t> of 30m     3 model requests, 2 failed upstream: rate_limit_exceeded; the last good one answered <t> ago
+                20261111-090000-0000000f  example/lease  publishing     <t>                 -
+                20261111-090000-0000000e  example/lease  work           <t> of 30m      $0.66  1 agent working; model request 2 in flight for <t>; it is past its bound, which is a bug: to stop it: pumpkin cancel --runs <scratch>/runs 20261111-090000-0000000e
+                  solver       <t> of 30m     2 model requests, the last answered <t> ago; model request 2 in flight for <t>; it is past its bound, which is a bug: to stop it: pumpkin cancel --runs <scratch>/runs 20261111-090000-0000000e
+                20261111-090000-0000000d  example/lease  final call     <t> of 15m04s  $1.05+  job 4 on modal/a100_80 with NVIDIA A100-SXM4-80GB; model request 3 in flight for <t>
+                20261111-090000-0000000c  example/lease  work           <t> of 30m     $0.68+  1 agent working
+                  solver       <t> of 30m     3 model requests, the last answered <t> ago
+                  job 0        <t> of 10m06s  train call on modal/a100_80 with unknown GPUs for agent 0
+                  lease 0      <t> of 1m      box of job 0 on aws/box, ready, 5s busy; `sh -c set -e\nprint 7` exited 0
+                20261111-090000-0000000b  example/lease  work           <t> of 30m      $0.66  1 agent working; model request 2 in flight for <t>
+                  solver       <t> of 30m     2 model requests, the last answered <t> ago; model request 2 in flight for <t>
+                20261111-090000-0000000a  example/lease  starting       <t> of 2m       $0.00  1 agent
+                  starting     <t> of 2m      solver on aws/judge
+
+              ended
+                20261110-100000-0000000a  example/lease  finished  18m20s  $1.11+  score=49.36 +1
+              +n counts the values of a result left out: to see them: pumpkin wait --outcome --runs <scratch>/runs <run>
+
+              11 runs: 10 live, 1 finished · $4.17+"#]],
     );
 }
 
@@ -410,14 +472,11 @@ fn lists_leases() {
             live(&scratch, &id, &cut(&log, seconds), Duration::from_secs(2))
         })
         .collect();
-    let ls = masked(
-        &ran(
-            scratch.pumpkin(&["ls", "--runs", "runs"]),
-            &scratch.0,
-            false,
-        ),
-        "20261114-",
-    );
+    let ls = masked(&ran(
+        scratch.pumpkin(&["ls", "--runs", "runs"]),
+        &scratch.0,
+        false,
+    ));
     drop(held);
     check(
         &scratch,
@@ -428,40 +487,42 @@ fn lists_leases() {
             $ pumpkin ls --runs runs
             exit status: Some(0)
             printed:
-              20261114-090000-00000001 work            <t>  of 30m     $0.68+  example/lease: 1 agent working
-                                       solver          <t>  of 30m             3 model requests, the last answered <t> ago
-                                       job 0           <t>  of 10m06s          train call on modal/a100_80 with unknown GPUs for agent 0
-                                       lease 0         <t>  of 1m              box of job 0 on aws/box, ready, 1s busy; put /pumpkin/in/payload to /work/in moved 1 entry, 1 byte
-              20261114-090000-00000002 work            <t>  of 30m     $0.68+  example/lease: 1 agent working
-                                       solver          <t>  of 30m             3 model requests, the last answered <t> ago
-                                       job 0           <t>  of 10m06s          train call on modal/a100_80 with unknown GPUs for agent 0
-                                       lease 0         <t>  of 1m              box of job 0 on aws/box, ready, 5s busy; `sh -c set -e\nprint 7` exited 0
-              20261114-090000-00000003 work            <t>  of 30m     $0.71+  example/lease: 1 agent working
-                                       solver          <t>  of 30m             3 model requests, the last answered <t> ago
-                                       job 0           <t>                     train call on modal/a100_80 with unknown GPUs for agent 0, ended: score=49.53; its sandbox isn't gone yet
-                                       lease 0         <t>                     box of job 0 on aws/box, closed as its call ended; its sandbox isn't gone yet; `sh -c set -e\nprint 7` exited 0
-              20261114-090000-00000004 work            <t>  of 30m     $0.72+  example/lease: 1 agent working
-                                       solver          <t>  of 30m             3 model requests, the last answered <t> ago
-                                       lease 1         <t>  of 30m             gpu of agent 0 on modal/a100_80, starting
-                                       lease 2         <t>  of 2m              cpu of agent 0 on aws/judge, starting
-              20261114-090000-00000005 work            <t>  of 30m     $0.73+  example/lease: 1 agent working
-                                       solver          <t>  of 30m             3 model requests, the last answered <t> ago
-                                       lease 1         <t>  of 1m              gpu of agent 0 on modal/a100_80 with NVIDIA A100-SXM4-80GB, ready, 2s busy; `nvidia-smi` exited 0
-                                       lease 2         <t>  of 2m              cpu of agent 0 on aws/judge, starting
-              20261114-090000-00000006 work            <t>  of 30m     $0.74+  example/lease: 1 agent working
-                                       solver          <t>  of 30m             3 model requests, the last answered <t> ago
-                                       lease 1         <t>                     gpu of agent 0 on modal/a100_80 with NVIDIA A100-SXM4-80GB, closed by its holder; its sandbox isn't gone yet; `nvidia-smi` exited 0
-                                       lease 2         <t>  of 2m              cpu of agent 0 on aws/judge, starting
-              20261114-090000-00000007 work            <t>  of 30m     $0.74+  example/lease: 1 agent working
-                                       solver          <t>  of 30m             3 model requests, the last answered <t> ago
-                                       lease 2         <t>  of 30m             cpu of agent 0 on aws/judge, ready, 2s busy; `sleep 60` running
-              20261114-090000-00000008 work            <t>  of 30m     $0.95+  example/lease: 1 agent working
-                                       solver          <t>  of 30m             3 model requests, the last answered <t> ago
-                                       lease 2         <t>  of 30m             cpu of agent 0 on aws/judge, ready, 30s busy; `sleep 60` timed out
-                                       lease 3         <t>                     gpu of agent 0 on modal/a100_80 with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB), expired; its sandbox isn't gone yet; `true` exited 0
-              20261114-090000-00000009 ending          <t>  of 1h43m   $1.04+  example/lease: the end of lease 2
-                                       lease 2         <t>                     cpu of agent 0 on aws/judge, closed as the work phase ended; its sandbox isn't gone yet; `sleep 60` timed out
-              9 runs: 9 running; $6.99 so far, and more without a price, and for 9 responses' unreported tokens; every live run ends by <t> UTC"#]],
+              live
+                20261114-090000-00000009  example/lease  ending     <t> of 1h43m  $1.04+  the end of lease 2
+                  lease 2     <t>            cpu of agent 0 on aws/judge, closed as the work phase ended; its sandbox isn't gone yet; `sleep 60` timed out
+                20261114-090000-00000008  example/lease  work       <t> of 30m    $0.95+  1 agent working
+                  solver      <t> of 30m     3 model requests, the last answered <t> ago
+                  lease 2     <t> of 30m     cpu of agent 0 on aws/judge, ready, 30s busy; `sleep 60` timed out
+                  lease 3     <t>            gpu of agent 0 on modal/a100_80 with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB), expired; its sandbox isn't gone yet; `true` exited 0
+                20261114-090000-00000007  example/lease  work       <t> of 30m    $0.74+  1 agent working
+                  solver      <t> of 30m     3 model requests, the last answered <t> ago
+                  lease 2     <t> of 30m     cpu of agent 0 on aws/judge, ready, 2s busy; `sleep 60` running
+                20261114-090000-00000006  example/lease  work       <t> of 30m    $0.74+  1 agent working
+                  solver      <t> of 30m     3 model requests, the last answered <t> ago
+                  lease 1     <t>            gpu of agent 0 on modal/a100_80 with NVIDIA A100-SXM4-80GB, closed by its holder; its sandbox isn't gone yet; `nvidia-smi` exited 0
+                  lease 2     <t> of 2m      cpu of agent 0 on aws/judge, starting
+                20261114-090000-00000005  example/lease  work       <t> of 30m    $0.73+  1 agent working
+                  solver      <t> of 30m     3 model requests, the last answered <t> ago
+                  lease 1     <t> of 1m      gpu of agent 0 on modal/a100_80 with NVIDIA A100-SXM4-80GB, ready, 2s busy; `nvidia-smi` exited 0
+                  lease 2     <t> of 2m      cpu of agent 0 on aws/judge, starting
+                20261114-090000-00000004  example/lease  work       <t> of 30m    $0.72+  1 agent working
+                  solver      <t> of 30m     3 model requests, the last answered <t> ago
+                  lease 1     <t> of 30m     gpu of agent 0 on modal/a100_80, starting
+                  lease 2     <t> of 2m      cpu of agent 0 on aws/judge, starting
+                20261114-090000-00000003  example/lease  work       <t> of 30m    $0.71+  1 agent working
+                  solver      <t> of 30m     3 model requests, the last answered <t> ago
+                  job 0       <t>            train call on modal/a100_80 with unknown GPUs for agent 0, ended: score=49.53; its sandbox isn't gone yet
+                  lease 0     <t>            box of job 0 on aws/box, closed as its call ended; its sandbox isn't gone yet; `sh -c set -e\nprint 7` exited 0
+                20261114-090000-00000002  example/lease  work       <t> of 30m    $0.68+  1 agent working
+                  solver      <t> of 30m     3 model requests, the last answered <t> ago
+                  job 0       <t> of 10m06s  train call on modal/a100_80 with unknown GPUs for agent 0
+                  lease 0     <t> of 1m      box of job 0 on aws/box, ready, 5s busy; `sh -c set -e\nprint 7` exited 0
+                20261114-090000-00000001  example/lease  work       <t> of 30m    $0.68+  1 agent working
+                  solver      <t> of 30m     3 model requests, the last answered <t> ago
+                  job 0       <t> of 10m06s  train call on modal/a100_80 with unknown GPUs for agent 0
+                  lease 0     <t> of 1m      box of job 0 on aws/box, ready, 1s busy; put /pumpkin/in/payload to /work/in moved 1 entry, 1 byte
+
+              9 runs: 9 live · $6.99+"#]],
     );
 }
 
@@ -538,8 +599,10 @@ fn says_unread_lines() {
             pumpkin: run 20261110-110000-0000000b: 4 parts of its log can't be read by this pumpkin, the first at line 5, its event: missing field `status`
             pumpkin: run 20261110-110000-0000000c: 4 parts of its log can't be read by this pumpkin, the first at line 1, its event: missing field `unix_ns`
             printed:
-              20261110-110000-0000000b finished        40s  -               -  example/lease
-              20261110-110000-0000000c failed            -  -               -  example/lease
+              ended
+                20261110-110000-0000000c  example/lease  failed         -  -
+                20261110-110000-0000000b  example/lease  finished     40s  -  no result
+
               2 runs: 1 finished (1 without a result), 1 failed
             $ pumpkin wait --runs runs 20261110-110000-0000000b
             exit status: Some(3)
@@ -556,6 +619,318 @@ fn says_unread_lines() {
             pumpkin: run 20261110-110000-0000000c: 4 parts of its log can't be read by this pumpkin, the first at line 1, its event: missing field `unix_ns`
             pumpkin: run 20261110-110000-0000000c failed: the agent's sandbox didn't start; its record is <scratch>/runs/20261110-110000-0000000c
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star"#]],
+    );
+}
+
+// A result's line shows its scalars in their order as far as the line allows, and counts the
+// values that it leaves out.
+#[test]
+fn fits_a_result_to_its_line() {
+    let scratch = Scratch::new();
+    let result = |id: &str, values: Value| {
+        let verdict = json!({ "kind": "returned", "result": { "values": values } });
+        let work_end = json!({ "kind": "agent_exited", "status": { "code": 0 } });
+        let outcome = finished(&verdict, &work_end, &submission());
+        write_record(&scratch, id, true, Some(outcome));
+        scratch.write(
+            &format!("runs/{id}/ir.json"),
+            &json!({ "name": "examples/companions" }),
+        );
+    };
+    result(
+        "20261125-212001-4d6d4a80",
+        json!([
+            { "name": "score", "value": 4 },
+            { "name": "of", "value": 4 },
+            { "name": "said", "value": { "c0": "2000:2000\nmain\n" } },
+            { "name": "users", "value": true },
+            { "name": "dns", "value": "DNS answers" },
+            { "name": "printed", "value": "long-final ok\n" },
+            { "name": "bridge_ms", "value": null },
+            { "name": "median", "value": 0.123_456 },
+        ]),
+    );
+    result(
+        "20261125-212523-f1fee7b6",
+        json!([{ "name": "detail", "value": ["agent user: ok (uid 1000)"] }]),
+    );
+    let ls = |columns: Option<&str>| {
+        let mut ls = scratch.pumpkin(&["ls", "--runs", "runs"]);
+        ls.envs(columns.map(|columns| ("COLUMNS", columns)));
+        Step::Ran(ran(ls, &scratch.0, false))
+    };
+    check(
+        &scratch,
+        [ls(None), ls(Some("100")), ls(Some("60"))],
+        false,
+        &[],
+        &expect![[r#"
+            $ pumpkin ls --runs runs
+            exit status: Some(0)
+            printed:
+              ended
+                20261125-212523-f1fee7b6  examples/companions  finished       -  -  +1
+                20261125-212001-4d6d4a80  examples/companions  finished       -  -  score=4 of=4 users=true dns="DNS answers" bridge_ms=null median=0.1235 +2
+              +n counts the values of a result left out: to see them: pumpkin wait --outcome --runs <scratch>/runs <run>
+
+              2 runs: 2 finished
+            $ COLUMNS=100 pumpkin ls --runs runs
+            exit status: Some(0)
+            printed:
+              ended
+                20261125-212523-f1fee7b6  examples/companions  finished       -  -  +1
+                20261125-212001-4d6d4a80  examples/companions  finished       -  -  score=4 of=4 users=true +5
+              +n counts the values of a result left out: to see them: pumpkin wait --outcome --runs <scratch>/runs <run>
+
+              2 runs: 2 finished
+            $ COLUMNS=60 pumpkin ls --runs runs
+            exit status: Some(0)
+            printed:
+              ended
+                20261125-212523-f1fee7b6  examples/companions  finished       -  -  +1
+                20261125-212001-4d6d4a80  examples/companions  finished       -  -  +8
+              +n counts the values of a result left out: to see them: pumpkin wait --outcome --runs <scratch>/runs <run>
+
+              2 runs: 2 finished"#]],
+    );
+}
+
+// A terminal gets each state in its colour and each step's time against its bound as a bar.
+#[test]
+fn styles_a_terminal() {
+    let scratch = Scratch::new();
+    let log = whole_log();
+    // Its bars move a half cell each 90 s, and this run's are each 27 s or more from a move.
+    let ago = Duration::from_secs(546);
+    let held = [
+        live(&scratch, "20261114-090000-00000001", &cut(&log, 566), ago),
+        live(
+            &scratch,
+            "20261114-090000-00000002",
+            &cut(&log, 1002),
+            Duration::from_secs(2),
+        ),
+    ];
+    let whole = "20261110-100000-0000000a";
+    let priced = lease_places(Prices::Both);
+    write_run(
+        &scratch,
+        whole,
+        asked(whole, 30),
+        &log,
+        Some(returned(49.36)),
+        &priced,
+    );
+    write_record(
+        &scratch,
+        "20261110-110000-0000000b",
+        true,
+        Some(super::unsubmitted()),
+    );
+    let failed = json!({ "state": "failed", "reason": "r" });
+    write_record(&scratch, "20261110-120000-0000000c", true, Some(failed));
+    let interrupted = json!({ "state": "interrupted", "signal": "SIGINT" });
+    write_record(
+        &scratch,
+        "20261110-130000-0000000d",
+        true,
+        Some(interrupted),
+    );
+    write_record(&scratch, "20261110-140000-0000000e", true, None);
+    let mut ls = scratch.pumpkin(&["ls", "--runs", "runs"]);
+    ls.envs([("CLICOLOR_FORCE", "1"), ("COLUMNS", "100")]);
+    let output = ls.output().unwrap();
+    drop(held);
+    assert!(output.status.success(), "{output:?}");
+    let styled = String::from_utf8(output.stdout).unwrap();
+    let styled = masked(&styled.replace(scratch.0.to_str().unwrap(), "<scratch>"));
+    let svg = anstyle_svg::Term::new().render_svg(&styled);
+    expect_file!["ls/styled.svg"].assert_eq(&svg);
+}
+
+// `--json` gives each row whole, the newest first, with the runs that ended over a day ago and
+// those that can't be listed.
+#[test]
+#[expect(clippy::too_many_lines, reason = "most of it is the JSON's snapshot")]
+fn prints_json() {
+    let scratch = Scratch::new();
+    let log = whole_log();
+    let held = live(
+        &scratch,
+        "20261114-090000-00000001",
+        &cut(&log, 62),
+        Duration::from_secs(2),
+    );
+    let whole = "20261110-100000-0000000a";
+    let priced = lease_places(Prices::Both);
+    write_run(
+        &scratch,
+        whole,
+        asked(whole, 30),
+        &log,
+        Some(returned(49.36)),
+        &priced,
+    );
+    let failed = json!({ "state": "failed", "reason": "r" });
+    write_record(
+        &scratch,
+        "20261110-120000-0000000c",
+        true,
+        Some(failed.clone()),
+    );
+    let older = "20261101-120000-0000000d";
+    write_record(&scratch, older, true, Some(failed));
+    days_ago(&scratch.0.join(format!("runs/{older}/outcome.json")), 2);
+    write_record(&scratch, "20261110-130000-0000000e", false, None);
+    let output = scratch
+        .pumpkin(&["ls", "--runs", "runs", "--json"])
+        .output()
+        .unwrap();
+    drop(held);
+    let mut listed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    for row in listed["runs"].as_array_mut().unwrap() {
+        let row = row.as_object_mut().unwrap();
+        let mut steps: Vec<&mut Value> = Vec::new();
+        for (field, value) in row.iter_mut() {
+            match field.as_str() {
+                "phase" if !value.is_null() => steps.push(value),
+                "steps" => steps.extend(value.as_array_mut().unwrap()),
+                _ => {}
+            }
+        }
+        for step in steps {
+            step["seconds"] = json!("<t>");
+            step["doing"] = json!(masked(step["doing"].as_str().unwrap()));
+        }
+    }
+    let said = String::from_utf8(output.stderr).unwrap();
+    let text = format!(
+        "$ pumpkin ls --runs runs --json\nexit status: {:?}\n{said}{}",
+        output.status.code(),
+        serde_json::to_string_pretty(&listed).unwrap()
+    );
+    check(
+        &scratch,
+        [Step::Ran(text)],
+        false,
+        &[],
+        &expect![[r#"
+        $ pumpkin ls --runs runs --json
+        exit status: Some(1)
+        pumpkin: <scratch>/runs/20261110-130000-0000000e/driver.pid isn't there: expected the record of a run to have it
+        pumpkin: 1 run can't be listed, as said above
+        {
+          "older": [
+            "20261101-120000-0000000d"
+          ],
+          "runs": [
+            {
+              "id": "20261114-090000-00000001",
+              "member": null,
+              "note": null,
+              "phase": {
+                "bound_seconds": 1800,
+                "doing": "1 agent working",
+                "name": "work",
+                "past_bound": false,
+                "seconds": "<t>"
+              },
+              "ran_seconds": null,
+              "requests": 3,
+              "result": null,
+              "spent": {
+                "partial": true,
+                "usd": 0.6808517777777778
+              },
+              "state": "running",
+              "steps": [
+                {
+                  "bound_seconds": 1800,
+                  "doing": "3 model requests, the last answered <t> ago",
+                  "name": "solver",
+                  "past_bound": false,
+                  "seconds": "<t>"
+                },
+                {
+                  "bound_seconds": 606,
+                  "doing": "train call on modal/a100_80 with unknown GPUs for agent 0",
+                  "name": "job 0",
+                  "past_bound": false,
+                  "seconds": "<t>"
+                },
+                {
+                  "bound_seconds": 60,
+                  "doing": "box of job 0 on aws/box, ready, 5s busy; `sh -c set -e\\nprint 7` exited 0",
+                  "name": "lease 0",
+                  "past_bound": false,
+                  "seconds": "<t>"
+                }
+              ],
+              "task": "example/lease",
+              "tokens": {
+                "cached": 2600,
+                "input": 3000,
+                "output": 300
+              },
+              "unread": null
+            },
+            {
+              "id": "20261110-120000-0000000c",
+              "member": null,
+              "note": null,
+              "phase": null,
+              "ran_seconds": null,
+              "requests": null,
+              "result": null,
+              "spent": null,
+              "state": "failed",
+              "steps": [],
+              "task": null,
+              "tokens": null,
+              "unread": null
+            },
+            {
+              "id": "20261110-100000-0000000a",
+              "member": null,
+              "note": null,
+              "phase": null,
+              "ran_seconds": 1100,
+              "requests": 4,
+              "result": [
+                {
+                  "name": "score",
+                  "value": 49.36
+                },
+                {
+                  "name": "metrics",
+                  "value": {
+                    "solved": 3
+                  }
+                }
+              ],
+              "spent": {
+                "partial": true,
+                "usd": 1.107974
+              },
+              "state": "finished",
+              "steps": [],
+              "task": "example/lease",
+              "tokens": {
+                "cached": 2600,
+                "input": 3500,
+                "output": 350
+              },
+              "unread": null
+            }
+          ],
+          "unlisted": [
+            {
+              "id": "20261110-130000-0000000e",
+              "message": "<scratch>/runs/20261110-130000-0000000e/driver.pid isn't there: expected the record of a run to have it",
+              "unread": null
+            }
+          ]
+        }"#]],
     );
 }
 

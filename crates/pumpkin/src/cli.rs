@@ -89,13 +89,13 @@ enum Parsed {
     Wait(Wait),
     /// List runs and their states.
     ///
-    /// `ls` prints a line for each run, oldest first, then a line of totals. Without a prefix, it
-    /// lists the runs that are live or ended within the last day, and the totals say how to list
-    /// the others. A live run's line gives its phase and the bound on it. An ended run's line
-    /// gives its state, how long it ran and its result's values, cut short if they are long.
-    /// `pumpkin wait --outcome` prints them whole. If a run can't be listed, `ls` says why and
-    /// lists the others. With `[controllers.<name>]` in the configuration and no `--runs`, `ls`
-    /// lists the controller's runs beside this machine's copies of them.
+    /// `ls` prints the live runs, newest first, each with its phase and each agent, call and lease
+    /// under it. Then come the runs that ended, newest first, and a line of totals. A result shows
+    /// its numbers, booleans and strings of one line, as far as its line allows, and `+n` counts
+    /// the values left out. On a terminal, `ls` colours each state and draws each step's time
+    /// against its bound as a bar, unless `NO_COLOR` is set. If a run can't be listed, `ls` says
+    /// why and lists the others. With `[controllers.<name>]` in the configuration and no `--runs`,
+    /// `ls` lists the controller's runs beside this machine's copies of them.
     Ls(Ls),
     /// Stop a run and remove what it left.
     ///
@@ -519,6 +519,14 @@ pub(crate) struct Ls {
     #[arg(long, value_name = "name", value_parser = controller(), help = CONTROLLER_HELP)]
     #[arg(conflicts_with = "runs")]
     pub(crate) controller: Option<Controller>,
+    /// List every run, however long ago it ended. Without it or a prefix, `ls` lists the runs
+    /// that are live or ended within the last day. It shows the newest 5 that ended.
+    #[arg(long, conflicts_with = "prefixes")]
+    pub(crate) all: bool,
+    /// Print the listing as JSON: each run's row, the newest first, with its whole result, as
+    /// `pumpkin wait --outcome` prints it.
+    #[arg(long)]
+    pub(crate) json: bool,
     /// A prefix of the ids of the runs to list, such as a day's in UTC, as `20261110`.
     #[arg(value_name = "prefix", value_parser = utf8(", as every id is: name a prefix of an id"))]
     pub(crate) prefixes: Vec<String>,

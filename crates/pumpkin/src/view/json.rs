@@ -63,62 +63,30 @@ pub(super) fn cut_text(text: String) -> String {
 }
 
 /// The row of the run list for a run that has not ended.
-pub(super) fn live_row(held: &Held, at: &next::At) -> Value {
+pub(super) fn live_row(held: &Held, at: &next::At) -> Row {
     let progress = held.readout.progress.clone();
-    let model = progress.as_ref().map(|progress| progress.model.clone());
-    let listed = Listed::of(&held.record, held.task.clone(), None, progress);
+    let listed = Listed::of(&held.record, held.task.clone(), None, progress, None);
     let id = held.record.id();
-    let mut row = listed_json(id, &Row::of(id, &listed, crate::unix_now(), at));
-    row["requests"] = json!(model.as_ref().map(|model| model.requests));
-    row["tokens"] = json!(
-        model
-            .as_ref()
-            .map(|model| tokens_json(&model.tokens, model.requests))
-    );
-    if let Some(started_over) = &held.started_over {
-        row["started_over"] = json!(started_over);
+    Row::of(id, &listed, crate::unix_now(), at)
+}
+
+/// The row of the run list for `row`, as `ls --json` gives it. It adds `started_over`, what the
+/// view found of the run's log when it last read it again from its start.
+pub(super) fn listed_json(row: &Row, started_over: Option<&str>) -> Value {
+    let mut json = match serde_json::to_value(row) {
+        Ok(json) => json,
+        // Serializing a map whose keys aren't strings fails, and a row holds none.
+        Err(error) => unreachable!("a row serializes: {error}"),
+    };
+    if let Some(started_over) = started_over {
+        json["started_over"] = json!(started_over);
     }
-    row
+    json
 }
 
-/// The row of the run list for run `id`, as `ls` shows `row`.
-pub(super) fn listed_json(id: &str, row: &Row) -> Value {
-    let progress::Columns {
-        state,
-        time,
-        bound,
-        usd,
-        rest,
-    } = &row.cells;
-    json!({
-        "id": id,
-        "live": row.live(),
-        "state": state,
-        "has_result": row.has_result(),
-        "time": time,
-        "bound": bound,
-        "usd": usd,
-        "rest": rest,
-    })
-}
-
-/// A run's tokens, where `input` and `output` are `null` if requests were made and no response
-/// reported its tokens, which is not none used.
-pub(super) fn tokens_json(tokens: &Tokens, requests: u64) -> Value {
-    let Tokens {
-        reported,
-        input,
-        output,
-        cached,
-        cache_write: _,
-        reasoning: _,
-    } = tokens;
-    let known = *reported > 0 || requests == 0;
-    json!({
-        "input": known.then_some(input),
-        "output": known.then_some(output),
-        "cached": cached,
-    })
+/// A run's tokens, as a row of the run list gives them.
+fn tokens_json(tokens: &Tokens, requests: u64) -> Value {
+    json!(progress::Tokens::of(tokens, requests))
 }
 
 /// The values a run's result shows, each by its name, in their order, and how its work phase
@@ -158,39 +126,40 @@ pub(super) fn run_json(held: &Held, at: &next::At, again: bool) -> Value {
         held.task.clone(),
         held.ending.clone(),
         progress.clone(),
+        None,
     );
     let row = Row::of(id, &listed, now, at);
-    let verdict = match (&held.ending, &progress) {
+    // The phase of a run that goes on, as `ls` shows it: its name, how long it has lasted, and
+    // ` of ` how long it may, or nothing where it has no bound.
+    let phase = (row.phase.as_ref()).map(|phase| {
+        let (time, bound) = (progress::time(phase), progress::bound(phase));
+        (phase, time, bound)
+    });
+    let verdict = match (&held.ending, &phase) {
         (Some(ending), _) => format!("Run {id} {}", how(ending)),
-        (None, None) => format!("Run {id} is publishing what its sandboxes run"),
-        (None, Some(_)) => {
-            let progress::Columns {
-                state,
-                time,
-                bound,
-                rest,
-                ..
-            } = &row.cells;
-            // A sentence, as the page's words are (`page/h.js`): its first word, the state, takes a
-            // capital.
-            let (first, others) = state.split_at(1);
+        (None, Some((phase, time, bound))) if progress.is_some() => {
+            // A sentence, as the page's words are (`page/h.js`): its first word, the phase's
+            // name, takes a capital.
+            let (first, others) = phase.name.split_at(1);
+            let task = row.task.as_deref().unwrap_or("-");
+            let doing = if phase.doing.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", phase.doing)
+            };
             format!(
-                "{}{others} for {time} {bound}: {rest}",
+                "{}{others} for {time} {bound}: {task}{doing}",
                 first.to_uppercase()
             )
         }
+        (None, _) => format!("Run {id} is publishing what its sandboxes run"),
     };
-    // The stage of a run that goes on, as `ls` shows it in its columns: the stage's name, how
-    // long it has lasted, and ` of ` how long it may, or nothing where it has no bound.
-    let phase = held.ending.is_none().then(|| {
-        let progress::Columns {
-            state, time, bound, ..
-        } = &row.cells;
-        json!({ "name": state, "time": time, "bound": bound })
-    });
+    let going = held.ending.is_none().then_some(phase).flatten();
+    let going = going
+        .map(|(phase, time, bound)| json!({ "name": phase.name, "time": time, "bound": bound }));
     let state = match (&held.ending, &progress) {
         (None, None) => "publishing",
-        (Some(_), _) | (None, Some(_)) => row.state().name(),
+        (Some(_), _) | (None, Some(_)) => row.state.name(),
     };
     let times = progress.as_ref().map(|progress| {
         let live_at = (held.ending.is_none()).then(|| now.since(progress.started));
@@ -219,9 +188,9 @@ pub(super) fn run_json(held: &Held, at: &next::At, again: bool) -> Value {
         "task": held.task,
         "live": held.ending.is_none(),
         "state": state,
-        "has_result": row.has_result(),
+        "has_result": row.result.is_some(),
         "verdict": verdict,
-        "stage": phase,
+        "stage": going,
         "result": result_json(held.ending.as_ref()),
         "failure": failure,
         "failures": held.failures.json(),

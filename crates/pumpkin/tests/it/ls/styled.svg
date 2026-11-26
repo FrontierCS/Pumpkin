@@ -1,0 +1,61 @@
+<svg width="1616px" height="326px" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .fg { fill: #AAAAAA }
+    .bg { fill: #000000 }
+    .fg-cyan { fill: #00AAAA }
+    .fg-green { fill: #00AA00 }
+    .fg-red { fill: #AA0000 }
+    .fg-yellow { fill: #AA5500 }
+    .container {
+      padding: 0 10px;
+      line-height: 18px;
+    }
+    .bold { font-weight: bold; }
+    .dimmed { opacity: 0.4; }
+    tspan {
+      font: 14px SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace;
+      white-space: pre;
+      line-height: 18px;
+    }
+  </style>
+
+  <rect width="100%" height="100%" y="0" rx="4.5" class="bg" />
+
+  <text xml:space="preserve" class="container fg">
+    <tspan x="10px" y="28px"><tspan class="bold">live</tspan>
+</tspan>
+    <tspan x="10px" y="46px"><tspan>  20261114-090000-00000002  example/lease  </tspan><tspan class="fg-cyan">ending</tspan><tspan>     &lt;t&gt; of 1h43m </tspan><tspan class="dimmed">──────────</tspan><tspan>  $1.04+  the end of lease 2</tspan>
+</tspan>
+    <tspan x="10px" y="64px"><tspan>    lease 2     &lt;t&gt;                    cpu of agent 0 on aws/judge, closed as the work phase ended; its sandbox isn't gone yet; `sleep 60` timed out</tspan>
+</tspan>
+    <tspan x="10px" y="82px"><tspan>  20261114-090000-00000001  example/lease  </tspan><tspan class="fg-cyan">work  </tspan><tspan>     &lt;t&gt; of 30m   </tspan><tspan class="fg-cyan">━━━━━━</tspan><tspan class="dimmed">────</tspan><tspan>  $0.95+  1 agent working</tspan>
+</tspan>
+    <tspan x="10px" y="100px"><tspan>    solver      &lt;t&gt; of 30m </tspan><tspan class="fg-cyan">━━━━━━</tspan><tspan class="dimmed">────</tspan><tspan>  3 model requests, the last answered &lt;t&gt; ago</tspan>
+</tspan>
+    <tspan x="10px" y="118px"><tspan>    lease 2     &lt;t&gt; of 30m </tspan><tspan class="fg-cyan">━━━━━</tspan><tspan class="dimmed">─────</tspan><tspan>  cpu of agent 0 on aws/judge, ready, 30s busy; `sleep 60` timed out</tspan>
+</tspan>
+    <tspan x="10px" y="136px"><tspan>    lease 3     &lt;t&gt;                    gpu of agent 0 on modal/a100_80 with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB), expired; its sandbox isn't gone yet; `true` exited 0</tspan>
+</tspan>
+    <tspan x="10px" y="154px">
+</tspan>
+    <tspan x="10px" y="172px"><tspan class="bold">ended</tspan>
+</tspan>
+    <tspan x="10px" y="190px"><tspan>  20261110-140000-0000000e  -              </tspan><tspan class="fg-red bold">lost       </tspan><tspan>  </tspan><tspan class="dimmed">     -</tspan><tspan>  </tspan><tspan class="dimmed">     -</tspan>
+</tspan>
+    <tspan x="10px" y="208px"><tspan>  20261110-130000-0000000d  -              </tspan><tspan class="fg-yellow">interrupted</tspan><tspan>  </tspan><tspan class="dimmed">     -</tspan><tspan>  </tspan><tspan class="dimmed">     -</tspan>
+</tspan>
+    <tspan x="10px" y="226px"><tspan>  20261110-120000-0000000c  -              </tspan><tspan class="fg-red bold">failed     </tspan><tspan>  </tspan><tspan class="dimmed">     -</tspan><tspan>  </tspan><tspan class="dimmed">     -</tspan>
+</tspan>
+    <tspan x="10px" y="244px"><tspan>  20261110-110000-0000000b  -              </tspan><tspan class="fg-yellow">finished   </tspan><tspan>  </tspan><tspan class="dimmed">     -</tspan><tspan>  </tspan><tspan class="dimmed">     -</tspan><tspan>  </tspan><tspan class="dimmed">no result</tspan>
+</tspan>
+    <tspan x="10px" y="262px"><tspan>  20261110-100000-0000000a  example/lease  </tspan><tspan class="fg-green">finished   </tspan><tspan>  18m20s  $1.11+  </tspan><tspan class="dimmed">score=</tspan><tspan>49.36 </tspan><tspan class="dimmed">+1</tspan>
+</tspan>
+    <tspan x="10px" y="280px"><tspan class="dimmed">+n counts the values of a result left out: to see them: pumpkin wait --outcome --runs &lt;scratch&gt;/runs &lt;run&gt;</tspan>
+</tspan>
+    <tspan x="10px" y="298px">
+</tspan>
+    <tspan x="10px" y="316px"><tspan>7 runs: </tspan><tspan class="fg-cyan">2 live</tspan><tspan>, </tspan><tspan class="fg-green">2 finished</tspan><tspan> </tspan><tspan class="fg-yellow">(1 without a result)</tspan><tspan>, </tspan><tspan class="fg-red bold">1 failed</tspan><tspan>, </tspan><tspan class="fg-yellow">1 interrupted</tspan><tspan>, </tspan><tspan class="fg-red bold">1 lost</tspan><tspan> · $3.10+</tspan>
+</tspan>
+  </text>
+
+</svg>

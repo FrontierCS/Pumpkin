@@ -1096,7 +1096,10 @@ fn reads_a_deep_result_and_a_log_cut_short() {
             $ pumpkin ls --runs runs 20261113-123335-0000000a
             exit status: Some(0)
             printed:
-              20261113-123335-0000000a finished         2s  -               -  example/lease: whole={"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d"…
+              ended
+                20261113-123335-0000000a  example/lease  finished      2s  -  +1
+              +n counts the values of a result left out: to see them: pumpkin wait --outcome --runs <scratch>/runs <run>
+
               1 run: 1 finished
             $ pumpkin wait --runs runs 20261113-123335-0000000a
             exit status: Some(0)

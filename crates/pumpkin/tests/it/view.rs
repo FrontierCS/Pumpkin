@@ -385,8 +385,23 @@ fn serves_runs() {
     let mut listed = served.get("/api/runs");
     for row in listed["runs"].as_array_mut().unwrap() {
         if row["id"] == live {
-            row["time"] = json!("<t>");
-            row["rest"] = json!(row["rest"].as_str().unwrap().replace(char::is_numeric, "#"));
+            let row = row.as_object_mut().unwrap();
+            let mut steps: Vec<&mut Value> = Vec::new();
+            for (field, value) in row.iter_mut() {
+                match field.as_str() {
+                    "phase" => steps.push(value),
+                    "steps" => steps.extend(value.as_array_mut().unwrap()),
+                    _ => {}
+                }
+            }
+            for step in steps {
+                step["seconds"] = json!("<t>");
+                let doing = step["doing"]
+                    .as_str()
+                    .unwrap()
+                    .replace(char::is_numeric, "#");
+                step["doing"] = json!(doing);
+            }
         }
     }
     steps.push(format!("GET /api/runs\n{}", fields(&listed, &["runs"])));
@@ -460,28 +475,28 @@ fn serves_runs() {
         steps.into_iter().map(Step::Ran),
         false,
         &shown,
-        &expect![[r#"
+        &expect![[r##"
             pumpkin view --runs runs
             pumpkin: serving the runs in runs to this machine alone, until stopped, at
                 http://127.0.0.1:<port>/?t=<token>
             GET /api/runs
             next: null
             runs:
-              {"bound":"","has_result":false,"id":"20261110-125000-00000010","live":false,"requests":null,"rest":"made by pumpkin 9.9.9","state":"unread","time":"-","tokens":null,"usd":"-"}
+              {"id":"20261110-125000-00000010","member":null,"note":"made by pumpkin 9.9.9","phase":null,"ran_seconds":null,"requests":null,"result":null,"spent":null,"state":"unread","steps":[],"task":null,"tokens":null,"unread":null}
               {"error":"runs/20261110-124000-00000011/record.json: Permission denied (os error 13)","id":"20261110-124000-00000011"}
-              {"bound":"-","has_result":false,"id":"20261110-120000-0000000d","live":false,"requests":null,"rest":"-","state":"lost","time":"-","tokens":null,"usd":"-"}
-              {"bound":"of 30m","has_result":false,"id":"<live>","live":true,"requests":3,"rest":"example/lease: # agent working","state":"work","time":"<t>","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.73+"}
-              {"bound":"-","has_result":false,"id":"20261110-100000-0000000b","live":false,"requests":3,"rest":"example/lease","state":"lost","time":"2m10s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.73+"}
-              {"bound":"-","has_result":true,"id":"<ended>","live":false,"requests":4,"rest":"example/lease: score=49.36 metrics={\"solved\":3}","state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.77+"}
-              {"bound":"-","has_result":false,"id":"20261110-083000-0000000c","live":false,"requests":2,"rest":"-","state":"finished","time":"1m00s","tokens":{"cached":null,"input":1000,"output":100},"usd":"$0.45+"}
-              {"bound":"-","has_result":false,"id":"20261110-080000-00000009","live":false,"requests":3,"rest":"-","state":"finished","time":"1m00s","tokens":{"cached":null,"input":null,"output":null},"usd":"-"}
-              {"bound":"-","has_result":false,"id":"20261110-070000-00000008","live":false,"requests":0,"rest":"-","state":"finished","time":"1m00s","tokens":{"cached":null,"input":0,"output":0},"usd":"-"}
-              {"bound":"-","has_result":true,"id":"20261110-060000-00000005","live":false,"requests":4,"rest":"example/lease: score=49.36 metrics={\"solved\":3}","state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3500,"output":350},"usd":"$0.66+"}
-              {"bound":"-","has_result":true,"id":"20261110-050000-00000006","live":false,"requests":4,"rest":"example/lease: score=49.36 metrics={\"solved\":3}","state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3500,"output":350},"usd":"$0.45+"}
-              {"bound":"-","has_result":true,"id":"20261110-040000-00000007","live":false,"requests":4,"rest":"example/lease: score=49.36 metrics={\"solved\":3}","state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3500,"output":350},"usd":"-"}
+              {"id":"20261110-120000-0000000d","member":null,"note":null,"phase":null,"ran_seconds":null,"requests":null,"result":null,"spent":null,"state":"lost","steps":[],"task":null,"tokens":null,"unread":null}
+              {"id":"<live>","member":null,"note":null,"phase":{"bound_seconds":1800,"doing":"# agent working","name":"work","past_bound":false,"seconds":"<t>"},"ran_seconds":null,"requests":3,"result":null,"spent":{"partial":true,"usd":0.7290855555555555},"state":"running","steps":[{"bound_seconds":1800,"doing":"# model requests, the last answered #m##s ago","name":"solver","past_bound":false,"seconds":"<t>"},{"bound_seconds":60,"doing":"gpu of agent # on modal/a###_## with NVIDIA A###-SXM#-##GB, ready, #m##s busy; `nvidia-smi` running","name":"lease 1","past_bound":false,"seconds":"<t>"},{"bound_seconds":120,"doing":"cpu of agent # on aws/judge, starting","name":"lease 2","past_bound":false,"seconds":"<t>"}],"task":"example/lease","tokens":{"cached":2600,"input":3000,"output":300},"unread":null}
+              {"id":"20261110-100000-0000000b","member":null,"note":null,"phase":null,"ran_seconds":130,"requests":3,"result":null,"spent":{"partial":true,"usd":0.7290855555555555},"state":"lost","steps":[],"task":"example/lease","tokens":{"cached":2600,"input":3000,"output":300},"unread":null}
+              {"id":"<ended>","member":null,"note":null,"phase":null,"ran_seconds":1100,"requests":4,"result":[{"name":"score","value":49.36},{"name":"metrics","value":{"solved":3}}],"spent":{"partial":true,"usd":0.77},"state":"finished","steps":[],"task":"example/lease","tokens":{"cached":2600,"input":3000,"output":300},"unread":null}
+              {"id":"20261110-083000-0000000c","member":null,"note":null,"phase":null,"ran_seconds":60,"requests":2,"result":null,"spent":{"partial":true,"usd":0.45},"state":"finished","steps":[],"task":null,"tokens":{"cached":null,"input":1000,"output":100},"unread":null}
+              {"id":"20261110-080000-00000009","member":null,"note":null,"phase":null,"ran_seconds":60,"requests":3,"result":null,"spent":{"partial":false,"usd":null},"state":"finished","steps":[],"task":null,"tokens":{"cached":null,"input":null,"output":null},"unread":null}
+              {"id":"20261110-070000-00000008","member":null,"note":null,"phase":null,"ran_seconds":60,"requests":0,"result":null,"spent":{"partial":false,"usd":null},"state":"finished","steps":[],"task":null,"tokens":{"cached":null,"input":0,"output":0},"unread":null}
+              {"id":"20261110-060000-00000005","member":null,"note":null,"phase":null,"ran_seconds":1100,"requests":4,"result":[{"name":"score","value":49.36},{"name":"metrics","value":{"solved":3}}],"spent":{"partial":true,"usd":0.65925},"state":"finished","steps":[],"task":"example/lease","tokens":{"cached":2600,"input":3500,"output":350},"unread":null}
+              {"id":"20261110-050000-00000006","member":null,"note":null,"phase":null,"ran_seconds":1100,"requests":4,"result":[{"name":"score","value":49.36},{"name":"metrics","value":{"solved":3}}],"spent":{"partial":true,"usd":0.448724},"state":"finished","steps":[],"task":"example/lease","tokens":{"cached":2600,"input":3500,"output":350},"unread":null}
+              {"id":"20261110-040000-00000007","member":null,"note":null,"phase":null,"ran_seconds":1100,"requests":4,"result":[{"name":"score","value":49.36},{"name":"metrics","value":{"solved":3}}],"spent":{"partial":true,"usd":null},"state":"finished","steps":[],"task":"example/lease","tokens":{"cached":2600,"input":3500,"output":350},"unread":null}
 
             GET /api/runs?before=<live>
-            {"next":null,"runs":[{"bound":"-","has_result":false,"id":"20261110-100000-0000000b","live":false,"requests":3,"rest":"example/lease","state":"lost","time":"2m10s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.73+"},{"bound":"-","has_result":true,"id":"<ended>","live":false,"requests":4,"rest":"example/lease: score=49.36 metrics={\"solved\":3}","state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.77+"},{"bound":"-","has_result":false,"id":"20261110-083000-0000000c","live":false,"requests":2,"rest":"-","state":"finished","time":"1m00s","tokens":{"cached":null,"input":1000,"output":100},"usd":"$0.45+"},{"bound":"-","has_result":false,"id":"20261110-080000-00000009","live":false,"requests":3,"rest":"-","state":"finished","time":"1m00s","tokens":{"cached":null,"input":null,"output":null},"usd":"-"},{"bound":"-","has_result":false,"id":"20261110-070000-00000008","live":false,"requests":0,"rest":"-","state":"finished","time":"1m00s","tokens":{"cached":null,"input":0,"output":0},"usd":"-"},{"bound":"-","has_result":true,"id":"20261110-060000-00000005","live":false,"requests":4,"rest":"example/lease: score=49.36 metrics={\"solved\":3}","state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3500,"output":350},"usd":"$0.66+"},{"bound":"-","has_result":true,"id":"20261110-050000-00000006","live":false,"requests":4,"rest":"example/lease: score=49.36 metrics={\"solved\":3}","state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3500,"output":350},"usd":"$0.45+"},{"bound":"-","has_result":true,"id":"20261110-040000-00000007","live":false,"requests":4,"rest":"example/lease: score=49.36 metrics={\"solved\":3}","state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3500,"output":350},"usd":"-"}]}
+            {"next":null,"runs":[{"id":"20261110-100000-0000000b","member":null,"note":null,"phase":null,"ran_seconds":130,"requests":3,"result":null,"spent":{"partial":true,"usd":0.7290855555555555},"state":"lost","steps":[],"task":"example/lease","tokens":{"cached":2600,"input":3000,"output":300},"unread":null},{"id":"<ended>","member":null,"note":null,"phase":null,"ran_seconds":1100,"requests":4,"result":[{"name":"score","value":49.36},{"name":"metrics","value":{"solved":3}}],"spent":{"partial":true,"usd":0.77},"state":"finished","steps":[],"task":"example/lease","tokens":{"cached":2600,"input":3000,"output":300},"unread":null},{"id":"20261110-083000-0000000c","member":null,"note":null,"phase":null,"ran_seconds":60,"requests":2,"result":null,"spent":{"partial":true,"usd":0.45},"state":"finished","steps":[],"task":null,"tokens":{"cached":null,"input":1000,"output":100},"unread":null},{"id":"20261110-080000-00000009","member":null,"note":null,"phase":null,"ran_seconds":60,"requests":3,"result":null,"spent":{"partial":false,"usd":null},"state":"finished","steps":[],"task":null,"tokens":{"cached":null,"input":null,"output":null},"unread":null},{"id":"20261110-070000-00000008","member":null,"note":null,"phase":null,"ran_seconds":60,"requests":0,"result":null,"spent":{"partial":false,"usd":null},"state":"finished","steps":[],"task":null,"tokens":{"cached":null,"input":0,"output":0},"unread":null},{"id":"20261110-060000-00000005","member":null,"note":null,"phase":null,"ran_seconds":1100,"requests":4,"result":[{"name":"score","value":49.36},{"name":"metrics","value":{"solved":3}}],"spent":{"partial":true,"usd":0.65925},"state":"finished","steps":[],"task":"example/lease","tokens":{"cached":2600,"input":3500,"output":350},"unread":null},{"id":"20261110-050000-00000006","member":null,"note":null,"phase":null,"ran_seconds":1100,"requests":4,"result":[{"name":"score","value":49.36},{"name":"metrics","value":{"solved":3}}],"spent":{"partial":true,"usd":0.448724},"state":"finished","steps":[],"task":"example/lease","tokens":{"cached":2600,"input":3500,"output":350},"unread":null},{"id":"20261110-040000-00000007","member":null,"note":null,"phase":null,"ran_seconds":1100,"requests":4,"result":[{"name":"score","value":49.36},{"name":"metrics","value":{"solved":3}}],"spent":{"partial":true,"usd":null},"state":"finished","steps":[],"task":"example/lease","tokens":{"cached":2600,"input":3500,"output":350},"unread":null}]}
             GET /api/runs/<ended>
             again: {"command":"pumpkin run --runs <scratch>/runs <scratch>/task.star"}
             cost: {"said":"$1.11, $0.66 of it for tokens and $0.45 for sandboxes, and more without a price, and for 1 response's unreported tokens","shown":"$1.11+"}
@@ -554,7 +569,7 @@ fn serves_runs() {
             {"error":"runs/20261110-124000-00000011/record.json: Permission denied (os error 13)"}
             GET /api/runs/<ended>/since?log=7 []
             HTTP/1.1 400 Bad Request
-            {"error":"byte 7 starts no line of run <ended>'s log, which is read to byte 10332: expected 0, or a byte that an answer gave"}"#]],
+            {"error":"byte 7 starts no line of run <ended>'s log, which is read to byte 10332: expected 0, or a byte that an answer gave"}"##]],
     );
 }
 
@@ -729,13 +744,17 @@ fn lists_the_jobs_whose_runs_have_no_record() {
         let (head, body) = piped.ask("/api/runs", false);
         let listed: Value = serde_json::from_slice(&body).unwrap();
         let rows = listed["runs"].as_array().unwrap().iter().map(|row| {
+            // A job's phase lasts as long as its marker is old, which moves.
+            let said = match (&row["phase"], &row["note"]) {
+                (Value::Object(phase), _) => format!("{} {}", phase["name"], phase["doing"]),
+                (_, Value::String(note)) => note.clone(),
+                _ => format!("result {}", row["result"]),
+            };
             format!(
-                "  {} {} {} live {}: {}",
+                "  {} {} {}: {said}",
                 row["id"].as_str().unwrap(),
                 row["member"].as_str().unwrap(),
                 row["state"].as_str().unwrap(),
-                row["live"],
-                row["rest"].as_str().unwrap()
             )
         });
         let rows: Vec<String> = rows.collect();
@@ -752,15 +771,15 @@ fn lists_the_jobs_whose_runs_have_no_record() {
         &[],
         &expect![[r#"
             GET /api/runs, before any run's record: 200 OK
-              20261107-130200-2c9b0006 alice unstarted live false: -: its job ended before the run started: to see why: pumpkin wait --controller alice 20261107-130200-2c9b0006
-              20261107-130100-2c9b0005 alice building live true: holding a build slot for 24h
-              20261107-130000-2c9b0004 alice waiting live true: waiting 24h for a build slot
-              20261107-120000-1b8a0001 alice unstarted live false: -: its job ended before the run started: to see why: pumpkin wait --controller alice 20261107-120000-1b8a0001
+              20261107-130200-2c9b0006 alice unstarted: its job ended before the run started: to see why: pumpkin wait --controller alice 20261107-130200-2c9b0006
+              20261107-130100-2c9b0005 alice building: "building" "holding a build slot"
+              20261107-130000-2c9b0004 alice waiting: "waiting" "for a build slot"
+              20261107-120000-1b8a0001 alice unstarted: its job ended before the run started: to see why: pumpkin wait --controller alice 20261107-120000-1b8a0001
             GET /api/runs, once 20261107-120000-1b8a0001's is begun: 200 OK
-              20261107-130200-2c9b0006 alice unstarted live false: -: its job ended before the run started: to see why: pumpkin wait --controller alice 20261107-130200-2c9b0006
-              20261107-130100-2c9b0005 alice building live true: holding a build slot for 24h
-              20261107-130000-2c9b0004 alice waiting live true: waiting 24h for a build slot
-              20261107-120000-1b8a0001 alice finished live false: -: score=7 metrics={"solved":3}"#]],
+              20261107-130200-2c9b0006 alice unstarted: its job ended before the run started: to see why: pumpkin wait --controller alice 20261107-130200-2c9b0006
+              20261107-130100-2c9b0005 alice building: "building" "holding a build slot"
+              20261107-130000-2c9b0004 alice waiting: "waiting" "for a build slot"
+              20261107-120000-1b8a0001 alice finished: result [{"name":"score","value":7.0},{"name":"metrics","value":{"solved":3}}]"#]],
     );
 }
 

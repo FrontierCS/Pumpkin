@@ -58,9 +58,10 @@ a run under the user's manager outlives it: enable lingering, and start `run` un
 ## Following and listing runs
 
 `pumpkin wait` follows a run to its end and says its summary. `run --wait` starts a run and
-follows it as `wait` does. `pumpkin ls` lists the runs that are live or ended within the last day.
-`pumpkin view` serves them to this machine's browser ([records](record.md#the-page)). `wait`,
-`ls` and `view` read only the record, so ending one never stops a run.
+follows it as `wait` does. `pumpkin ls` lists the runs that are live or ended within the last day,
+the newest first. `ls --json` lists them for a program to read. `pumpkin view` serves them to this
+machine's browser ([records](record.md#the-page)). `wait`, `ls` and `view` read only the record, so
+ending one never stops a run.
 
 A live run's phase is `publishing` what its sandboxes run, `starting` its agents, `work`, `ending`
 the work phase, or `final call`. Under the phase, `ls` names each call and each lease that hasn't
