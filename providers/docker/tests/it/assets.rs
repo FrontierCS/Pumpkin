@@ -7,7 +7,6 @@ use std::net::TcpStream;
 use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::{fs, thread};
 
 use docker::AssetCache;
@@ -133,7 +132,8 @@ fn listed(base: &Path, dir: &Path, lines: &mut Vec<String>) {
             let bytes = String::from_utf8_lossy(&fs::read(&path).unwrap())
                 .escape_debug()
                 .to_string();
-            lines.push(format!("  {:04o} {shown}: {bytes}", mode(&path)));
+            let held = format!("  {:04o} {shown}: {bytes}", mode(&path));
+            lines.push(held.trim_end().to_owned());
         }
     }
 }
@@ -156,6 +156,7 @@ fn fetches_each_digest_once() {
         fetched: false, at <cache>/<digest>
         the cache holds:
           0700 .
+          0600 .<digest>.lock:
           0555 <digest>/
           0444 <digest>/config.json: {}\n
           0555 <digest>/shards/
@@ -192,12 +193,13 @@ fn refuses_what_isnt_pinned() {
         `short` from https://localhost:PORT/short ends after 1 of its 2 bytes: give the size of the file that the URL serves
         `long` from https://localhost:PORT/long holds more than its 2 bytes: give the size of the file that the URL serves
         the cache holds:
-          0700 ."#]],
+          0700 .
+          0600 .<digest>.lock:"#]],
     );
 }
 
-// Two fetches of a digest at once each fetch the files, and the first to name the entry keeps it.
-// The second finds it named, and drops its own.
+// Two fetches of a digest at once fetch its files once. The second begins while the first holds
+// the digest's lock and waits on its server.
 #[test]
 fn fetches_at_once() {
     let dir = TestDir::new();
@@ -205,73 +207,65 @@ fn fetches_at_once() {
     let (asked, first_asked) = mpsc::channel();
     let (release, gate) = mpsc::channel();
     let held = serving(vec![(CONFIG.0, CONFIG.1)], Some(asked), Some(gate));
-    let free = serving(vec![(CONFIG.0, CONFIG.1)], None, None);
-    let first = {
-        let (cache, files) = (cache.clone(), files(held, &[(CONFIG.0, CONFIG.2, 3)]));
+    let (asked, second_asked) = mpsc::channel();
+    let free = serving(vec![(CONFIG.0, CONFIG.1)], Some(asked), None);
+    let publishing = |port| {
+        let (cache, files) = (cache.clone(), files(port, &[(CONFIG.0, CONFIG.2, 3)]));
         thread::spawn(move || published(&cache, &files))
     };
-    // The first holds its staging directory, and waits on its server.
+    let first = publishing(held);
     first_asked.recv().unwrap();
-    let second = published(&cache, &files(free, &[(CONFIG.0, CONFIG.2, 3)]));
+    let second = publishing(free);
+    // Whether the second waits for the lock by then or takes it later, it finds the entry.
     release.send(()).unwrap();
-    let first = first.join().unwrap();
+    let (first, second) = (first.join().unwrap(), second.join().unwrap());
+    let asked = format!(
+        "the second's server was asked {} times",
+        second_asked.try_iter().count()
+    );
     check(
         &cache,
-        &[first, second],
+        &[first, second, asked],
         &[],
         &expect![[r#"
         fetched: true, at <cache>/<digest>
-        fetched: true, at <cache>/<digest>
+        fetched: false, at <cache>/<digest>
+        the second's server was asked 0 times
         the cache holds:
           0700 .
+          0600 .<digest>.lock:
           0555 <digest>/
           0444 <digest>/config.json: {}\n"#]],
     );
 }
 
-// A fetch removes each directory that a fetch of its digest began past their bound, as a killed one
-// leaves, though read-only. It keeps one that began within the bound, and another digest's.
+// A fetch replaces what a killed fetch of its digest left in its staging directory, though
+// read-only.
 #[test]
-fn removes_what_a_killed_fetch_left() {
+fn replaces_what_a_killed_fetch_left() {
     let dir = TestDir::new();
     let cache = dir.path().join("assets");
     // As the cache makes itself.
     DirBuilder::new().mode(0o700).create(&cache).unwrap();
-    let left = |name: &str| {
-        let shards = cache.join(name).join("shards");
-        fs::create_dir_all(&shards).unwrap();
-        fs::write(shards.join("1.bin"), SHARD.1).unwrap();
-        fs::set_permissions(shards.join("1.bin"), Permissions::from_mode(0o444)).unwrap();
-        for read_only in [shards.clone(), cache.join(name)] {
-            fs::set_permissions(read_only, Permissions::from_mode(0o555)).unwrap();
-        }
-    };
-    let (hex, other) = (&DIGEST["sha256:".len()..], "e".repeat(64));
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    left(&format!(".{hex}.0.killed"));
-    left(&format!(".{hex}.{now}.running"));
-    left(&format!(".{other}.0.killed"));
+    let left = cache.join(format!(".{}.part", &DIGEST["sha256:".len()..]));
+    let shards = left.join("shards");
+    fs::create_dir_all(&shards).unwrap();
+    fs::write(shards.join("1.bin"), SHARD.1).unwrap();
+    fs::set_permissions(shards.join("1.bin"), Permissions::from_mode(0o444)).unwrap();
+    for read_only in [&shards, &left] {
+        fs::set_permissions(read_only, Permissions::from_mode(0o555)).unwrap();
+    }
     let port = serving(vec![(CONFIG.0, CONFIG.1)], None, None);
     let outcomes = [published(&cache, &files(port, &[(CONFIG.0, CONFIG.2, 3)]))];
-    let now = now.to_string();
-    let masked = [(now.as_str(), "<now>"), (other.as_str(), "<other>")];
     check(
         &cache,
         &outcomes,
-        &masked,
+        &[],
         &expect![[r#"
         fetched: true, at <cache>/<digest>
         the cache holds:
           0700 .
-          0555 .<digest>.<now>.running/
-          0555 .<digest>.<now>.running/shards/
-          0444 .<digest>.<now>.running/shards/1.bin: 1\n
-          0555 .<other>.0.killed/
-          0555 .<other>.0.killed/shards/
-          0444 .<other>.0.killed/shards/1.bin: 1\n
+          0600 .<digest>.lock:
           0555 <digest>/
           0444 <digest>/config.json: {}\n"#]],
     );

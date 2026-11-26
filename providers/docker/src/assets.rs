@@ -2,11 +2,11 @@
 //! ([`AssetCache`]).
 
 use std::collections::BTreeSet;
-use std::fs::{self, DirBuilder, File, Permissions};
+use std::fs::{self, DirBuilder, File, OpenOptions, Permissions};
 use std::io::{self, Read as _, Write};
-use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use provider::{AssetDigest, AssetRef, Assets, PublishedAsset, RunTag};
 use schema::ir::{AssetFile, AssetFiles, Sha256Digest};
@@ -38,10 +38,11 @@ const MAX_REDIRECTS: u32 = 40;
 /// the servers that it fetches them from.
 ///
 /// It fetches each digest's files once, into an entry named by the digest, which each sandbox that
-/// holds them mounts read-only. A fetch fills a directory of its own, then makes it read-only. It
-/// renames that to the entry once each file has the size and SHA-256 that its asset pins. So no
-/// fetch, even another process's, finds an entry half made. A fetch that fails removes its
-/// directory. A later fetch of the digest removes one that a killed fetch left.
+/// holds them mounts read-only. A fetch holds the digest's lock, which a fetch in any process waits
+/// for. It fills the digest's staging directory, then makes it read-only. It renames that to the
+/// entry once each file has the size and SHA-256 that its asset pins. So no fetch finds an entry
+/// half made. A fetch that fails removes its directory. A later fetch of the digest removes one
+/// that a killed fetch left.
 // Bazel's repository cache moves a download into place alike:
 // https://github.com/bazelbuild/bazel/blob/06deebfb5b73f848de5a0ea0e00fcfaa26788d1f/src/main/java/com/google/devtools/build/lib/bazel/repository/cache/RepositoryCache.java#L231-L236
 #[derive(Debug)]
@@ -153,31 +154,6 @@ impl AssetCache {
         let read_only = fs::set_permissions(&to, Permissions::from_mode(0o444));
         read_only.context(to.display())
     }
-
-    /// Removes each directory that a fetch of `digest` began over [`FETCH_TIMEOUT`] ago, as of
-    /// `now`, a time since the Unix epoch. Its fetch has failed, or its process was killed.
-    fn remove_stale(&self, digest: &AssetDigest, now: Duration) -> Result<(), String> {
-        let prefix = format!(".{}.", digest.hex());
-        let entries = fs::read_dir(&self.dir).context(self.dir.display())?;
-        for entry in entries {
-            let entry = entry.context(self.dir.display())?;
-            let name = entry.file_name();
-            let began = (name.to_str())
-                .and_then(|name| name.strip_prefix(&prefix))
-                .and_then(|rest| rest.split_once('.'))
-                .and_then(|(seconds, _)| seconds.parse().ok())
-                .map(Duration::from_secs);
-            if began.is_some_and(|began| now.saturating_sub(began) > FETCH_TIMEOUT) {
-                let path = entry.path();
-                match remove(&path) {
-                    // Its own fetch, just past its bound, removed it first.
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                    removed => removed.context(format_args!("removing {}", path.display()))?,
-                }
-            }
-        }
-        Ok(())
-    }
 }
 
 impl Assets for AssetCache {
@@ -196,6 +172,17 @@ impl Assets for AssetCache {
                 entry.display()
             ));
         };
+        let made = DirBuilder::new()
+            .mode(0o700)
+            .recursive(true)
+            .create(&self.dir);
+        made.context(self.dir.display())?;
+        let lock = self.dir.join(format!(".{}.lock", digest.hex()));
+        let lock = (OpenOptions::new().create(true).truncate(false).write(true))
+            .mode(0o600)
+            .open(&lock)
+            .and_then(|file| file.lock().map(|()| file))
+            .context(lock.display())?;
         // Only a fetch that checked each file names an entry.
         if fs::exists(&entry).context(entry.display())? {
             return Ok(PublishedAsset {
@@ -203,28 +190,25 @@ impl Assets for AssetCache {
                 fetched: false,
             });
         }
-        let made = DirBuilder::new()
-            .mode(0o700)
-            .recursive(true)
-            .create(&self.dir);
-        made.context(self.dir.display())?;
+        // The wait for the lock is unbounded, as Go's module cache waits for its lockfile. Its
+        // holder's fetch is bounded by `FETCH_TIMEOUT`, and the kernel releases the lock of a
+        // killed holder. So a staging directory that the holder finds is a dead fetch's.
+        // https://github.com/golang/go/blob/46b62495e1bf4d56e0313320772ae588d9119aed/src/cmd/go/internal/modfetch/fetch.go#L218-L234
+        let staging = Staging {
+            dir: self.dir.join(format!(".{}.part", digest.hex())),
+            _lock: lock,
+        };
+        match remove(&staging.dir) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            removed => removed.context(format_args!("removing {}", staging.dir.display()))?,
+        }
+        fs::create_dir(&staging.dir).context(staging.dir.display())?;
         let by = Deadline::after(FETCH_TIMEOUT);
-        let began = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default();
-        self.remove_stale(digest, began)?;
-        // Named by when it began, for a later fetch to tell it stale, then by random characters.
-        // `tempdir_in` tries others until no directory has the name.
-        let staging = tempfile::Builder::new()
-            .prefix(&format!(".{}.{}.", digest.hex(), began.as_secs()))
-            .tempdir_in(&self.dir)
-            .context(self.dir.display())?;
-        let staging = Staging(staging.keep());
         let mut dirs = BTreeSet::new();
         for file in files.as_slice() {
-            self.fetch(&staging.0, file, by)?;
+            self.fetch(&staging.dir, file, by)?;
             let below = Path::new(file.path.as_str()).ancestors().skip(1);
-            dirs.extend(below.map(|dir| staging.0.join(dir)));
+            dirs.extend(below.map(|dir| staging.dir.join(dir)));
         }
         // Deepest first, so that a crash once the entry is named leaves none of its files out.
         for dir in dirs.iter().rev() {
@@ -232,19 +216,13 @@ impl Assets for AssetCache {
             read_only.context(dir.display())?;
             sync(dir)?;
         }
-        match fs::rename(&staging.0, &entry) {
-            Ok(()) => sync(&self.dir)?,
-            // Another fetch at once named it first, which checked each file as this one did. The
-            // staging directory goes as it drops.
-            Err(_) if entry.is_dir() => {}
-            Err(error) => {
-                return Err(format!(
-                    "renaming {} to {} failed: {error}",
-                    staging.0.display(),
-                    entry.display()
-                ));
-            }
-        }
+        let renamed = fs::rename(&staging.dir, &entry);
+        renamed.context(format_args!(
+            "renaming {} to {}",
+            staging.dir.display(),
+            entry.display()
+        ))?;
+        sync(&self.dir)?;
         Ok(PublishedAsset {
             reference,
             fetched: true,
@@ -252,13 +230,17 @@ impl Assets for AssetCache {
     }
 }
 
-/// A fetch's directory, which it removes as it drops unless the fetch renamed it.
-struct Staging(PathBuf);
+/// A fetch's directory, and the digest's lock. It removes the directory as it drops, unless the
+/// fetch renamed it, and only then releases the lock.
+struct Staging {
+    dir: PathBuf,
+    _lock: File,
+}
 
 impl Drop for Staging {
     fn drop(&mut self) {
-        // Gone once renamed. A directory left by a failed removal is stale to a later fetch.
-        let _ = remove(&self.0);
+        // Gone once renamed. A directory left by a failed removal goes at the next fetch.
+        let _ = remove(&self.dir);
     }
 }
 

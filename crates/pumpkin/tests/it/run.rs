@@ -1695,7 +1695,7 @@ fn holds_assets_read_only() {
         lease 0's sandbox, leases/0/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
         lease 1's sandbox, leases/1/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
         outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_exited","status":{"code":0}}}],"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"busy_ns":"<ns>","charged_ns":"<ns>","class":"container","count":4,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":4},{"name":"of","value":4},{"name":"pinned","value":true},{"name":"read_only","value":true},{"name":"refused","value":true},{"name":"unchanged","value":true},{"name":"unexpected","value":{}}]}}}
-        .pumpkin/assets holds: 6ce84a757aa294faf6f92e1e6ffec9916a3d70bb60c53f32e4f56295f2f239d7"#]].assert_eq(&shown);
+        .pumpkin/assets holds: .6ce84a757aa294faf6f92e1e6ffec9916a3d70bb60c53f32e4f56295f2f239d7.lock, 6ce84a757aa294faf6f92e1e6ffec9916a3d70bb60c53f32e4f56295f2f239d7"#]].assert_eq(&shown);
 }
 
 /// Writes `examples/hello` into `scratch`, with the marker of its root, and with `label` on its
