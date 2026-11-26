@@ -2,27 +2,25 @@
 
 SUMS = 'cd "$1" && shift && sha256sum "$@"'
 
-# The texts of the errors that refuse a write: the mount's, and the file's mode's.
-EROFS = "Read-only file system"
-EACCES = "Permission denied"
+# The texts of the errors that refuse a write: a read-only mount's, a file's mode's, and that of a
+# change that only a file's owner may make.
+REFUSALS = ["Read-only file system", "Permission denied", "Operation not permitted"]
 
-# Each write, by its name, as a command on `$0`, a file of the asset in the current directory, with
-# the error that refuses it. The kernel looks at a mount's flag before a file's mode, but for an
-# open of a file to write. There the file's mode refuses it first, as the role's user isn't root.
+# Each write, by its name, as a command on `$0`, a file of the asset in the current directory.
 WRITES = [
-    ("create", "echo x > new", EROFS),
-    ("append", "echo x >> \"$0\"", EACCES),
-    ("rdwr", "exec 3<> \"$0\"", EACCES),
-    ("truncate", "truncate -s 0 \"$0\"", EACCES),
-    ("unlink", "rm \"$0\"", EROFS),
-    ("rename", "mv \"$0\" moved", EROFS),
-    ("utime", "touch \"$0\"", EROFS),
-    ("mkdir", "mkdir made", EROFS),
-    ("symlink", "ln -s \"$0\" linked", EROFS),
-    ("link", "ln \"$0\" hard", EROFS),
-    ("setxattr", "setfattr -n user.pumpkin -v 1 \"$0\"", EROFS),
-    ("chmod", "chmod 0666 \"$0\"", EROFS),
-    ("chown", "chown 1000:1000 \"$0\"", EROFS),
+    ("create", "echo x > new"),
+    ("append", "echo x >> \"$0\""),
+    ("rdwr", "exec 3<> \"$0\""),
+    ("truncate", "truncate -s 0 \"$0\""),
+    ("unlink", "rm \"$0\""),
+    ("rename", "mv \"$0\" moved"),
+    ("utime", "touch \"$0\""),
+    ("mkdir", "mkdir made"),
+    ("symlink", "ln -s \"$0\" linked"),
+    ("link", "ln \"$0\" hard"),
+    ("setxattr", "setfattr -n user.pumpkin -v 1 \"$0\""),
+    ("chmod", "chmod 0666 \"$0\""),
+    ("chown", "chown 1000:1000 \"$0\""),
 ]
 
 # Runs each of `WRITES` in the directory `$1` on its file `$2`, and prints each one's name and how
@@ -33,7 +31,7 @@ file=$2
 try() {
   said=$(sh -c "$2" "$file" 2>&1) && echo "$1: done" || echo "$1: ${said##*: }"
 }
-""" + "".join(["try {} '{}'\n".format(name, command) for name, command, _ in WRITES]) + """
+""" + "".join(["try {} '{}'\n".format(name, command) for name, command in WRITES]) + """
 awk -v at="$1" '$5 == at {print "mounted: " $6}' /proc/self/mountinfo
 """
 
@@ -45,7 +43,7 @@ def _probe(runner, path, names, writes):
     return sums | {"writes": runner.run(["sh", "-c", TRY, "sh", path, names[0]], timeout_seconds = 30)["stdout_tail"]}
 
 def final_call(target: Target, _submissions, *, path, files):
-    """Checks the runner's asset in two leases: its files' SHA-256s, its mount, and each write.
+    """Checks the runner's asset in two leases: its files' SHA-256s, and each write.
 
     Args:
       target: the call's target, which holds the runner's session.
@@ -55,10 +53,11 @@ def final_call(target: Target, _submissions, *, path, files):
 
     Returns:
       The count of the facts that hold, `score`, of `of`, then each fact. `pinned`: each file has
-      its SHA-256 in the first lease. `read_only`: the asset is mounted there with `ro`.
-      `refused`: each write there failed with its error. `unchanged`: each file has its SHA-256 in
-      the second lease too. `unexpected` holds how each write that departed from that ended, by its
-      name, and the mount's options, if it departed.
+      its SHA-256 in the first lease. `refused`: each write there failed with one of `REFUSALS`.
+      `unchanged`: each file has its SHA-256 in the second lease too. Then `mounted`, the first
+      option of the asset's mount, `ro` or `rw`, which is no fact, as a provider may keep the files
+      read-only by their modes alone. `unexpected` holds how each write that wasn't refused ended,
+      by its name.
     """
     names = [file["path"] for file in files]
     sums = "".join(["{}  {}\n".format(file["sha256"].replace("sha256:", ""), file["path"]) for file in files])
@@ -66,14 +65,12 @@ def final_call(target: Target, _submissions, *, path, files):
     second = target.with_runner("sandbox", _probe, path, names, False)
     lines = [line for line in first["writes"].split("\n") if line != ""]
     ended = {line.split(": ")[0]: line.replace(line.split(": ")[0] + ": ", "") for line in lines}
-    expected = {name: error for name, _, error in WRITES}
-    unexpected = {name: how for name, how in ended.items() if name != "mounted" and how != expected.get(name)}
-    mounted = ended.get("mounted", "")
+    writes = {name: how for name, how in ended.items() if name != "mounted"}
+    unexpected = {name: how for name, how in writes.items() if how not in REFUSALS}
     facts = {
         "pinned": first["sums"] == sums,
-        "read_only": mounted.split(",")[0] == "ro",
-        "refused": sorted([name for name in ended.keys() if name != "mounted"]) == sorted(expected.keys()) and len(unexpected) == 0,
+        "refused": sorted(writes.keys()) == sorted([name for name, _ in WRITES]) and len(unexpected) == 0,
         "unchanged": second["sums"] == sums,
     }
-    departed = {} if facts["read_only"] else {"mounted": mounted}
-    return {"score": len([fact for fact in facts.values() if fact]), "of": len(facts)} | facts | {"unexpected": unexpected | departed}
+    shown = {"mounted": ended.get("mounted", "").split(",")[0], "unexpected": unexpected}
+    return {"score": len([fact for fact in facts.values() if fact]), "of": len(facts)} | facts | shown
