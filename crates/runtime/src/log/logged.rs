@@ -196,6 +196,10 @@ pub(super) enum Event {
     SandboxMet {
         sandbox: SandboxName,
     },
+    ContainerMet {
+        sandbox: SandboxName,
+        container: Container,
+    },
     SandboxGpus {
         sandbox: SandboxName,
         gpus: Vec<String>,
@@ -235,6 +239,7 @@ impl Event {
             | Self::ModelAnswered { .. }
             | Self::SandboxCreated { .. }
             | Self::SandboxMet { .. }
+            | Self::ContainerMet { .. }
             | Self::SandboxGpus { .. }
             | Self::SandboxDeleted { .. }
             | Self::Unknown => None,
@@ -268,6 +273,7 @@ impl Event {
             | Self::ModelAnswered { .. }
             | Self::SandboxCreated { .. }
             | Self::SandboxMet { .. }
+            | Self::ContainerMet { .. }
             | Self::SandboxGpus { .. }
             | Self::SandboxDeleted { .. }
             | Self::Unknown => None,

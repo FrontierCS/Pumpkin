@@ -1237,6 +1237,66 @@ fn shows_a_sandboxs_start() {
 }
 
 #[test]
+fn shows_when_a_sandboxs_containers_met() {
+    let scratch = Scratch::new();
+    let id = "20261110-175500-00000015";
+    let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    let opened = |lease: u64| {
+        let lease =
+            json!({ "kind": "start_lease", "lease": lease, "holder": "agent-0", "grant": "cpu" });
+        logged(30, json!({ "kind": "tick" }), json!([lease]))
+    };
+    let stamp = |observed_ms: u64, event: Value| {
+        let mut line = logged(90, event, json!([]));
+        line["observed_ns"] = json!((observed_ms * 1_000_000).to_string());
+        line
+    };
+    let created = |lease: &str| json!({ "kind": "sandbox_created", "sandbox": lease, "began_ns": "30500000000" });
+    let met = |lease: &str, container: &str| json!({ "kind": "container_met", "sandbox": lease, "container": container });
+    // Lease 2's eight containers meet 100 ms apart. `auth`, declared last, meets second.
+    let declared = ["web", "db", "queue", "cache", "mail", "search", "auth"];
+    let mut log = vec![opened(2), opened(3), stamp(31_000, created("lease-2"))];
+    log.extend(
+        (["main", "auth"].iter().chain(&declared[..6]).zip(1..))
+            .map(|(container, tenths)| stamp(31_000 + 100 * tenths, met("lease-2", container))),
+    );
+    log.push(stamp(
+        31_800,
+        json!({ "kind": "sandbox_met", "sandbox": "lease-2" }),
+    ));
+    log.push(stamp(31_000, created("lease-3")));
+    log.push(stamp(32_000, met("lease-3", "db")));
+    log.push(stamp(33_000, met("lease-3", "auth")));
+    let dir = write_run(&scratch, id, since, &log, None, &lease_places(Prices::Both));
+    let mut ir = super::lease_task();
+    let image = format!("sha256:{}", "1".repeat(64));
+    let companions: Vec<Value> = (declared.iter())
+        .map(|name| json!({ "name": name, "image": image, "user": { "uid": 1000, "gid": 1000 }, "cwd": "/work" }))
+        .collect();
+    ir["roles"][4]["runtime"]["runner"]["companions"] = json!(companions);
+    fs::write(dir.join("ir.json"), ir.to_string()).unwrap();
+    let served = Served::start(&scratch);
+    let polled = served.get(&format!("/api/runs/{id}/since?log=0"));
+    let said = (polled["run"]["lanes"].as_array().unwrap().iter())
+        .filter(|lane| lane["kind"] == "runner")
+        .map(|lane| {
+            format!(
+                "{}: {}",
+                lane["lane"], lane["sandbox"]["start"]["containers"]
+            )
+        });
+    check(
+        &scratch,
+        said.map(Step::Ran),
+        false,
+        &[],
+        &expect![[r#"
+            "lease 2": {"first":31.1,"held":8,"met":8,"more_unmet":0,"slowest":[{"met":31.8,"name":"search"},{"met":31.7,"name":"mail"},{"met":31.6,"name":"cache"},{"met":31.5,"name":"queue"},{"met":31.4,"name":"db"}],"unmet":[]}
+            "lease 3": {"first":32.0,"held":8,"met":2,"more_unmet":1,"slowest":[{"met":33.0,"name":"auth"},{"met":32.0,"name":"db"}],"unmet":["main","web","queue","cache","mail"]}"#]],
+    );
+}
+
+#[test]
 #[expect(clippy::too_many_lines, reason = "most of it is the three runs' logs")]
 fn states_failures() {
     let scratch = Scratch::new();

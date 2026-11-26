@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
-use schema::ir::{self, Gpu, Name};
+use schema::ir::{self, CompanionName, Gpu, Name};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -22,6 +22,7 @@ pub(super) struct Roles {
     pub(super) final_target: Option<String>,
     pub(super) places: BTreeMap<String, Place>,
     pub(super) gpus: BTreeMap<String, Gpu>,
+    pub(super) companions: BTreeMap<String, Vec<CompanionName>>,
     pub(super) deadline: Option<Duration>,
     pub(super) startups: BTreeMap<Place, Duration>,
     pub(super) prices: BTreeMap<Place, f64>,
@@ -33,6 +34,16 @@ impl Roles {
         let roles = ir.map_or(&[][..], |ir| ir.roles.as_slice());
         let gpus = (roles.iter())
             .filter_map(|role| Some((role.name.to_string(), role.needs.gpu.clone()?)));
+        let companions = roles.iter().filter_map(|role| {
+            let ir::Runtime::Runner(runner) = &role.runtime else {
+                return None;
+            };
+            let names = runner
+                .companions
+                .iter()
+                .map(|companion| companion.name.clone());
+            Some((role.name.to_string(), names.collect()))
+        });
         let agents = roles
             .iter()
             .enumerate()
@@ -83,6 +94,7 @@ impl Roles {
             final_target,
             places: places(provided),
             gpus: gpus.collect(),
+            companions: companions.collect(),
             deadline: ir.map(|ir| Duration::from_secs(ir.deadline_seconds.get())),
             startups,
             prices,
@@ -100,6 +112,7 @@ impl Roles {
             startup: (place.as_ref()).and_then(|place| self.startups.get(place).copied()),
             place,
             needs: role.and_then(|role| self.gpus.get(role)).cloned(),
+            companions: role.and_then(|role| self.companions.get(role)).cloned(),
             asked,
             ..Sandbox::default()
         }
