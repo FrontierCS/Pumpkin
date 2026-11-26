@@ -120,8 +120,8 @@ the protocol is all they agree on. `tls` carries bytes below the protocol and kn
 messages. The gateway knows no provider, so every provider's sandboxes have the same sessions.
 
 **Architecture Invariant:** `sandboxd` is no boundary within its container. It has its role's
-privileges, so what it does the role's own code could do too. The session is the boundary. Neither
-is the relay in `main`: a companion's own TLS is the boundary.
+privileges, so what it does the role's own code could do too. The session is the boundary. So is
+each companion's, whatever carries it to the gateway.
 
 ### `crates/route`
 
@@ -231,8 +231,8 @@ A sandbox proves which it is by how it meets the gateway. On the host, it dials 
 it can reach. On a private network, its hello presents an `Attestation` that its provider checks,
 such as an EC2 instance's identity document. Across the Internet, the gateway dials the endpoint
 that the sandbox's create gave, and answers the hello with a `RegistrationGrant` that only that
-`sandboxd` was given. A companion meets the gateway through a relay in `main`, under TLS that ends
-in the companion, with a certificate that the gateway issued for it alone.
+`sandboxd` was given. Each container of a sandbox meets the gateway as its provider's `Meeting`
+says.
 
 No credential is reachable from a sandbox. The model provider's key stays in the host's `Upstream`,
 and the record keeps no header's value. Images are private: an EC2 instance pulls them with its
