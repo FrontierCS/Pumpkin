@@ -1,6 +1,6 @@
-//! What the Modal provider decides without Modal: the references of a batch of images (`images`),
-//! and the memory and the companions that a sandbox holds (`create`). This binary compiles both
-//! modules itself, as the crate keeps them private.
+//! What the Modal provider decides without Modal. That is the references of a batch of images
+//! (`images`), and the memory and companions that a sandbox holds (`create`). This binary compiles
+//! both modules itself, as the crate keeps them private.
 
 #![expect(
     clippy::unwrap_used,

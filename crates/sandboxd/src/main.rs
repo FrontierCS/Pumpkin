@@ -110,8 +110,8 @@ mod flags {
             /// closed. Needs --relayed. Refused without --listen, and with --tls.
             optional --relay address: SocketAddr
             /// A companion that --relay carries connections to, by its name, which must resolve
-            /// within the sandbox. It carries one connection a companion at a time. Repeatable, once
-            /// for each companion. Refused without --relay.
+            /// within the sandbox. It carries one connection a companion at a time. Repeatable,
+            /// once for each companion. Refused without --relay.
             repeated --relayed companion: Companion
             /// Becomes this user, `uid:gid`, each a number but 0, as sandboxd starts, which must be
             /// as root, having given the user /pumpkin, made if absent: no command, nor sandboxd,
