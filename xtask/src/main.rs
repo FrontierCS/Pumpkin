@@ -615,7 +615,19 @@ fn tests(test: &mut Command, doctests: &mut Command, again: &str) -> Result<()> 
 /// `git diff --stat`, also if a test failed.
 fn refill(package: &str, filter: Option<&str>) -> Result<()> {
     star::link()?;
-    let test = ["nextest", "run", "--locked", "--package", package];
+    // `--package` would unify features over that package alone, and rebuild the dependencies
+    // that ci builds with the workspace's. The filterset builds the same artifacts as ci. Its `=`
+    // makes the name an exact match, as nextest advises for a name built in code:
+    // https://github.com/nextest-rs/nextest/blob/6b3f994577a98874a2e0ea5bef77fbbab3434044/nextest-filtering/reference.md#L144-L146
+    let selected = format!("package(={package})");
+    let test = [
+        "nextest",
+        "run",
+        "--workspace",
+        "--locked",
+        "--filterset",
+        &selected,
+    ];
     let mut test = subcommand(tools::NEXTEST, &test)?;
     test.args(filter).env("UPDATE_EXPECT", "1");
     let tested = ran(&mut test, step(BUILD_TIMEOUT).named("cargo nextest run"));
