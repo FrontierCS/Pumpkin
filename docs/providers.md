@@ -26,10 +26,10 @@ that share a provider never reach each other's sandboxes.
 Its sandboxes are containers on the machine's own engine, each confined, with no network but
 loopback, on whole cores that no other run's containers get while the run lasts. A run whose roles
 need more cores than other runs leave is refused, and can be run again once they end. It has one
-class, `container`, that offers the machine's CPUs and memory and no GPU. A machine that uses it
-uses no other provider, so where a run's roles are placed never depends on how much memory the
-machine has. Rootless Docker is the recommended engine: `pumpkin run` warns of one that runs as
-root.
+class, `container`, that offers the machine's CPUs and memory and no GPU. The class holds a role's
+assets in `.pumpkin/assets/`. A machine that uses it uses no other provider, so where a run's roles
+are placed never depends on how much memory the machine has. Rootless Docker is the recommended
+engine: `pumpkin run` warns of one that runs as root.
 
 ## The EC2 provider
 

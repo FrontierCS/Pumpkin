@@ -107,14 +107,24 @@ fn shows(certificate: &str, key: &str) -> tls::Server {
     tls::Server::new(&[&certificate], key.secret_pkcs8_der()).unwrap()
 }
 
+/// The root that the stand-in's certificates are issued from, in DER.
+///
+/// # Panics
+///
+/// Panics if the stand-in's root, a constant, can't be read.
+pub fn root() -> Vec<u8> {
+    CertificateDer::from_pem_slice(ROOT.as_bytes())
+        .unwrap()
+        .to_vec()
+}
+
 /// A TLS client that trusts the stand-in's root alone.
 ///
 /// # Panics
 ///
 /// Panics if the stand-in's root, a constant, can't be read.
 pub fn client() -> tls::Client {
-    let root = CertificateDer::from_pem_slice(ROOT.as_bytes()).unwrap();
-    tls::Client::trusting(&root).unwrap()
+    tls::Client::trusting(&root()).unwrap()
 }
 
 /// A TLS client that trusts Web PKI's roots, as the driver's does, and so not the stand-in's.

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::time::SystemTime;
 
-use docker::Docker;
+use docker::{AssetCache, Docker};
 use ec2::Ec2;
 use engine::Engine;
 use gateway::{Dialer, Listener};
@@ -393,7 +393,9 @@ impl<'e> Offer<'e> {
     fn new(name: &Name, kind: config::Kind, engine: &'e Engine) -> Result<Self, String> {
         let offer = match kind {
             config::Kind::Docker(config::Empty {}) => {
-                let docker = Docker::connect(engine);
+                let assets =
+                    Workspace::find().map(|workspace| AssetCache::new(&workspace.docker_assets()));
+                let docker = assets.and_then(|assets| Docker::connect(engine, assets));
                 Self::Docker(docker.context(format_args!("reaching provider `{name}` failed"))?)
             }
             config::Kind::Ec2(settings) => {

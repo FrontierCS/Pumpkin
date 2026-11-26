@@ -254,7 +254,7 @@
 "examples/hypergraph/README.md" = 4
 "examples/team/README.md" = 6
 "providers/docker/src/cpus.rs" = 9
-"providers/docker/src/lib.rs" = 17
+"providers/docker/src/lib.rs" = 16
 "providers/docker/tests/it/main.rs" = 14
 "providers/ec2/boot/src/main.rs" = 6
 "providers/ec2/boot/tests/it.rs" = 1

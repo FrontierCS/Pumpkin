@@ -8,22 +8,28 @@
 //! - `sandboxd`, read-only, as its first process, dialing its [`SocketDial`], its log's only
 //!   writer;
 //! - for a role that makes ops ([`Create::ops`]), [`sandboxctl`](SANDBOXCTL_PATH), read-only;
-//! - for a role with a model route ([`Create::model`]), `sandboxd` serving the model endpoint.
+//! - for a role with a model route ([`Create::model`]), `sandboxd` serving the model endpoint;
+//! - each of its role's assets ([`Create::assets`]), read-only, from the [`AssetCache`].
 //!
 //! On the engine, it creates only containers, labelled with their run's [`RunTag`] for
 //! [`Sweep::list`], and their anonymous volumes, and pulls no image; outside it, it writes only
-//! its runs' entries in the ledger of CPUs. It needs an engine that enforces every limit that a
-//! container has, as a rootless one does only with `cpuset` ([`engine::Security::rootless`]).
+//! its runs' entries in the ledger of CPUs, and the asset cache. It needs an engine that enforces
+//! every limit that a container has, as a rootless one does only with `cpuset`
+//! ([`engine::Security::rootless`]).
 
 use std::collections::BTreeMap;
 use std::num::NonZeroU64;
 use std::path::Path;
 use std::process::Output;
 
-use engine::{ContextName, Engine, REMOVE_TIMEOUT, confinement, docker, docker_to, fix_reported};
+pub use assets::AssetCache;
+use engine::{
+    ContextName, Engine, READ_ONLY_TMP, REMOVE_TIMEOUT, confinement, docker, docker_to,
+    fix_reported,
+};
 use provider::{
-    Assets, Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready,
-    Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
+    Assets, Console, Create, Created, Creator, HeldAsset, ImageRef, Listed, Meeting, Provider,
+    Ready, Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
 use schema::ir::{Image, Name};
 use schema::sandbox::{SANDBOXCTL_PATH, SANDBOXD_PATH, SOCKET_NAME, SocketDial};
@@ -34,6 +40,7 @@ use stdx::{Context, Deadline};
 
 use crate::cpus::Cpus;
 
+mod assets;
 mod cpus;
 
 /// The name of the provider's one class of sandbox, a container on the engine's host, which
@@ -56,12 +63,13 @@ pub struct Docker<'e> {
     engine: &'e Engine,
     ready: Ready,
     cpus: Cpus,
+    assets: AssetCache,
 }
 
 impl<'e> Docker<'e> {
-    /// The provider on `engine`. Its sandboxes get the CPUs that are online. It refuses an engine
-    /// that can't enforce every container's limits.
-    pub fn connect(engine: &'e Engine) -> Result<Self, String> {
+    /// The provider on `engine`. Its sandboxes get the CPUs that are online, and the files of their
+    /// assets from `assets`. It refuses an engine that can't enforce every container's limits.
+    pub fn connect(engine: &'e Engine, assets: AssetCache) -> Result<Self, String> {
         let report = engine.report();
         let &engine::Host {
             memory_limit,
@@ -94,12 +102,13 @@ impl<'e> Docker<'e> {
             // and the engine has this one class, which every role is to fit.
             cpu_model: None,
             companions: false,
-            assets: false,
+            assets: true,
         };
         Ok(Self {
             engine,
             ready: ready(report, offers),
             cpus,
+            assets,
         })
     }
 
@@ -152,6 +161,19 @@ impl Provider for Docker<'_> {
     }
 
     fn fits(&self, phases: &[Vec<Role>]) -> Result<(), String> {
+        // A container's empty tmpfs there hides whatever is mounted at its path (`confinement`).
+        let at_tmp = (phases.iter().flatten()).find(|role| {
+            role.assets
+                .iter()
+                .any(|path| path.as_str() == READ_ONLY_TMP)
+        });
+        if let Some(role) = at_tmp {
+            return Err(format!(
+                "role `{}` holds an asset at `{READ_ONLY_TMP}`, where each sandbox has an empty \
+                 read-only tmpfs: hold it at another path, such as one below `{READ_ONLY_TMP}`",
+                role.name
+            ));
+        }
         cpus::fits(&self.cpus, phases).map(|_| ())
     }
 
@@ -177,9 +199,9 @@ impl Provider for Docker<'_> {
         Meeting::Local(self)
     }
 
-    // Its sandboxes hold no assets.
+    // A sandbox mounts each asset's files from the cache on the machine.
     fn assets(&self) -> Option<&dyn Assets> {
-        None
+        Some(&self.assets)
     }
 
     fn console(&self, run: &RunTag, id: &SandboxId) -> Result<Console, String> {
@@ -252,9 +274,7 @@ fn create_args(create: &Create, dial: &SocketDial, cpus: &Cpus) -> Result<Vec<St
         // The provider has one class (`CLASS`), so every container is of it.
         class: _,
         image,
-        // Only a provider that publishes assets is given any (`provider::Assets`), and this one
-        // publishes none.
-        assets: _,
+        assets,
         sandboxd,
         ops,
         model,
@@ -275,6 +295,8 @@ fn create_args(create: &Create, dial: &SocketDial, cpus: &Cpus) -> Result<Vec<St
         instances: _,
         // Its class holds no companions.
         companions: _,
+        // `assets` gives each one's path, with its files.
+        assets: _,
     } = role;
     let sandboxd = Path::new(sandboxd.as_str());
     let mut args = vec![
@@ -297,6 +319,9 @@ fn create_args(create: &Create, dial: &SocketDial, cpus: &Cpus) -> Result<Vec<St
     if *ops {
         args.push(bind_mount(sandboxd, SANDBOXCTL_PATH)?);
     }
+    for HeldAsset { path, reference } in assets {
+        args.push(bind_mount(Path::new(reference.as_str()), path.as_str())?);
+    }
     args.extend([
         format!("--entrypoint={SANDBOXD_PATH}"),
         "--".to_owned(),
@@ -314,11 +339,12 @@ fn create_args(create: &Create, dial: &SocketDial, cpus: &Cpus) -> Result<Vec<St
 
 /// A read-only `--mount` of `host`, which must exist, at `container`.
 fn bind_mount(host: &Path, container: &str) -> Result<String, String> {
-    // `--mount` reads its value as a line of CSV, so the source, which may hold commas and
-    // quotes, is a quoted field, with each quote doubled.
+    // `--mount` reads its value as a line of CSV. So the source and the target, which may hold
+    // commas and quotes, are quoted fields, with each quote doubled.
     let source = mountable(host, container)?.replace('"', "\"\"");
+    let target = container.replace('"', "\"\"");
     Ok(format!(
-        "--mount=type=bind,\"source={source}\",target={container},readonly"
+        "--mount=type=bind,\"source={source}\",\"target={target}\",readonly"
     ))
 }
 

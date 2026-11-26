@@ -157,6 +157,9 @@ fn provider_role(workflow: &Workflow, role: RoleId, instances: NonZeroU32) -> Ro
         resources: sandbox.needs.resources(),
         instances,
         companions,
+        assets: (sandbox.assets.iter())
+            .map(|asset| asset.path.clone())
+            .collect(),
     }
 }
 

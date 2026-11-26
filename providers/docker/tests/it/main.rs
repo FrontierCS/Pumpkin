@@ -9,6 +9,8 @@
 )]
 #![expect(clippy::disallowed_methods, reason = "nextest bounds each test")]
 
+mod assets;
+
 use std::collections::BTreeSet;
 use std::fs::DirBuilder;
 use std::num::{NonZeroU32, NonZeroU64};
@@ -19,7 +21,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant, SystemTime};
 use std::{env, fs, thread};
 
-use docker::Docker;
+use docker::{AssetCache, Docker};
 use engine::{BuildContext, ContextName, Engine, Recipe, Security};
 use expect_test::{Expect, expect};
 use gateway::{Arrival, IncomingModelRequest, Op, Process, Put, Registration, Session, Sockets};
@@ -28,7 +30,9 @@ use provider::{
 };
 use recipe::Given;
 use schema::frame::MAX_MESSAGE_BYTES;
-use schema::ir::{AbsolutePath, Argv, Container, Env, EnvVar, Image, Mode, Name, Resources};
+use schema::ir::{
+    AbsolutePath, Argv, AssetPath, Container, Env, EnvVar, Image, Mode, Name, Resources,
+};
 use schema::sandbox::op::{
     CallReply, CommandEnd, CommandStatus, Failure, FailureCode, JobReply, JobState, Last,
     LeaseRemaining, LeaseReply, LeaseState, LeaseStatusReply, NowReply, OpReply, OpsReply,
@@ -216,7 +220,12 @@ fn reached() -> &'static Result<Engine, String> {
 
 fn connected() -> &'static Result<Docker<'static>, String> {
     static PROVIDER: OnceLock<Result<Docker<'static>, String>> = OnceLock::new();
-    PROVIDER.get_or_init(|| Docker::connect(reached().as_ref().map_err(String::clone)?))
+    PROVIDER.get_or_init(|| Docker::connect(reached().as_ref().map_err(String::clone)?, cache()))
+}
+
+// Shared by every run of the tests, as a machine's runs share their workspace's.
+fn cache() -> AssetCache {
+    AssetCache::new(&Path::new(env!("CARGO_TARGET_TMPDIR")).join("assets"))
 }
 
 // Shared by every run of the tests, as a machine's runs share their workspace's.
@@ -709,6 +718,31 @@ fn volume(sandbox: &Started) -> String {
     name
 }
 
+// A container's empty tmpfs at `/tmp` would hide an asset there, so the provider refuses one as
+// the run is placed. An asset below `/tmp` is mounted in that tmpfs.
+#[test]
+#[ignore = "needs Docker: run cargo xtask live docker"]
+fn assets_at_tmp() {
+    let holding = |path: &str| Role {
+        assets: vec![AssetPath::try_from(path.to_owned()).unwrap()],
+        ..suite_role("runner")
+    };
+    let fits = |path: &str| {
+        let fits = provider().fits(&[vec![holding(path)]]);
+        format!(
+            "{path}: {}",
+            fits.err().unwrap_or_else(|| "fits".to_owned())
+        )
+    };
+    check(
+        "assets-at-tmp",
+        |_| vec![fits("/tmp"), fits("/tmp/model")],
+        &expect![[r#"
+            /tmp: role `runner` holds an asset at `/tmp`, where each sandbox has an empty read-only tmpfs: hold it at another path, such as one below `/tmp`
+            /tmp/model: fits"#]],
+    );
+}
+
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn suite() {
@@ -719,7 +753,7 @@ struct Platform;
 
 impl Subject for Platform {
     fn connect(&self) -> Result<Box<dyn Provider + '_>, String> {
-        Ok(Box::new(Docker::connect(engine())?))
+        Ok(Box::new(Docker::connect(engine(), cache())?))
     }
 
     fn locals(&self, dir: &Path) -> Locals {

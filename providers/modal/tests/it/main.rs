@@ -53,6 +53,7 @@ fn runner(memory_bytes: u64) -> Role {
         },
         instances: NonZeroU32::MIN,
         companions: 0,
+        assets: Vec::new(),
     }
 }
 

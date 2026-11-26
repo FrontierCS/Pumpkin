@@ -85,6 +85,8 @@ impl Ec2<'_> {
             instances: _,
             // Its classes hold no companions.
             companions: _,
+            // Nor do they hold assets.
+            assets: _,
         } = role;
         let class = (self.classes.get(class))
             .ok_or_else(|| format!("class `{class}` is none of the envelope's"))?;
