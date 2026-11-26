@@ -298,8 +298,8 @@ impl<H: Host> Sandboxes<'_, H> {
         // it, as errgroup returns the first error of its goroutines:
         // https://github.com/golang/sync/blob/7fc1605a5dde7535a0fc1770ca44238629ff29ac/errgroup/errgroup.go#L64-L83
         let stop = &AtomicBool::new(false);
-        // One thread for each companion, so at most as many as the runner's class holds
-        // (`Companions::Reserved::most`), which placing checked.
+        // One thread for each companion, so at most as many as the runner's sandbox holds, which
+        // its provider's `fits` checked (`Role::companions`).
         let (main, companions, ended) = thread::scope(|scope| {
             let meeting: Vec<_> = (companions.into_iter())
                 .map(|(name, registration)| {

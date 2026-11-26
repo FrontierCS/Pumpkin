@@ -134,6 +134,11 @@ pub struct Role {
     pub resources: Resources,
     /// How many of its sandboxes a run runs at once.
     pub instances: NonZeroU32,
+    /// How many companions each of its sandboxes holds beside its own container: a runner's, as
+    /// it declares them, and none for any other role. Only a class that holds companions is given
+    /// a role with any ([`Offers::companions`](schema::workflow::Offers::companions)), and
+    /// [`fits`](crate::Provider::fits) refuses more than its sandbox holds.
+    pub companions: usize,
 }
 
 /// What a provider's `publish_image` made of a role's image, for the role's creates to name: a

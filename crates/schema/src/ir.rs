@@ -230,8 +230,10 @@ pub struct RunnerRuntime {
     pub env: Env,
     /// The containers that each of the runner's sandboxes holds beside its own, each named once
     /// among them. They share the sandbox's [`Needs`] and its lifetime. The runner is placed only
-    /// in a class that holds them all for its needs
-    /// ([`Offers::companions`](crate::workflow::Offers::companions)). Absent, none.
+    /// in a class that holds companions
+    /// ([`Offers::companions`](crate::workflow::Offers::companions)). It is refused, before any
+    /// image is built, if they are more than its provider's sandbox holds for its needs. Absent,
+    /// none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub companions: Vec<Companion>,
 }

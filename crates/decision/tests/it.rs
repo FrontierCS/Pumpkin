@@ -32,7 +32,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::NonZeroU64;
 use std::time::Duration;
 
 use decision::{
@@ -45,7 +45,7 @@ use schema::ir::{
 };
 use schema::sandbox::op::{CommandEnd, OpReply, REASON_BYTES, SessionOp, TransferEnd};
 use schema::sandbox::{ExitStatus, RESULT_MAX_BYTES};
-use schema::workflow::{Class, Companions, Offers, Workflow};
+use schema::workflow::{Class, Offers, Workflow};
 use serde_json::{Value, json};
 use test_support::workflow;
 
@@ -173,11 +173,7 @@ fn offered() -> BTreeMap<Name, BTreeMap<Name, Class>> {
             gpu: None,
             cpu_features: BTreeSet::new(),
             cpu_model,
-            companions: Companions::Reserved {
-                cpu_millis_each: NonZeroU64::new(32).unwrap(),
-                memory_bytes_each: NonZeroU64::new(32 << 20).unwrap(),
-                most: NonZeroUsize::new(250).unwrap(),
-            },
+            companions: true,
         };
         let declared = Class {
             offers,

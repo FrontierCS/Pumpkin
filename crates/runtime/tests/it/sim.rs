@@ -32,7 +32,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
-use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
+use std::num::{NonZeroU32, NonZeroU64};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -56,7 +56,7 @@ use schema::sandbox::{
     RESULT_MAX_BYTES, RegistrationGrant, RelativePath, Relayed, Root, SOCKET_NAME, SocketDial,
     ToSandbox, dir_mode, file_mode, log_dir, out_dir, pumpkin_dir,
 };
-use schema::workflow::{Class, Companions, Offers, UsdPerHour};
+use schema::workflow::{Class, Offers, UsdPerHour};
 use serde_json::{Map, Value, json};
 use stdx::Deadline;
 use stdx::time::{Clock as _, Machine};
@@ -526,16 +526,12 @@ impl Sim {
     }
 
     #[must_use]
-    /// Makes each class offer its sandboxes 8 companions at most, whatever the role needs. A
-    /// sandbox that listens runs each on a thread of its own, with files of its own, behind the
-    /// stand-in relay ([`relayed`]).
+    /// Makes each class hold companions, as many as a role declares. A sandbox that listens runs
+    /// each on a thread of its own, with files of its own, behind the stand-in relay
+    /// ([`relayed`]).
     pub(crate) fn offering_companions(mut self) -> Self {
         for class in self.ready.classes.values_mut() {
-            class.offers.companions = Companions::Reserved {
-                cpu_millis_each: NonZeroU64::MIN,
-                memory_bytes_each: NonZeroU64::MIN,
-                most: NonZeroUsize::new(8).unwrap(),
-            };
+            class.offers.companions = true;
         }
         self
     }
@@ -643,7 +639,7 @@ fn ready(startup_seconds: NonZeroU64) -> Ready {
             gpu: None,
             cpu_features: BTreeSet::new(),
             cpu_model,
-            companions: Companions::None,
+            companions: false,
         };
         let class = Class {
             offers,

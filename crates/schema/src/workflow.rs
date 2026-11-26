@@ -8,7 +8,7 @@
 //! targets is known to be a [`Target`]. Ids are only valid for the workflow that issued them.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
+use std::num::{NonZeroU32, NonZeroU64};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -254,8 +254,8 @@ impl From<UsdPerHour> for f64 {
 /// What a class of sandbox offers the roles of its sandboxes, as its provider states it.
 ///
 /// It is the most CPU and memory that a role may need, its GPUs, and its CPU's flags and model,
-/// which a role's [needs](crate::ir::Needs) are matched against. It is also how many companions a
-/// runner's sandbox holds for those needs ([`Workflow::place`]).
+/// which a role's [needs](crate::ir::Needs) are matched against, and whether its sandboxes hold a
+/// runner's companions ([`Workflow::place`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Offers {
     /// In thousandths of a CPU.
@@ -266,26 +266,11 @@ pub struct Offers {
     pub cpu_features: BTreeSet<CpuFlag>,
     /// None if the provider states no model.
     pub cpu_model: Option<CpuModel>,
-    /// How many companions each sandbox holds beside its own container
-    /// ([`ir::RunnerRuntime::companions`](crate::ir::RunnerRuntime::companions)).
-    pub companions: Companions,
-}
-
-/// How many companions a class's sandboxes hold beside their own container, as its provider
-/// states it ([`Offers::companions`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Companions {
-    /// None: a runner that declares companions fits no sandbox of the class.
-    None,
-    /// As many as the role's [needs](crate::ir::Needs) hold at `cpu_millis_each` thousandths of
-    /// a CPU and `memory_bytes_each` each, and `most` at most. The sandbox's own container isn't
-    /// counted.
-    Reserved {
-        cpu_millis_each: NonZeroU64,
-        memory_bytes_each: NonZeroU64,
-        most: NonZeroUsize,
-    },
+    /// Whether each sandbox holds a runner's companions beside its own container
+    /// ([`ir::RunnerRuntime::companions`](crate::ir::RunnerRuntime::companions)). A runner that
+    /// declares any fits no other class. Its provider refuses, before any image is built, more
+    /// than a sandbox holds for the runner's needs.
+    pub companions: bool,
 }
 
 /// A value for each provider that a [`Placed`] workflow places a role on: what its placing gave

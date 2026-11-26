@@ -144,11 +144,17 @@ impl Capacity {
 
 fn provider_role(workflow: &Workflow, role: RoleId, instances: NonZeroU32) -> Role {
     let sandbox = workflow.sandbox(role);
+    // Only a runner declares companions, and a session names each runner.
+    let runner = (workflow.sessions()).find(|(_, session)| session.runner.role() == role);
+    let companions = runner.map_or(0, |(_, session)| {
+        workflow.runner(session.runner).companions.len()
+    });
     Role {
         name: sandbox.name.clone(),
         user: sandbox.user,
         resources: sandbox.needs.resources(),
         instances,
+        companions,
     }
 }
 

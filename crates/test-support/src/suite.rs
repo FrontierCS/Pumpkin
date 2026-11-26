@@ -684,6 +684,7 @@ pub fn suite_role(role: &str) -> Role {
         )
         .unwrap(),
         instances: NonZeroU32::MIN,
+        companions: 0,
     }
 }
 
