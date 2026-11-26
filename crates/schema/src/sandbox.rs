@@ -552,8 +552,7 @@ impl fmt::Debug for TlsIdentity {
 }
 
 /// The most bytes of a [`route`]: the longest name of a companion, and a line feed.
-pub const MAX_ROUTE_BYTES: usize = 64;
-const _: () = assert!(MAX_ROUTE_BYTES == MAX_LABEL_BYTES + 1);
+pub const MAX_ROUTE_BYTES: usize = MAX_LABEL_BYTES + 1;
 
 /// The route to `companion`: what the gateway sends first on a connection to its sandbox's relay
 /// ([`Relayed`]).
