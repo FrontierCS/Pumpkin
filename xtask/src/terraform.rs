@@ -5,10 +5,9 @@
 use std::path::Path;
 use std::process::Command;
 
-use stdx::process::{self, Environment, Failure, Stream};
+use stdx::process::{self, Environment, Failure};
 
-use crate::repo::STEP_TIMEOUT;
-use crate::{Result, ran, root, step, tools};
+use crate::{Held, Result, root, tools};
 
 /// The module, from the workspace's root.
 const MODULE: &str = "deploy/aws";
@@ -19,12 +18,12 @@ const EXAMPLE: &str = "deploy/aws/examples/team";
 
 /// Fails unless the module and the example are formatted and valid. `terraform fmt` prints the
 /// diff of each file that isn't formatted, and `terraform validate` prints each error.
-pub(crate) fn check() -> Result<()> {
+pub(crate) fn check(held: &mut Held) -> Result<()> {
     let terraform = tools::fetched(tools::TERRAFORM)?;
     let plugins = tools::terraform_plugins()?;
     let mut fmt = command(&terraform);
     fmt.args(["fmt", "-check", "-diff", "-recursive", MODULE]);
-    match process::run(&mut fmt, step(STEP_TIMEOUT).named("terraform fmt")) {
+    match held.ran(&mut fmt, "terraform fmt") {
         Ok(_) => {}
         Err(Failure::Exited { .. }) => {
             return Err(format!(
@@ -37,14 +36,14 @@ pub(crate) fn check() -> Result<()> {
         Err(failure) => return Err(failure.to_string().into()),
     }
     for directory in [MODULE, EXAMPLE] {
-        validate(&terraform, &plugins, directory)?;
+        validate(held, &terraform, &plugins, directory)?;
     }
     Ok(())
 }
 
 /// Fails unless `directory`, from the workspace's root, initializes without a backend and
 /// validates.
-fn validate(terraform: &Path, plugins: &Path, directory: &str) -> Result<()> {
+fn validate(held: &mut Held, terraform: &Path, plugins: &Path, directory: &str) -> Result<()> {
     let chdir = format!("-chdir={directory}");
     let mut init = command(terraform);
     init.args([&chdir, "init", "-backend=false", "-input=false"])
@@ -53,21 +52,17 @@ fn validate(terraform: &Path, plugins: &Path, directory: &str) -> Result<()> {
         // provider, which the plugin directory lacks.
         .arg("-upgrade");
     // `init` prints its progress and warnings on its standard output, and its errors on its
-    // standard error. Its standard output is shown only on a failure, as pre-commit-terraform
-    // shows init's output:
+    // standard error. It is shown only on a failure, as pre-commit-terraform shows init's output:
     // https://github.com/antonbabenko/pre-commit-terraform/blob/b9e409b0fee34ee0eee7e6f6a407061f15032926/hooks/_common.sh#L859-L881
-    let quiet = step(STEP_TIMEOUT).stdout(Stream::Captured);
     let name = format!("terraform init {directory}");
-    if let Err(failure) = process::run(&mut init, quiet.named(&name)) {
-        if let Failure::Exited { output, .. } = &failure {
-            print!("{}", String::from_utf8_lossy(&output.stdout));
-        }
-        return Err(failure.to_string().into());
-    }
+    held.ran_quiet(&mut init, &name)
+        .map_err(|failure| failure.to_string())?;
     let mut validate = command(terraform);
     validate.args([&chdir, "validate"]);
     let name = format!("terraform validate {directory}");
-    ran(&mut validate, step(STEP_TIMEOUT).named(&name)).map(drop)
+    held.ran(&mut validate, &name)
+        .map_err(|failure| failure.to_string())?;
+    Ok(())
 }
 
 /// A `terraform`, at the workspace's root.

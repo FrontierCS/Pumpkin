@@ -16,6 +16,7 @@ use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, Permissions};
 use std::os::unix::fs::PermissionsExt as _;
+use std::panic::resume_unwind;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Output};
 use std::time::Duration;
@@ -68,9 +69,10 @@ mod flags {
                 optional --check
             }
 
-            /// Runs the checks every change must pass, in order, and stops at the first that
-            /// fails. They reach no Docker engine or cloud. They reach the network only to fetch
-            /// crates and pinned tools on first use.
+            /// Runs the checks every change must pass. The checks that build and test the
+            /// workspace run in order and stop at the first that fails. The others run beside
+            /// them, in order, and stop at the first that fails. They reach no Docker engine or
+            /// cloud. They reach the network only to fetch crates and pinned tools on first use.
             cmd ci {}
 
             /// Writes the figures drawn from the workspace, which `ci` checks are up to date. The
@@ -441,11 +443,109 @@ fn root() -> &'static Path {
 }
 
 fn ci() -> Result<()> {
-    ran(fmt()?.arg("--check"), step(STEP_TIMEOUT))?;
+    // Two independent chains of work share this process. The checks that take no cargo build lock
+    // run on a thread beside the steps that build, so that neither waits for the other.
+    let ((held, side), built) = std::thread::scope(|scope| {
+        let side = scope.spawn(|| {
+            let mut held = Held::default();
+            let result = side_checks(&mut held).map_err(|error| error.to_string());
+            (held, result)
+        });
+        let built = cargo_checks().map_err(|error| error.to_string());
+        (
+            side.join().unwrap_or_else(|panic| resume_unwind(panic)),
+            built,
+        )
+    });
+    held.print();
+    // The side chain's failure comes first, whichever ended first, so that the result doesn't
+    // depend on timing.
+    match (side, built) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(failed), Ok(())) | (Ok(()), Err(failed)) => Err(failed.into()),
+        (Err(side), Err(built)) => Err(format!("{side}\n{built}").into()),
+    }
+}
+
+/// What the steps of the side chain printed, held until the chain ends. The cargo steps print
+/// as they run, so what a side step printed at once would interleave with it.
+#[derive(Default)]
+struct Held {
+    text: Vec<u8>,
+}
+
+impl Held {
+    /// Runs `command` to its end within [`STEP_TIMEOUT`], and holds its echo and what it printed
+    /// on both streams. A failure says to fix what the command printed above, as the held text
+    /// is printed above it.
+    fn ran(&mut self, command: &mut Command, name: &str) -> std::result::Result<Output, Failure> {
+        self.run(command, name, true)
+    }
+
+    /// As [`ran`](Self::ran), but holds what the command printed only if it failed.
+    fn ran_quiet(
+        &mut self,
+        command: &mut Command,
+        name: &str,
+    ) -> std::result::Result<Output, Failure> {
+        self.run(command, name, false)
+    }
+
+    fn run(
+        &mut self,
+        command: &mut Command,
+        name: &str,
+        printed_on_success: bool,
+    ) -> std::result::Result<Output, Failure> {
+        self.text
+            .extend_from_slice(format!("$ {}\n", process::shown(command)).as_bytes());
+        let how = Run::new(Bound::Within(STEP_TIMEOUT), Echo::Silent).named(name);
+        match process::run(command, how) {
+            Ok(output) => {
+                if printed_on_success {
+                    self.hold(&output);
+                }
+                Ok(output)
+            }
+            Err(Failure::Exited { name, output, .. }) => {
+                self.hold(&output);
+                let stderr = Stream::Inherited;
+                Err(Failure::Exited {
+                    name,
+                    output,
+                    stderr,
+                })
+            }
+            Err(failure) => Err(failure),
+        }
+    }
+
+    fn hold(&mut self, output: &Output) {
+        self.text.extend_from_slice(&output.stdout);
+        self.text.extend_from_slice(&output.stderr);
+    }
+
+    fn print(&self) {
+        eprint!("{}", String::from_utf8_lossy(&self.text));
+    }
+}
+
+/// The checks that take no cargo build lock: they run beside [`cargo_checks`].
+fn side_checks(held: &mut Held) -> Result<()> {
+    let mut fmt = fmt()?;
+    held.ran(fmt.arg("--check"), "cargo fmt")
+        .map_err(|failure| failure.to_string())?;
     let repo = Repo { root: root() };
     tidy::check(&repo)?;
-    terraform::check()?;
+    terraform::check(held)?;
     figure::check(root(), &metadata()?)?;
+    page::check(held)?;
+    Ok(())
+}
+
+/// The checks that build or test the workspace.
+fn cargo_checks() -> Result<()> {
+    let repo = Repo { root: root() };
     let mut clippy = cargo(&["clippy", "--workspace", "--all-targets", "--locked"]);
     ran(
         clippy.args(["--", "--deny", "warnings"]),
@@ -456,7 +556,6 @@ fn ci() -> Result<()> {
         doc.env("RUSTDOCFLAGS", "--deny warnings"),
         step(BUILD_TIMEOUT),
     )?;
-    page::check()?;
     let buildifier = star::link()?;
     let pumpkin = tests_pumpkin()?;
     star::place(&buildifier, &pumpkin)?;
