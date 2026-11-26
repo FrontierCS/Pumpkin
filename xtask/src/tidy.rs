@@ -258,7 +258,7 @@ fn test_binaries(paths: &[String]) -> Vec<String> {
     problems
 }
 
-fn under_tests(file: &Path) -> bool {
+pub(crate) fn under_tests(file: &Path) -> bool {
     (file.parent()).is_some_and(|parent| {
         (parent.components()).any(|component| component.as_os_str() == "tests")
     })

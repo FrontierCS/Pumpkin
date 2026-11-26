@@ -21,6 +21,9 @@ mod diff;
 mod entry;
 mod live;
 mod op_stats;
+mod premise_list;
+#[path = "../../src/premises.rs"]
+mod premises;
 #[path = "../../src/repo.rs"]
 mod repo;
 #[path = "../../src/settings.rs"]
