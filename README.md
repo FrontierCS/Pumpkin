@@ -78,7 +78,7 @@ $ .pumpkin/bin/pumpkin ls
 ended
   20261116-195228-234cd166  examples/hello  finished      2s  -  score=6 lines=1
 
-1 run in the last day: 1 finished
+1 run: 1 finished
 $ .pumpkin/bin/pumpkin view
 ```
 

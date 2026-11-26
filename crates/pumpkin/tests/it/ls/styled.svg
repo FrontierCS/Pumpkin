@@ -1,4 +1,4 @@
-<svg width="1289px" height="326px" xmlns="http://www.w3.org/2000/svg">
+<svg width="1616px" height="326px" xmlns="http://www.w3.org/2000/svg">
   <style>
     .fg { fill: #AAAAAA }
     .bg { fill: #000000 }
@@ -26,15 +26,15 @@
 </tspan>
     <tspan x="10px" y="46px"><tspan>  20261114-090000-00000002  example/lease  </tspan><tspan class="fg-cyan">ending</tspan><tspan>     &lt;t&gt; of 1h43m </tspan><tspan class="dimmed">──────────</tspan><tspan>  $1.04+  the end of lease 2</tspan>
 </tspan>
-    <tspan x="10px" y="64px"><tspan>    lease 2     &lt;t&gt;                       cpu of agent 0 on aws/judge, closed as the work phase ended; its sandbox isn't gone yet; `sleep 60` timed out</tspan>
+    <tspan x="10px" y="64px"><tspan>    lease 2     &lt;t&gt;                    cpu of agent 0 on aws/judge, closed as the work phase ended; its sandbox isn't gone yet; `sleep 60` timed out</tspan>
 </tspan>
-    <tspan x="10px" y="82px"><tspan>  20261114-090000-00000001  example/lease  </tspan><tspan class="fg-cyan">work  </tspan><tspan>     &lt;t&gt; of 30m   </tspan><tspan class="dimmed">──────────</tspan><tspan>  $0.68+  1 agent working</tspan>
+    <tspan x="10px" y="82px"><tspan>  20261114-090000-00000001  example/lease  </tspan><tspan class="fg-cyan">work  </tspan><tspan>     &lt;t&gt; of 30m   </tspan><tspan class="fg-cyan">━━━━━━</tspan><tspan class="dimmed">────</tspan><tspan>  $0.95+  1 agent working</tspan>
 </tspan>
-    <tspan x="10px" y="100px"><tspan>    solver      &lt;t&gt; of 30m    </tspan><tspan class="dimmed">──────────</tspan><tspan>  3 model requests, the last answered &lt;t&gt; ago</tspan>
+    <tspan x="10px" y="100px"><tspan>    solver      &lt;t&gt; of 30m </tspan><tspan class="fg-cyan">━━━━━━</tspan><tspan class="dimmed">────</tspan><tspan>  3 model requests, the last answered &lt;t&gt; ago</tspan>
 </tspan>
-    <tspan x="10px" y="118px"><tspan>    job 0       &lt;t&gt; of 10m06s </tspan><tspan class="dimmed">──────────</tspan><tspan>  train call on modal/a100_80 with unknown GPUs for agent 0</tspan>
+    <tspan x="10px" y="118px"><tspan>    lease 2     &lt;t&gt; of 30m </tspan><tspan class="fg-cyan">━━━━━</tspan><tspan class="dimmed">─────</tspan><tspan>  cpu of agent 0 on aws/judge, ready, 30s busy; `sleep 60` timed out</tspan>
 </tspan>
-    <tspan x="10px" y="136px"><tspan>    lease 0     &lt;t&gt; of 1m     </tspan><tspan class="fg-cyan">━╸</tspan><tspan class="dimmed">────────</tspan><tspan>  box of job 0 on aws/box, ready, 5s busy; `sh -c set -e\nprint 7` exited 0</tspan>
+    <tspan x="10px" y="136px"><tspan>    lease 3     &lt;t&gt;                    gpu of agent 0 on modal/a100_80 with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB), expired; its sandbox isn't gone yet; `true` exited 0</tspan>
 </tspan>
     <tspan x="10px" y="154px">
 </tspan>
@@ -54,7 +54,7 @@
 </tspan>
     <tspan x="10px" y="298px">
 </tspan>
-    <tspan x="10px" y="316px"><tspan>7 runs in the last day: </tspan><tspan class="fg-cyan">2 live</tspan><tspan>, </tspan><tspan class="fg-green">2 finished</tspan><tspan>, </tspan><tspan class="fg-red bold">1 failed</tspan><tspan>, </tspan><tspan class="fg-yellow">1 interrupted</tspan><tspan>, </tspan><tspan class="fg-red bold">1 lost</tspan><tspan> · $2.83+</tspan>
+    <tspan x="10px" y="316px"><tspan>7 runs: </tspan><tspan class="fg-cyan">2 live</tspan><tspan>, </tspan><tspan class="fg-green">2 finished</tspan><tspan> </tspan><tspan class="fg-yellow">(1 without a result)</tspan><tspan>, </tspan><tspan class="fg-red bold">1 failed</tspan><tspan>, </tspan><tspan class="fg-yellow">1 interrupted</tspan><tspan>, </tspan><tspan class="fg-red bold">1 lost</tspan><tspan> · $3.10+</tspan>
 </tspan>
   </text>
 

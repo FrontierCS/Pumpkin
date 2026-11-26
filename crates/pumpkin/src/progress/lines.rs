@@ -18,8 +18,8 @@ use super::{
 };
 use crate::next;
 
-/// How many of the runs that ended within the last day `ls` shows without `--all` or a prefix.
-/// With a live run's steps and the totals, they fit a terminal of 24 rows.
+/// How many of the runs that ended within the last day `ls` shows without `--all` or a prefix,
+/// the newest. With a live run's steps and the totals, they fit a terminal of 24 rows.
 const ENDED_SHOWN: usize = 5;
 
 /// How many cells a step's bar takes, and the halves of a cell that it fills.
@@ -30,8 +30,8 @@ const _: () = assert!(BAR_HALVES == 2 * BAR_CELLS as u64);
 /// Which of a listing's runs `ls` shows.
 #[derive(Clone, Copy)]
 pub(crate) enum Scope {
-    /// The runs that are live or ended within the last day: each live one, and the
-    /// [`ENDED_SHOWN`] that ended last.
+    /// The runs that are live or ended within the last day: each live one, and the newest
+    /// [`ENDED_SHOWN`] of those that ended.
     Day,
     /// Each run of the listing, as `--all` or a prefix lists them.
     Every,
@@ -55,9 +55,7 @@ pub(crate) fn lines(listing: &Listing, at: &next::At, layout: &Layout) -> String
         .filter(|entry| matches!(entry, Entry::Older))
         .count();
     let (live, ended): (Vec<&Row>, Vec<&Row>) = rows.iter().partition(|row| row.live());
-    let members: BTreeSet<String> = (rows.iter())
-        .filter_map(|row| row.member.as_ref().map(ToString::to_string))
-        .collect();
+    let members: BTreeSet<String> = rows.iter().map(|row| member(row)).collect();
     // A column that repeats one name says nothing: a machine's own runs name none, and a
     // controller of one member names it in every row.
     let membered = members.len() > 1;
@@ -72,7 +70,7 @@ pub(crate) fn lines(listing: &Listing, at: &next::At, layout: &Layout) -> String
     }
     if !shown.is_empty() {
         let head = if shown.len() < ended.len() {
-            format!("ended, last {} of {}", shown.len(), ended.len())
+            format!("ended, newest {} of {}", shown.len(), ended.len())
         } else {
             "ended".to_owned()
         };
@@ -85,8 +83,11 @@ pub(crate) fn lines(listing: &Listing, at: &next::At, layout: &Layout) -> String
         }
         sections.push(section);
     }
-    let hidden = ended.len() - shown.len() + older;
-    let totals = totals(&rows, layout.scope, hidden, at, &paint);
+    let hidden = Hidden {
+        days: (shown.len() < ended.len()).then(|| days(&rows)),
+        older,
+    };
+    let totals = totals(&rows, &hidden, at, &paint);
     sections.extend(totals.map(|totals| format!("{totals}\n")));
     sections.join("\n")
 }
@@ -339,9 +340,7 @@ fn ended_section(rows: &[&Row], membered: bool, layout: &Layout, paint: &Paint) 
             + 2;
         let rest = match (&row.result, &row.note) {
             (Some(values), _) => {
-                let room = layout.width.map_or(RESULT_SHOWN_BYTES, |width| {
-                    width.saturating_sub(taken).min(RESULT_SHOWN_BYTES)
-                });
+                let room = layout.width.map(|width| width.saturating_sub(taken));
                 let (shown, left) = fitted(values, room, paint);
                 left_out |= left > 0;
                 shown
@@ -358,12 +357,14 @@ fn ended_section(rows: &[&Row], membered: bool, layout: &Layout, paint: &Paint) 
     (section, left_out)
 }
 
-/// The values of a result that fit `room` columns, in their order, as `name=value`, with `+n`
-/// for the `n` left out, and that count. Only a scalar is shown: a number, a boolean, `null` or a
-/// string of one line. A list, an object, or a string of more than one line is left out. So is
-/// each value from the first that doesn't fit.
-fn fitted(values: &[super::row::Returned], room: usize, paint: &Paint) -> (String, usize) {
-    let mark_width = format!(" +{}", values.len()).len();
+/// The values of a result that fit [`RESULT_SHOWN_BYTES`] and `room` characters, if it bounds
+/// them, in their order, as `name=value`. They end with `+n` for the `n` left out, and come with
+/// that count. Only a scalar is shown: a number, a boolean, `null` or a string of one line. A
+/// list, an object, or a string of more than one line is left out. So is each value from the
+/// first that doesn't fit.
+fn fitted(values: &[super::row::Returned], room: Option<usize>, paint: &Paint) -> (String, usize) {
+    // The mark is ASCII, so its bytes are its characters.
+    let mark_size = format!(" +{}", values.len()).len();
     let (mut plain, mut styled, mut count) = (String::new(), String::new(), 0);
     for (index, super::row::Returned { name, value }) in values.iter().enumerate() {
         let Some(value) = scalar(value) else {
@@ -373,9 +374,11 @@ fn fitted(values: &[super::row::Returned], room: usize, paint: &Paint) -> (Strin
         let item = format!("{space}{name}={value}");
         // The mark is needed unless this value is the last and each before it is shown.
         let last = index + 1 == values.len() && count == index;
-        let needed =
-            plain.chars().count() + item.chars().count() + if last { 0 } else { mark_width };
-        if needed > room {
+        let mark = if last { 0 } else { mark_size };
+        let needed_size = plain.len() + item.len() + mark;
+        let needed_characters = plain.chars().count() + item.chars().count() + mark;
+        let past_room = room.is_some_and(|room| needed_characters > room);
+        if needed_size > RESULT_SHOWN_BYTES || past_room {
             break;
         }
         plain.push_str(&item);
@@ -405,27 +408,50 @@ fn scalar(value: &Value) -> Option<String> {
     }
 }
 
-/// The line of totals of `rows` in `scope`, of which `hidden` aren't shown. It says how many
-/// there are in each state and what they cost, and names the command that lists each run if some
-/// aren't shown. `None` for a listing of no run.
-fn totals(
-    rows: &[&Row],
-    scope: Scope,
-    hidden: usize,
-    at: &next::At,
-    paint: &Paint,
-) -> Option<String> {
-    let every = format!("to list every run: {} --all", next::of_runs("ls", at));
+/// The runs of a listing that its lines don't show.
+struct Hidden {
+    /// The days, as the prefixes of their ids, of the runs listed, if some that ended aren't shown.
+    days: Option<Vec<String>>,
+    /// How many ended over a day ago, which the listing doesn't read.
+    older: usize,
+}
+
+/// The days of `rows`, as the prefixes of their ids, such as `20261125`.
+fn days(rows: &[&Row]) -> Vec<String> {
+    let days: BTreeSet<&str> = rows.iter().filter_map(|row| row.id.get(..8)).collect();
+    days.into_iter().map(str::to_owned).collect()
+}
+
+/// The line of totals of `rows`. It says how many there are in each state and what they cost.
+/// It names the commands that list the runs `hidden` holds. `None` for a listing of no run.
+fn totals(rows: &[&Row], hidden: &Hidden, at: &next::At, paint: &Paint) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(days) = &hidden.days {
+        // The days' prefixes read only the records of those days, where `--all` reads every one.
+        let them = next::of_run("ls", at, &days.join(" "));
+        parts.push(format!("to list them all: {them}"));
+    }
+    let every = format!("{} --all", next::of_runs("ls", at));
     if rows.is_empty() {
-        return (hidden > 0).then(|| format!("no run is live, or ended within a day · {every}"));
+        let older = crate::counted(hidden.older, "older run");
+        return (hidden.older > 0).then(|| {
+            format!("no run is live, or ended within a day · to list the {older}: {every}")
+        });
+    }
+    if hidden.older > 0 {
+        let older = crate::counted(hidden.older, "older run");
+        parts.push(format!("to list the {older} too: {every}"));
     }
     let mut counts: BTreeMap<State, usize> = BTreeMap::new();
-    let (mut live, mut cost, mut partial) = (0, None, false);
+    let (mut live, mut without_result, mut cost, mut partial) = (0, 0, None, false);
     for row in rows {
         if row.live() {
             live += 1;
         } else {
             *counts.entry(row.state).or_default() += 1;
+        }
+        if row.state == State::Finished && row.result.is_none() {
+            without_result += 1;
         }
         match row.spent {
             Some(Spent {
@@ -444,24 +470,21 @@ fn totals(
         states.push(paint.on(LIVE, &format!("{live} live")));
     }
     for (state, count) in counts {
-        let style = if state == State::Finished {
-            GOOD
-        } else {
-            state_style(state, false)
-        };
-        states.push(paint.on(style, &format!("{count} {}", state.name())));
+        let mut shown = paint.on(
+            state_style(state, true),
+            &format!("{count} {}", state.name()),
+        );
+        if state == State::Finished && without_result > 0 {
+            let without = format!("({without_result} without a result)");
+            let _ = write!(shown, " {}", paint.on(WARN, &without));
+        }
+        states.push(shown);
     }
     let runs = crate::counted(rows.len(), "run");
-    let within = match scope {
-        Scope::Day => " in the last day",
-        Scope::Every => "",
-    };
-    let mut parts = vec![format!("{runs}{within}: {}", states.join(", "))];
+    let mut said = vec![format!("{runs}: {}", states.join(", "))];
     if let Some(cost) = cost {
-        parts.push(usd(cost, partial));
+        said.push(usd(cost, partial));
     }
-    if hidden > 0 {
-        parts.push(every);
-    }
-    Some(parts.join(" · "))
+    said.extend(parts);
+    Some(said.join(" · "))
 }

@@ -520,7 +520,7 @@ pub(crate) struct Ls {
     #[arg(conflicts_with = "runs")]
     pub(crate) controller: Option<Controller>,
     /// List every run, however long ago it ended. Without it or a prefix, `ls` lists the runs
-    /// that are live or ended within the last day, and shows the 5 that ended last.
+    /// that are live or ended within the last day. It shows the newest 5 that ended.
     #[arg(long, conflicts_with = "prefixes")]
     pub(crate) all: bool,
     /// Print the listing as JSON: each run's row, the newest first, with its whole result, as

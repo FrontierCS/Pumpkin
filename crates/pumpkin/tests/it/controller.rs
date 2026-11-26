@@ -2138,25 +2138,25 @@ fn ls_answered_there() {
             pumpkin: controller `alice`: up <t>, 4 jobs, disk <n>% used
             printed:
               live
-                20261107-130101-2c9b0008  -  building       <t>   -
-                20261107-130100-2c9b0005  -  building       <t>   -  holding a build slot
-                20261107-130000-2c9b0004  -  waiting        <t>   -  for a build slot
-                20261107-120100-1b8a0002  -  publishing     <t>   -
+                20261107-130101-2c9b0008  alice  -  building       <t>   -
+                20261107-130100-2c9b0005  alice  -  building       <t>   -  holding a build slot
+                20261107-130000-2c9b0004  alice  -  waiting        <t>   -  for a build slot
+                20261107-120100-1b8a0002  -      -  publishing     <t>   -
 
               ended
-                20261107-130200-2c9b0006  -  unstarted       -  -  its job ended before the run started: to see why: pumpkin wait --controller alice 20261107-130200-2c9b0006
-                20261107-120000-1b8a0001  -  finished        -  -  score=7 +1
-                20261107-110000-0d0c0008  -  finished        -  -  score=3 +1
+                20261107-130200-2c9b0006  alice  -  unstarted       -  -  its job ended before the run started: to see why: pumpkin wait --controller alice 20261107-130200-2c9b0006
+                20261107-120000-1b8a0001  alice  -  finished        -  -  score=7 +1
+                20261107-110000-0d0c0008  -      -  finished        -  -  score=3 +1
               +n counts the values of a result left out: to see them: pumpkin wait --outcome --controller alice <run>
 
-              7 runs in the last day: 4 live, 2 finished, 1 unstarted · to list every run: pumpkin ls --controller alice --all
+              7 runs: 4 live, 2 finished, 1 unstarted · to list the 2 older runs too: pumpkin ls --controller alice --all
             $ pumpkin ls 20261106
             exit status: Some(0)
             pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
             printed:
               ended
-                20261106-130300-2c9b0007  -  unstarted       -  -  its job ended before the run started: to see why: pumpkin wait --controller alice 20261106-130300-2c9b0007
-                20261106-120000-1b8a0003  -  failed          -  -
+                20261106-130300-2c9b0007  alice  -  unstarted       -  -  its job ended before the run started: to see why: pumpkin wait --controller alice 20261106-130300-2c9b0007
+                20261106-120000-1b8a0003  -      -  failed          -  -
 
               2 runs: 1 failed, 1 unstarted"#]],
     );
@@ -2197,7 +2197,7 @@ fn ls_leaves_its_streams_blocking() {
               20261107-120000-1b8a0001  -  finished       -  -  score=7 +1
             +n counts the values of a result left out: to see them: pumpkin wait --outcome --controller alice <run>
 
-            1 run in the last day: 1 finished
+            1 run: 1 finished
             blocking: true"#]],
     );
 }
@@ -2302,7 +2302,7 @@ fn ls_refusals() {
                 20261107-120000-1b8a0001  -  finished       -  -  score=7 +1
               +n counts the values of a result left out: to see them: pumpkin wait --outcome --controller alice <run>
 
-              1 run in the last day: 1 finished
+              1 run: 1 finished
             $ pumpkin ls
             exit status: Some(1)
             pumpkin: controller `alice` refused: <scratch>/home/.pumpkin/runs: Not a directory (os error 20): expected the directory that runs are recorded in, as `--runs` names it"#]],
@@ -2528,7 +2528,7 @@ fn members_attributed() {
               ended
                 <id>  -  unstarted       -  -  its job ended before the run started: to see why: pumpkin wait --controller alice <id>
 
-              1 run in the last day: 1 unstarted"#]],
+              1 run: 1 unstarted"#]],
     );
 }
 
@@ -2743,7 +2743,7 @@ fn member_unread() {
               ended
                 <other>  -  unstarted       -  -  its job ended before the run started: to see why: pumpkin wait --controller alice <other>
 
-              1 run in the last day: 1 unstarted
+              1 run: 1 unstarted
             $ pumpkin cancel <unread>
             exit status: Some(1)
             pumpkin: run <unread> on controller `alice` names a member that can't be read: <scratch>/home/jobs/<unread>/member: `Bad!` is not a member's name: give one of 1 to 32 of a-z, 0-9 and `-`, starting with a letter: to stop it: pumpkin cancel --controller alice --any-member <unread>

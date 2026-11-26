@@ -88,7 +88,7 @@ fn lists() {
                 20261107-120000-1b8a6389  examples/hello  finished          -  -  score=7 +1
               +n counts the values of a result left out: to see them: pumpkin wait --outcome --runs <scratch>/runs <run>
 
-              6 runs in the last day: 1 live, 2 finished, 1 failed, 1 interrupted, 1 lost
+              6 runs: 1 live, 2 finished, 1 failed, 1 interrupted, 1 lost
             $ pumpkin ls --runs nowhere
             exit status: Some(1)
             pumpkin: nowhere: No such file or directory (os error 2): expected the directory that runs are recorded in, as `--runs` names it
@@ -161,7 +161,7 @@ fn lists_other_builds_unread() {
                 20261107-120000-1b8a6389  -  finished       -  -  score=7 +1
               +n counts the values of a result left out: to see them: pumpkin wait --outcome --runs <scratch>/runs <run>
 
-              4 runs in the last day: 1 finished, 3 unread
+              4 runs: 1 finished, 3 unread
             $ pumpkin ls --runs runs
             exit status: Some(1)
             pumpkin: <scratch>/runs/20261107-120400-5f2e0004/outcome.json: Permission denied (os error 13)
@@ -174,7 +174,7 @@ fn lists_other_builds_unread() {
                 20261107-120000-1b8a6389  -  finished       -  -  score=7 +1
               +n counts the values of a result left out: to see them: pumpkin wait --outcome --runs <scratch>/runs <run>
 
-              4 runs in the last day: 1 finished, 3 unread"#]],
+              4 runs: 1 finished, 3 unread"#]],
     );
 }
 
@@ -249,7 +249,7 @@ fn lists_the_last_day() {
             $ pumpkin ls --runs runs
             exit status: Some(0)
             printed:
-              ended, last 5 of 6
+              ended, newest 5 of 6
                 20261107-120500-1b8a0003  -  finished       -  -  score=5 +1
                 20261107-120400-1b8a0003  -  finished       -  -  score=4 +1
                 20261107-120300-1b8a0003  -  finished       -  -  score=3 +1
@@ -257,7 +257,7 @@ fn lists_the_last_day() {
                 20261107-120100-1b8a0003  -  finished       -  -  score=1 +1
               +n counts the values of a result left out: to see them: pumpkin wait --outcome --runs <scratch>/runs <run>
 
-              6 runs in the last day: 5 finished, 1 failed · to list every run: pumpkin ls --runs <scratch>/runs --all
+              6 runs: 5 finished, 1 failed · to list them all: pumpkin ls --runs <scratch>/runs 20261107 · to list the 3 older runs too: pumpkin ls --runs <scratch>/runs --all
             $ pumpkin ls --runs runs --all
             exit status: Some(0)
             printed:
@@ -285,7 +285,7 @@ fn lists_the_last_day() {
             $ pumpkin ls --runs runs
             exit status: Some(0)
             printed:
-              no run is live, or ended within a day · to list every run: pumpkin ls --runs <scratch>/runs --all"#]],
+              no run is live, or ended within a day · to list the 3 older runs: pumpkin ls --runs <scratch>/runs --all"#]],
     );
 }
 
@@ -422,7 +422,7 @@ fn lists_phases() {
                 20261110-100000-0000000a  example/lease  finished  18m20s  $1.11+  score=49.36 +1
               +n counts the values of a result left out: to see them: pumpkin wait --outcome --runs <scratch>/runs <run>
 
-              5 runs: 5 finished · $2.22+
+              5 runs: 5 finished (1 without a result) · $2.22+
             $ pumpkin ls --runs runs 20261110-10 20261111
             exit status: Some(0)
             printed:
@@ -522,7 +522,7 @@ fn lists_leases() {
                   job 0       <t> of 10m06s  train call on modal/a100_80 with unknown GPUs for agent 0
                   lease 0     <t> of 1m      box of job 0 on aws/box, ready, 1s busy; put /pumpkin/in/payload to /work/in moved 1 entry, 1 byte
 
-              9 runs in the last day: 9 live · $6.99+"#]],
+              9 runs: 9 live · $6.99+"#]],
     );
 }
 
@@ -603,7 +603,7 @@ fn says_unread_lines() {
                 20261110-110000-0000000c  example/lease  failed         -  -
                 20261110-110000-0000000b  example/lease  finished     40s  -  no result
 
-              2 runs in the last day: 1 finished, 1 failed
+              2 runs: 1 finished (1 without a result), 1 failed
             $ pumpkin wait --runs runs 20261110-110000-0000000b
             exit status: Some(3)
             pumpkin: run 20261110-110000-0000000b started <t> after it was asked for, and ran <t>:
@@ -673,7 +673,7 @@ fn fits_a_result_to_its_line() {
                 20261125-212001-4d6d4a80  examples/companions  finished       -  -  score=4 of=4 users=true dns="DNS answers" bridge_ms=null median=0.1235 +2
               +n counts the values of a result left out: to see them: pumpkin wait --outcome --runs <scratch>/runs <run>
 
-              2 runs in the last day: 2 finished
+              2 runs: 2 finished
             $ COLUMNS=100 pumpkin ls --runs runs
             exit status: Some(0)
             printed:
@@ -682,7 +682,7 @@ fn fits_a_result_to_its_line() {
                 20261125-212001-4d6d4a80  examples/companions  finished       -  -  score=4 of=4 users=true +5
               +n counts the values of a result left out: to see them: pumpkin wait --outcome --runs <scratch>/runs <run>
 
-              2 runs in the last day: 2 finished
+              2 runs: 2 finished
             $ COLUMNS=60 pumpkin ls --runs runs
             exit status: Some(0)
             printed:
@@ -691,7 +691,7 @@ fn fits_a_result_to_its_line() {
                 20261125-212001-4d6d4a80  examples/companions  finished       -  -  +8
               +n counts the values of a result left out: to see them: pumpkin wait --outcome --runs <scratch>/runs <run>
 
-              2 runs in the last day: 2 finished"#]],
+              2 runs: 2 finished"#]],
     );
 }
 
@@ -700,11 +700,17 @@ fn fits_a_result_to_its_line() {
 fn styles_a_terminal() {
     let scratch = Scratch::new();
     let log = whole_log();
+    // Its bars move a half cell each 90 s, and this run's are each 27 s or more from a move.
+    let ago = Duration::from_secs(546);
     let held = [
-        ("20261114-090000-00000001", 62),
-        ("20261114-090000-00000002", 1002),
-    ]
-    .map(|(id, seconds)| live(&scratch, id, &cut(&log, seconds), Duration::from_secs(2)));
+        live(&scratch, "20261114-090000-00000001", &cut(&log, 566), ago),
+        live(
+            &scratch,
+            "20261114-090000-00000002",
+            &cut(&log, 1002),
+            Duration::from_secs(2),
+        ),
+    ];
     let whole = "20261110-100000-0000000a";
     let priced = lease_places(Prices::Both);
     write_run(

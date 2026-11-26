@@ -72,7 +72,7 @@
 </tspan>
     <tspan x="10px" y="478px"><tspan>          List every run, however long ago it ended. Without it or a prefix, `ls` lists the runs</tspan>
 </tspan>
-    <tspan x="10px" y="496px"><tspan>          that are live or ended within the last day, and shows the 5 that ended last</tspan>
+    <tspan x="10px" y="496px"><tspan>          that are live or ended within the last day. It shows the newest 5 that ended</tspan>
 </tspan>
     <tspan x="10px" y="514px">
 </tspan>
