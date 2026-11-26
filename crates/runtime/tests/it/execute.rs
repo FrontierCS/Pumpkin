@@ -3407,6 +3407,7 @@ fn final_call_model() {
 // The call's route ends with the call, so its request in flight is cut short, while the agent's
 // stream goes on.
 #[test]
+#[expect(clippy::too_many_lines, reason = "most of it is its snapshot")]
 fn call_and_agent_model() {
     let argv = [
         "ops",
@@ -3415,13 +3416,19 @@ fn call_and_agent_model() {
         "await 0 completed",
         "call submit 6",
         "exit",
+        // Each route's end cuts its stream, beside the teardown of its caller's sandbox. The
+        // agent's sandbox answers its teardown's freeze once its cut is logged.
+        r#"await_log model_answered model="m-large""#,
     ];
     let steps = ["model m-small 5", "ask m-small stall", "exit"];
     let mut ir = trainer_routed(routed(ops_workflow(&argv, 30)), &steps);
     ir["roles"][0]["name"] = json!("solver");
     ir["roles"].as_array_mut().unwrap().reverse();
+    // The call's delete is recorded once its cut is.
+    let deleted = Synced::Holding("jobs/0/.sandbox.json.partial", DELETED);
+    let cut = r#""answer":{"kind":"cut"},"api":"responses","caller":"job-0""#;
     let shown = executed(
-        &SimHost::new(),
+        &SimHost::new().held_sync(deleted, cut),
         "call-and-agent-model",
         &[(PROVIDER, &Sim::new())],
         &ir,
