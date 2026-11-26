@@ -297,9 +297,9 @@ the work deadline, `deadline_seconds`, passes.
 
 A [target](#target) whose one [sandbox](#sandbox) lasts the whole [work](#work) phase, and serves
 each of its [calls](#call) in turn, keeping the files that each call leaves. A target's `lifetime`
-key chooses this: `work` for one sandbox for the work phase, or `call`, the default, for a fresh
-sandbox per call (`ir::TargetLifetime`). **Open:** it also goes by shared sandbox, work-lifetime
-target and work sandbox, and by the record's `shared/<role>/`.
+key chooses this: `work_phase` for one sandbox for the work phase, or `per_call`, the default, for
+a fresh sandbox per call (`ir::TargetLifetime`). **Open:** it also goes by shared sandbox,
+`work_phase` target and work sandbox, and by the record's `shared/<role>/`.
 
 ### Workflow
 
