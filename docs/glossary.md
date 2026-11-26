@@ -284,9 +284,9 @@ instance of a [role](#role). `sandboxd`, its supervisor, serves its [session](#s
 
 ### Session
 
-**Open.** The one connection between the [gateway](#gateway) and a sandbox's `sandboxd`, its only
-way out (`gateway::Session`). Also a [grant](#grant)'s kind that lends [runners](#runner)
-(`ir::Session`).
+**Open.** A connection between the [gateway](#gateway) and a [container](#container)'s `sandboxd`,
+its only way out (`gateway::Session`). A sandbox has one for each container. Also a
+[grant](#grant)'s kind that lends [runners](#runner) (`ir::Session`).
 
 ### Submission
 
