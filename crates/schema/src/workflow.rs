@@ -419,7 +419,43 @@ pub struct Runner {
     pub cwd: AbsolutePath,
     pub env: Env,
     /// Each named once among them, as parsing checks.
-    pub companions: Vec<Companion>,
+    companions: Vec<Companion>,
+}
+
+impl Runner {
+    /// Each of its companions, by its id, in the order declared.
+    pub fn companions(&self) -> impl ExactSizeIterator<Item = (CompanionId, &Companion)> {
+        let companions = self.companions.iter().enumerate();
+        companions.map(|(index, companion)| (CompanionId(index), companion))
+    }
+
+    /// Its companion `id`, one of its own.
+    pub fn companion(&self, id: CompanionId) -> &Companion {
+        &self.companions[id.0]
+    }
+}
+
+/// One of a runner's companions, by its place among those that the runner declares. It is valid
+/// only for the runner that issued it ([`Runner::companions`]).
+// A typed index into what its runner declares, as rust-analyzer's `la_arena::Idx` is into its
+// arena:
+// https://github.com/rust-lang/rust-analyzer/blob/b74e96f509baf0be70281c55f14cb18fefbc6b22/lib/la-arena/src/lib.rs#L44-L48
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompanionId(usize);
+
+impl CompanionId {
+    /// The companion's index in its runner's declaration order.
+    pub fn index(self) -> usize {
+        self.0
+    }
+}
+
+/// One of the containers of a runner's sandboxes, which an op names by its
+/// [`Container`](crate::ir::Container): `main`, or one of the runner's companions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContainerId {
+    Main,
+    Companion(CompanionId),
 }
 
 /// A job function of the agent's; see [`ir::JobFunction`](crate::ir::JobFunction).

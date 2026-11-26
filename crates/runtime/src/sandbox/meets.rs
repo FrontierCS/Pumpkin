@@ -19,7 +19,7 @@ use provider::{
 };
 use schema::ir::{Companion, CompanionName, Container, Image, Name};
 use schema::sandbox::{OpPayloadLimit, PrivateDial, SocketDial};
-use schema::workflow::{ByProvider, Placed, Placement, RunnerId};
+use schema::workflow::{ByProvider, CompanionId, ContainerId, Placed, Placement, RunnerId};
 use stdx::time::Clock as _;
 use stdx::{Context, Deadline};
 
@@ -81,18 +81,18 @@ impl Meets<'_> {
 }
 
 /// A runner's companions on the provider whose sandboxes hold them, which listen. Each is as the
-/// runner declares it, with its image as that provider published it.
+/// runner declares it, by its id, with its image as that provider published it.
 pub(super) struct WithCompanions<'p> {
     listens: &'p dyn Listens,
     dialer: &'p Dialer,
-    companions: Vec<(&'p Companion, ImageRef)>,
+    companions: Vec<((CompanionId, &'p Companion), ImageRef)>,
 }
 
 /// The registrations of a new sandbox's sessions, one for each of its containers.
 pub(super) struct Registrations {
     pub(super) main: gateway::Registration,
-    /// Each companion's, in the order that its runner declares them.
-    pub(super) companions: Vec<(CompanionName, gateway::Registration)>,
+    /// Each companion's, by its id and its name, in the order that its runner declares them.
+    pub(super) companions: Vec<(CompanionId, CompanionName, gateway::Registration)>,
 }
 
 impl WithCompanions<'_> {
@@ -111,7 +111,7 @@ impl WithCompanions<'_> {
         let issued = |error: io::Error| error.to_string();
         let (main, unreached) = dialer.issue().map_err(issued)?;
         let (mut dials, mut unrelayed) = (Vec::new(), Vec::new());
-        for (companion, image) in companions {
+        for ((id, companion), image) in companions {
             let Companion {
                 name,
                 image: _,
@@ -126,7 +126,7 @@ impl WithCompanions<'_> {
                 user: *user,
                 relayed,
             });
-            unrelayed.push((name.clone(), unreached));
+            unrelayed.push((*id, name.clone(), unreached));
         }
         let dials = ListenDials {
             main,
@@ -142,7 +142,7 @@ impl WithCompanions<'_> {
             Some(relay) => Ok(Registrations {
                 main: unreached.at(main),
                 companions: (unrelayed.into_iter())
-                    .map(|(name, unreached)| (name, unreached.at(relay.clone())))
+                    .map(|(id, name, unreached)| (id, name, unreached.at(relay.clone())))
                     .collect(),
             }),
             None => Err(format!(
@@ -172,7 +172,7 @@ pub(crate) fn listening<'p>(
     let mut listening = BTreeMap::new();
     for (_, session) in workflow.sessions() {
         let runner = session.runner;
-        if workflow.runner(runner).companions.is_empty() {
+        if workflow.runner(runner).companions().len() == 0 {
             continue;
         }
         let Placement {
@@ -209,12 +209,12 @@ pub(super) fn publish_companions<'p>(
     let workflow = placed.workflow();
     let mut published = BTreeMap::new();
     for (&runner, &listens) in &listening.0 {
-        let declared = &workflow.runner(runner).companions;
+        let declared: Vec<_> = workflow.runner(runner).companions().collect();
         let role = &workflow.sandbox(runner.role()).name;
         let on = &placed.placement(runner.role()).provider;
         interruption::check()?;
         let images: Vec<Image> = (declared.iter())
-            .map(|companion| companion.image.clone())
+            .map(|(_, companion)| companion.image.clone())
             .collect();
         let references = listens.publish_companion_images(&images, &providers.get(on).sandboxd);
         let references = references.context(format_args!(
@@ -232,24 +232,24 @@ pub(super) fn publish_companions<'p>(
         let with = WithCompanions {
             listens,
             dialer,
-            companions: declared.iter().zip(references).collect(),
+            companions: declared.into_iter().zip(references).collect(),
         };
         published.insert(runner, with);
     }
     Ok(published)
 }
 
-/// The sessions of a sandbox's containers: `main`'s, and that of each companion that its role
-/// declares, by the companion's name.
+/// The sessions of a sandbox's containers: `main`'s, and one for each companion that its role
+/// declares, in that order.
 pub(crate) struct Sessions<C> {
     pub(crate) main: Session<C>,
-    companions: BTreeMap<CompanionName, Session<C>>,
+    companions: Vec<Session<C>>,
 }
 
 impl<C> Sessions<C> {
-    /// The session of the companion `name`, if the sandbox's role declares it.
-    pub(crate) fn companion(&mut self, name: &CompanionName) -> Option<&mut Session<C>> {
-        self.companions.get_mut(name)
+    /// The session of companion `id` of the sandbox's runner.
+    pub(crate) fn companion(&mut self, id: CompanionId) -> &mut Session<C> {
+        &mut self.companions[id.index()]
     }
 }
 
@@ -289,7 +289,7 @@ impl<H: Host> Sandboxes<'_, H> {
         (clock, by): (&H::Clock, Duration),
         (ops, model): (Option<OpPayloadLimit>, bool),
         arrivals: Sender<T>,
-        wrap: impl Fn(Container, Arrival) -> T + Clone + Send + 'static,
+        wrap: impl Fn(ContainerId, Arrival) -> T + Clone + Send + 'static,
     ) -> Result<Sessions<H::Clock>, String> {
         let Registrations { main, companions } = registrations;
         let (sandbox, alone) = (which.name(), companions.is_empty());
@@ -302,8 +302,8 @@ impl<H: Host> Sandboxes<'_, H> {
         // its provider's `fits` checked (`Role::companions`).
         let (main, companions, ended) = thread::scope(|scope| {
             let meeting: Vec<_> = (companions.into_iter())
-                .map(|(name, registration)| {
-                    let container = Container::Companion(name.clone());
+                .map(|(id, name, registration)| {
+                    let container = ContainerId::Companion(id);
                     // A companion's session is passive, and serves no model.
                     let opens = (None, false, arrivals.clone(), of(wrap.clone(), container));
                     let meet = {
@@ -324,7 +324,7 @@ impl<H: Host> Sandboxes<'_, H> {
                     (name, spawned)
                 })
                 .collect();
-            let opens = (ops, model, arrivals, of(wrap, Container::Main));
+            let opens = (ops, model, arrivals, of(wrap, ContainerId::Main));
             let (looks, sandbox) = (Looks::new(clock), (&sandbox, id, provider, alone));
             let main = self.meet_main(sandbox, main, (clock, by), opens, (&looks, stop));
             self.watch((&looks, provider, id), main, meeting, (clock, stop))
@@ -458,10 +458,10 @@ fn stopped(stop: &AtomicBool) -> bool {
 
 /// `wrap`, for the arrivals on the session of `container`.
 fn of<T>(
-    wrap: impl Fn(Container, Arrival) -> T + Send + 'static,
-    container: Container,
+    wrap: impl Fn(ContainerId, Arrival) -> T + Send + 'static,
+    container: ContainerId,
 ) -> impl Fn(Arrival) -> T + Send + 'static {
-    move |arrival| wrap(container.clone(), arrival)
+    move |arrival| wrap(container, arrival)
 }
 
 /// Waits for a container to meet the gateway at `registration` by `by`, a time on `clock`, and

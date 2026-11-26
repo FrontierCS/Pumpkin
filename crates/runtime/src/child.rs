@@ -16,8 +16,8 @@ use std::time::Duration;
 use decision::{CallResult, Caller, Core, Event, JobId, Request};
 use gateway::{Arrival, IncomingModelRequest, Trees};
 use provider::UnixTime;
-use schema::ir::Container;
 use schema::sandbox::OpPayloadLimit;
+use schema::workflow::ContainerId;
 use stdx::time::Clock as _;
 
 use super::log::Entry;
@@ -58,7 +58,7 @@ pub(super) enum Message<O> {
     /// come from the loop, which ended the target.
     ///
     /// [`Registration::accept`]: gateway::Registration::accept
-    Session(Container, Duration, Arrival),
+    Session(ContainerId, Duration, Arrival),
     Stop,
     /// An order of the core's for its driver, or the core's reply to its op.
     Order(O),

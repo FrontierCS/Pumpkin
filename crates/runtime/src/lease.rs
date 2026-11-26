@@ -10,10 +10,10 @@
 
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom};
-use std::iter;
 use std::num::NonZeroU64;
 use std::path::Path;
 use std::time::Duration;
+use std::{fmt, iter};
 
 use decision::{Direction, Event, LeaseId};
 use gateway::{Arrival, Process, Put, Session, Trees};
@@ -23,7 +23,7 @@ use schema::sandbox::tree::Limits;
 use schema::sandbox::{
     Entry, Launch, RelativePath, Root, command_env, dir_mode, log_dir, out_dir, pumpkin_dir,
 };
-use schema::workflow::Runner;
+use schema::workflow::{ContainerId, Runner};
 use stdx::Context;
 use stdx::time::Clock as _;
 
@@ -43,7 +43,7 @@ pub(super) enum Order {
 /// `number`th command or transfer.
 pub(super) struct Transfer {
     pub(super) number: u64,
-    pub(super) container: Container,
+    pub(super) container: ContainerId,
     pub(super) direction: Direction,
     /// The most bytes of files it may move.
     pub(super) max_bytes: NonZeroU64,
@@ -54,7 +54,7 @@ pub(super) struct Transfer {
 /// The core's order to run a command in a lease's runner, its `command`th.
 pub(super) struct Run {
     pub(super) command: u64,
-    pub(super) container: Container,
+    pub(super) container: ContainerId,
     pub(super) argv: Argv,
     /// The longest it may run, if it has a bound of its own.
     pub(super) timeout: Option<Duration>,
@@ -64,7 +64,7 @@ pub(super) struct Run {
 struct Running {
     command: u64,
     /// The container that it runs in, whose session started it.
-    container: Container,
+    container: ContainerId,
     process: Process,
     /// When it is to be killed, since the run started, until it has been.
     kill_at: Option<Duration>,
@@ -86,31 +86,22 @@ struct Held<'a, C> {
 fn held_by<'a, C>(
     runner: &'a Runner,
     sessions: &'a mut Sessions<C>,
-    container: &Container,
+    container: ContainerId,
 ) -> Held<'a, C> {
-    let Container::Companion(name) = container else {
-        return Held {
+    match container {
+        ContainerId::Main => Held {
             session: &mut sessions.main,
             cwd: &runner.cwd,
             env: &runner.env,
-        };
-    };
-    let mut declared = runner.companions.iter();
-    let declared = declared.find(|companion| companion.name == *name);
-    // A type for a container that the runner holds would carry the runtime's sessions through the
-    // core, which does no I/O.
-    let (Some(companion), Some(session)) = (declared, sessions.companion(name)) else {
-        unreachable!(
-            "a lease was ordered work in container `{name}`, which its runner doesn't hold, \
-             though the core orders a command or a transfer only in a container that the lease's \
-             runner holds, refusing any other (`held_container`), and a runner's sandbox starts \
-             only once each companion that the runner declares has a session (`Sandboxes::meet`)"
-        )
-    };
-    Held {
-        session,
-        cwd: &companion.cwd,
-        env: &companion.env,
+        },
+        ContainerId::Companion(id) => {
+            let companion = runner.companion(id);
+            Held {
+                session: sessions.companion(id),
+                cwd: &companion.cwd,
+                env: &companion.env,
+            }
+        }
     }
 }
 
@@ -161,7 +152,7 @@ fn drive<H: Host>(
         }
     }
     if let Some((container, reason)) = early {
-        return failed(ended(&container, &reason));
+        return failed(ended(runner, container, &reason));
     }
     if let Err(error) = std::fs::create_dir(child.dir.join(log_dir().as_str())) {
         return failed(format!(
@@ -172,18 +163,21 @@ fn drive<H: Host>(
     let mut running = None;
     let served = serve(leased, child, sessions, &mut running);
     let by = child.deadlines.collect;
-    let freezing = |container: &Container| format!("freezing the runner's `{container}` failed");
+    let freezing =
+        |container: &dyn fmt::Display| format!("freezing the runner's `{container}` failed");
     if let Err(reason) = (sessions.main.freeze(by)).context(freezing(&Container::Main)) {
         return failed(served.err().unwrap_or(reason));
     }
     if let Some(running) = running {
-        let (dir, container) = (command_dir(running.command), &running.container);
+        let (dir, container) = (command_dir(running.command), running.container);
         let session = held_by(runner, sessions, container).session;
         // `main` is frozen. A companion is frozen only for the log of a command that still ran in
         // it. So its freeze's failure leaves that log incomplete, and no more.
         let frozen = match container {
-            Container::Main => Ok(()),
-            Container::Companion(_) => session.freeze(by).context(freezing(container)),
+            ContainerId::Main => Ok(()),
+            ContainerId::Companion(id) => {
+                (session.freeze(by)).context(freezing(&runner.companion(id).name))
+            }
         };
         if let Err(error) = frozen.and_then(|()| collect(session, &dir, &child.dir, by)) {
             child.note(format!("lease {}'s {dir} is incomplete: {error}", lease.0));
@@ -220,13 +214,13 @@ fn serve<H: Host>(
         match message {
             None => {
                 if let Some(running) = running {
-                    let session = held_by(runner, sessions, &running.container).session;
+                    let session = held_by(runner, sessions, running.container).session;
                     kill(child, by_start, running, session)?;
                 }
             }
             Some(Message::Stop) => return Ok(()),
             Some(Message::Order(Order::Transfer(order))) => {
-                let trees = held_by(runner, sessions, &order.container).session.trees();
+                let trees = held_by(runner, sessions, order.container).session.trees();
                 let end = transfer(child, &trees, &order, &mut held);
                 let transfer = order.number;
                 child.event(Event::TransferEnded {
@@ -267,12 +261,12 @@ fn serve<H: Host>(
                 } else {
                     CommandEnd::Exited(status)
                 };
-                let session = held_by(runner, sessions, &ran.container).session;
+                let session = held_by(runner, sessions, ran.container).session;
                 let (stdout, stderr) = outputs(child, ran.command, session, ran.required_output)?;
                 child.event(command_ended(lease, ran.command, (end, stdout, stderr)));
             }
             Some(Message::Session(container, _, Arrival::Ended { reason })) => {
-                return Err(ended(&container, &reason));
+                return Err(ended(runner, container, &reason));
             }
             // A type for a passive session's arrivals would split the gateway's `pub` `Arrival` by
             // the kind of session.
@@ -290,11 +284,13 @@ fn serve<H: Host>(
     }
 }
 
-/// Why a lease fails once the session of `container` of its runner has ended, for `reason`.
-fn ended(container: &Container, reason: &str) -> String {
+/// Why a lease fails once the session of `container` of its runner, `runner`, has ended, for
+/// `reason`.
+fn ended(runner: &Runner, container: ContainerId, reason: &str) -> String {
     match container {
-        Container::Main => format!("the runner's session ended: {reason}"),
-        Container::Companion(name) => {
+        ContainerId::Main => format!("the runner's session ended: {reason}"),
+        ContainerId::Companion(id) => {
+            let name = &runner.companion(id).name;
             format!("the session of the runner's companion `{name}` ended: {reason}")
         }
     }
@@ -329,7 +325,7 @@ fn start(
     (run, by): (&Run, Duration),
     sessions: &mut Sessions<impl Clock>,
 ) -> Result<Process, String> {
-    let Held { session, cwd, env } = held_by(runner, sessions, &run.container);
+    let Held { session, cwd, env } = held_by(runner, sessions, run.container);
     let dir = command_dir(run.command);
     let put = session.put(&pumpkin_dir(), [Put::Dir(dir.clone(), dir_mode())], by);
     put.context(format_args!("making {dir} failed"))?;

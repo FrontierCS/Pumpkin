@@ -36,7 +36,9 @@ use schema::sandbox::op::{
     CommandStatus, JobState, Last, LeaseRemaining, LeaseReply, LeaseState, LeaseStatusReply,
     OpReply, OpsReply, REASON_BYTES, SessionOp, StatusReply, TransferEnd, TransferStatus,
 };
-use schema::workflow::{AgentId, JobFunctionId, JobOf, NowFunctionId, RoleId, SessionId};
+use schema::workflow::{
+    AgentId, ContainerId, JobFunctionId, JobOf, NowFunctionId, RoleId, SessionId,
+};
 
 use super::jobs::{Job, State};
 use super::leases::{self, Work};
@@ -201,7 +203,7 @@ impl Core<'_> {
                 timeout_seconds,
             } => {
                 let lease = (caller, id, lease);
-                let ran = self.lease_run(lease, container, end, argv, timeout_seconds, then);
+                let ran = self.lease_run(lease, &container, end, argv, timeout_seconds, then);
                 ran.map(OpReply::Lease)
             }
             SessionOp::Put {
@@ -212,7 +214,7 @@ impl Core<'_> {
                 replace,
             } => {
                 let direction = Direction::Put { tree, to, replace };
-                let transfer = self.transfer((caller, id, lease), container, direction, then);
+                let transfer = self.transfer((caller, id, lease), &container, direction, then);
                 transfer.map(OpReply::Lease)
             }
             SessionOp::Get {
@@ -222,7 +224,7 @@ impl Core<'_> {
                 to,
             } => {
                 let direction = Direction::Get { from, to };
-                let transfer = self.transfer((caller, id, lease), container, direction, then);
+                let transfer = self.transfer((caller, id, lease), &container, direction, then);
                 transfer.map(OpReply::Lease)
             }
             SessionOp::Status { lease } => {
@@ -356,17 +358,17 @@ impl Core<'_> {
     }
 
     /// Checks that lease `number` of `session` can take work in `container` now, and returns it
-    /// with when its runner became ready: the caller holds it, its runner holds `container`, is
-    /// ready and runs nothing, and its session has commands left. `act` ends the advice in a
-    /// refusal.
+    /// with `container` as its runner holds it, and when its runner became ready: the caller holds
+    /// it, its runner holds `container`, is ready and runs nothing, and its session has commands
+    /// left. `act` ends the advice in a refusal.
     fn idle_lease(
         &self,
         (caller, session, number): (Caller, SessionId, u64),
         container: &Container,
         act: &str,
-    ) -> Result<(LeaseId, Duration), String> {
+    ) -> Result<(LeaseId, ContainerId, Duration), String> {
         let id = self.own_lease((caller, session), number)?;
-        self.held_container((session, number), container)?;
+        let held = self.held_container((session, number), container)?;
         let name = &self.workflow.session(session).name;
         let lease = &self.leases[id];
         let since = match lease.state {
@@ -398,7 +400,7 @@ impl Core<'_> {
                 grant.name
             ));
         }
-        Ok((id, since))
+        Ok((id, held, since))
     }
 
     // Kubernetes' API server refuses an exec in a container that its pod lacks, as this does:
@@ -407,20 +409,19 @@ impl Core<'_> {
         &self,
         (session, number): (SessionId, u64),
         container: &Container,
-    ) -> Result<(), String> {
-        let companions = &self
-            .workflow
-            .runner(self.workflow.session(session).runner)
-            .companions;
+    ) -> Result<ContainerId, String> {
+        let runner = self.workflow.runner(self.workflow.session(session).runner);
         let held = match container {
-            Container::Main => true,
-            Container::Companion(name) => companions.iter().any(|held| held.name == *name),
+            Container::Main => Some(ContainerId::Main),
+            Container::Companion(name) => (runner.companions())
+                .find(|(_, companion)| companion.name == *name)
+                .map(|(id, _)| ContainerId::Companion(id)),
         };
-        if held {
-            return Ok(());
+        if let Some(held) = held {
+            return Ok(held);
         }
-        let names: Vec<String> = (companions.iter())
-            .map(|companion| format!("`{}`", companion.name))
+        let names: Vec<String> = (runner.companions())
+            .map(|(_, companion)| format!("`{}`", companion.name))
             .collect();
         let instead = match names.split_last() {
             None => format!(
@@ -442,7 +443,7 @@ impl Core<'_> {
     fn transfer(
         &mut self,
         (caller, session, number): (Caller, SessionId, u64),
-        container: Container,
+        container: &Container,
         direction: Direction,
         then: &mut Vec<Action>,
     ) -> Result<LeaseReply, String> {
@@ -450,7 +451,7 @@ impl Core<'_> {
             Direction::Put { .. } => "put a tree",
             Direction::Get { .. } => "get a tree",
         };
-        let (id, _) = self.idle_lease((caller, session, number), &container, act)?;
+        let (id, held, _) = self.idle_lease((caller, session, number), container, act)?;
         let work = |number| Work::Transfer {
             number,
             ended: None,
@@ -460,7 +461,7 @@ impl Core<'_> {
             lease: id,
             holder: caller,
             transfer,
-            container,
+            container: held,
             direction,
             max_bytes: self.workflow.session(self.leases[id].grant).transfer_bytes,
         });
@@ -470,14 +471,14 @@ impl Core<'_> {
     fn lease_run(
         &mut self,
         (caller, session, number): (Caller, SessionId, u64),
-        container: Container,
+        container: &Container,
         work_end: Duration,
         argv: Argv,
         timeout_seconds: Option<NonZeroU64>,
         then: &mut Vec<Action>,
     ) -> Result<LeaseReply, String> {
         let act = "run a command";
-        let (id, since) = self.idle_lease((caller, session, number), &container, act)?;
+        let (id, held, since) = self.idle_lease((caller, session, number), container, act)?;
         let lease = &self.leases[id];
         let timeout = timeout_seconds.map(|seconds| Duration::from_secs(seconds.get()));
         // The lease ends by its own time, and by its holder's work's end.
@@ -487,7 +488,7 @@ impl Core<'_> {
             && timeout.get() > left
         {
             let name = &self.workflow.session(session).name;
-            let rerun = rerun((name, number), &container, NonZeroU64::new(left), &argv);
+            let rerun = rerun((name, number), container, NonZeroU64::new(left), &argv);
             return Err(format!(
                 "the timeout of {timeout} s is longer than lease {number} has left, {left} s: \
                  run it again as `{rerun}`"
@@ -501,7 +502,7 @@ impl Core<'_> {
         then.push(Action::RunCommand {
             lease: id,
             command,
-            container,
+            container: held,
             argv,
             timeout,
         });

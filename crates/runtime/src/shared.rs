@@ -8,9 +8,8 @@ use std::time::Duration;
 
 use decision::{CallResult, Event, JobId};
 use gateway::Arrival;
-use schema::ir::Container;
 use schema::sandbox::{log_dir, out_dir};
-use schema::workflow::TargetId;
+use schema::workflow::{ContainerId, TargetId};
 use stdx::Context;
 use stdx::time::Clock as _;
 
@@ -75,7 +74,7 @@ impl<'r, H: Host> Resident<'r, H> {
             Arrival::Ended { reason } => format!("the shared role's session ended: {reason}"),
             arrival @ Arrival::Exited { .. } => {
                 if let Some((_, sender)) = &self.active {
-                    let _ = sender.send(Message::Session(Container::Main, at, arrival));
+                    let _ = sender.send(Message::Session(ContainerId::Main, at, arrival));
                 }
                 return None;
             }
@@ -96,7 +95,7 @@ impl<'r, H: Host> Resident<'r, H> {
             let ended = Arrival::Ended {
                 reason: reason.clone(),
             };
-            let _ = sender.send(Message::Session(Container::Main, at, ended));
+            let _ = sender.send(Message::Session(ContainerId::Main, at, ended));
         }
         self.failed = Some(reason.clone());
         Some(Event::SharedFailed { target, reason })
@@ -110,7 +109,7 @@ impl<'r, H: Host> Resident<'r, H> {
             let ended = Arrival::Ended {
                 reason: "the work phase ended".to_owned(),
             };
-            let _ = sender.send(Message::Session(Container::Main, at, ended));
+            let _ = sender.send(Message::Session(ContainerId::Main, at, ended));
         }
     }
 }

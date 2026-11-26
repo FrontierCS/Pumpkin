@@ -22,10 +22,12 @@ use alloc::vec::Vec;
 use core::num::NonZeroU64;
 use core::time::Duration;
 
-use schema::ir::{AbsolutePath, ArgumentValue, Argv, Container, Name, Sha256Digest};
+use schema::ir::{AbsolutePath, ArgumentValue, Argv, Name, Sha256Digest};
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::{CommandEnd, OpReply, SessionOp, TransferEnd};
-use schema::workflow::{AgentId, JobFunctionId, Placed, SessionId, TargetId, Workflow};
+use schema::workflow::{
+    AgentId, ContainerId, JobFunctionId, Placed, SessionId, TargetId, Workflow,
+};
 
 mod call;
 mod jobs;
@@ -280,7 +282,7 @@ pub enum Action {
         lease: LeaseId,
         command: u64,
         /// One that the lease's runner holds.
-        container: Container,
+        container: ContainerId,
         argv: Argv,
         timeout: Option<Duration>,
     },
@@ -294,7 +296,7 @@ pub enum Action {
         holder: Caller,
         transfer: u64,
         /// One that the lease's runner holds.
-        container: Container,
+        container: ContainerId,
         direction: Direction,
         max_bytes: NonZeroU64,
     },

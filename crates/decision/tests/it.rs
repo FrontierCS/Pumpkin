@@ -45,7 +45,7 @@ use schema::ir::{
 };
 use schema::sandbox::op::{CommandEnd, OpReply, REASON_BYTES, SessionOp, TransferEnd};
 use schema::sandbox::{ExitStatus, RESULT_MAX_BYTES};
-use schema::workflow::{Class, Offers, Workflow};
+use schema::workflow::{Class, ContainerId, Offers, Workflow};
 use serde_json::{Value, json};
 use test_support::workflow;
 
@@ -478,7 +478,7 @@ impl Run<'_> {
             } => format!(
                 "run command {command} of lease {}{}, {}, with a timeout of {timeout:?}",
                 lease.0,
-                in_container(container),
+                in_container(*container),
                 json!(argv)
             ),
             Action::Transfer {
@@ -489,7 +489,7 @@ impl Run<'_> {
                 direction,
                 max_bytes,
             } => transfer_text(
-                (*lease, container, *holder),
+                (*lease, *container, *holder),
                 *transfer,
                 direction,
                 *max_bytes,
@@ -511,10 +511,10 @@ impl Run<'_> {
 }
 
 /// Where in a lease's runner an action runs, as the action says it: nothing for `main`.
-fn in_container(container: &Container) -> String {
+fn in_container(container: ContainerId) -> String {
     match container {
-        Container::Main => String::new(),
-        Container::Companion(name) => format!(" in {name}"),
+        ContainerId::Main => String::new(),
+        ContainerId::Companion(id) => format!(" in companion {}", id.index()),
     }
 }
 
@@ -527,7 +527,7 @@ fn holder_text(holder: Caller) -> String {
 }
 
 fn transfer_text(
-    (lease, container, holder): (LeaseId, &Container, Caller),
+    (lease, container, holder): (LeaseId, ContainerId, Caller),
     transfer: u64,
     direction: &Direction,
     max: NonZeroU64,
@@ -2073,13 +2073,13 @@ fn lease_containers() {
               (tick due at 903000)
             3100 gpu.run 0:scheduler - serve
               reply to op 3: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":899,"cumulative_seconds":1199,"commands":2}}
-              run command 0 of lease 0 in scheduler, ["serve"], with a timeout of None
+              run command 0 of lease 0 in companion 0, ["serve"], with a timeout of None
             3200 gpu.get 0:swe-000 /work/out /got
               refuse op 4: lease 0 runs command 0, one at a time: get a tree once `gpu.status` says it has ended
             3300 command_ended 0 0 0
             3400 gpu.get 0:swe-000 /work/out /got
               reply to op 5: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":899,"cumulative_seconds":1199,"commands":1}}
-              get /work/out to /got as transfer 1 of lease 0 in swe-000, of at most 4096 bytes
+              get /work/out to /got as transfer 1 of lease 0 in companion 1, of at most 4096 bytes
             3500 transfer_ended 0 1 moved 1 5
             3600 gpu.run 0:scheduler 900 echo it's
               refuse op 6: the timeout of 900 s is longer than lease 0 has left, 899 s: run it again as `sandboxctl call gpu.run 0 --container scheduler --timeout 899 -- echo 'it'\''s'`

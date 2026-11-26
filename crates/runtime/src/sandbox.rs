@@ -21,15 +21,15 @@ use provider::{
     Create, Created, ImageRef, Listed, Meeting, Provider, Role, RunTag, SandboxId, SandboxdRef,
     Sweep, Undeleted, UnixTime,
 };
-use schema::ir::{Command, Container, GpuModel, Image, Name};
+use schema::ir::{Command, GpuModel, Image, Name};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
     Launch, OpPayloadLimit, PUMPKIN_BYTES, RelativePath, command_env, command_stderr,
     command_stdout, pumpkin_dir,
 };
 use schema::workflow::{
-    AgentId, ByProvider, ByRole, JobFunctionId, Placed, RoleId, RunnerId, SessionId, TargetId,
-    Workflow,
+    AgentId, ByProvider, ByRole, ContainerId, JobFunctionId, Placed, RoleId, RunnerId, SessionId,
+    TargetId, Workflow,
 };
 use serde::{Deserialize, Deserializer, de};
 use stdx::time::Clock as _;
@@ -147,7 +147,7 @@ fn provider_role(workflow: &Workflow, role: RoleId, instances: NonZeroU32) -> Ro
     // Only a runner declares companions, and a session names each runner.
     let runner = (workflow.sessions()).find(|(_, session)| session.runner.role() == role);
     let companions = runner.map_or(0, |(_, session)| {
-        workflow.runner(session.runner).companions.len()
+        workflow.runner(session.runner).companions().len()
     });
     Role {
         name: sandbox.name.clone(),
@@ -482,7 +482,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         (clock, by): (&H::Clock, Duration),
         hard_end: UnixTime,
         arrivals: Sender<T>,
-        wrap: impl Fn(Container, Arrival) -> T + Clone + Send + 'static,
+        wrap: impl Fn(ContainerId, Arrival) -> T + Clone + Send + 'static,
     ) -> Result<Started<H::Clock>, Unstarted> {
         let name = which.name();
         let now = UnixTime::of(SystemTime::now())?;
