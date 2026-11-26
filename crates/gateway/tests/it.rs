@@ -2145,26 +2145,8 @@ fn untrusted_companions() {
             let (_, again, _) = relayed_to(&dialer, "scheduler");
             let rekeyed = refused("scheduler", relayed::server(&again));
             let public = refused(edge::OTHER_NAME, edge::other_server());
-            vec![
-                format!("the certificate issued for another companion: {foreign}"),
-                format!("one issued for its name later, of another key: {rekeyed}"),
-                format!("one for its name that the dialer's own roots vouch for: {public}"),
-            ]
-        },
-        &expect![[r#"
-            the certificate issued for another companion: Err("InvalidData: the gateway can't trust companion `scheduler` behind the relay at localhost:$PORT: the TLS handshake failed: invalid peer certificate: UnknownIssuer: expected TLS 1.3 from `scheduler`, with a certificate trusted for it")
-            one issued for its name later, of another key: Err("InvalidData: the gateway can't trust companion `scheduler` behind the relay at localhost:$PORT: the TLS handshake failed: invalid peer certificate: BadSignature: expected TLS 1.3 from `scheduler`, with a certificate trusted for it")
-            one for its name that the dialer's own roots vouch for: Err("InvalidData: the gateway can't trust companion `companion` behind the relay at localhost:$PORT: the TLS handshake failed: invalid peer certificate: UnknownIssuer: expected TLS 1.3 from `companion`, with a certificate trusted for it")"#]],
-    );
-}
-
-#[test]
-fn answering_relay() {
-    check(
-        |_| {
-            let dialer = Dialer::new(edge::client());
+            // The relay says a hello of its own, in the clear, and hears what the gateway sends.
             let (grant, _, unreached) = relayed_to(&dialer, "scheduler");
-            // The relay says a hello of its own, in the clear, and sends on what it then hears.
             let (heard, answers) = mpsc::channel();
             let port = edge::front_of(move |mut stream| {
                 read_route(&mut stream).unwrap();
@@ -2174,15 +2156,19 @@ fn answering_relay() {
                 heard.send(answered).unwrap();
             });
             let answering = accepted(unreached, port, (&Machine, hung()), false);
-            let unread = unread(&[&answers.recv_timeout(HUNG).unwrap()], &grant);
+            assert!(unread(&[&answers.recv_timeout(HUNG).unwrap()], &grant));
             vec![
+                format!("the certificate issued for another companion: {foreign}"),
+                format!("one issued for its name later, of another key: {rekeyed}"),
+                format!("one for its name that the dialer's own roots vouch for: {public}"),
                 format!("a relay that answers for the companion: {answering}"),
-                format!("  it heard none of the session's bytes: {unread}"),
             ]
         },
         &expect![[r#"
-            a relay that answers for the companion: Err("InvalidData: the gateway can't trust companion `scheduler` behind the relay at localhost:$PORT: the TLS handshake failed: received corrupt message of type InvalidContentType: expected TLS 1.3 from `scheduler`, with a certificate trusted for it")
-              it heard none of the session's bytes: true"#]],
+            the certificate issued for another companion: Err("InvalidData: the gateway can't trust companion `scheduler` behind the relay at localhost:$PORT: the TLS handshake failed: invalid peer certificate: UnknownIssuer: expected TLS 1.3 from `scheduler`, with a certificate trusted for it")
+            one issued for its name later, of another key: Err("InvalidData: the gateway can't trust companion `scheduler` behind the relay at localhost:$PORT: the TLS handshake failed: invalid peer certificate: BadSignature: expected TLS 1.3 from `scheduler`, with a certificate trusted for it")
+            one for its name that the dialer's own roots vouch for: Err("InvalidData: the gateway can't trust companion `companion` behind the relay at localhost:$PORT: the TLS handshake failed: invalid peer certificate: UnknownIssuer: expected TLS 1.3 from `companion`, with a certificate trusted for it")
+            a relay that answers for the companion: Err("InvalidData: the gateway can't trust companion `scheduler` behind the relay at localhost:$PORT: the TLS handshake failed: received corrupt message of type InvalidContentType: expected TLS 1.3 from `scheduler`, with a certificate trusted for it")"#]],
     );
 }
 
@@ -2200,22 +2186,12 @@ fn closing_relays() {
             let refused = once(edge::front_of(|mut stream| {
                 read_route(&mut stream).unwrap();
             }));
-            // The relay carries the handshake's start, and five bytes of a TLS server's answer.
-            let said = Says::Hello((json!(hello()), Vec::new()));
-            let (address, _) = companion(edge::other_server(), "scheduler", said);
-            let cut = once(edge::front_of(move |mut stream| {
+            // The relay takes the handshake's start, and answers with the header of a TLS record
+            // alone, as a server's answer cut short.
+            let cut = once(edge::front_of(|mut stream| {
                 read_route(&mut stream).unwrap();
-                let mut companion = TcpStream::connect(address).unwrap();
-                let mut start = [0; 5];
-                stream.read_exact(&mut start).unwrap();
-                companion.write_all(&start).unwrap();
-                let mut rest = stream.try_clone().unwrap();
-                let mut to_companion = companion.try_clone().unwrap();
-                thread::spawn(move || std::io::copy(&mut rest, &mut to_companion));
-                companion.read_exact(&mut start).unwrap();
-                stream.write_all(&start).unwrap();
-                stream.shutdown(Shutdown::Both).unwrap();
-                companion.shutdown(Shutdown::Both).unwrap();
+                stream.read_exact(&mut [0; 5]).unwrap();
+                stream.write_all(&[0x16, 0x03, 0x03, 0x00, 0x40]).unwrap();
             }));
             vec![
                 format!("a relay that closes before the route: {unrouted}"),

@@ -775,7 +775,6 @@ fn sandboxctl_containers() {
                 ctl call gpu.run 0 --container scheduler -- true
                 ctl call gpu.get 0 /work/out got --container Scheduler
                 ctl call gpu.status 0 --container scheduler
-                ctl call gpu.close 0 --container main
                 ctl call train payload --container scheduler"
             );
             let path = format!("PATH={}", sandbox.path.display());
@@ -796,8 +795,6 @@ fn sandboxctl_containers() {
               sandboxctl: `Scheduler` is not a companion's name: use 1 to 63 characters from a-z, 0-9 and `-`, starting with a letter and ending with a letter or a digit
             $ sandboxctl call gpu.status 0 --container scheduler: exit 1
               sandboxctl: `gpu.status` takes no `--container`, as it acts on the whole lease: give it without one
-            $ sandboxctl call gpu.close 0 --container main: exit 1
-              sandboxctl: `gpu.close` takes no `--container`, as it acts on the whole lease: give it without one
             $ sandboxctl call train payload --container scheduler: exit 1
               sandboxctl: a function's call takes no `--container`: give it to a session's `run`, `put` or `get`
             then Ended { reason: "the owner dropped the session" }

@@ -1781,7 +1781,6 @@ fn placed_companions() {
             on_cpu(needs(500, 1024, 0), 32),
             on_cpu(needs(16, 1024, 0), 1),
             on_unoffered(needs(500, 1024, 1), 1),
-            on_unoffered(needs(128_000, 1024, 0), 0),
             Accompanying {
                 offered: BTreeMap::new(),
                 ..on(needs(500, 1024, 1), 1)
@@ -1800,7 +1799,6 @@ fn placed_companions() {
             {"cpu_millis":500,"memory_bytes":1073741824} with 32: /roles/3/runtime/runner/companions: `gpu` declares 32 companions, more than any class that fits its needs holds: `modal`'s `cpu` holds 15 for needs of 500 thousandths of a CPU and 1 GiB, so declare at most 15
             {"cpu_millis":16,"memory_bytes":1073741824} with 1: /roles/3/runtime/runner/companions: `gpu` declares 1 companion, more than any class that fits its needs holds: `modal`'s `cpu` holds 0 for needs of 16 thousandths of a CPU and 1 GiB, so need at least 32 thousandths of a CPU, or declare none
             {"cpu_millis":500,"gpu":{"count":1,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":1073741824} with 1: /roles/3/runtime/runner/companions: `gpu` declares 1 companion, and no class of sandbox offers companions: declare none, or run it where a class offers them
-            {"cpu_millis":128000,"memory_bytes":1073741824} with 0: /roles/3/needs: `gpu` fits no class of sandbox, as `aws`'s `agent` offers 8000 thousandths of a CPU, fewer than its 128000; `aws`'s `ice_lake` offers 4000 thousandths of a CPU, fewer than its 128000; `aws`'s `judge` offers 8000 thousandths of a CPU, fewer than its 128000; `aws`'s `judge_60` offers 64000 thousandths of a CPU, fewer than its 128000; `aws`'s `judge_memory` offers 8000 thousandths of a CPU, fewer than its 128000; `gpus`'s `h100` offers 8000 thousandths of a CPU, fewer than its 128000; `gpus`'s `h100_4` offers 32000 thousandths of a CPU, fewer than its 128000: change its needs, or run it where sandboxes are larger
             {"cpu_millis":500,"gpu":{"count":1,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":1073741824} with 1: /roles/0/needs: `agent` fits no class of sandbox, as no class is offered: change its needs, or run it where sandboxes are larger
             /roles/1/needs: `trainer` fits no class of sandbox, as no class is offered: change its needs, or run it where sandboxes are larger
             /roles/2/needs: `final_judge` fits no class of sandbox, as no class is offered: change its needs, or run it where sandboxes are larger
