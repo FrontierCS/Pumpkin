@@ -37,6 +37,7 @@ mod keydir;
 mod link;
 mod manifest;
 mod next;
+mod paint;
 mod progress;
 mod reaping;
 mod run;
@@ -301,10 +302,7 @@ fn printed_listing(
 // https://github.com/git/git/blob/73876f4861cd3d187a4682290ab75c9dccadbc56/pager.c#L158-L187
 fn terminal() -> (bool, Option<usize>) {
     let stdout = io::stdout();
-    let styled = match AutoStream::choice(&stdout) {
-        ColorChoice::Never => false,
-        ColorChoice::Auto | ColorChoice::AlwaysAnsi | ColorChoice::Always => true,
-    };
+    let styled = paint::styled(&stdout);
     let columns = env::var("COLUMNS")
         .ok()
         .and_then(|columns| columns.parse().ok());

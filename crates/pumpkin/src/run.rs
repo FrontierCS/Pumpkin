@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::time::SystemTime;
@@ -25,6 +26,7 @@ use crate::bodies::{Bodies, Sources};
 use crate::cli::Exit;
 use crate::driver::{Driver, Handoff};
 use crate::ending::{Printed, closing, end, follow, followed, following};
+use crate::paint::{self, Paint};
 use crate::sandboxd::Sandboxd;
 use crate::workspace::Workspace;
 use crate::{
@@ -349,7 +351,7 @@ fn reached<'e>(
     let fits = runtime::fits(&placed, &placed_on.as_ref().map(Connected::provider));
     fits.map_err(|error| match offered {
         Offered::Here { config, .. } => format!("{}: {error}", config.display()),
-        Offered::Controller(name) => format!("controller `{name}`: {error}"),
+        Offered::Controller { name, .. } => format!("controller `{name}`: {error}"),
     })?;
     Ok(placed_on.into_iter().collect())
 }
@@ -436,15 +438,15 @@ impl<'e> Connected<'e> {
 }
 
 /// `workflow` placed in the classes that `classes` gives of each of `providers`, which `offered`
-/// offers. It comes with each provider that it places a role on. Otherwise, once it has said why
-/// each role that fits none fits none, it gives how many there are.
+/// offers. It comes with each provider that it places a role on. Otherwise it fails as
+/// [`misplaced`] does.
 fn place<P>(
     workflow: Workflow,
     providers: BTreeMap<Name, P>,
     classes: impl Fn(&P) -> &BTreeMap<Name, Class>,
     offered: &Offered<'_>,
 ) -> Result<(Placed, ByProvider<P>), String> {
-    (workflow.place(providers, classes)).map_err(|errors| misplaced(&errors, offered))
+    (workflow.place(providers, classes)).map_err(|errors| misplaced(errors, offered))
 }
 
 /// Who offers the sandboxes of a run that a refusal of it names.
@@ -452,44 +454,46 @@ enum Offered<'a> {
     /// The providers of the configuration at `config`, to the operator of the task whose entry is
     /// at `entry`.
     Here { entry: &'a Path, config: &'a Path },
-    /// A controller, to its member, by the name that the member's configuration gives it.
-    Controller(&'a controller::Name),
+    /// A controller, to its member, by the name that the member's configuration gives it, for
+    /// the task whose entry is at `entry`.
+    Controller {
+        name: &'a controller::Name,
+        entry: &'a Path,
+    },
 }
 
-/// Says each of `errors`, a placement's, as `offered` has it, and returns the error that closes
-/// them.
-fn misplaced(errors: &ParseErrors, offered: &Offered<'_>) -> String {
+/// Says each of `errors`, a placement's, at the task's entry, then how many there are, as
+/// `offered` has it. The errors are styled where the standard error is. Returns where to read how
+/// a class is offered.
+fn misplaced(errors: ParseErrors, offered: &Offered<'_>) -> String {
     let count = errors.as_slice().len();
-    match offered {
-        Offered::Here { entry, config } => {
-            let path = entry.display();
-            for error in errors.as_slice() {
-                say(format_args!("{path}: {error}"));
-            }
-            let has = format_args!(
-                "{path}: placing the workflow's roles in the classes that {}'s providers offer has",
-                config.display()
-            );
-            closing_problems(has, count)
-        }
-        Offered::Controller(name) => {
-            for error in errors.as_slice() {
-                say(format_args!("controller `{name}`: {error}"));
-            }
-            let has = format_args!(
-                "controller `{name}`: placing the workflow's roles in the classes of sandbox \
-                 that it offers has"
-            );
-            closing_problems(has, count)
-        }
+    let (Offered::Here { entry, .. } | Offered::Controller { entry, .. }) = offered;
+    let errors = errors.in_source(|_| entry.display().to_string());
+    let paint = Paint(paint::styled(&io::stderr()));
+    for error in errors.as_slice() {
+        say(paint.error(error));
     }
+    let has = match offered {
+        Offered::Here { entry, config } => format!(
+            "{}: placing the workflow's roles in the classes that {}'s providers offer has",
+            entry.display(),
+            config.display()
+        ),
+        Offered::Controller { name, .. } => format!(
+            "controller `{name}`: placing the workflow's roles in the classes of sandbox that it \
+             offers has"
+        ),
+    };
+    say(closing_problems(format_args!("{has}"), count));
+    "to read how a configuration offers a class: pumpkin help config".to_owned()
 }
 
 /// Fails as [`reached`] does, to the member of the controller that they name `controller`, if
 /// the roles of `workflow` never fit the providers of the configuration at `config`, which it
-/// reaches on `engine`.
+/// reaches on `engine`. The task's entry is at `entry`.
 pub(crate) fn never_fits_controller(
     workflow: &Workflow,
+    entry: &Path,
     config: &Path,
     engine: &Engine,
     controller: &controller::Name,
@@ -500,7 +504,10 @@ pub(crate) fn never_fits_controller(
         gateway: _,
         upstreams: _,
     } = config::read(config)?;
-    let offered = Offered::Controller(controller);
+    let offered = Offered::Controller {
+        name: controller,
+        entry,
+    };
     reached(workflow, providers, engine, &offered)?;
     Ok(())
 }

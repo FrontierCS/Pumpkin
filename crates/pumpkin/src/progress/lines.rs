@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use anstyle::{AnsiColor, Style};
+use anstyle::Style;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -17,6 +17,7 @@ use super::{
     number_shown, span, usd,
 };
 use crate::next;
+use crate::paint::{BAD, DIM, GOOD, HEAD, LIVE, Paint, WARN};
 
 /// How many of the runs that ended within the last day `ls` shows without `--all` or a prefix,
 /// the newest. With a live run's steps and the totals, they fit a terminal of 24 rows.
@@ -125,15 +126,6 @@ pub(crate) fn json(listing: &Listing, unlisted: &[Unlisted], pretty: bool) -> St
     }
 }
 
-const HEAD: Style = Style::new().bold();
-const DIM: Style = Style::new().dimmed();
-// Cargo's palette: green for what went well, yellow for a warning, red for an error.
-// https://github.com/rust-lang/cargo/blob/111443f3dc4d82a65e2306a93028f122406401c1/crates/cargo-util-terminal/src/style.rs#L4-L15
-const LIVE: Style = AnsiColor::Cyan.on_default();
-const GOOD: Style = AnsiColor::Green.on_default();
-const WARN: Style = AnsiColor::Yellow.on_default();
-const BAD: Style = AnsiColor::Red.on_default().bold();
-
 /// The style of a run that is in `state`, with a result if `result`.
 fn state_style(state: State, result: bool) -> Style {
     match state {
@@ -142,19 +134,6 @@ fn state_style(state: State, result: bool) -> Style {
         State::Finished | State::Interrupted | State::Unstarted => WARN,
         State::Failed | State::Lost => BAD,
         State::Unread => DIM,
-    }
-}
-
-/// Styles text where the lines are styled, and leaves it plain where they aren't.
-struct Paint(bool);
-
-impl Paint {
-    fn on(&self, style: Style, text: &str) -> String {
-        if self.0 && !text.is_empty() {
-            format!("{style}{text}{style:#}")
-        } else {
-            text.to_owned()
-        }
     }
 }
 

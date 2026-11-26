@@ -220,7 +220,7 @@
 "crates/schema/src/sandbox/tree.rs" = 3
 "crates/schema/src/workflow.rs" = 13
 "crates/schema/src/workflow/errors.rs" = 1
-"crates/schema/src/workflow/place.rs" = 4
+"crates/schema/src/workflow/place.rs" = 3
 "crates/schema/tests/ir.rs" = 4
 "crates/stdx/src/lib.rs" = 5
 "crates/stdx/src/net.rs" = 5

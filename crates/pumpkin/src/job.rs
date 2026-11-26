@@ -646,7 +646,8 @@ fn build_first(
     let built = star::checked(entry, args, |task| {
         let engine = engine(config)?;
         // Before a build slot is waited for and anything is built.
-        crate::run::never_fits_controller(task.workflow(), config, &engine, controller)?;
+        let entry = Path::new(entry.path());
+        crate::run::never_fits_controller(task.workflow(), entry, config, &engine, controller)?;
         let tags = match task.build(&engine, &mut admission) {
             Ok((_, tags, _)) => tags,
             Err(problems) => return Ok(Err(problems)),

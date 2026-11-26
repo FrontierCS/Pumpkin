@@ -24,7 +24,7 @@ mod ops;
 mod parse;
 mod place;
 
-pub use errors::{ParseError, ParseErrors};
+pub use errors::{At, ParseError, ParseErrors, Part};
 
 /// A workflow that parsing checked: only parsing makes one, so code past it needn't check again.
 #[derive(Clone, Debug, PartialEq, Eq)]
