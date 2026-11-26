@@ -38,10 +38,20 @@ grant's call is checked against the grant first ([grants](workflows.md#grants)).
 A kind of [sandbox](#sandbox) that a [provider](#provider) offers, such as a machine size, with its
 resources, startup bound and price (`workflow::Class`).
 
+### Companion
+
+A [container](#container) that a [runner](#runner) declares beside [`main`](#main) in each of its
+[sandboxes](#sandbox), with its own image and user. A [holder](#holder) names it to run or copy
+there: `container =` in a [body](#body), `--container` to `sandboxctl`. The runner's `companions`
+key lists them (`ir::Companion`). Only a [class](#class) whose `Offers::companions` is set holds
+any.
+
 ### Container
 
-An isolated set of processes that Docker runs from an [image](#image). The Docker and EC2 providers
-run sandboxes in them. **Not** for a sandbox in general.
+An isolated set of processes in a [sandbox](#sandbox), started from an [image](#image), with its
+own files, user and address: [`main`](#main), or a [companion](#companion) (`ir::Container`).
+**Open:** also a Docker container, in which the Docker and EC2 providers run a sandbox's `main`.
+**Not** for a sandbox as a whole.
 
 ### Controller
 
@@ -147,10 +157,18 @@ Said of a [run](#run) whose [driver](#driver) ended before writing its [outcome]
 
 A computer that runs `pumpkin`: the operator's own, or a [controller](#controller). **Not** host.
 
+### `main`
+
+The [container](#container) of each [sandbox](#sandbox) that runs its [role](#role)'s
+[image](#image) (`Container::Main`). A command or a copy goes there unless it names a
+[companion](#companion).
+
 ### Meeting
 
 How a [provider](#provider)'s sandboxes first reach the [gateway](#gateway), such as by a local
-socket (`provider::Meeting`). A sandbox has met once its [session](#session) is set up.
+socket (`provider::Meeting`). Each [container](#container) meets on a [session](#session) of its
+own, once that is set up, and its sandbox once all have. The log's `container_met` and
+`sandbox_met` record them.
 
 ### Member
 
@@ -222,6 +240,15 @@ outputs and [outcome](#outcome) ([records](record.md)).
 
 A Dockerfile for an [image](#image), whose build may fetch only what a digest, checksum or commit
 pins (the `recipe` crate).
+
+### Relay
+
+A forwarder that a [provider](#provider) gives each listening [sandbox](#sandbox) with
+[companions](#companion), at the endpoint its create returns (`Listened::relay`). It carries
+each connection from the [gateway](#gateway) to the companion that the connection's first line
+names (`sandbox::route`). The gateway's TLS ends in the companion, so the relay reads none of the
+[session](#session). `sandbox::Relayed` is what a companion is given for this. **Open:** also
+`runtime::relay`'s verb, what a call's thread does between its target's session and the loop.
 
 ### Result
 
