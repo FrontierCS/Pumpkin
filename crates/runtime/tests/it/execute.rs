@@ -846,7 +846,7 @@ fn opened(record: &Path, log: &[Value]) -> Vec<Opened> {
                     let function = granted(&caller["runtime"]["agent"]["grants"], &action["grant"]);
                     let target = role(&function["job"]["target"]);
                     let runtime = &roles[target]["runtime"]["target"];
-                    let sandbox = if runtime["lifetime"] == "work" {
+                    let sandbox = if runtime["lifetime"] == "work_phase" {
                         format!("shared-{target}")
                     } else {
                         job()
@@ -4893,7 +4893,7 @@ fn work_target_bodies_run_separate_leases_for_each_callers_job() {
         ],
         &["worker", "0"],
     );
-    ir["roles"][1]["runtime"]["target"]["lifetime"] = json!("work");
+    ir["roles"][1]["runtime"]["target"]["lifetime"] = json!("work_phase");
     ir["roles"][1]["runtime"]["target"]["sessions"][0]["session"]["commands"] = json!(3);
     let agent = &mut ir["roles"][0];
     agent["name"] = json!("alpha");
@@ -5378,7 +5378,7 @@ fn finished(outcome: &Outcome) -> String {
 fn work_target_workflow(agent: &[&str], body: &str) -> Value {
     let mut ir = submissions_workflow(agent);
     ir["roles"][0]["runtime"]["agent"]["grants"][0]["job"]["body"]["def"] = json!(body);
-    ir["roles"][1]["runtime"] = json!({"target": {"lifetime":"work", "cwd":"/work"}});
+    ir["roles"][1]["runtime"] = json!({"target": {"lifetime":"work_phase", "cwd":"/work"}});
     ir
 }
 
@@ -5405,7 +5405,7 @@ fn work_and_call_targets() -> Value {
     ]);
     let mut fresh = ir["roles"][1].clone();
     fresh["name"] = json!("fresh");
-    fresh["runtime"]["target"]["lifetime"] = json!("call");
+    fresh["runtime"]["target"]["lifetime"] = json!("per_call");
     let mut grant = beta["runtime"]["agent"]["grants"][0].clone();
     grant["name"] = json!("fresh");
     grant["job"]["target"] = json!("fresh");
@@ -5463,21 +5463,28 @@ fn work_target_calls_share_files_and_collect_each_call_once() {
             .unwrap();
     assert_eq!(sandbox["delete"]["state"], "deleted");
 
-    // A record that declares the role `shared` identifies the same physical sandbox.
+    // A record that declares the role `shared`, or names the lifetimes `work` and `call`,
+    // identifies the same physical sandbox.
     let path = record.join("ir.json");
-    let mut old: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    old["roles"][1]["runtime"] =
+    let written: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let mut shared = written.clone();
+    shared["roles"][1]["runtime"] =
         json!({"shared":{"command":{"argv":["server"],"cwd":"/"},"cwd":"/work"}});
-    fs::write(path, serde_json::to_vec(&old).unwrap()).unwrap();
-    let progress = Record::open(&record)
-        .unwrap()
-        .progress()
-        .unwrap()
-        .progress
-        .unwrap();
-    assert_eq!(progress.shared[&1].role, "trainer");
-    assert_eq!(progress.calls[1].shared, Some(1));
-    assert_eq!(progress.calls[2].shared, None);
+    let mut named = written;
+    named["roles"][1]["runtime"]["target"]["lifetime"] = json!("work");
+    named["roles"][4]["runtime"]["target"]["lifetime"] = json!("call");
+    for old in [shared, named] {
+        fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+        let progress = Record::open(&record)
+            .unwrap()
+            .progress()
+            .unwrap()
+            .progress
+            .unwrap();
+        assert_eq!(progress.shared[&1].role, "trainer");
+        assert_eq!(progress.calls[1].shared, Some(1));
+        assert_eq!(progress.calls[2].shared, None);
+    }
 }
 
 fn capture_workflow() -> Value {

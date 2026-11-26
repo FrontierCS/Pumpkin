@@ -85,7 +85,7 @@ impl Capacity {
         };
         let mut functions = BTreeMap::new();
         for (id, function) in workflow.job_functions() {
-            if workflow.target(function.target).lifetime == schema::ir::TargetLifetime::Call {
+            if workflow.target(function.target).lifetime == schema::ir::TargetLifetime::PerCall {
                 functions.insert(id, reserve(&mut work, function.target.role(), 1)?);
             }
         }
@@ -235,7 +235,7 @@ impl Meets<'_> {
     }
 }
 
-/// Whose sandbox: the agent's, a work-lifetime target's, a call's target, or an instance of a
+/// Whose sandbox: the agent's, a `work_phase` target's, a call's target, or an instance of a
 /// lease's runner.
 #[derive(Clone, Copy)]
 pub(super) enum Which {

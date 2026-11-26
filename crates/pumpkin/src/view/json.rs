@@ -320,7 +320,7 @@ fn start_json(start: &SandboxStart) -> Value {
 fn shared_lanes(progress: &Progress) -> impl Iterator<Item = Value> {
     progress.shared.iter().map(|(index, service)| {
         json!({
-            "lane": format!("shared {index}"), "kind": "target", "lifetime": "work", "role": service.role,
+            "lane": format!("shared {index}"), "kind": "target", "lifetime": "work_phase", "role": service.role,
             "sandbox": sandbox(&service.sandbox), "said": progress::work_target_line(service),
         })
     })

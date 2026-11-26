@@ -384,7 +384,7 @@ fn role_json(
         ir::Runtime::Target(target) => (
             "target",
             target.egress.model.is_some(),
-            Some(target.lifetime.unwrap_or(ir::TargetLifetime::Call)),
+            Some(target.lifetime.unwrap_or(ir::TargetLifetime::PerCall)),
         ),
         ir::Runtime::Runner(_) => ("runner", false, None),
     };

@@ -1,4 +1,4 @@
-//! A work phase owns one sandbox per work-lifetime target. Its worker lends the
+//! A work phase owns one sandbox per `work_phase` target. Its worker lends the
 //! session to each admitted body in turn, then collects and deletes the sandbox on closure.
 
 use std::path::Path;

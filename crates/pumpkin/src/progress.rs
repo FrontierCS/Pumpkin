@@ -608,7 +608,7 @@ pub(crate) fn work_target_line(service: &runtime::SharedSpan) -> String {
         "starting".to_owned()
     };
     format!(
-        "work-lifetime target {} on {}: {state}",
+        "`work_phase` target {} on {}: {state}",
         service.role,
         placed(&service.sandbox)
     )

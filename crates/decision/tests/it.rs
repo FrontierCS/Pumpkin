@@ -1307,7 +1307,7 @@ fn shared_failure_after_abandon_leaves_the_call_to_teardown() {
     check(
         |ir| {
             ir["deadline_seconds"] = json!(60);
-            ir["roles"][1]["runtime"] = json!({"target": {"lifetime": "work", "cwd": "/"}});
+            ir["roles"][1]["runtime"] = json!({"target": {"lifetime": "work_phase", "cwd": "/"}});
         },
         r"
         0 work_started
@@ -3112,7 +3112,7 @@ fn work_target_drains_the_previous_jobs_lease_before_reusing_its_slot() {
             two_agents(ir);
             ir["roles"][0]["runtime"]["agent"]["grants"][0]["job"]["call_timeout_seconds"] =
                 json!(1);
-            ir["roles"][1]["runtime"]["target"]["lifetime"] = json!("work");
+            ir["roles"][1]["runtime"]["target"]["lifetime"] = json!("work_phase");
         },
         r#"
         0 work_started
@@ -3448,7 +3448,7 @@ fn shared_calls_serialize_across_grants_and_drain_before_judging() {
             let roles = ir["roles"].as_array_mut().unwrap();
             let mut board = roles[1].clone();
             board["name"] = json!("board");
-            board["runtime"] = json!({"target":{"lifetime":"work","cwd":"/"}});
+            board["runtime"] = json!({"target":{"lifetime":"work_phase","cwd":"/"}});
             for role in &mut *roles {
                 if let Some(grants) = role["runtime"]
                     .get_mut("agent")

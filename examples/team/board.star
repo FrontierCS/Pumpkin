@@ -74,7 +74,7 @@ def board(participants, user):
         "user": user,
         "needs": {"cpu_millis": 500, "memory_bytes": 256 * MiB},
         "runtime": {"target": {
-            "lifetime": "work",
+            "lifetime": "work_phase",
             "cwd": "/pumpkin/out",
             "env": ["TEAM_ROLES=" + " ".join(participants)],
         }},

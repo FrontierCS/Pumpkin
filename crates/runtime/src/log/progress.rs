@@ -196,7 +196,7 @@ pub struct AgentSpan {
     pub model: Option<ModelUse>,
 }
 
-/// One work-lifetime sandbox for all calls that name this target.
+/// One `work_phase` sandbox for all calls that name this target.
 #[derive(Clone, Debug, Default)]
 pub struct SharedSpan {
     pub role: String,
