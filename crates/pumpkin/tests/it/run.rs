@@ -1680,21 +1680,21 @@ fn holds_assets_read_only() {
         pumpkin:    <t> sandbox lease 1 of job 0 asked on local/container
         pumpkin:    <t> sandbox lease 1 of job 0 ready
         pumpkin:    <t> sandbox lease 1 of job 0 ended: closed by its holder
-        pumpkin:    <t> final call job 0 ended: score=3 of=3 pinned=true read_only=true unchanged=true unexpected={}
+        pumpkin:    <t> final call job 0 ended: score=4 of=4 pinned=true read_only=true refused=true unchanged=true unexpected={}
         pumpkin: run <id> started <t> after it was asked for, and ran <t>:
              <t> agent on local/container, started at <t>, exited 0 at <t>; its work ended at <t>
-             <t> final call job 0 on local/container, started after <t>, ran <t>: score=3 of=3 pinned=true read_only=true unchanged=true unexpected={}
+             <t> final call job 0 on local/container, started after <t>, ran <t>: score=4 of=4 pinned=true read_only=true refused=true unchanged=true unexpected={}
              <t>   sandbox lease 0 of job 0 on local/container, <t>: charged <t>, <t> of it busy, 2 commands, the last `sh -c \ncd "$1" || exit 1\nfile=$2\ntry() {\n  said=$(sh -c …` exited 0; closed by its holder
              <t>   sandbox lease 1 of job 0 on local/container, <t>: charged <t>, <t> of it busy, 1 command, the last `sh -c cd "$1" && shift && sha256sum "$@" sh /opt/model LICEN…` exited 0; closed by its holder
           sandboxes: 4 on local/container, <t> in all, leases charged <t>, <t> of it busy, 4 created, all deleted
-        pumpkin: run <id> finished with a result (score=3 of=3 pinned=true read_only=true unchanged=true unexpected={}); its record is <scratch>/.pumpkin/runs/<id>
+        pumpkin: run <id> finished with a result (score=4 of=4 pinned=true read_only=true refused=true unchanged=true unexpected={}); its record is <scratch>/.pumpkin/runs/<id>
         pumpkin: to run it again: pumpkin run --config <scratch>/pumpkin.toml <scratch>/examples/assets/task.star
         record: agents/agent/log/command.stderr, agents/agent/log/command.stdout, agents/agent/out/, agents/agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/out/, jobs/0/sandbox.json, leases/0/log/0/command.stderr, leases/0/log/0/command.stdout, leases/0/log/1/command.stderr, leases/0/log/1/command.stdout, leases/0/out/, leases/0/sandbox.json, leases/1/log/0/command.stderr, leases/1/log/0/command.stdout, leases/1/out/, leases/1/sandbox.json, log.jsonl, outcome.json, payloads/, provider.json, record.json, sources/task/assets/final.star, sources/task/assets/task.star
         agent `agent`'s sandbox, agents/agent/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
         job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
         lease 0's sandbox, leases/0/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
         lease 1's sandbox, leases/1/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
-        outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_exited","status":{"code":0}}}],"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"busy_ns":"<ns>","charged_ns":"<ns>","class":"container","count":4,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":3},{"name":"of","value":3},{"name":"pinned","value":true},{"name":"read_only","value":true},{"name":"unchanged","value":true},{"name":"unexpected","value":{}}]}}}
+        outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_exited","status":{"code":0}}}],"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"busy_ns":"<ns>","charged_ns":"<ns>","class":"container","count":4,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":4},{"name":"of","value":4},{"name":"pinned","value":true},{"name":"read_only","value":true},{"name":"refused","value":true},{"name":"unchanged","value":true},{"name":"unexpected","value":{}}]}}}
         .pumpkin/assets holds: 6ce84a757aa294faf6f92e1e6ffec9916a3d70bb60c53f32e4f56295f2f239d7"#]].assert_eq(&shown);
 }
 
