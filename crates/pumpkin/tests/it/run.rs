@@ -1627,22 +1627,97 @@ dials_from = "203.0.113.7"
 classes.a100 = { gpu = "A100-80GB", gpu_model = "NVIDIA A100-SXM4-80GB", cpu_millis = 8000, memory_bytes = 85899345920, startup_seconds = 1800 }
 "#;
 
+// A role's assets reach its sandboxes read-only, from the workspace's cache, fetched from Hugging
+// Face. Each write there fails with `EROFS`, and a fresh sandbox finds the files unchanged.
+#[test]
+#[ignore = "needs Docker and GitHub: run cargo xtask live docker"]
+fn holds_assets_read_only() {
+    let scratch = Scratch::new();
+    let label = format!("pumpkin.test=assets-{}", std::process::id());
+    let _images = Labelled(label.clone());
+    let files = ["task.star", "final.star", "Dockerfile"];
+    write_example(&scratch, "assets", &files, &label);
+    fs::hard_link(sandboxd(), scratch.0.join(".pumpkin/bin/sandboxd")).unwrap();
+    let context = docker_context();
+    scratch.write("pumpkin.toml", &machine(&context));
+    let home = test_home(&scratch, &context);
+    let temp = scratch.0.join("tmp");
+    fs::create_dir(&temp).unwrap();
+    let args = [
+        "run",
+        "examples/assets/task.star",
+        "--wait",
+        "--config",
+        "pumpkin.toml",
+    ];
+    let mut run = at_home(&scratch, &home, &temp, &args);
+    let invoked = invocation(&run);
+    let rootful = !engine(&scratch, &context).report().security.rootless;
+    let output = with_room(&mut run);
+    let cache = scratch.0.join(".pumpkin/assets");
+    let lines = [
+        report(invoked, &output, &scratch.0, rootful),
+        format!(".pumpkin/assets holds: {}", held(&cache)),
+    ];
+    // So that the scratch directory can be removed.
+    fs::set_permissions(home.join(".docker"), Permissions::from_mode(0o755)).unwrap();
+    let shown = lines
+        .join("\n")
+        .replace(scratch.0.to_str().unwrap(), "<scratch>");
+    expect![[r#"
+        $ env --unset=DOCKER_CONFIG TMPDIR=<scratch>/tmp env --unset=XDG_CACHE_HOME env --unset=XDG_CONFIG_HOME env --unset=XDG_DATA_HOME pumpkin run examples/assets/task.star --wait --config pumpkin.toml
+        exit status: Some(0)
+        pumpkin: run <id> records into <scratch>/.pumpkin/runs/<id>
+        pumpkin: run <id> started
+        pumpkin: following run <id>, recorded in <scratch>/.pumpkin/runs/<id>: ending `pumpkin run` does not stop it
+        pumpkin:    <t> agent started on local/container
+        pumpkin:    <t> the work phase ended
+        pumpkin:    <t> final call job 0 asked on local/container
+        pumpkin:    <t> final call job 0 started
+        pumpkin:    <t> sandbox lease 0 of job 0 asked on local/container
+        pumpkin:    <t> sandbox lease 0 of job 0 ready
+        pumpkin:    <t> sandbox lease 0 of job 0 ended: closed by its holder
+        pumpkin:    <t> sandbox lease 1 of job 0 asked on local/container
+        pumpkin:    <t> sandbox lease 1 of job 0 ready
+        pumpkin:    <t> sandbox lease 1 of job 0 ended: closed by its holder
+        pumpkin:    <t> final call job 0 ended: score=3 of=3 pinned=true read_only=true unchanged=true unexpected={}
+        pumpkin: run <id> started <t> after it was asked for, and ran <t>:
+             <t> agent on local/container, started at <t>, exited 0 at <t>; its work ended at <t>
+             <t> final call job 0 on local/container, started after <t>, ran <t>: score=3 of=3 pinned=true read_only=true unchanged=true unexpected={}
+             <t>   sandbox lease 0 of job 0 on local/container, <t>: charged <t>, <t> of it busy, 2 commands, the last `sh -c \ncd "$1" || exit 1\nfile=$2\ntry() {\n  said=$(sh -c …` exited 0; closed by its holder
+             <t>   sandbox lease 1 of job 0 on local/container, <t>: charged <t>, <t> of it busy, 1 command, the last `sh -c cd "$1" && shift && sha256sum "$@" sh /opt/model LICEN…` exited 0; closed by its holder
+          sandboxes: 4 on local/container, <t> in all, leases charged <t>, <t> of it busy, 4 created, all deleted
+        pumpkin: run <id> finished with a result (score=3 of=3 pinned=true read_only=true unchanged=true unexpected={}); its record is <scratch>/.pumpkin/runs/<id>
+        pumpkin: to run it again: pumpkin run --config <scratch>/pumpkin.toml <scratch>/examples/assets/task.star
+        record: agents/agent/log/command.stderr, agents/agent/log/command.stdout, agents/agent/out/, agents/agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/out/, jobs/0/sandbox.json, leases/0/log/0/command.stderr, leases/0/log/0/command.stdout, leases/0/log/1/command.stderr, leases/0/log/1/command.stdout, leases/0/out/, leases/0/sandbox.json, leases/1/log/0/command.stderr, leases/1/log/0/command.stdout, leases/1/out/, leases/1/sandbox.json, log.jsonl, outcome.json, payloads/, provider.json, record.json, sources/task/assets/final.star, sources/task/assets/task.star
+        agent `agent`'s sandbox, agents/agent/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
+        job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
+        lease 0's sandbox, leases/0/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
+        lease 1's sandbox, leases/1/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
+        outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_exited","status":{"code":0}}}],"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"busy_ns":"<ns>","charged_ns":"<ns>","class":"container","count":4,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":3},{"name":"of","value":3},{"name":"pinned","value":true},{"name":"read_only","value":true},{"name":"unchanged","value":true},{"name":"unexpected","value":{}}]}}}
+        .pumpkin/assets holds: 6ce84a757aa294faf6f92e1e6ffec9916a3d70bb60c53f32e4f56295f2f239d7"#]].assert_eq(&shown);
+}
+
 /// Writes `examples/hello` into `scratch`, with the marker of its root, and with `label` on its
 /// image.
 fn write_hello(scratch: &Scratch, label: &str) {
+    let files = ["task.star", "count.star", "final.star", "Dockerfile"];
+    write_example(scratch, "hello", &files, label);
+}
+
+/// Writes `files` of `examples/<example>` into `scratch`, with the marker of the examples' root and
+/// their `submit.star`, and with `label` on the image of its `Dockerfile`.
+fn write_example(scratch: &Scratch, example: &str, files: &[&str], label: &str) {
     let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
-    for file in [
-        "PUMPKIN.star",
-        "submit.star",
-        "hello/task.star",
-        "hello/count.star",
-        "hello/final.star",
-        "hello/Dockerfile",
-    ] {
-        let text = fs::read_to_string(examples.join(file)).unwrap();
+    let own = files.iter().map(|file| format!("{example}/{file}"));
+    for file in ["PUMPKIN.star".to_owned(), "submit.star".to_owned()]
+        .into_iter()
+        .chain(own)
+    {
+        let text = fs::read_to_string(examples.join(&file)).unwrap();
         scratch.write(&format!("examples/{file}"), &text);
     }
-    let recipe = scratch.0.join("examples/hello/Dockerfile");
+    let recipe = scratch.0.join(format!("examples/{example}/Dockerfile"));
     let mut labelled = fs::OpenOptions::new().append(true).open(recipe).unwrap();
     writeln!(labelled, "LABEL {label}").unwrap();
 }

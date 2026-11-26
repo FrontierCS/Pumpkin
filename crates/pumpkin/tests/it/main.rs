@@ -551,6 +551,12 @@ fn steady_outcome(mut outcome: Value) -> Value {
         usage["ran_ns"] = "<ns>".into();
         for sandboxes in usage["sandboxes"].as_array_mut().unwrap() {
             sandboxes["lasted_ns"] = "<ns>".into();
+            // Of leases' sandboxes alone.
+            for time in ["busy_ns", "charged_ns"] {
+                if let Some(ns) = sandboxes.get_mut(time) {
+                    *ns = "<ns>".into();
+                }
+            }
             if let Some(usd) = sandboxes.get_mut("usd") {
                 *usd = "<usd>".into();
             }
