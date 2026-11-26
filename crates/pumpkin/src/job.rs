@@ -658,10 +658,10 @@ fn build_first(
     let built = star::checked(entry, args, |task| {
         let engine = engine(config)?;
         // Before a build slot is waited for and anything is built.
-        let entry = Path::new(entry.path());
-        crate::run::never_fits_controller(task.workflow(), entry, config, &engine, controller)?;
+        let (workflow, source_map) = (task.workflow(), task.source_map());
+        crate::run::never_fits_controller(workflow, source_map, config, &engine, controller)?;
         let tags = match task.build(&engine, &mut admission) {
-            Ok((_, tags, _)) => tags,
+            Ok((_, tags, _, _)) => tags,
             Err(problems) => return Ok(Err(problems)),
         };
         // By their IDs too, until the job ends, as its run publishes them, however long it waits

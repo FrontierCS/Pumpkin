@@ -153,7 +153,7 @@ impl Sources {
     }
 
     /// Where `at` starts: `<file>:<line>:<column>`.
-    fn place(&self, at: Span) -> String {
+    pub(crate) fn place(&self, at: Span) -> String {
         let Location { line, column, .. } = self.locate(at);
         format!("{}:{line}:{column}", file(&self.0[at.file.0].label))
     }
