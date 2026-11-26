@@ -10,7 +10,7 @@ use crate::repo::Repo;
 // growing past its cap, and fails on an exception that names no file:
 // https://github.com/tigerbeetle/tigerbeetle/blob/24d92bff033453dcc757adfcd9aa14655d1b1734/src/tidy.zig#L731-L753
 // https://github.com/tigerbeetle/tigerbeetle/blob/24d92bff033453dcc757adfcd9aa14655d1b1734/src/tidy.zig#L1496-L1508
-const CEILINGS: &str = ".config/tidy.toml";
+pub(super) const CEILINGS: &str = ".config/tidy.toml";
 
 /// A cap on what each file of a kind holds, whose exceptions are its table in [`CEILINGS`].
 pub(super) struct Cap {

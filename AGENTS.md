@@ -23,5 +23,5 @@
 
 Before writing Rust, read `docs/dev/style.md`. Before writing or running tests, read
 `docs/dev/testing.md`. Before writing docs, comments, commit messages or PR texts, read
-`docs/dev/writing.md`.
+`docs/dev/writing.md`. Before naming a concept, look its word up in `docs/glossary.md`.
 `ARCHITECTURE.md` says where code goes.

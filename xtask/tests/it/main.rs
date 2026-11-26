@@ -510,6 +510,45 @@ fn links() {
 }
 
 #[test]
+fn retired_words() {
+    use Standing::{Ignored, Tracked, Untracked};
+    let settings = "[retired]\n\
+                    gizmo = { use = \"widget\", except = [\"vendor/\", \"docs/theirs.md\"] }\n\
+                    doohickey = { use = \"gadget\", except = [\"docs/gone.md\"] }\n";
+    let code = "// A Gizmo, two gizmos.\n\
+                fn gizmo_count() {}\n\
+                struct GizmoSet;\n\
+                const S: &str = \"no gizmo\";\n\
+                // https://example.com/gizmo/a and gizmology, a word of its own.\n";
+    let file = |path, text: &str, standing| (path, text.to_owned(), standing);
+    check(
+        &[
+            file(".config/tidy.toml", settings, Tracked),
+            file("src/lib.rs", code, Tracked),
+            file(
+                "docs/guide.md",
+                "Each [gizmo](https://example.com/gizmo).\n",
+                Tracked,
+            ),
+            file("docs/theirs.md", "Their gizmo.\n", Tracked),
+            file("docs/notes.md", "A gizmo.\n", Untracked),
+            file("vendor/lib.rs", "// A gizmo.\n", Tracked),
+            file("ignored/lib.rs", "// A gizmo.\n", Ignored),
+            file("Cargo.toml", "# A gizmo.\n", Tracked),
+        ],
+        tidy,
+        &expect![[r#"
+            docs/guide.md:1:7: `gizmo` holds the retired word `gizmo`: write `widget`, as docs/glossary.md does, or list the file as an exception in .config/tidy.toml where the word is another project's
+            src/lib.rs:1:6: `Gizmo` holds the retired word `gizmo`: write `widget`, as docs/glossary.md does, or list the file as an exception in .config/tidy.toml where the word is another project's
+            src/lib.rs:1:17: `gizmos` holds the retired word `gizmo`: write `widget`, as docs/glossary.md does, or list the file as an exception in .config/tidy.toml where the word is another project's
+            src/lib.rs:2:4: `gizmo_count` holds the retired word `gizmo`: write `widget`, as docs/glossary.md does, or list the file as an exception in .config/tidy.toml where the word is another project's
+            src/lib.rs:3:8: `GizmoSet` holds the retired word `gizmo`: write `widget`, as docs/glossary.md does, or list the file as an exception in .config/tidy.toml where the word is another project's
+            src/lib.rs:4:21: `gizmo` holds the retired word `gizmo`: write `widget`, as docs/glossary.md does, or list the file as an exception in .config/tidy.toml where the word is another project's
+            .config/tidy.toml: `docs/gone.md`, an exception for `doohickey`, holds no such word: take it off the list"#]],
+    );
+}
+
+#[test]
 fn test_binaries() {
     use Standing::Tracked;
     let file = |path, text: &str| (path, text.to_owned(), Tracked);

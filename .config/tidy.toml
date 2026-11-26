@@ -291,3 +291,9 @@
 "xtask/tests/it/aws_certificates.rs" = 1
 "xtask/tests/it/live.rs" = 2
 "xtask/tests/it/main.rs" = 2
+
+# The words that Pumpkin no longer uses, each with the word to write instead, which
+# `docs/glossary.md` defines, and the paths where the word is right: each a file, or a directory
+# as a path that ends in `/` (`xtask/src/tidy/retired.rs`).
+[retired]
+pod = { use = "sandbox", except = ["crates/engine/src/prune.rs"] }
