@@ -3,11 +3,10 @@
 //!
 //! A connection first says its [route](schema::sandbox::route), a companion's name. The relay
 //! then connects to that companion by its name, at [`RELAYED_PORT`], and carries bytes both ways
-//! until either connection ends, which ends both. It answers nothing itself: it carries a
-//! connection or closes it, and says why it closed one on standard error.
+//! until either connection ends, which ends both. It says on standard error why it closed a
+//! connection.
 //!
 //! The relay is no boundary. The role's code can end it or take its place, so nothing trusts it.
-//! What it carries is the companion's own TLS, which it can neither read nor answer for.
 //!
 //! What its peers make it hold is bounded. One thread takes the connections and reads each route
 //! in turn, as a `sandboxd` that listens greets one peer at a time. It connects only to the
@@ -30,19 +29,20 @@ use crate::session::TOLD_PEERS_COUNT;
 use crate::until::Until;
 
 // A route is the first that its connection says, as a hello is, so it waits for the network
-// alone. The other connections wait their turn meanwhile.
+// alone.
 const ROUTE_TIMEOUT: Duration = HELLO_TIMEOUT;
 
 // How long a companion has to take the relay's connection: as long as a hello gets, as it waits
 // for the network alone too.
 const CONNECT_TIMEOUT: Duration = HELLO_TIMEOUT;
 
-// How many closed connections the relay tells of. Any container of the sandbox may reach the
-// relay, as often as it likes.
+// As many as a `sandboxd` that listens tells of (`TOLD_PEERS_COUNT`). Any container of the
+// sandbox may reach the relay, as often as it likes.
 const TOLD_COUNT: usize = TOLD_PEERS_COUNT;
 
 // How long the relay waits before it takes a connection again, once taking one has failed. It
-// fails while the process has no descriptor to spare.
+// fails while the process has no descriptor to spare. `sandboxd`'s listeners for ops and model
+// requests wait as long for the same failure.
 const RETAKE: Duration = Duration::from_millis(10);
 
 /// Listens at `address`, and from then on relays each connection there to the companion that
@@ -153,7 +153,6 @@ fn carry(gateway: &TcpStream, companion: &CompanionName) -> Result<(), String> {
     ))?;
     thread::scope(|scope| {
         let back = thread::Builder::new().name("relayed-back".to_owned());
-        // The scope waits for it, so neither way's copy outlasts this call.
         let back = back.spawn_scoped(scope, || copy(&reached, gateway));
         back.context(format_args!(
             "the thread that carries companion `{companion}`'s bytes back didn't start"

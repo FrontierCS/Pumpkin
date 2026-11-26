@@ -185,7 +185,6 @@ fn listen(
     }
 }
 
-/// The connection of a peer that opened the session: as TCP carries it, or under TLS.
 enum Greeted {
     Tcp(TcpStream),
     Tls(tls::Stream),

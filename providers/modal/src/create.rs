@@ -2,12 +2,7 @@
 //!
 //! The request states what each container of the sandbox starts with. That is `sandboxd`'s
 //! argument vector, and the environment that holds what `sandboxd` alone is given. For `main`, it
-//! is also the ports that get a tunnel. The helper passes each on to Modal as it is.
-//!
-//! `main` listens for the gateway behind a tunnel. In a sandbox that holds companions, it also
-//! relays to them, behind a second tunnel. Each companion is a sidecar of Modal's, whose
-//! `sandboxd` listens under TLS of its own, where only the sandbox's containers reach it
-//! (`schema::sandbox::Relayed`).
+//! is also the ports that get a tunnel.
 
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
@@ -39,7 +34,6 @@ const RELAY_PORT: u16 = 7435;
 /// What a published `sandboxd`'s reference holds between its path and its digest.
 const DIGEST: &str = "@sha256:";
 
-/// The memory of `role`'s sandboxes in MiB, or why Modal can't give it.
 pub(crate) fn memory_mib(role: &Role) -> Result<u64, String> {
     let memory_bytes = role.resources.memory_bytes.get();
     if !memory_bytes.is_multiple_of(MIB) {

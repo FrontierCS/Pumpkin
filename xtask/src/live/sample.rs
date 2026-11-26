@@ -1,5 +1,4 @@
-//! `cargo xtask sample-driver`: what the driver of a run on the controller holds, as its `/proc`
-//! says, read over the SSH that the live suites use.
+//! `cargo xtask sample-driver`.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -15,7 +14,6 @@ use crate::flags::SampleDriver;
 use crate::repo::STEP_TIMEOUT;
 use crate::settings::{Provider, Settings};
 
-/// How often a sample is taken.
 const EVERY: Duration = Duration::from_millis(100);
 
 /// How many samples apart each task's own line is printed.
@@ -79,11 +77,8 @@ pub(crate) fn sample_driver(flags: &SampleDriver) -> Result<()> {
     sampled
 }
 
-/// Samples the driver of run `id` on the controller that `remote` runs a command on, every
-/// `EVERY`, until it exits. Each sample is a line of the driver's `Threads`, `VmRSS` and `VmHWM`.
-/// It holds its open files and their soft and hard limits, and its tasks by name. A name counts
-/// each run of digits as `#`. Every `TASKS_EVERY`th sample also has a line for each task, with its
-/// switches and its `schedstat`.
+/// Samples the driver of run `id` on the controller that `remote` runs a command on, as
+/// `sample-driver`'s help says. A task's name counts each run of digits as `#`.
 fn sampled(remote: &dyn Fn(&str) -> std::result::Result<String, String>, id: &str) -> Result<()> {
     let pids = remote(&format!("pgrep --full '/pumpkin driver [0-9]+ {id} '"))?;
     let Some(pid) = pids.split_whitespace().next() else {

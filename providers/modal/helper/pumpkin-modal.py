@@ -121,9 +121,9 @@ def unchanged(sandboxd: dict) -> None:
 
 
 def create(modal, request: dict) -> dict:
-    """Creates the run's sandbox of the request's role, then its `sidecars`, and returns its ID,
-    the tunnel to each of the request's `ports`, in their order, and the `phases` that it timed:
-    `lookup`, `create`, `tunnels` and `list`, then `companions` if it made any, in order.
+    """Creates the run's sandbox of the request's role, then its `sidecars`. Returns the sandbox's
+    ID, a tunnel for each of the request's `ports` in their order, and the `phases` that it timed.
+    The phases are `lookup`, `create`, `tunnels` and `list`, then `companions` if it made any.
 
     Each container starts with the `args` and `env` that the request gives it, which this passes
     on as they are. `main` has the request's `sandboxd` attached at each path of its `at`.
@@ -178,9 +178,7 @@ def create(modal, request: dict) -> dict:
 
 
 def accompany(modal, sandbox, sidecars: list[dict]) -> None:
-    """Starts each of `sidecars` beside `sandbox`'s own container, at most `AT_ONCE` at a time,
-    each with its `name`, its `image`, by its ID, and the `args` and `env` it is given. A sidecar
-    opens no connection but to the sandbox's other containers, and to Modal's resolver.
+    """Starts each of `sidecars` beside `sandbox`'s own container, at most `AT_ONCE` at a time.
 
     If one isn't created, this ends the sandbox, and then raises the first failure in the order of
     `sidecars`, by its sidecar's name. A sandbox that has ended refuses every sidecar, and Modal

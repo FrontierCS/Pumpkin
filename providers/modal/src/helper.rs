@@ -68,7 +68,7 @@ pub(crate) enum Request<'a> {
     /// Reaches the workspace that the profile names.
     Ready,
     /// Imports the image at each of `references`, a reference by digest, which Modal pulls with
-    /// the AWS role `role_arn` in `region`, all at once. With `sandboxd`, it builds that into
+    /// the AWS role `role_arn` in `region`, in one call. With `sandboxd`, it builds that into
     /// each. Answers their ids, in the order of `references`.
     Import {
         references: Vec<&'a str>,

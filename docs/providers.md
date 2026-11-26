@@ -53,10 +53,9 @@ Modal's resolver; the driver dials it through Modal's TLS tunnel, which takes co
 from the configuration's `dials_from` address. A class names its GPU as Modal does, such as `A100-80GB`, and Modal ends each sandbox at
 its hard end.
 
-Only a Modal class holds a runner's [`companions`](../crates/schema/src/ir.rs), as sidecars made
-through `_experimental_sidecars` of Modal's SDK. A run that declares more than its class holds is
-refused before anything is built, with what would hold them. A sandbox that holds as many as
-its needs allow may not meet them all within its class's startup.
+Only a Modal class holds a runner's [`companions`](../crates/schema/src/ir.rs), each as a sidecar
+of Modal's. A sandbox that holds as many as its needs allow may not meet them all within its
+class's startup.
 
 Each container has its own files, processes, address and loopback, and reaches the others by name.
 Over their network, every caller arrives from one address. Modal's resolver answers for public

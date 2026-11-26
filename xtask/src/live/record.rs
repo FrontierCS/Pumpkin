@@ -15,10 +15,9 @@ const COMPANIONS: &str = "companions";
 // in hundreds. So only a path inside the sandbox passes.
 const BRIDGE_MEDIAN_MS: f64 = 50.0;
 
-/// What is wrong with each create on Modal in `lines`, a run's log. That is a phase missing, out of
-/// order or outside its create, or a log without one. A create of a sandbox that holds companions,
-/// one whose containers the log says met, is to have [`COMPANIONS`] last, and any other none. A
-/// Modal sandbox's id starts with `sb-`, and its delete in the log names it.
+/// What is wrong with each create on Modal in `lines`, a run's log, as [`create_unphased`] says, or
+/// a log without one. A sandbox holds companions if the log says its containers met. A Modal
+/// sandbox's id starts with `sb-`, and its delete in the log names it.
 pub(crate) fn unphased(lines: &[Value]) -> Vec<String> {
     let logged = |kind: &str, sandbox: &Value| {
         lines.iter().any(|line| {

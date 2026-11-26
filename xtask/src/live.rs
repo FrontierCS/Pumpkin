@@ -99,9 +99,9 @@ pub(crate) fn docker() -> Result<()> {
 /// Runs `examples/smoke` at `HEAD` on `provider` through the controller, and fails unless every
 /// probe passed, every sandbox was deleted and nothing of the run is left on the provider. On
 /// Modal, it then runs `examples/companions` likewise. That fails too unless each fact that its
-/// result names holds, and its log shows each container's meet. It first runs `pumpkin-admin check`
-/// on the controller's deployment, and fails if that finds a problem. With `lost`, it loses a smoke
-/// run instead, and checks that its sandboxes end by themselves and that a reap removes the rest.
+/// result names holds. It first runs `pumpkin-admin check` on the controller's deployment, and
+/// fails if that finds a problem. With `lost`, it loses a smoke run instead, and checks that its
+/// sandboxes end by themselves and that a reap removes the rest.
 /// `again` names the command that repeats it.
 pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> Result<()> {
     let again = match provider {
@@ -143,7 +143,7 @@ pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> 
     })?;
     if settings.modal.is_some() {
         let mut run = controlled(&repo, &settings.name, &["run", "--wait"]);
-        // Its defaults: 8 companions, on needs that start them all in a class's startup.
+        // With the example's defaults, which start every companion within a class's startup.
         run.arg("companions/task.star");
         eprintln!("xtask: running examples/companions at {commit} through the controller");
         let companioned = verified(&settings, &repo, run, companioned);
@@ -679,8 +679,7 @@ fn probed(values: &[serde_json::Value], gpu: bool) -> Vec<String> {
 
 /// What is wrong in the record of a run of `examples/companions` at `record`. That is what
 /// [`checked`] finds, a fact that its result says doesn't hold, and a create whose phases are
-/// wrong. It is also a meet of its containers that the log doesn't show in full. It prints the
-/// result.
+/// wrong. It prints the result.
 fn companioned(record: &Path) -> Vec<String> {
     let mut failed = checked(record, |values| {
         let shown: Vec<String> = (values.iter())

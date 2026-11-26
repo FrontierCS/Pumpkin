@@ -110,8 +110,8 @@ mod flags {
             /// closed. Needs --relayed. Refused without --listen, and with --tls.
             optional --relay address: SocketAddr
             /// A companion that --relay carries connections to, by its name, which must resolve
-            /// within the sandbox. It carries one connection a companion at a time. Repeatable, a
-            /// companion at a time. Refused without --relay.
+            /// within the sandbox. It carries one connection a companion at a time. Repeatable, once
+            /// for each companion. Refused without --relay.
             repeated --relayed companion: Companion
             /// Becomes this user, `uid:gid`, each a number but 0, as sandboxd starts, which must be
             /// as root, having given the user /pumpkin, made if absent: no command, nor sandboxd,
@@ -230,7 +230,6 @@ fn main() -> ExitCode {
     }
 }
 
-/// How `sandboxd` meets the gateway at `address`, as `--listen`, `--by` and `--tls` say.
 fn gateway_of(
     address: Address,
     listen: bool,
@@ -442,8 +441,6 @@ fn server(certificate: Option<OsString>, key: Option<OsString>) -> Result<tls::S
                  companion, which a sandboxd that listens with --tls serves TLS with"
             ));
         };
-        // A value that isn't UTF-8 isn't hexadecimal digits either, so it is refused as any
-        // other value that isn't an identity's digits.
         Ok(digits.into_string().unwrap_or_default())
     };
     let certificate = digits(certificate, SANDBOXD_TLS_CERTIFICATE)?;

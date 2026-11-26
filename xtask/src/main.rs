@@ -114,7 +114,7 @@ mod flags {
             /// driver's `/proc` alone, over the SSH that `live` uses, as the job's user. Each
             /// sample is a line of its threads, resident memory and peak, open files and their
             /// limits, and its tasks by name.
-            /// Every tenth also has a line a task, with its switches and `schedstat`.
+            /// Every tenth also has a line for each task, with its switches and `schedstat`.
             cmd sample-driver {
                 /// The run's id.
                 required id: String
@@ -845,7 +845,7 @@ fn sandboxd() -> Result<PathBuf> {
 fn release_binary(package: &str, target: &str) -> Result<PathBuf> {
     let mut build = cargo(&["build", "--release", "--locked", "--package", package]);
     build.args(["--target", target]);
-    // `pumpkin` and `sandboxd` build `ring`'s C and assembly.
+    // A static build compiles `ring`'s C and assembly.
     if target == MUSL {
         tools::musl_cc(&mut build)?;
     }

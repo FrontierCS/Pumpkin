@@ -432,7 +432,7 @@ impl Creator<ListenDials, Listened> for Modal<'_> {
 impl Listens for Modal<'_> {
     /// Publishes `images` as [`Listens::publish_companion_images`] asks. Each is pushed as a
     /// role's is ([`Provider::publish_image`]), once however often `images` names it. Modal then
-    /// imports them all at once, and builds `sandboxd` into each, as it starts a sidecar only
+    /// imports them all in one call, and builds `sandboxd` into each, as it starts a sidecar only
     /// from an image that it has built. So no create waits for a build.
     fn publish_companion_images(
         &self,

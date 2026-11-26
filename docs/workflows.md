@@ -26,8 +26,7 @@ The run places the role by those needs ([providers](providers.md#placing-a-run))
 - A **runner** is a sandbox that a session leases. The lease's holder drives it. A runner holds no
   egress and no grants. A runner may declare [`companions`](../crates/schema/src/ir.rs):
   containers beside its own in each of its sandboxes. Such a runner fits only a class that holds
-  companions, and its provider refuses more than a sandbox holds for its `needs`
-  ([providers](providers.md#the-modal-provider)).
+  companions ([providers](providers.md#the-modal-provider)).
 
 A runner's own container is `main`. A body names one with `container`, as [Bodies](#bodies) shows.
 [`examples/companions`](../examples/companions/task.star) starts a service in each.
