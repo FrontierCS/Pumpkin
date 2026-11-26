@@ -5,6 +5,11 @@
 # clock is a whole second, so 5 s leaves room for a busy machine.
 slow-timeout = { period = "5s", terminate-after = 1 }
 
+# `cargo xtask ci` records each run's failed tests from this report in the flake ledger. Its place,
+# `target/nextest/default/junit.xml`, is `NEXTEST_REPORT` in `xtask/src/main.rs`.
+[profile.default.junit]
+path = "junit.xml"
+
 # The shared provider suite waits a second, its `soon()`, for each wait that nothing can end
 # sooner, for each of its three subjects.
 [[profile.default.overrides]]

@@ -35,6 +35,14 @@ pub(crate) struct Repo<'a> {
     pub(crate) root: &'a Path,
 }
 
+// What `git` printed, as `Repo::git` returns it.
+fn read(mut git: Command) -> Result<String> {
+    let how = Run::new(Bound::Within(STEP_TIMEOUT), Echo::Silent);
+    let output = process::run(&mut git, how).map_err(|failure| failure.to_string())?;
+    let shown = process::shown(&git);
+    Ok(printed(output).context(format_args!("reading what `{shown}` printed failed"))?)
+}
+
 impl Repo<'_> {
     /// A `git` with `args`, at the root.
     pub(crate) fn command<I: AsRef<OsStr>>(&self, args: impl IntoIterator<Item = I>) -> Command {
@@ -46,11 +54,32 @@ impl Repo<'_> {
     /// What `git` with `args` printed, at the root, as text less its trailing newline; an error
     /// if it failed, saying what git reported.
     pub(crate) fn git<I: AsRef<OsStr>>(&self, args: impl IntoIterator<Item = I>) -> Result<String> {
-        let mut git = self.command(args);
-        let how = Run::new(Bound::Within(STEP_TIMEOUT), Echo::Silent);
-        let output = process::run(&mut git, how).map_err(|failure| failure.to_string())?;
-        let shown = process::shown(&git);
-        Ok(printed(output).context(format_args!("reading what `{shown}` printed failed"))?)
+        read(self.command(args))
+    }
+
+    /// The id of a tree of the working tree's files: the tracked files as they are, and the
+    /// untracked files that no ignore rule covers. A tracked file that was deleted is missing.
+    /// Working trees whose files, modes and links are alike have the same id. The id of one that
+    /// matches `HEAD` is `HEAD`'s tree.
+    ///
+    /// The tree is built in a scratch index, so the index and every ref stay as they are. Git
+    /// keeps the tree's objects, which `git gc` prunes once nothing refers to them.
+    pub(crate) fn working_tree(&self) -> Result<String> {
+        let git_dir = self.git(["rev-parse", "--absolute-git-dir"])?;
+        // Beside the index that it stands in for.
+        let scratch = tempfile::Builder::new()
+            .prefix("xtask-tree.")
+            .tempdir_in(&git_dir)
+            .context(format_args!("making a scratch index in {git_dir} failed"))?;
+        let index = scratch.path().join("index");
+        // The scratch index starts empty, so `add --all` takes each file as the working tree
+        // holds it.
+        let mut add = self.command(["add", "--all"]);
+        add.env("GIT_INDEX_FILE", &index);
+        read(add)?;
+        let mut write = self.command(["write-tree"]);
+        write.env("GIT_INDEX_FILE", &index);
+        read(write)
     }
 
     /// The text of the file at `path`, from the root.

@@ -330,20 +330,30 @@ pub(crate) fn fetched(release: Release) -> Result<PathBuf> {
 /// Directory Specification places it. The launcher `dist/pumpkin` caches Pumpkin's releases in
 /// that cache directory too.
 fn cache() -> Result<PathBuf> {
+    Ok(xdg("XDG_CACHE_HOME", ".cache")?.join("pumpkin/tools"))
+}
+
+/// Where the user's checkouts keep a history that nothing can fetch again: `pumpkin` in the
+/// user's state directory. The XDG Base Directory Specification places a history there. It places
+/// a cache, which may be deleted at any time, in another directory.
+pub(crate) fn state() -> Result<PathBuf> {
+    Ok(xdg("XDG_STATE_HOME", ".local/state")?.join("pumpkin"))
+}
+
+/// The directory that the environment variable `variable` names, or else `fallback` below the
+/// home directory.
+fn xdg(variable: &str, fallback: &str) -> Result<PathBuf> {
     // The specification says to ignore a relative path.
-    let dir = match env::var_os("XDG_CACHE_HOME").map(PathBuf::from) {
-        Some(dir) if dir.is_absolute() => dir,
+    match env::var_os(variable).map(PathBuf::from) {
+        Some(dir) if dir.is_absolute() => Ok(dir),
         _ => match env::var_os("HOME") {
-            Some(home) if !home.is_empty() => PathBuf::from(home).join(".cache"),
-            _ => {
-                return Err(
-                    "no cache directory is set: set XDG_CACHE_HOME to an absolute path or set HOME"
-                        .into(),
-                );
-            }
+            Some(home) if !home.is_empty() => Ok(PathBuf::from(home).join(fallback)),
+            _ => Err(format!(
+                "no directory is set for {variable}: set it to an absolute path or set HOME"
+            )
+            .into()),
         },
-    };
-    Ok(dir.join("pumpkin/tools"))
+    }
 }
 
 /// Downloads `release` into `to` and fails unless its SHA-256 is the pin's.
