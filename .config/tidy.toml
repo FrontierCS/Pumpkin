@@ -297,4 +297,8 @@
 # `docs/glossary.md` defines, and the paths where the word is right: each a file, or a directory
 # as a path that ends in `/` (`xtask/src/tidy/retired.rs`).
 [retired]
-pod = { use = "sandbox", except = ["crates/engine/src/prune.rs"] }
+pod = { use = "sandbox", except = [
+    "crates/decision/src/ops.rs",
+    "crates/engine/src/prune.rs",
+    "crates/schema/src/ir/container.rs",
+] }
