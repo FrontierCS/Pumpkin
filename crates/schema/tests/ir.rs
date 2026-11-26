@@ -1485,6 +1485,118 @@ fn agent_files() {
     );
 }
 
+/// A file of an asset at `path`, whose SHA-256's digits all are `digit`.
+fn asset_file(path: &str, digit: char) -> Value {
+    json!({
+        "path": path, "url": format!("https://example.com/{digit}"), "size": 963,
+        "sha256": format!("sha256:{}", digit.to_string().repeat(64)),
+    })
+}
+
+/// [`workflow`] with its target `trainer` holding `files` at `path`.
+fn holding(path: &str, files: Value) -> Value {
+    let mut asset = json!({ "path": path });
+    asset["files"] = files;
+    fixture_with("/roles/1/assets", json!([asset]))
+}
+
+#[test]
+fn asset_values() {
+    let one = || json!([asset_file("config.json", 'a')]);
+    let at_url = |url: &str| {
+        let mut file = asset_file("a", 'a');
+        file["url"] = json!(url);
+        holding("/opt/model", json!([file]))
+    };
+    let many = |count: usize| {
+        let files = (0..count).map(|index| asset_file(&index.to_string(), 'a'));
+        holding("/opt/model", files.collect())
+    };
+    check(
+        [
+            holding(
+                "/opt/model",
+                json!([
+                    asset_file("config.json", 'a'),
+                    asset_file("shards/1.bin", 'b')
+                ]),
+            ),
+            holding("/usr", one()),
+            holding("/pumpkin/model", one()),
+            holding("/dev/shm", one()),
+            holding("/proc", one()),
+            holding("/opt/model", json!([])),
+            many(100_001),
+            holding("/opt/model", json!([asset_file("a\nb", 'a')])),
+            holding(
+                "/opt/model",
+                json!([asset_file("a", 'a'), asset_file("a", 'b')]),
+            ),
+            holding(
+                "/opt/model",
+                json!([asset_file("a", 'a'), asset_file("a/b", 'b')]),
+            ),
+            at_url("http://example.com/a"),
+            at_url("https://user:secret@example.com/a"),
+            at_url("https://example.com/a b"),
+            at_url("https:///a"),
+            at_url(&format!("https://example.com/{}", "a".repeat(8000))),
+        ],
+        &expect![[r#"
+            parsed
+            parsed
+            `/pumpkin/model` is in `/pumpkin`, which holds Pumpkin's own files: name a path outside it
+            `/dev/shm` is in `/dev`, which the sandbox's kernel serves: hold the asset outside it
+            `/proc` is in `/proc`, which the sandbox's kernel serves: hold the asset outside it
+            the asset holds no file: give one at least
+            the asset holds 100001 files: give at most 100000
+            `a\nb` holds a newline: give the file a path without one
+            `a` is the path of more than one file: give each file a path of its own
+            `a/b` is below `a`, which is a file of the asset: put it in a directory
+            `http://example.com/a` isn't an `https://` URL: give an `https://` URL with a host, no user, no whitespace and at most 8000 bytes
+            `https://user:secret@example.com/a` names a user: give an `https://` URL with a host, no user, no whitespace and at most 8000 bytes
+            `https://example.com/a b` holds whitespace or a control character: give an `https://` URL with a host, no user, no whitespace and at most 8000 bytes
+            `https:///a` names no host: give an `https://` URL with a host, no user, no whitespace and at most 8000 bytes
+            `https://example.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa…` is 8020 bytes long: give an `https://` URL with a host, no user, no whitespace and at most 8000 bytes"#]],
+    );
+}
+
+#[test]
+fn asset_paths() {
+    let assets = |assets: Value| fixture_with("/roles/0/assets", assets);
+    let asset =
+        |path: &str, digit: char| json!({ "path": path, "files": [asset_file("a", digit)] });
+    check(
+        [
+            assets(json!([asset("/opt/a", 'a'), asset("/opt/b", 'b')])),
+            assets(json!([asset("/opt/a", 'a'), asset("/opt/a", 'b')])),
+            assets(json!([asset("/opt/a", 'a'), asset("/opt/a/b", 'b')])),
+            assets(json!([asset("/opt/a/b", 'a'), asset("/opt/a", 'b')])),
+            assets(json!([
+                asset("/workspace/.tmp", 'a'),
+                asset("/workspace/.codex/x", 'a')
+            ])),
+            assets(json!([asset("/workspace", 'a')])),
+        ],
+        &expect![[r#"
+            parsed
+            error: `/opt/a` is also the path of /roles/0/assets/0: hold an asset at each path once
+              --> roles[0].assets[1].path
+            error: `/opt/a/b` is below `/opt/a`, the path of /roles/0/assets/0: hold each asset outside the others
+              --> roles[0].assets[1].path
+            error: `/opt/a` holds `/opt/a/b`, the path of /roles/0/assets/0: hold each asset outside the others
+              --> roles[0].assets[1].path
+            error: `/workspace/.tmp` is where the role holds an asset read-only: put it outside every asset
+              --> roles[0].runtime.agent.dirs[1].path
+            error: `/workspace/.codex` is below `/workspace`, where the role holds an asset read-only: put it outside every asset
+              --> roles[0].runtime.agent.dirs[0].path
+            error: `/workspace/.tmp` is below `/workspace`, where the role holds an asset read-only: put it outside every asset
+              --> roles[0].runtime.agent.dirs[1].path
+            error: `/workspace/.codex/config.toml` is below `/workspace`, where the role holds an asset read-only: put it outside every asset
+              --> roles[0].runtime.agent.files[0].path"#]],
+    );
+}
+
 #[test]
 fn broken_references() {
     let mut ir = workflow();

@@ -14,8 +14,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::ir::{
-    AbsolutePath, Command, Companion, CpuFlag, CpuModel, Dir, Env, File, Gpu, Image, JsonPointer,
-    ModelRoute, Name, Needs, TargetLifetime, User, WorkflowName,
+    AbsolutePath, Asset, Command, Companion, CpuFlag, CpuModel, Dir, Env, File, Gpu, Image,
+    JsonPointer, ModelRoute, Name, Needs, TargetLifetime, User, WorkflowName,
 };
 use crate::sandbox::OpPayloadLimit;
 
@@ -378,6 +378,8 @@ pub enum JobOf {
 pub struct Sandbox {
     pub name: Name,
     pub image: Image,
+    /// See [`ir::Role::assets`](crate::ir::Role::assets), whose rules they keep.
+    pub assets: Vec<Asset>,
     pub user: User,
     pub needs: Needs,
     /// The role's place in the IR, where placing it reports what is wrong.
