@@ -8,7 +8,7 @@
 
 # The Markdown documents over `WORD_CAP` words, as `wc -w` counts them.
 [words]
-"ARCHITECTURE.md" = 2763
+"ARCHITECTURE.md" = 2809
 "deploy/aws/README.md" = 2110
 "docs/glossary.md" = 1667
 "docs/language.md" = 1534
@@ -17,7 +17,7 @@
 # over `SENTENCE_CAP` words in `xtask/src/tidy/sentences.rs`, or with a semicolon that chains
 # clauses.
 [sentences]
-"ARCHITECTURE.md" = 23
+"ARCHITECTURE.md" = 28
 "crates/aws/src/iam/simulate.rs" = 1
 "crates/aws/src/lib.rs" = 12
 "crates/aws/src/problem.rs" = 1

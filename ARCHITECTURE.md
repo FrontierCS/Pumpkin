@@ -20,13 +20,13 @@ reads only the IR, and the driver hands it the bodies of the IR's functions, so 
 on no language.
 
 Each instance of a role is a sandbox, which a provider makes: a container on the operator's Docker
-engine, a container on an EC2 instance of its own, or a Modal sandbox. A sandbox holds the
-container `main` and, for a runner, its companions. In each container, `sandboxd` serves one
-session, its only way to the host. Over it the host moves files and runs commands, and code in the
-sandbox makes ops, such as a call of a function, and model requests. On the host, the gateway holds
-each session's end, the decision core decides what the run does next, and the runtime carries out
-those decisions on the providers and keeps the run's record. The model route sends each model
-request that it admits to the model provider, with the provider's key.
+engine, a container on an EC2 instance of its own, or a Modal sandbox. A sandbox holds `main` and,
+for a runner, its companions. In each container, `sandboxd` serves one session, its only way out.
+Over it the host moves files and runs commands, and code in the sandbox makes ops, such as a call
+of a function, and model requests. On the host, the gateway holds each session's end, the decision
+core decides what the run does next, and the runtime carries out those decisions on the providers
+and keeps the run's record. The model route sends each model request that it admits to the model
+provider, with the provider's key.
 
 A run is one process, the driver, on one machine: the operator's own, or a team's controller, an
 EC2 instance or a container on a Docker host, which runs the runs a machine sends it.
@@ -37,9 +37,10 @@ EC2 instance or a container on a Docker host, which runs the runs a machine send
 
 `pumpkin` (`crates/pumpkin`) is the operator's command line, and its `main.rs` dispatches the
 commands. `run` builds a task's images and starts its driver. Read its path through the driver
-first. A machine whose configuration names a controller sends each run over `ssh` to the same
-executable there, whose `controller serve` starts it as a job. Under the name `pumpkin-admin`, the
-executable installs and checks the controller's host.
+first. A machine whose configuration names a controller in `[controllers.<name>]` sends each run
+over `ssh` to the same executable there, whose `controller serve` starts the run as a job in a
+systemd unit of its own. Under the name `pumpkin-admin`, a hard link, the executable installs and
+checks the controller's host.
 
 `sandboxd` (`crates/sandboxd`) is the supervisor in every sandbox, a static binary. Under the name
 `sandboxctl`, it is the shim through which code in the sandbox makes ops. `ec2-boot`
@@ -80,8 +81,9 @@ EC2 provider hands `ec2-boot` (`ec2_boot`).
 
 ### `crates/decision`
 
-The decision core. `Core` takes each `Event` that the runtime observed and returns the `Action`s to
-perform, until one ends the run.
+The decision core. `Core` takes each `Event` that the runtime observed, with the time since the
+run started, and returns the `Action`s to perform, until `Action::Finish` carries the run's
+`Outcome` or `Action::Abandon` ends it at its hard end.
 
 **Architecture Invariant:** the core does no I/O, reads no clock and draws no randomness, so the
 same events give the same actions. Time reaches it only with each event.
@@ -96,8 +98,8 @@ and the deletion of every work sandbox that the run knows of is confirmed.
 
 `lang` is the workflow language. `evaluate` runs a task's entry file to a `Plan` of its images and
 workflow, or to its `Problems`, and `call` calls a body during a run. `library` holds the standard
-library's files, which `pumpkin` serves below `@pumpkin//`. A harness is a directory there.
-`recipe` checks image recipes, Dockerfiles, for a fetch that no digest pins.
+library's files, which `pumpkin` serves below `@pumpkin//`. A harness is a directory there, such
+as `harness/codex/`. `recipe` checks image recipes, Dockerfiles, for a fetch that no digest pins.
 
 **Architecture Invariant:** evaluation is hermetic. It reads source only through its `Loader`, by
 `Label`s that stay below their root. It only declares images, and reaches a host only through the
@@ -108,25 +110,26 @@ runtime, the core and the providers never see the language. Only `library` knows
 
 ### `crates/gateway`, `crates/tls`, `crates/sandboxd`
 
-The two ends of a session. The `gateway` is the host's end: the `Session`'s one owner hears of each
-op, model request and exit as an `Arrival`. `sandboxd` serves the sandbox's end and freezes it.
-`tls` carries a session that crosses the Internet.
+The two ends of a session. The `gateway` is the host's end: the `Session`'s one owner moves trees,
+runs commands, and hears of each op, model request and exit as an `Arrival`. `sandboxd` serves the
+sandbox's end, carries ops from `sandboxctl` and model requests from its model endpoint, and
+freezes the sandbox. `tls` carries a session that crosses the Internet, below the session's
+protocol.
 
 **Architecture Invariant:** a sandbox can't harm the host through its session. Anything out of
 protocol ends the session, and a session costs the host only bounded memory and bounded waits.
 
 **Architecture Invariant:** the two ends share no Pumpkin crate but `schema`, `stdx` and `tls`, so
-the protocol is all they agree on. `tls` carries bytes below the protocol and knows none of its
-messages. The gateway knows no provider, so every provider's sandboxes have the same sessions.
+the protocol is all they agree on. The gateway knows no provider, so every provider's sandboxes
+have the same sessions.
 
 **Architecture Invariant:** `sandboxd` is no boundary within its container. It has its role's
-privileges, so what it does the role's own code could do too. The session is the boundary. So is
-each companion's, whatever carries it to the gateway.
+privileges, so what it does the role's own code could do too. The session is the boundary.
 
 ### `crates/route`
 
-The model route. `serve` sends each model request that a `Route` admits upstream (`Upstream`), and
-streams the response back.
+The model route. `serve` answers each model request through the entry of the role's route whose
+`Route` admits it, sends it upstream (`Upstream`), and streams the response back.
 
 **Architecture Invariant:** the route stays closed. A request reaches the models that its workflow
 allows and nothing else of the model provider's: none of the state it keeps, the tools it runs or
@@ -137,11 +140,11 @@ API and those its entry lists.
 
 ### `crates/provider`, `crates/engine`, `crates/aws`
 
-`provider` is the interface that every provider implements. `Provider` reserves what a run's roles
-need, publishes their images, says how the sandboxes meet the gateway (`Meeting`), and creates
-them. `Sweep`, its part that lists and deletes a run's sandboxes, is all a reap needs. `engine` is
-the operator's Docker engine, which builds every image, whichever provider runs it. `aws` is AWS's
-command line as Pumpkin runs it (`Cli`).
+`provider` is the interface that every provider implements. `Provider` says whether a run's roles
+could ever fit (`Provider::fits`), reserves what they need, publishes their images, says how the
+sandboxes meet the gateway (`Meeting`), and creates them. `Sweep`, its part that lists and deletes
+a run's sandboxes, is all a reap needs. `engine` is the operator's Docker engine, which builds
+every image, whichever provider runs it. `aws` is AWS's command line as Pumpkin runs it (`Cli`).
 
 **Architecture Invariant:** runs that share a provider never reach each other's sandboxes. Every
 sandbox carries its run's `RunTag`, and a provider lists and deletes only the sandboxes that carry
@@ -168,8 +171,8 @@ each as a sandbox in a Modal workspace, under gVisor, through its helper, `pumpk
 
 The host side. `Run::prepare` reserves on each provider and begins the record, and `Run::execute`
 drives the `Core` on the run's providers to its outcome, or until a signal stops it. One thread
-drives the core, and each call and lease is a child on a thread of its own. A start meets each
-companion on one more. `record` and `log` lay out the record, and `Record` reads it back.
+drives the core, and each call and lease is a child on a thread of its own. `record` and `log` lay
+out the record, and `Record` reads it back.
 
 **Architecture Invariant:** the runtime is written once, against `Provider`. It depends on no
 provider's crate, not even in its tests, which run on a simulated provider.
@@ -201,12 +204,13 @@ member's build runs as the controller's one user.
 ### `crates/test-support`, `xtask`, `dist`, `deploy`, `examples`
 
 `test-support` holds what the tests of several crates share, such as the conformance suite of the
-`Provider` trait. Only tests use it. `xtask` holds the contributor tasks, such as `ci` and `live`.
-`dist` holds the files that a release ships as they are, such as `./pumpkin`, a task repository's
-launcher. `deploy/aws` is the Terraform module that makes a team's Pumpkin on AWS, as
-[its README](deploy/aws/README.md) says. `deploy/docker` makes a team's controller in a privileged
-container on a Docker host, as [its README](deploy/docker/README.md) says. Both install a
-controller by `deploy/controller`'s one script. `examples` holds tasks.
+`Provider` trait. Only tests use it. `xtask` holds the contributor tasks: `ci` runs the checks
+every change passes, and `live` those that reach a real environment. `dist` holds the files that a
+release ships as they are, such as `./pumpkin`, a task repository's launcher. `deploy/aws` is the
+Terraform module that makes a team's Pumpkin on AWS, as [its README](deploy/aws/README.md) says.
+`deploy/docker` makes a team's controller in a privileged container on a Docker host, as
+[its README](deploy/docker/README.md) says: systemd, `sshd` and a Docker engine of the container's
+own. Both install a controller by `deploy/controller`'s one script. `examples` holds tasks.
 
 **Architecture Invariant:** a Docker controller's jobs reach the engine inside its container alone,
 never the host's, so the paths that the Docker provider mounts, its ledger of CPUs and the prune of
@@ -222,17 +226,15 @@ the run.
 
 A sandbox reaches the host only over its session, and nothing else of the network: a Docker sandbox
 has loopback alone, an EC2 sandbox's instance drops all but the gateway's address and port, and a
-Modal sandbox's containers open no connection but to one another and DNS. Nothing separates them,
-so a task authenticates its own services. Through the session, ops go to the core, which authorizes
-each against the caller's grants, and model requests go through the closed route. The agent never
-reaches the final call's target.
+Modal sandbox's containers open no connection but to one another and DNS. Nothing separates them.
+Through the session, ops go to the core, which authorizes each against the caller's grants, and
+model requests go through the closed route. The agent never reaches the final call's target.
 
 A sandbox proves which it is by how it meets the gateway. On the host, it dials a socket that only
 it can reach. On a private network, its hello presents an `Attestation` that its provider checks,
 such as an EC2 instance's identity document. Across the Internet, the gateway dials the endpoint
 that the sandbox's create gave, and answers the hello with a `RegistrationGrant` that only that
-`sandboxd` was given. Each container of a sandbox meets the gateway as its provider's `Meeting`
-says.
+`sandboxd` was given.
 
 No credential is reachable from a sandbox. The model provider's key stays in the host's `Upstream`,
 and the record keeps no header's value. Images are private: an EC2 instance pulls them with its
@@ -281,8 +283,9 @@ major. A task repository runs the release that its `.pumpkinversion` pins.
 
 ### Errors
 
-Errors follow [`docs/dev/style.md`](docs/dev/style.md). What `pumpkin` says of a run's end or of a
-refusal ends with the commands to run next (`next`).
+Errors follow [`docs/dev/style.md`](docs/dev/style.md). A check of an input reports each problem
+at its place. What `pumpkin` says of a run's end or of a refusal ends with the commands to run
+next (`next`).
 
 ### Testing
 
