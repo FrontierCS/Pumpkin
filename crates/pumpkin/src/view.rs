@@ -185,7 +185,8 @@ struct View {
     at: next::At,
     /// Whether a run's reply carries the command that runs it again.
     again: bool,
-    /// The directory of the runs' jobs, which name each run's member, on a controller.
+    /// The directory of the runs' jobs, on a controller. A job names its run's member, and is
+    /// listed as `ls` lists it while its run has no record.
     jobs: Option<PathBuf>,
     /// The list row of each run that has ended, or is lost.
     ended: BTreeMap<String, Row>,
@@ -605,12 +606,17 @@ impl View {
     }
 
     fn runs_json(&mut self, before: Option<&str>) -> Result<Response, Failed> {
-        let names =
+        let mut names =
             if self.at.dir().is_none() && !self.runs.try_exists().context(self.runs.display())? {
                 Vec::new()
             } else {
                 Record::names(&self.runs)?
             };
+        if let Some(jobs) = &self.jobs {
+            names.extend(crate::serve::job_ids(jobs)?);
+            names.sort_unstable();
+            names.dedup();
+        }
         let older = names.iter().rev();
         let mut page = older.filter(|name| before.is_none_or(|before| name.as_str() < before));
         let mut rows = Vec::new();
@@ -654,6 +660,25 @@ impl View {
         Ok(self.membered(id, row)?.into())
     }
 
+    /// The row of job `id`, whose run has no record, as `ls` lists it, or `None` if no job is `id`.
+    fn job_row(&self, id: &str) -> Result<Option<JsonRow>, String> {
+        let Some(jobs) = &self.jobs else {
+            return Ok(None);
+        };
+        let job = jobs.join(id);
+        if !job.try_exists().context(job.display())? {
+            return Ok(None);
+        }
+        let listed = crate::serve::job_listed(id)?;
+        let mut row = listed_json(
+            id,
+            &progress::Row::of(id, &listed, crate::unix_now(), &self.at),
+        );
+        row["requests"] = Value::Null;
+        row["tokens"] = Value::Null;
+        Ok(Some(self.membered(id, row)?.into()))
+    }
+
     /// `row`, of run `id`, with the run's member, if a job started the run.
     fn membered(&self, id: &str, mut row: Value) -> Result<Value, String> {
         if let Some(jobs) = &self.jobs
@@ -678,7 +703,7 @@ impl View {
             let has = dir.join("record.json").try_exists();
             let has = has.map_err(|error| ReadError::Failed(format!("{}: {error}", dir.display())));
             if !has? {
-                return Ok(None);
+                return self.job_row(id).map_err(ReadError::Failed);
             }
             let record = Record::open(&dir)?;
             if let Some(ending) = record.ending()? {

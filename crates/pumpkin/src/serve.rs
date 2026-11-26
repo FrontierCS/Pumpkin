@@ -348,42 +348,55 @@ fn unstarted(
     listing: &mut Listing,
 ) -> Result<(), String> {
     let jobs = home.join(JOBS);
-    let entries = match fs::read_dir(&jobs) {
+    for id in job_ids(&jobs)? {
+        // A run whose directory is made, or whose record is written, after `listed_in` read the
+        // runs is not in `listing` yet, and its job is its row, so that no job drops out.
+        if !crate::picked(prefixes, &id) || listing.runs.contains_key(&id) {
+            continue;
+        }
+        let listed = job_listed(&id)?;
+        if matches!(listed, progress::Listed::Unstarted)
+            && !logged_since(&jobs.join(&id).join("log"), since)?
+        {
+            listing.runs.insert(id, Entry::Older);
+            continue;
+        }
+        let row = Row::of(&id, &listed, now, at);
+        listing.runs.insert(id, Entry::Row(Box::new(row)));
+    }
+    Ok(())
+}
+
+/// The ids of the jobs in `jobs`, a home's `JOBS`, which may be missing.
+pub(crate) fn job_ids(jobs: &Path) -> Result<Vec<String>, String> {
+    let entries = match fs::read_dir(jobs) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error).context(jobs.display()),
     };
-    let held = crate::job::jobs()?;
+    let mut ids = Vec::new();
     for entry in entries {
         let name = entry.context(jobs.display())?.file_name();
         // As `ls` lists them, which leaves out a name that starts with a dot.
-        let Some(id) = name.to_str().filter(|id| !id.starts_with('.')) else {
-            continue;
-        };
-        // A run whose directory is made, or whose record is written, after `listed_in` read the
-        // runs is not in `listing` yet, and its job is its row, so that no job drops out.
-        if !crate::picked(prefixes, id) || listing.runs.contains_key(id) {
-            continue;
+        if let Some(id) = name.to_str().filter(|id| !id.starts_with('.')) {
+            ids.push(id.to_owned());
         }
-        let tmpfs = held.join(id);
-        let listed = if let Some(waiting_since) = modified(&tmpfs.join(WAITING))? {
-            progress::Listed::Waiting { waiting_since }
-        } else if is_dir(&tmpfs)? {
-            progress::Listed::Building {
-                held_since: modified(&tmpfs.join(BUILDING))?,
-            }
-        } else if logged_since(&jobs.join(id).join("log"), since)? {
-            progress::Listed::Unstarted
-        } else {
-            listing.runs.insert(id.to_owned(), Entry::Older);
-            continue;
-        };
-        let row = Row::of(id, &listed, now, at);
-        listing
-            .runs
-            .insert(id.to_owned(), Entry::Row(Box::new(row)));
     }
-    Ok(())
+    Ok(ids)
+}
+
+/// Job `id`, whose run has no record, as `ls` lists it: `waiting` for a build slot, `building`,
+/// or `unstarted` once its unit has ended.
+pub(crate) fn job_listed(id: &str) -> Result<progress::Listed, String> {
+    let tmpfs = crate::job::jobs()?.join(id);
+    if let Some(waiting_since) = modified(&tmpfs.join(WAITING))? {
+        return Ok(progress::Listed::Waiting { waiting_since });
+    }
+    if is_dir(&tmpfs)? {
+        let held_since = modified(&tmpfs.join(BUILDING))?;
+        return Ok(progress::Listed::Building { held_since });
+    }
+    Ok(progress::Listed::Unstarted)
 }
 
 fn exists(path: &Path) -> Result<bool, String> {

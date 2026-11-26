@@ -13,8 +13,8 @@ use schema::sandbox::RESULT_MAX_BYTES;
 use serde_json::{Value, json};
 
 use super::{
-    Prices, Scratch, Step, asked, check, cut, lease_places, lock_driver, logged, payload, poll,
-    returned, whole_log, write_record, write_run,
+    Prices, Scratch, Step, asked, check, cut, days_ago, lease_places, lock_driver, logged, payload,
+    poll, returned, whole_log, write_record, write_run,
 };
 
 /// A `pumpkin view` process that listens on loopback, and is killed when dropped.
@@ -571,6 +571,7 @@ impl Piped {
     fn start(scratch: &Scratch) -> Self {
         let mut command = scratch.pumpkin(&["controller", "serve", "--member", "alice"]);
         command.env("HOME", &scratch.0);
+        command.env("XDG_RUNTIME_DIR", scratch.0.join("run"));
         command.stdin(Stdio::piped()).stdout(Stdio::piped());
         let mut child = command.spawn().unwrap();
         let mut stdout = BufReader::new(child.stdout.take().unwrap());
@@ -700,6 +701,66 @@ fn answers_over_a_pipe() {
             cancel: {"error":"the view on a controller answers no cancel: cancel run <live> from the page that `pumpkin view` serves, or run: pumpkin cancel --controller alice <live>"}
             the live run, after a line more: live true, 1 record, from where the last poll ended
             once its standard input ends: exit status: 0"#]],
+    );
+}
+
+// A controller's job whose run has no record yet is listed as `ls` lists it, until the record
+// is begun.
+#[test]
+fn lists_the_jobs_whose_runs_have_no_record() {
+    let scratch = Scratch::new();
+    let (ended, waiting, building, unstarted) = (
+        "20261107-120000-1b8a0001",
+        "20261107-130000-2c9b0004",
+        "20261107-130100-2c9b0005",
+        "20261107-130200-2c9b0006",
+    );
+    for id in [ended, waiting, building, unstarted] {
+        scratch.write(&format!("jobs/{id}/log"), "");
+        scratch.write(&format!("jobs/{id}/member"), "alice\n");
+    }
+    for (id, marker) in [(waiting, "waiting"), (building, "building")] {
+        let path = format!("run/pumpkin/{id}/{marker}");
+        scratch.write(&path, "");
+        days_ago(&scratch.0.join(path), 1);
+    }
+    let mut piped = Piped::start(&scratch);
+    let mut listed = || {
+        let (head, body) = piped.ask("/api/runs", false);
+        let listed: Value = serde_json::from_slice(&body).unwrap();
+        let rows = listed["runs"].as_array().unwrap().iter().map(|row| {
+            format!(
+                "  {} {} {} live {}: {}",
+                row["id"].as_str().unwrap(),
+                row["member"].as_str().unwrap(),
+                row["state"].as_str().unwrap(),
+                row["live"],
+                row["rest"].as_str().unwrap()
+            )
+        });
+        let rows: Vec<String> = rows.collect();
+        format!("{}\n{}", head["status"].as_str().unwrap(), rows.join("\n"))
+    };
+    let before = format!("GET /api/runs, before any run's record: {}", listed());
+    write_record(&scratch, ended, true, Some(returned(7.0)));
+    fs::rename(scratch.0.join("runs"), scratch.0.join(".pumpkin/runs")).unwrap();
+    let after = format!("GET /api/runs, once {ended}'s is begun: {}", listed());
+    check(
+        &scratch,
+        [Step::Ran(before), Step::Ran(after)],
+        false,
+        &[],
+        &expect![[r#"
+            GET /api/runs, before any run's record: 200 OK
+              20261107-130200-2c9b0006 alice unstarted live false: -: its job ended before the run started: to see why: pumpkin wait --controller alice 20261107-130200-2c9b0006
+              20261107-130100-2c9b0005 alice building live true: holding a build slot for 24h
+              20261107-130000-2c9b0004 alice waiting live true: waiting 24h for a build slot
+              20261107-120000-1b8a0001 alice unstarted live false: -: its job ended before the run started: to see why: pumpkin wait --controller alice 20261107-120000-1b8a0001
+            GET /api/runs, once 20261107-120000-1b8a0001's is begun: 200 OK
+              20261107-130200-2c9b0006 alice unstarted live false: -: its job ended before the run started: to see why: pumpkin wait --controller alice 20261107-130200-2c9b0006
+              20261107-130100-2c9b0005 alice building live true: holding a build slot for 24h
+              20261107-130000-2c9b0004 alice waiting live true: waiting 24h for a build slot
+              20261107-120000-1b8a0001 alice finished live false: -: score=7 metrics={"solved":3}"#]],
     );
 }
 
