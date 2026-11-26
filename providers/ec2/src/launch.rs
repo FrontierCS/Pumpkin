@@ -80,7 +80,7 @@ impl Ec2<'_> {
             user,
             resources,
             instances: _,
-            // The envelope's classes hold no companions, so placing gives it no role with any.
+            // Its classes hold no companions.
             companions: _,
         } = role;
         let class = (self.classes.get(class))

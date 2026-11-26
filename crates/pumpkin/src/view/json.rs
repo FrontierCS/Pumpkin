@@ -27,8 +27,8 @@ const LANE_TICKS: u32 = 500;
 // laptop's window holds.
 const START_PHASES: usize = 16;
 
-/// How many containers a lane's start names at most in each of its lists. One lists the slowest
-/// to meet the gateway, the other those yet to meet it. A runner may hold hundreds.
+/// How many containers a lane's start names at most in each of its lists. A runner may hold
+/// hundreds.
 // Each list wraps in one row of the start's card, which a laptop's window holds with the rest.
 // Five names of 63 characters wrap to 11 lines of it.
 const START_CONTAINERS: usize = 5;

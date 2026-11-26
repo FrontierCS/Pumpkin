@@ -24,9 +24,9 @@ The run places the role by those needs ([providers](providers.md#placing-a-run))
   A work target's commands make no ops and no model requests. A process there can outlive its
   call, so nothing could tell its requests apart by job.
 - A **runner** is a sandbox that a session leases. The lease's holder drives it. A runner holds no
-  egress and no grants. A runner may declare `companions`: containers beside its own in each of
-  its sandboxes, which share its `needs`. Placing refuses such a runner, as no provider's class
-  offers companions.
+  egress and no grants. A runner may declare [`companions`](../crates/schema/src/ir.rs):
+  containers beside its own in each of its sandboxes. Placing refuses such a runner, as no
+  provider's class offers companions.
 
 Every sandbox has `/pumpkin`, which holds Pumpkin's own files. The `schema` crate's
 [`sandbox`](../crates/schema/src/sandbox.rs) module lays them out:

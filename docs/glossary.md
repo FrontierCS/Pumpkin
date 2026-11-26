@@ -43,8 +43,7 @@ resources, startup bound and price (`workflow::Class`).
 A [container](#container) that a [runner](#runner) declares beside [`main`](#main) in each of its
 [sandboxes](#sandbox), with its own image and user. A [holder](#holder) names it to run or copy
 there: `container =` in a [body](#body), `--container` to `sandboxctl`. The runner's `companions`
-key lists them (`ir::Companion`). Only a [class](#class) whose `Offers::companions` is set holds
-any.
+key lists them (`ir::Companion`).
 
 ### Container
 
@@ -166,9 +165,8 @@ The [container](#container) of each [sandbox](#sandbox) that runs its [role](#ro
 ### Meeting
 
 How a [provider](#provider)'s sandboxes first reach the [gateway](#gateway), such as by a local
-socket (`provider::Meeting`). Each [container](#container) meets on a [session](#session) of its
-own, once that is set up, and its sandbox once all have. The log's `container_met` and
-`sandbox_met` record them.
+socket (`provider::Meeting`). A [container](#container) has met once its [session](#session) is
+set up, and its sandbox once all have (`container_met`, `sandbox_met`).
 
 ### Member
 
@@ -246,9 +244,8 @@ pins (the `recipe` crate).
 A forwarder that a [provider](#provider) gives each listening [sandbox](#sandbox) with
 [companions](#companion), at the endpoint its create returns (`Listened::relay`). It carries
 each connection from the [gateway](#gateway) to the companion that the connection's first line
-names (`sandbox::route`). The gateway's TLS ends in the companion, so the relay reads none of the
-[session](#session). `sandbox::Relayed` is what a companion is given for this. **Open:** also
-`runtime::relay`'s verb, what a call's thread does between its target's session and the loop.
+names (`sandbox::route`). `sandbox::Relayed` is what a companion is given for this. **Open:**
+also `runtime::relay`'s verb, what a call's thread does between its target's session and the loop.
 
 ### Result
 

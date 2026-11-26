@@ -1,6 +1,4 @@
-//! The names of a sandbox's containers. Each sandbox holds one container that runs its role's
-//! image, named `main`. A runner's sandboxes also hold its companions, each by a [`CompanionName`].
-//! A [`Container`] names either.
+//! The names of a sandbox's containers ([`Container`]).
 
 use std::borrow::Cow;
 use std::fmt;
@@ -19,7 +17,6 @@ checked_string!(
     check_companion_name
 );
 
-/// The name of the container that runs a sandbox's role's image.
 const MAIN: &str = "main";
 
 /// The most bytes of a DNS label (RFC 1035, section 2.3.4).

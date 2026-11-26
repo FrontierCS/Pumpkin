@@ -264,7 +264,7 @@ fn create_args(create: &Create, dial: &SocketDial, cpus: &Cpus) -> Result<Vec<St
         resources,
         // The ledger holds a share for each instance, and `instance` names the one to take.
         instances: _,
-        // The engine's class holds no companions, so placing gives it no role with any.
+        // Its class holds no companions.
         companions: _,
     } = role;
     let sandboxd = Path::new(sandboxd.as_str());

@@ -499,7 +499,6 @@ pub struct TlsIdentity {
 }
 
 impl TlsIdentity {
-    /// The identity of `certificate`, in DER, and `key`, its PKCS #8 private key in DER.
     pub fn new(certificate: Vec<u8>, key: Vec<u8>) -> Self {
         Self { certificate, key }
     }
@@ -523,12 +522,10 @@ impl TlsIdentity {
         })
     }
 
-    /// Its certificate, in DER.
     pub fn certificate(&self) -> &[u8] {
         &self.certificate
     }
 
-    /// Its certificate's private key, a PKCS #8 key in DER.
     pub fn key(&self) -> &[u8] {
         &self.key
     }

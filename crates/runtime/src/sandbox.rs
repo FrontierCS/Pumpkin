@@ -173,7 +173,6 @@ pub(super) struct Sandboxes<'p, H: Host> {
     placed: &'p Placed,
     providers: ByProvider<Hosting<'p>>,
     images: ByRole<ImageRef>,
-    // Each runner that declares companions, with them.
     companions: BTreeMap<RunnerId, WithCompanions<'p>>,
     sockets: Sockets,
     record: &'p Path,
@@ -506,7 +505,6 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             hard_end,
             by: by_unix.min(hard_end),
         };
-        // Only a runner declares companions, and each lease's sandbox holds its runner's.
         let companions = match which {
             Which::Lease(_, runner, _) => self.companions.get(&runner),
             Which::Agent(_) | Which::Shared(_) | Which::Call(..) => None,

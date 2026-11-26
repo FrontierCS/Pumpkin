@@ -63,7 +63,6 @@ pub(super) struct Run {
 
 struct Running {
     command: u64,
-    /// The container that it runs in, whose session started it.
     container: ContainerId,
     process: Process,
     /// When it is to be killed, since the run started, until it has been.
@@ -75,14 +74,11 @@ struct Running {
 /// One of a runner's containers, as a lease's commands run in it.
 struct Held<'a, C> {
     session: &'a mut Session<C>,
-    /// Where each of its commands starts.
     cwd: &'a AbsolutePath,
     /// The variables added to the environment of each of its commands.
     env: &'a Env,
 }
 
-/// `container` of `runner`'s sandbox, whose sessions are `sessions`, which an order of the core's
-/// names.
 fn held_by<'a, C>(
     runner: &'a Runner,
     sessions: &'a mut Sessions<C>,
@@ -284,8 +280,6 @@ fn serve<H: Host>(
     }
 }
 
-/// Why a lease fails once the session of `container` of its runner, `runner`, has ended, for
-/// `reason`.
 fn ended(runner: &Runner, container: ContainerId, reason: &str) -> String {
     match container {
         ContainerId::Main => format!("the runner's session ended: {reason}"),

@@ -98,9 +98,6 @@ pub enum Meeting<'p> {
 
 /// A provider whose sandboxes listen ([`Meeting::Listen`]): their create, and what publishes the
 /// images of the companions that they hold.
-///
-/// Only such a provider is given a companion, so only its classes offer any
-/// ([`Offers::companions`](schema::workflow::Offers::companions)).
 pub trait Listens: Creator<ListenDials, Listened> {
     /// Publishes `images`, each a companion's, so that this provider's sandboxes can run each
     /// beside `main`, under `sandboxd` as it published it. Returns one reference for each image,

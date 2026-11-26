@@ -267,9 +267,7 @@ pub struct Offers {
     /// None if the provider states no model.
     pub cpu_model: Option<CpuModel>,
     /// Whether each sandbox holds a runner's companions beside its own container
-    /// ([`ir::RunnerRuntime::companions`](crate::ir::RunnerRuntime::companions)). A runner that
-    /// declares any fits no other class. Its provider refuses, before any image is built, more
-    /// than a sandbox holds for the runner's needs.
+    /// ([`ir::RunnerRuntime::companions`](crate::ir::RunnerRuntime::companions)).
     pub companions: bool,
 }
 

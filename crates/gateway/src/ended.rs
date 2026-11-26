@@ -1,6 +1,3 @@
-//! Why a session ended, and when by its clock, as the first of its threads to see the end
-//! recorded it.
-
 use std::fmt;
 use std::sync::OnceLock;
 use std::time::Duration;

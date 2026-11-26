@@ -2,8 +2,7 @@
 //!
 //! A sandbox's create is given what each of its containers meets the gateway by, and leaves a
 //! registration for each ([`Registrations`]). The start then meets every container at once
-//! ([`Sandboxes::meet`]). `main` meets on the thread that starts the sandbox. Each companion meets
-//! on a thread of its own, which ends before the start returns.
+//! ([`Sandboxes::meet`]). `main` meets on the thread that starts the sandbox.
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -80,8 +79,7 @@ impl Meets<'_> {
     }
 }
 
-/// A runner's companions on the provider whose sandboxes hold them, which listen. Each is as the
-/// runner declares it, by its id, with its image as that provider published it.
+/// A runner's companions on the provider whose sandboxes hold them, which listen.
 pub(super) struct WithCompanions<'p> {
     listens: &'p dyn Listens,
     dialer: &'p Dialer,
@@ -155,15 +153,12 @@ impl WithCompanions<'_> {
     }
 }
 
-/// Each runner that declares companions, with the provider that it is placed on, whose sandboxes
-/// listen ([`listening`]).
 pub(crate) struct Listening<'p>(BTreeMap<RunnerId, &'p dyn Listens>);
 
 /// Each runner of `placed` that declares companions, with its provider, of `providers`, as only a
 /// sandbox that listens holds any.
 ///
-/// Fails if such a runner is placed on a provider whose sandboxes don't listen. That is the
-/// provider's fault, as placing put the runner in one of its classes that holds companions.
+/// Fails if such a runner is placed on a provider whose sandboxes don't listen.
 pub(crate) fn listening<'p>(
     placed: &Placed,
     providers: &ByProvider<&'p dyn Provider>,
@@ -247,7 +242,6 @@ pub(crate) struct Sessions<C> {
 }
 
 impl<C> Sessions<C> {
-    /// The session of companion `id` of the sandbox's runner.
     pub(crate) fn companion(&mut self, id: CompanionId) -> &mut Session<C> {
         &mut self.companions[id.index()]
     }
@@ -264,8 +258,8 @@ struct Opened<C> {
 /// The meeting of a companion: its thread, or how it went, once the thread has ended.
 type Meeting<'scope, C> = Result<thread::ScopedJoinHandle<'scope, Opened<C>>, Opened<C>>;
 
-// Each session stamps its own end, so this bounds only how late a start notices one. It changes
-// no start's failure.
+// As long as the gateway's accept sleeps between two looks. Each session stamps its own end, so
+// this bounds only how late a start notices one.
 const WATCH: Duration = Duration::from_millis(10);
 
 /// What a container's session opens with. That is the limit on an op's payload, if it takes ops,
@@ -304,7 +298,6 @@ impl<H: Host> Sandboxes<'_, H> {
             let meeting: Vec<_> = (companions.into_iter())
                 .map(|(id, name, registration)| {
                     let container = ContainerId::Companion(id);
-                    // A companion's session is passive, and serves no model.
                     let opens = (None, false, arrivals.clone(), of(wrap.clone(), container));
                     let meet = {
                         let clock = clock.clone();
@@ -361,7 +354,6 @@ impl<H: Host> Sandboxes<'_, H> {
         // connect.
         let ended = || looks.ended(self.between_looks, || self.ended(provider, id));
         let accepted = accepted(registration, (clock, by), opens, (stop, ended));
-        // A sandbox that holds `main` alone has met once `main` has.
         if alone && let Ok((_, at)) = &accepted {
             let (sandbox, at) = (sandbox.clone(), *at);
             self.send([log::Entry::Met { sandbox, at }]);
@@ -383,9 +375,8 @@ impl<H: Host> Sandboxes<'_, H> {
 
     /// Waits for each of `meeting`, the meetings of a sandbox's companions, to end, and returns
     /// how each went, after `main`'s. While one still waits, it watches sandbox `id` of `provider`
-    /// and each session that opened. A session that ended fails its container's meeting, when the
-    /// session saw its end. A sandbox that its provider lists as ended fails the start, as the
-    /// failure returned last. Either sets `stop`.
+    /// and each session that opened. A sandbox that its provider lists as ended fails the start, as
+    /// the failure returned last, and sets `stop`.
     fn watch<'scope>(
         &self,
         (looks, provider, id): (&Looks<'_, H::Clock>, &dyn Provider, &SandboxId),
@@ -450,7 +441,6 @@ fn sessions_ended<C>(
     }
 }
 
-/// How the meeting that `thread` ran went, once the thread has ended.
 fn joined<C>(thread: thread::ScopedJoinHandle<'_, Opened<C>>) -> Opened<C> {
     let opened = thread.join();
     opened.unwrap_or_else(|panic| panic::resume_unwind(panic))
@@ -473,7 +463,6 @@ fn stopped(stop: &AtomicBool) -> bool {
     interruption::signal().is_some() || stop.load(Ordering::Relaxed)
 }
 
-/// `wrap`, for the arrivals on the session of `container`.
 fn of<T>(
     wrap: impl Fn(ContainerId, Arrival) -> T + Send + 'static,
     container: ContainerId,
@@ -482,9 +471,8 @@ fn of<T>(
 }
 
 /// Waits for a container to meet the gateway at `registration` by `by`, a time on `clock`, and
-/// returns its session with when it met. The session takes ops and model requests as `opens`
-/// says, and hands its arrivals over through `opens`' sender and wrap. The wait ends as
-/// [`stopped`] says, and once `ended` says so. Its error comes with whether `stopped` ended it.
+/// returns its session with when it met. The wait ends as [`stopped`] says, and once `ended` says
+/// so. Its error comes with whether `stopped` ended it.
 fn accepted<C: Clock, T: Send + 'static>(
     registration: gateway::Registration,
     (clock, by): (&C, Duration),

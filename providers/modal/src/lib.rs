@@ -416,7 +416,7 @@ impl Creator<ListenDials, Listened> for Modal<'_> {
 }
 
 impl Listens for Modal<'_> {
-    // Its classes offer no companions, so no runner that declares any is placed on it.
+    // Its classes hold no companions.
     fn publish_companion_images(
         &self,
         images: &[Image],

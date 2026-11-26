@@ -39,8 +39,6 @@ const REDIAL_MOST: Duration = Duration::from_secs(15);
 /// a slow link, makes the accept wait, and only the deadline fails it, saying why the last dial
 /// failed. TLS that the client refuses, as a certificate it doesn't trust for the endpoint's name,
 /// and a hello that the gateway refuses, fail it at once.
-///
-/// A companion listens behind its sandbox's relay ([`Dialer::relayed`]).
 #[derive(Debug)]
 pub struct Dialer {
     client: tls::Client,

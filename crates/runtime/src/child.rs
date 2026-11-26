@@ -52,10 +52,9 @@ pub(super) struct Deadlines {
 
 pub(super) enum Message<O> {
     /// What the session of one of its sandbox's containers handed over
-    /// ([`Registration::accept`]), at the time the run observed it. The container is `main` but
-    /// in a runner's sandbox, which also holds its companions. That is its commands' exits and its
-    /// end, and the ops and model requests of a session that takes them. A shared target's end can
-    /// come from the loop, which ended the target.
+    /// ([`Registration::accept`]), at the time the run observed it. That is its commands' exits
+    /// and its end, and the ops and model requests of a session that takes them. A shared target's
+    /// end can come from the loop, which ended the target.
     ///
     /// [`Registration::accept`]: gateway::Registration::accept
     Session(ContainerId, Duration, Arrival),

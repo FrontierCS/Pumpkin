@@ -1,9 +1,4 @@
 //! The meeting of a companion that listens behind its sandbox's relay ([`Relayed`]).
-//!
-//! The gateway issues the companion a certificate and its key. It dials the relay, names the
-//! companion there, and runs TLS within that connection, with that certificate as its one root.
-//! So whatever carries the connection reads nothing of the session, and can't answer for the
-//! companion without the certificate's key.
 
 use std::io::{self, Write as _};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -33,9 +28,6 @@ const NO_EXPIRATION: Duration = Duration::from_secs(253_402_300_799);
 impl Dialer {
     /// Issues the grant and the TLS identity of `companion`, in the [`Relayed`] that its
     /// `sandboxd` is given. The [`Unreached`] takes the endpoint of its sandbox's relay.
-    ///
-    /// The identity's certificate doesn't expire. Only the registration that the [`Unreached`]
-    /// becomes trusts it, and only the [`Relayed`] holds its key.
     pub fn relayed(&self, companion: &CompanionName) -> io::Result<(Relayed, Unreached)> {
         let grant = random_grant()?;
         let (identity, within) = Within::issue(companion)?;
