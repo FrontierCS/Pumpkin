@@ -23,7 +23,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv4Addr;
-use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
+use std::num::{NonZeroU32, NonZeroU64};
 use std::path::Path;
 
 use aws::{Cli, Region, Repository, RepositoryName, RoleArn};
@@ -34,12 +34,12 @@ use provider::{
 };
 use schema::ir::{self, GpuModel, Image, Name};
 use schema::sandbox::SANDBOXD_PATH;
-use schema::workflow::{Class, Companions, Offers, UsdPerHour};
+use schema::workflow::{Class, Offers, UsdPerHour};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use stdx::Deadline;
 
-use crate::create::{MIB, Sandboxd, memory_mib};
+use crate::create::{Sandboxd, companions_held, memory_mib};
 use crate::helper::{ASK_TIMEOUT, ConfigFile, Helper, IMPORT_TIMEOUT, Profile, Request};
 use crate::iam::ECR;
 use crate::images::Batch;
@@ -50,17 +50,6 @@ mod helper;
 pub mod iam;
 mod images;
 mod sandboxes;
-
-/// The companions that a sandbox of any class holds, each a sidecar of Modal's.
-// Modal refuses a sidecar past what the sandbox reserves: its refusal says "limit is derived from
-// sandbox reservation". It counts no container of the sandbox's own. Its guide caps them at 250
-// whatever the reservation: https://modal.com/docs/guide/sandbox-sidecars
-// A sandbox reserves what its role needs (`sandboxes`), which is what placing counts by.
-const COMPANIONS: Companions = Companions::Reserved {
-    cpu_millis_each: NonZeroU64::new(32).unwrap(),
-    memory_bytes_each: NonZeroU64::new(32 * MIB).unwrap(),
-    most: NonZeroUsize::new(250).unwrap(),
-};
 
 /// The provider's settings, in a table such as [the crate's](crate#settings).
 // Without `deny_unknown_fields`, so that a reader of settings may ignore a key that a later
@@ -192,7 +181,7 @@ impl TryFrom<ClassTable> for SandboxClass {
             gpu: offered,
             cpu_features: BTreeSet::new(),
             cpu_model: None,
-            companions: COMPANIONS,
+            companions: true,
         };
         let class = Class {
             offers,
@@ -212,7 +201,7 @@ impl From<SandboxClass> for ClassTable {
             usd_per_hour,
         } = class;
         // Its GPU's count is `gpu`'s, a class of the settings names no CPU's flags or model, and
-        // every class offers the same companions.
+        // every class holds companions.
         let Offers {
             cpu_millis,
             memory_bytes,
@@ -357,6 +346,12 @@ impl Provider for Modal<'_> {
             memory_mib(role)?;
         }
         Ok(Reservation::new(()))
+    }
+
+    // Modal refuses a companion past what its sandbox holds only at the create, after every image
+    // is published. So a run that declares more is refused here, before any is built.
+    fn fits(&self, phases: &[Vec<Role>]) -> Result<(), String> {
+        phases.iter().flatten().try_for_each(companions_held)
     }
 
     /// Publishes `image`, a role's, as [`Provider::publish_image`] asks: the engine must have it,

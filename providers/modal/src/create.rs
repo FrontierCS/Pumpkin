@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use crate::images::imported;
 
 /// The bytes in a MiB, the unit in which Modal gives a sandbox memory.
-pub(crate) const MIB: u64 = 1024 * 1024;
+const MIB: u64 = 1024 * 1024;
 
 /// The port at which `main`'s `sandboxd` listens for the gateway, behind a tunnel.
 const MAIN_PORT: u16 = 7434;
@@ -50,6 +50,95 @@ pub(crate) fn memory_mib(role: &Role) -> Result<u64, String> {
         ));
     }
     Ok(memory_bytes / MIB)
+}
+
+/// How many companions a sandbox holds beside its own container, each a sidecar of Modal's. It
+/// holds one for each `cpu_millis_each` thousandths of a CPU and `memory_bytes_each` that its role
+/// needs, and `most` at most.
+struct Companions {
+    cpu_millis_each: u64,
+    memory_bytes_each: u64,
+    most: usize,
+}
+
+/// The companions that a sandbox of any class holds.
+// Modal refuses a sidecar past what the sandbox reserves: its refusal says "limit is derived from
+// sandbox reservation". It counts no container of the sandbox's own. Its refusals at that edge
+// show that each sidecar takes 32 thousandths of a CPU and 32 MiB of the reservation. Its guide
+// caps them at 250 whatever the reservation: https://modal.com/docs/guide/sandbox-sidecars
+// A sandbox reserves what its role needs (`request`), which is what `companions_held` counts by.
+const COMPANIONS: Companions = Companions {
+    cpu_millis_each: 32,
+    memory_bytes_each: 32 * MIB,
+    most: 250,
+};
+
+/// Fails if `role` declares more companions than its sandboxes hold ([`COMPANIONS`]), saying what
+/// would hold them.
+pub(crate) fn companions_held(role: &Role) -> Result<(), String> {
+    let Companions {
+        cpu_millis_each,
+        memory_bytes_each,
+        most,
+    } = COMPANIONS;
+    let (cpu_millis, memory_bytes) = (role.resources.cpu_millis, role.resources.memory_bytes);
+    let fewest = (cpu_millis.get() / cpu_millis_each).min(memory_bytes.get() / memory_bytes_each);
+    // A count past `usize::MAX` is past `most` too.
+    let held = usize::try_from(fewest).unwrap_or(usize::MAX).min(most);
+    let declared = role.companions;
+    if declared <= held {
+        return Ok(());
+    }
+    let s = if declared == 1 { "" } else { "s" };
+    let asked = format!("role `{}` declares {declared} companion{s}", role.name);
+    let fewer = match held {
+        0 => "declare none".to_owned(),
+        _ => format!("declare at most {held}"),
+    };
+    if held == most {
+        return Err(format!(
+            "{asked}, and a Modal sandbox holds at most {most}: {fewer}"
+        ));
+    }
+    let holds = format!(
+        "{asked}, and a Modal sandbox holds {held} for needs of {cpu_millis} thousandths of a \
+         CPU and {}",
+        binary(memory_bytes.get())
+    );
+    if declared > most {
+        return Err(format!("{holds}: {fewer}"));
+    }
+    // In `u128`, where no product of a count and an amount overflows.
+    let each = |amount: u64| declared as u128 * u128::from(amount);
+    // Only what falls short.
+    let cpu = (each(cpu_millis_each) > u128::from(cpu_millis.get()))
+        .then(|| format!("{} thousandths of a CPU", each(cpu_millis_each)));
+    let memory = (each(memory_bytes_each) > u128::from(memory_bytes.get()))
+        .then(|| binary(each(memory_bytes_each)));
+    let more = match (cpu, memory) {
+        (Some(cpu), None) => cpu,
+        (None, Some(memory)) => memory,
+        (Some(cpu), Some(memory)) => format!("{cpu} and {memory}"),
+        // `held`, below `most`, is the fewer of the counts that the CPU and the memory give, each
+        // rounded down. So `declared`, which is more, takes more than the role needs of one.
+        (None, None) => {
+            unreachable!("a sandbox short of companions below its cap is short of CPU or memory")
+        }
+    };
+    Err(format!("{holds}: need at least {more}, or {fewer}"))
+}
+
+/// `bytes` exactly, in the largest binary unit that divides it, as "3 GiB" or "1536 MiB".
+fn binary(bytes: impl Into<u128>) -> String {
+    let bytes = bytes.into();
+    let units = [(1 << 30, "GiB"), (1 << 20, "MiB"), (1 << 10, "KiB")];
+    match units
+        .into_iter()
+        .find(|(unit, _)| bytes.is_multiple_of(*unit))
+    {
+        Some((unit, name)) => format!("{} {name}", bytes / unit),
+        None => format!("{bytes} bytes"),
+    }
 }
 
 /// The published `sandboxd`, for the helper to put into an image. It is the file at `path` on

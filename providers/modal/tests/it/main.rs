@@ -1,6 +1,7 @@
 //! What the Modal provider decides without Modal. That is the references of a batch of images
-//! (`images`), what its helper's `create` is asked, and how its answer is read (`create`). This
-//! binary compiles both modules itself, as the crate keeps them private.
+//! (`images`), what its helper's `create` is asked, and how its answer is read (`create`). So is
+//! how many companions a sandbox holds (`create`). This binary compiles both modules itself, as
+//! the crate keeps them private.
 
 #![expect(
     clippy::unwrap_used,
@@ -65,6 +66,7 @@ fn runner(memory_bytes: u64, ops: bool, model: bool) -> Create {
             user: user(1000),
             resources,
             instances: NonZeroU32::MIN,
+            companions: 0,
         },
         instance: 0,
         class: name("cpu"),
@@ -233,6 +235,54 @@ fn answers() {
         no relay, though asked: the Modal helper's `create` gave sandbox sb-1's tunnels as a list of 1: expected one for each port that it was asked for
         a relay, though not asked: the Modal helper's `create` gave sandbox sb-1's tunnels as a list of 2: expected one for each port that it was asked for
         a relay at an address: Modal's tunnel to sandbox sb-1's relay isn't an endpoint: `192.0.2.1` is not a DNS name: give the name the endpoint's certificate is for, such as `ta-1.w.modal.host`"#]],
+    );
+}
+
+/// Whether a sandbox of a runner that needs `cpu_millis` thousandths of a CPU and `memory_mib` MiB
+/// holds `companions`, or why not.
+fn held(cpu_millis: u64, memory_mib: u64, companions: usize) -> String {
+    let Create { role, .. } = runner(memory_mib << 20, false, false);
+    let resources = Resources {
+        cpu_millis: NonZeroU64::new(cpu_millis).unwrap(),
+        ..role.resources
+    };
+    let role = Role {
+        resources,
+        companions,
+        ..role
+    };
+    let held = create::companions_held(&role).map_or_else(|refused| refused, |()| "held".into());
+    format!("{cpu_millis}, {memory_mib} MiB, {companions}: {held}")
+}
+
+// Each count's edge, by the CPU, the memory and the cap. A rule off by one in any of them, or in
+// its comparison, fails a case.
+#[test]
+fn companions() {
+    check(
+        [
+            held(500, 1024, 15),
+            held(500, 1024, 16),
+            held(512, 1024, 16),
+            held(8000, 1000, 31),
+            held(8000, 1000, 32),
+            held(16_000, 128 << 10, 250),
+            held(16_000, 128 << 10, 251),
+            held(500, 512, 17),
+            held(500, 1024, 251),
+            held(16, 1024, 1),
+        ],
+        &expect![[r#"
+            500, 1024 MiB, 15: held
+            500, 1024 MiB, 16: role `runner` declares 16 companions, and a Modal sandbox holds 15 for needs of 500 thousandths of a CPU and 1 GiB: need at least 512 thousandths of a CPU, or declare at most 15
+            512, 1024 MiB, 16: held
+            8000, 1000 MiB, 31: held
+            8000, 1000 MiB, 32: role `runner` declares 32 companions, and a Modal sandbox holds 31 for needs of 8000 thousandths of a CPU and 1000 MiB: need at least 1 GiB, or declare at most 31
+            16000, 131072 MiB, 250: held
+            16000, 131072 MiB, 251: role `runner` declares 251 companions, and a Modal sandbox holds at most 250: declare at most 250
+            500, 512 MiB, 17: role `runner` declares 17 companions, and a Modal sandbox holds 15 for needs of 500 thousandths of a CPU and 512 MiB: need at least 544 thousandths of a CPU and 544 MiB, or declare at most 15
+            500, 1024 MiB, 251: role `runner` declares 251 companions, and a Modal sandbox holds 15 for needs of 500 thousandths of a CPU and 1 GiB: declare at most 15
+            16, 1024 MiB, 1: role `runner` declares 1 companion, and a Modal sandbox holds 0 for needs of 16 thousandths of a CPU and 1 GiB: need at least 32 thousandths of a CPU, or declare none"#]],
     );
 }
 
