@@ -19,6 +19,9 @@ mod aws_certificates;
 #[path = "../../src/diff.rs"]
 mod diff;
 mod entry;
+mod flake_ledger;
+#[path = "../../src/flakes.rs"]
+mod flakes;
 mod live;
 mod op_stats;
 #[path = "../../src/repo.rs"]

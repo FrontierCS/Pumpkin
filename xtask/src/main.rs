@@ -11,7 +11,6 @@
     reason = "a command line reports on its standard output and error"
 )]
 
-use std::env;
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, Permissions};
@@ -20,6 +19,7 @@ use std::panic::resume_unwind;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Output};
 use std::time::Duration;
+use std::{env, io};
 
 use repo::{Repo, STEP_TIMEOUT};
 use stdx::Context as _;
@@ -28,6 +28,7 @@ use stdx::process::{self, Bound, Echo, Environment, Failure, Run, Stream, printe
 mod aws_certificates;
 mod diff;
 mod figure;
+mod flakes;
 mod live;
 mod op_stats;
 mod page;
@@ -108,6 +109,16 @@ mod flags {
                 /// checks that its boot reaped the run.
                 optional --lost
             }
+
+            /// Reports each test that failed in one run of `ci` and passed in another on the same
+            /// tree. Gives its failed and passed counts, its trees and its last failure's first
+            /// lines. Each run of `ci`'s tests appends to `$XDG_STATE_HOME/pumpkin/ci-tests.jsonl`,
+            /// or `~/.local/state/pumpkin/ci-tests.jsonl`, which every checkout shares. A run
+            /// records its time, its commit, its failed tests and its tree. The tree is the id of
+            /// a Git tree of the working tree's files, so uncommitted changes make it differ. Git's
+            /// ignored files are left out. A run isn't recorded if the working tree changed while
+            /// `ci` ran. The doctests aren't recorded. This command runs no test.
+            cmd flakes {}
 
             /// Counts incoming operations by request kind in a run's `log.jsonl`. Reports the
             /// bytes of matching lines, including their newlines, and the full log size.
@@ -194,6 +205,7 @@ mod flags {
         Figures(Figures),
         AwsCertificates(AwsCertificates),
         Live(Live),
+        Flakes(Flakes),
         OpStats(OpStats),
         Sandboxd(Sandboxd),
         Build(Build),
@@ -224,6 +236,9 @@ mod flags {
         pub gpu_model: Option<String>,
         pub lost: bool,
     }
+
+    #[derive(Debug)]
+    pub struct Flakes;
 
     #[derive(Debug)]
     pub struct OpStats {
@@ -343,6 +358,10 @@ fn try_main() -> Result<()> {
             };
             live::smoke(provider, gpu_model.as_deref(), lost)
         }
+        flags::XtaskCmd::Flakes(flags::Flakes) => {
+            print!("{}", flakes::report(&tools::state()?.join(flakes::LEDGER))?);
+            Ok(())
+        }
         flags::XtaskCmd::OpStats(flags::OpStats { run_dir, caller }) => {
             op_stats::report(&run_dir, caller.as_deref())
         }
@@ -441,6 +460,10 @@ fn root() -> &'static Path {
     };
     root
 }
+
+/// Where nextest's default profile writes its `JUnit` report, below the target directory. It
+/// follows from `path` in `.config/nextest.toml`.
+const NEXTEST_REPORT: &str = "nextest/default/junit.xml";
 
 fn ci() -> Result<()> {
     // Two independent chains of work share this process. The checks that take no cargo build lock
@@ -568,7 +591,47 @@ fn cargo_checks() -> Result<()> {
     // ci checks snapshots, never rewrites them.
     test.env_remove("UPDATE_EXPECT");
     doctests.env_remove("UPDATE_EXPECT");
-    tests(&mut test, &mut doctests, "cargo xtask ci")
+    // The ledger's tree is the one that the checks read, so it must be the same before and after.
+    let tested = flakes::Tested::of(&repo);
+    let report = target_dir()?.join(NEXTEST_REPORT);
+    // Only this run's report counts. One left by an earlier run would be recorded again if the
+    // build of the tests failed.
+    match fs::remove_file(&report) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("removing {} failed: {error}", report.display()).into()),
+    }
+    let result = tests(&mut test, &mut doctests, "cargo xtask ci");
+    let recorded = tested.and_then(|tested| record_tests(&repo, &tested, &report, result.is_ok()));
+    // A ledger that can't be written doesn't fail the checks.
+    if let Err(error) = recorded {
+        eprintln!("xtask: recording the tests in the flake ledger failed: {error}");
+    }
+    result
+}
+
+/// Appends to the flake ledger the run of tests that nextest reported in `report`, which holds
+/// nothing if the build of the tests failed first.
+fn record_tests(
+    repo: &Repo<'_>,
+    tested: &flakes::Tested,
+    report: &Path,
+    passed: bool,
+) -> Result<()> {
+    let junit = match fs::read_to_string(report) {
+        Ok(junit) => junit,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("reading {} failed: {error}", report.display()).into()),
+    };
+    if flakes::Tested::of(repo)? != *tested {
+        return Err("the working tree changed while `ci` ran: no tree identifies its tests".into());
+    }
+    flakes::record(
+        &tools::state()?.join(flakes::LEDGER),
+        tested,
+        &junit,
+        passed,
+    )
 }
 
 /// What `cargo metadata` says of the workspace's own packages, as JSON.
