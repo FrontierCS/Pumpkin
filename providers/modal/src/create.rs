@@ -222,6 +222,9 @@ pub(crate) fn request<'a>(
         // Taken as the parameter `gpu`.
         class: _,
         image,
+        // Only a provider that publishes assets is given any (`provider::Assets`), and this one
+        // publishes none.
+        assets: _,
         sandboxd,
         ops,
         model,

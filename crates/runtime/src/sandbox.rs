@@ -37,10 +37,12 @@ use stdx::{Context, Deadline, time};
 
 use super::{Clock, Host, Input, Stopped, interruption, log, record};
 
+mod assets;
 mod meets;
 
-pub(super) use meets::{Listening, Sessions, listening};
-use meets::{Meets, Registrations, WithCompanions};
+use assets::{Holding, holding};
+pub(super) use meets::Sessions;
+use meets::{Listening, Meets, Registrations, WithCompanions, listening};
 
 /// The most entries, files and directories, that the host collects from a sandbox in one tree.
 pub(super) const ENTRIES: u64 = 100_000;
@@ -158,10 +160,28 @@ fn provider_role(workflow: &Workflow, role: RoleId, instances: NonZeroU32) -> Ro
     }
 }
 
+/// The provider of each role that needs what only some providers' sandboxes do, as [`capable`]
+/// finds it. They listen, for a runner's companions, or hold assets.
+pub(super) struct Capable<'p> {
+    listening: Listening<'p>,
+    holding: Holding<'p>,
+}
+
+/// What [`listening`] and [`holding`] find of `placed`, on `providers`. Fails as either does.
+pub(super) fn capable<'p>(
+    placed: &Placed,
+    providers: &ByProvider<&'p dyn Provider>,
+) -> Result<Capable<'p>, String> {
+    let listening = listening(placed, providers)?;
+    let holding = holding(placed, providers)?;
+    Ok(Capable { listening, holding })
+}
+
 /// What a run puts on each provider before any sandbox starts, and the directory of its sockets.
 pub(super) struct Published<'p> {
     providers: ByProvider<Hosting<'p>>,
     images: ByRole<ImageRef>,
+    assets: assets::Held,
     companions: BTreeMap<RunnerId, WithCompanions<'p>>,
     sockets: Sockets,
 }
@@ -173,6 +193,7 @@ pub(super) struct Sandboxes<'p, H: Host> {
     placed: &'p Placed,
     providers: ByProvider<Hosting<'p>>,
     images: ByRole<ImageRef>,
+    assets: assets::Held,
     companions: BTreeMap<RunnerId, WithCompanions<'p>>,
     sockets: Sockets,
     record: &'p Path,
@@ -355,23 +376,24 @@ pub(super) struct Started<C> {
 }
 
 impl<'p> Published<'p> {
-    /// Publishes `sandboxd` on each provider that hosts a role, and each role's image there, once
-    /// however many roles name it. Then it publishes the images of each runner's companions on
-    /// the provider that `listening` gives it. Last, it makes the run's sockets directory in
-    /// `record`, which must not exist yet. A provider that is private meets the gateway at
-    /// `private`, which then must be some; one whose sandboxes listen, through `dialer`.
+    /// Publishes `sandboxd` on each provider that hosts a role, then each role's assets and image,
+    /// and the images of each runner's companions, for `run`. It publishes each once on its
+    /// role's provider, however many roles name it, through what `capable` found there for assets
+    /// and companions. Last, it makes the run's sockets directory in `record`, which must not exist
+    /// yet. A private provider meets the gateway at `private`, which then must be some, and one
+    /// whose sandboxes listen, through `dialer`. It returns each publish of assets too, for the
+    /// run's log.
     ///
-    /// Stops as interrupted before each publish once a signal has come, as a publish may take
-    /// minutes.
+    /// Stops as interrupted before each publish once a signal has come, as one may take minutes.
     pub(super) fn create(
+        run: &RunTag,
         providers: &ByProvider<&'p dyn Provider>,
         placed: &'p Placed,
-        listening: &Listening<'p>,
+        capable: &Capable<'p>,
         sandboxd: &Path,
-        private: Option<&'p Listener>,
-        dialer: &'p Dialer,
+        (private, dialer): (Option<&'p Listener>, &'p Dialer),
         record: &Path,
-    ) -> Result<Self, Stopped> {
+    ) -> Result<(Self, Vec<log::AssetPublished>), Stopped> {
         let workflow = placed.workflow();
         let providers = placed.by_provider(|name| {
             // Each publish is a provider call that a stop doesn't cut short, and one may take
@@ -401,6 +423,9 @@ impl<'p> Published<'p> {
                 meets,
             })
         })?;
+        // Before the images, as a file that isn't as the workflow pins it fails in minutes, and
+        // the images' publish may take far longer.
+        let (assets, published_assets) = assets::publish(run, placed, &capable.holding)?;
         let mut published = BTreeMap::<(&Name, Image), ImageRef>::new();
         let images = workflow.by_role(|(role, sandbox)| {
             let on = &placed.placement(role).provider;
@@ -417,18 +442,21 @@ impl<'p> Published<'p> {
                 }
             }
         })?;
+        let listening = &capable.listening;
         let companions = meets::publish_companions(placed, &providers, listening, dialer)?;
         // In the record, so that they go where it goes: `record::create` made it, and checked the
         // path to it, so that no other user may rename entries in it, or above it, as
         // `Sockets::create` needs.
         let sockets =
             Sockets::create(record::sockets(record)).map_err(|error| error.to_string())?;
-        Ok(Self {
+        let published = Self {
             providers,
             images,
+            assets,
             companions,
             sockets,
-        })
+        };
+        Ok((published, published_assets))
     }
 }
 
@@ -445,6 +473,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         let Published {
             providers,
             images,
+            assets,
             companions,
             sockets,
         } = published;
@@ -460,6 +489,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             placed,
             providers,
             images,
+            assets,
             companions,
             sockets,
             record,
@@ -499,6 +529,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             instance: which.instance(),
             class: placement.class.clone(),
             image: self.images.get(role).clone(),
+            assets: self.assets.get(&role).cloned().unwrap_or_default(),
             sandboxd: hosting.sandboxd.clone(),
             ops: ops.is_some(),
             model,

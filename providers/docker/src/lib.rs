@@ -22,8 +22,8 @@ use std::process::Output;
 
 use engine::{ContextName, Engine, REMOVE_TIMEOUT, confinement, docker, docker_to, fix_reported};
 use provider::{
-    Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation,
-    Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
+    Assets, Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready,
+    Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
 use schema::ir::{Image, Name};
 use schema::sandbox::{SANDBOXCTL_PATH, SANDBOXD_PATH, SOCKET_NAME, SocketDial};
@@ -177,6 +177,11 @@ impl Provider for Docker<'_> {
         Meeting::Local(self)
     }
 
+    // Its sandboxes hold no assets.
+    fn assets(&self) -> Option<&dyn Assets> {
+        None
+    }
+
     fn console(&self, run: &RunTag, id: &SandboxId) -> Result<Console, String> {
         let context = self.context();
         let id = id.as_str();
@@ -247,6 +252,9 @@ fn create_args(create: &Create, dial: &SocketDial, cpus: &Cpus) -> Result<Vec<St
         // The provider has one class (`CLASS`), so every container is of it.
         class: _,
         image,
+        // Only a provider that publishes assets is given any (`provider::Assets`), and this one
+        // publishes none.
+        assets: _,
         sandboxd,
         ops,
         model,

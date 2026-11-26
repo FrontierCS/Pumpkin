@@ -20,8 +20,8 @@ use decision::{Outcome, lasts};
 use expect_test::{Expect, expect};
 use gateway::Dialer;
 use provider::{
-    Console, Create, Created, Creator, ImageRef, Listed, ListenDials, Listened, Listens, Meeting,
-    Provider, Ready, Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
+    Assets, Console, Create, Created, Creator, ImageRef, Listed, ListenDials, Listened, Listens,
+    Meeting, Provider, Ready, Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
 use route::Serving;
 use runtime::{
@@ -146,6 +146,10 @@ impl Provider for Interrupting<'_> {
                 panic!("the simulated provider's sandboxes dial no private address")
             }
         }
+    }
+
+    fn assets(&self) -> Option<&dyn Assets> {
+        self.sim.assets()
     }
 
     fn console(&self, run: &RunTag, id: &SandboxId) -> Result<Console, String> {
@@ -4893,6 +4897,113 @@ fn companions_where_sandboxes_dial() {
         fits: provider `simulated`'s class `sim` holds companions, and its sandboxes don't listen: expected only a provider whose sandboxes listen to offer companions
         prepared: the same; records: []"#]]
     .assert_eq(&format!(
+        "fits: {fits}\nprepared: {}; records: {records:?}",
+        if prepared == fits { "the same" } else { &prepared }
+    ));
+}
+
+/// A file of an asset at `path`, of 2 bytes, whose SHA-256's digits are `sha256`, from `base`.
+fn asset_file(base: &str, path: &str, sha256: &str) -> Value {
+    let (url, sha256) = (format!("{base}/{path}"), format!("sha256:{sha256}"));
+    json!({ "path": path, "url": url, "size": 2, "sha256": sha256 })
+}
+
+// The SHA-256s of `{}\n`, `1\n` and `b\n`, as `sha256sum` prints them.
+const CONFIG: &str = "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356";
+const SHARD: &str = "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865";
+const B: &str = "0263829989b6fd954f72baaf2fc64bc2e2f01d692d4de72986ea808f6e99813f";
+
+// The digests of `config.json` and `shards/1.bin` of those bytes, and of `b`. A shell prints each
+// in a directory of its files, by this command:
+// `find . -type f -printf '%P\n' | LC_ALL=C sort | xargs -d '\n' sha256sum | sha256sum`.
+const MODEL_DIGEST: &str =
+    "sha256:db7e6a1a23aacc416c441bbb070046f249bf5b5d7fb72273e956c45deb0a9d6e";
+const B_DIGEST: &str = "sha256:eeb0cd7d8c9d9d34ac22ea13505d7249a4f9f8408c491c32a4c2d2d300bf2efa";
+
+// Each digest is published once on its provider before the run, whatever roles hold it, from any
+// URL. So are a role's that never starts. Each create holds its role's assets.
+#[test]
+fn holds_each_roles_assets() {
+    let model = json!([
+        asset_file("https://example.com", "config.json", CONFIG),
+        asset_file("https://example.com", "shards/1.bin", SHARD),
+    ]);
+    let b = |base: &str| json!([asset_file(base, "b", B)]);
+    let mut ir = workflow(&["exit", "0"]);
+    ir["roles"][0]["assets"] = json!([{ "path": "/opt/model", "files": model.clone() }]);
+    ir["roles"][1]["assets"] = json!([{ "path": "/opt/b", "files": b("https://example.com") }]);
+    ir["roles"][2]["assets"] = json!([
+        { "path": "/opt/weights", "files": model },
+        { "path": "/opt/b", "files": b("https://mirror.example.com") },
+    ]);
+    let sim = Sim::new().holding_assets();
+    let shown = executed(
+        &SimHost::new(),
+        "holds-each-roles-assets",
+        &[(PROVIDER, &sim)],
+        &ir,
+        SANDBOXD,
+        &[],
+    );
+    let ended = shown.lines().take(1).map(str::to_owned);
+    let published =
+        (sim.published().into_iter()).filter(|published| published.starts_with("asset"));
+    let mut digests = Vec::new();
+    let logged = (shown.lines())
+        .filter(|line| line.contains("asset_published"))
+        .map(|line| {
+            let mut line: Value = serde_json::from_str(line).unwrap();
+            digests.push(line["event"]["digest"].as_str().unwrap().to_owned());
+            // The machine's clock times a publish, on any host.
+            line["event"]["took_ns"] = json!("<ns>");
+            line.to_string()
+        });
+    let logged: Vec<String> = logged.collect();
+    assert_eq!(
+        digests,
+        [MODEL_DIGEST, B_DIGEST],
+        "the digests that the shell prints"
+    );
+    let shown: Vec<String> = (ended
+        .chain(published)
+        .chain(sim.held_assets())
+        .chain(logged))
+    .collect();
+    expect![[r#"
+        finished, showing [score=0]
+        asset sha256:db7e6a1a23aacc416c441bbb070046f249bf5b5d7fb72273e956c45deb0a9d6e: config.json, shards/1.bin
+        asset sha256:eeb0cd7d8c9d9d34ac22ea13505d7249a4f9f8408c491c32a4c2d2d300bf2efa: b
+        agent-0 holds asset:sha256:db7e6a1a23aacc416c441bbb070046f249bf5b5d7fb72273e956c45deb0a9d6e at /opt/model
+        job-0 holds asset:sha256:db7e6a1a23aacc416c441bbb070046f249bf5b5d7fb72273e956c45deb0a9d6e at /opt/weights
+        job-0 holds asset:sha256:eeb0cd7d8c9d9d34ac22ea13505d7249a4f9f8408c491c32a4c2d2d300bf2efa at /opt/b
+        {"actions":[],"at_ns":"0","event":{"digest":"sha256:db7e6a1a23aacc416c441bbb070046f249bf5b5d7fb72273e956c45deb0a9d6e","fetched":true,"kind":"asset_published","provider":"simulated","took_ns":"<ns>"},"seq":1}
+        {"actions":[],"at_ns":"0","event":{"digest":"sha256:eeb0cd7d8c9d9d34ac22ea13505d7249a4f9f8408c491c32a4c2d2d300bf2efa","fetched":true,"kind":"asset_published","provider":"simulated","took_ns":"<ns>"},"seq":2}"#]].assert_eq(&shown.join("\n"));
+}
+
+// Only a provider that publishes assets is given any. So a provider whose class holds them where it
+// publishes none is refused before any image is built, and no run on it is prepared.
+#[test]
+fn assets_where_none_are_published() {
+    let sim = Sim::new().offering_assets();
+    let mut ir = workflow(&["exit", "0"]);
+    let b = json!([asset_file("https://example.com", "b", B)]);
+    ir["roles"][1]["assets"] = json!([{ "path": "/opt/b", "files": b }]);
+    let ir = serde_json::from_value(ir).unwrap();
+    let placed = placed(&ir, sim.ready()).unwrap();
+    let on = providers_of(&placed, |_| &sim);
+    let fits = runtime::fits(&placed, &on).unwrap_err();
+    let runs = TestDir::new();
+    let servings = StandIn::servings(None, placed.workflow(), runs.path());
+    let (prices, id) = (prices(), new_id(SystemTime::now()).unwrap());
+    let (models, recorded) = kept(&placed, &servings, &prices);
+    let prepared = Run::prepare(&System, placed, on, runs.path(), id, models, recorded);
+    let Err(prepared) = prepared else {
+        panic!("a run whose assets no provider publishes is prepared")
+    };
+    let records = files(runs.path());
+    expect![[r#"
+        fits: provider `simulated`'s class `sim` holds assets, and the provider publishes none: expected only a provider that publishes assets to offer a class that holds them
+        prepared: the same; records: []"#]].assert_eq(&format!(
         "fits: {fits}\nprepared: {}; records: {records:?}",
         if prepared == fits { "the same" } else { &prepared }
     ));

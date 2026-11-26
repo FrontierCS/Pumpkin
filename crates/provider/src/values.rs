@@ -5,7 +5,7 @@ use std::fmt;
 use std::num::NonZeroU32;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use schema::ir::{CompanionName, Name, Resources, User};
+use schema::ir::{AssetPath, CompanionName, Name, Resources, Sha256Digest, User};
 use schema::sandbox::{Endpoint, Listening, Relayed};
 use schema::workflow::Class;
 use serde::Serialize;
@@ -74,6 +74,9 @@ pub struct Create {
     /// ([`Ready::classes`]), which the role fits.
     pub class: Name,
     pub image: ImageRef,
+    /// The assets that its `main` holds, each read-only at its path. Only a provider that
+    /// publishes assets ([`Assets`](crate::Assets)) is given any.
+    pub assets: Vec<HeldAsset>,
     pub sandboxd: SandboxdRef,
     /// Whether the role's commands make ops: if so, the sandbox has `sandboxctl` at
     /// [`SANDBOXCTL_PATH`](schema::sandbox::SANDBOXCTL_PATH) and its `sandboxd` serves ops; if
@@ -155,6 +158,65 @@ impl From<String> for ImageRef {
     fn from(reference: String) -> Self {
         Self(reference)
     }
+}
+
+/// The digest that names an asset's files, as [`AssetFiles`](schema::ir::AssetFiles) defines it,
+/// by which a provider keeps them.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AssetDigest(Sha256Digest);
+
+impl AssetDigest {
+    /// Its 64 hexadecimal digits, without `sha256:`.
+    pub fn hex(&self) -> &str {
+        self.0.hex()
+    }
+}
+
+impl From<Sha256Digest> for AssetDigest {
+    fn from(digest: Sha256Digest) -> Self {
+        Self(digest)
+    }
+}
+
+impl fmt::Display for AssetDigest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// What a provider's `publish_asset` made of an asset's files
+/// ([`Assets::publish_asset`](crate::Assets::publish_asset)).
+#[derive(Debug)]
+pub struct PublishedAsset {
+    /// For each create whose sandbox holds the files to name ([`HeldAsset::reference`]).
+    pub reference: AssetRef,
+    /// Whether this publish fetched the files: false if the provider held them already.
+    pub fetched: bool,
+}
+
+/// A reference to an asset's files that a provider published, which only that provider reads, such
+/// as where it keeps them.
+#[derive(Clone, Debug)]
+pub struct AssetRef(String);
+
+impl AssetRef {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for AssetRef {
+    fn from(reference: String) -> Self {
+        Self(reference)
+    }
+}
+
+/// An asset that a sandbox holds read-only at `path`, of the files that its provider published as
+/// `reference` ([`Create::assets`]).
+#[derive(Clone, Debug)]
+pub struct HeldAsset {
+    pub path: AssetPath,
+    pub reference: AssetRef,
 }
 
 /// What a provider's `publish_sandboxd` made of the static `sandboxd`, for every create to name:

@@ -29,8 +29,8 @@ use std::path::Path;
 use aws::{Cli, Region, Repository, RepositoryName, RoleArn};
 use engine::{Platform, Pusher};
 use provider::{
-    Console, Create, Creator, ImageRef, Listed, ListenDials, Listened, Listens, Meeting, Provider,
-    Ready, Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
+    Assets, Console, Create, Creator, ImageRef, Listed, ListenDials, Listened, Listens, Meeting,
+    Provider, Ready, Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
 use schema::ir::{self, GpuModel, Image, Name};
 use schema::sandbox::SANDBOXD_PATH;
@@ -380,6 +380,11 @@ impl Provider for Modal<'_> {
     // A sandbox's only way in is its tunnel, where the gateway dials it.
     fn meeting(&self) -> Meeting<'_> {
         Meeting::Listen(self)
+    }
+
+    // Its sandboxes hold no assets.
+    fn assets(&self) -> Option<&dyn Assets> {
+        None
     }
 
     fn console(&self, run: &RunTag, id: &SandboxId) -> Result<Console, String> {

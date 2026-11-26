@@ -6,11 +6,12 @@ use std::fmt;
 use std::net::IpAddr;
 use std::path::Path;
 
-use schema::ir::Image;
+use schema::ir::{AssetFiles, Image};
 use schema::sandbox::{Attestation, PrivateDial, SocketDial};
 pub use values::{
-    CompanionDial, Console, Create, Created, ImageRef, Listed, ListenDials, Listened, Phase, Ready,
-    Role, RunTag, SandboxId, SandboxdRef, Undeleted, UnixTime,
+    AssetDigest, AssetRef, CompanionDial, Console, Create, Created, HeldAsset, ImageRef, Listed,
+    ListenDials, Listened, Phase, PublishedAsset, Ready, Role, RunTag, SandboxId, SandboxdRef,
+    Undeleted, UnixTime,
 };
 
 mod values;
@@ -78,6 +79,9 @@ pub trait Provider: Sweep + Send + Sync {
     /// How its sandboxes meet the gateway, with the create that takes what each is given to.
     fn meeting(&self) -> Meeting<'_>;
 
+    /// What publishes the assets that its sandboxes hold, if they hold any.
+    fn assets(&self) -> Option<&dyn Assets>;
+
     /// Reads what sandbox `id` of `run` has printed, its [`Console`]. Fails if `id` isn't one of
     /// `run`'s sandboxes, such as another run's.
     fn console(&self, run: &RunTag, id: &SandboxId) -> Result<Console, String>;
@@ -107,6 +111,23 @@ pub trait Listens: Creator<ListenDials, Listened> {
         images: &[Image],
         sandboxd: &SandboxdRef,
     ) -> Result<Vec<ImageRef>, String>;
+}
+
+/// A provider whose sandboxes hold assets ([`Create::assets`]): what publishes the files of each.
+///
+/// Only such a provider is given an asset, so only its classes hold any
+/// ([`Offers::assets`](schema::workflow::Offers::assets)).
+pub trait Assets: Sync {
+    /// Publishes `files`, whose digest is `digest`, so that this provider's sandboxes can hold them
+    /// read-only. It keeps them only if each file's URL gives the file's size and SHA-256. Fails,
+    /// naming the first file that didn't, and then keeps none of them by `digest`. Each sandbox that
+    /// it makes carries `run`'s tag, so that `run`'s [`list`](Sweep::list) finds one that it left.
+    fn publish_asset(
+        &self,
+        run: &RunTag,
+        digest: &AssetDigest,
+        files: &AssetFiles,
+    ) -> Result<PublishedAsset, String>;
 }
 
 /// Whether a hello over a private network ([`Meeting::Private`]) is from the sandbox that a create

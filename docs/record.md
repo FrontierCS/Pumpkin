@@ -13,6 +13,7 @@ it ran. This page says where to look in a record, and what the page shows.
 | every event of the run, in order, and what the driver did about it | `log.jsonl` |
 | when each sandbox's create began and returned, the phases of it that its provider timed, and when the sandbox met the gateway | `jq -c 'select(.event.kind == "sandbox_created" or .event.kind == "sandbox_met")' log.jsonl` |
 | when each container met the gateway, in a sandbox that holds companions | `jq -c 'select(.event.kind == "container_met")' log.jsonl` |
+| each asset that a provider published before the run started, by its digest, whether that fetched its files, and how long it took | `jq -c 'select(.event.kind == "asset_published")' log.jsonl` |
 | the workflow as it ran, where each role was placed, and each provider's report, whose strings name the provider's account | `ir.json`, `provider.json` |
 | the text of each file the evaluation read, from which each body is evaluated | `sources/task/`, `sources/library/` |
 | what the driver said after the start, such as why a sandbox failed to start | `driver.log` |

@@ -43,12 +43,14 @@ use std::time::Duration;
 use std::{fs, io, iter};
 
 use provider::{
-    CompanionDial, Console, Create, Created, Creator, ImageRef, Listed, ListenDials, Listened,
-    Listens, Meeting, Phase, Provider, Ready, Reservation, Role, RunTag, SandboxId, SandboxdRef,
-    Sweep, Undeleted, UnixTime,
+    AssetDigest, AssetRef, Assets, CompanionDial, Console, Create, Created, Creator, HeldAsset,
+    ImageRef, Listed, ListenDials, Listened, Listens, Meeting, Phase, Provider, PublishedAsset,
+    Ready, Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted, UnixTime,
 };
 use schema::frame;
-use schema::ir::{AbsolutePath, Argv, Container, CpuModel, Image, Mode, Name, Sha256Digest};
+use schema::ir::{
+    AbsolutePath, Argv, AssetFiles, Container, CpuModel, Image, Mode, Name, Sha256Digest,
+};
 use schema::sandbox::op::{
     JobState, Last, LeaseStatusReply, OpCall, OpReply, SessionOp, StatusReply, TransferStatus,
 };
@@ -170,6 +172,8 @@ pub(crate) struct Sim {
     impostor: Option<&'static str>,
     // The companion at whose set-up `main`'s session ends.
     ends_main: Option<&'static str>,
+    // Whether it publishes the assets that its sandboxes hold.
+    publishes_assets: bool,
 }
 
 // What is called once the run log holds each part in a line.
@@ -244,6 +248,8 @@ struct State {
     reserved: Vec<Reserved>,
     /// What each create was given of each companion, by the sandbox's id.
     companions: Vec<String>,
+    /// What each create was given of each asset, by the sandbox's name.
+    assets: Vec<String>,
     /// The record of the run whose sandboxes these are, once `Sim::records` names it.
     record: Option<PathBuf>,
     /// The run's clock, on a simulated host.
@@ -383,6 +389,7 @@ impl Sim {
                 cpus: 1 << 10,
                 reserved: Vec::new(),
                 companions: Vec::new(),
+                assets: Vec::new(),
                 record: None,
                 time: None,
             })),
@@ -395,6 +402,7 @@ impl Sim {
             turns: None,
             impostor: None,
             ends_main: None,
+            publishes_assets: false,
         }
     }
 
@@ -571,6 +579,25 @@ impl Sim {
     }
 
     #[must_use]
+    /// Makes each class hold assets, though the provider publishes none unless it is also
+    /// [`holding_assets`](Self::holding_assets).
+    pub(crate) fn offering_assets(mut self) -> Self {
+        for class in self.ready.classes.values_mut() {
+            class.offers.assets = true;
+        }
+        self
+    }
+
+    #[must_use]
+    /// Makes each class hold assets, which the provider publishes, keeping none of their files.
+    pub(crate) fn holding_assets(self) -> Self {
+        Self {
+            publishes_assets: true,
+            ..self.offering_assets()
+        }
+    }
+
+    #[must_use]
     /// Makes the containers of each sandbox that holds companions meet the gateway in `turns`.
     /// Each says its hello once the one before it has taken its first request. It moves the clock
     /// to its seconds first. A container without a turn never says hello.
@@ -648,6 +675,11 @@ impl Sim {
 
     pub(crate) fn companions(&self) -> Vec<String> {
         self.state().companions.clone()
+    }
+
+    /// What each create was given of each asset.
+    pub(crate) fn held_assets(&self) -> Vec<String> {
+        self.state().assets.clone()
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
@@ -864,13 +896,48 @@ impl Provider for Sim {
         }
     }
 
+    fn assets(&self) -> Option<&dyn Assets> {
+        self.publishes_assets.then_some(self)
+    }
+
     fn console(&self, run: &RunTag, id: &SandboxId) -> Result<Console, String> {
         self.console_of(run, id)
     }
 }
 
+impl Assets for Sim {
+    fn publish_asset(
+        &self,
+        _run: &RunTag,
+        digest: &AssetDigest,
+        files: &AssetFiles,
+    ) -> Result<PublishedAsset, String> {
+        let paths: Vec<&str> = (files.as_slice().iter())
+            .map(|file| file.path.as_str())
+            .collect();
+        (self.state().published).push(format!("asset {digest}: {}", paths.join(", ")));
+        Ok(PublishedAsset {
+            reference: AssetRef::from(format!("{}:asset:{digest}", self.platform)),
+            fetched: true,
+        })
+    }
+}
+
+impl Sim {
+    // Notes each asset that `create` holds, each of which it published.
+    fn held(&self, create: &Create) -> Result<(), String> {
+        for HeldAsset { path, reference } in &create.assets {
+            let reference = self.own("the asset", reference.as_str())?;
+            let held = format!("{} holds {reference} at {path}", create.name);
+            self.state().assets.push(held);
+        }
+        Ok(())
+    }
+}
+
 impl Creator<SocketDial> for Sim {
     fn create(&self, create: &Create, dial: SocketDial) -> Result<Created, String> {
+        self.held(create)?;
         let meets = Meets::Dials(dial.dir.join(SOCKET_NAME));
         self.timed(|| self.made(create, meets, Vec::new()))
     }
@@ -878,6 +945,7 @@ impl Creator<SocketDial> for Sim {
 
 impl Creator<ListenDials, Listened> for Sim {
     fn create(&self, create: &Create, dials: ListenDials) -> Result<Listened, String> {
+        self.held(create)?;
         let ListenDials { main, companions } = dials;
         let behind_edge = |listener: &TcpListener| {
             let port = edge::front(listener.local_addr().unwrap());
@@ -1204,6 +1272,7 @@ impl Subject for Sim {
             turns: self.turns,
             impostor: self.impostor,
             ends_main: self.ends_main,
+            publishes_assets: self.publishes_assets,
         }))
     }
 
