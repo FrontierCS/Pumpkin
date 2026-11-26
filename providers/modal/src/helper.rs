@@ -28,9 +28,11 @@ const CALL_ENVIRONMENT: Environment = Environment::Only(&["HOME", "PATH"]);
 // https://github.com/modal-labs/modal-client/blob/dbb24aba92e2c6c4fa8a123234813cfa48e09b0b/py/modal/_utils/grpc_utils.py#L427-L428
 pub(crate) const ASK_TIMEOUT: Duration = Duration::from_mins(2);
 
-// Modal pulls the image and builds it within the call, which takes minutes for a large image and
-// about half an hour for one that holds a task's weights.
-pub(crate) const IMPORT_TIMEOUT: Duration = Duration::from_mins(45);
+// Modal pulls the images and builds them within the call. Its time grows with their size and falls
+// with how fast Modal copies them, which no bound can know. So this bound is sized only to turn an
+// import that hangs into a failure, as the engine's push is. Modal goes on with a build whose call
+// was killed, and a later import of the same image waits for that build.
+pub(crate) const IMPORT_TIMEOUT: Duration = Duration::from_hours(2);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 // The name of a profile in Modal's configuration file, which Modal refuses if the file lacks it.
