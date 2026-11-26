@@ -2054,7 +2054,7 @@ fn unread(carried: &[&[u8]], grant: &RegistrationGrant) -> bool {
 }
 
 /// The outcome of the accept of `unreached` at the relay behind the edge's `port`.
-fn accepted<C: Clock>(
+fn accepted<C: Clock + Send + Sync + 'static>(
     unreached: Unreached,
     port: u16,
     (clock, by): (&C, Duration),
@@ -2207,7 +2207,11 @@ fn closing_relays() {
 }
 
 /// What becomes of the accept of a companion that says `says` within its TLS, on `clock`.
-fn greeted<C: Clock>(dialer: &Dialer, says: Says, (clock, by): (&C, Duration)) -> String {
+fn greeted<C: Clock + Send + Sync + 'static>(
+    dialer: &Dialer,
+    says: Says,
+    (clock, by): (&C, Duration),
+) -> String {
     let (grant, identity, unreached) = relayed_to(dialer, "scheduler");
     let server = relayed::server(&identity);
     let (port, relay) = relayed_behind("scheduler", server, says);

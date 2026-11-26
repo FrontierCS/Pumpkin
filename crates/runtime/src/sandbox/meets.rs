@@ -264,8 +264,8 @@ struct Opened<C> {
 /// The meeting of a companion: its thread, or how it went, once the thread has ended.
 type Meeting<'scope, C> = Result<thread::ScopedJoinHandle<'scope, Opened<C>>, Opened<C>>;
 
-// How long a start sleeps between its looks at a sandbox whose companions still wait, as the
-// gateway's accept sleeps between its own.
+// Each session stamps its own end, so this bounds only how late a start notices one. It changes
+// no start's failure.
 const WATCH: Duration = Duration::from_millis(10);
 
 /// What a container's session opens with. That is the limit on an op's payload, if it takes ops,
@@ -383,9 +383,9 @@ impl<H: Host> Sandboxes<'_, H> {
 
     /// Waits for each of `meeting`, the meetings of a sandbox's companions, to end, and returns
     /// how each went, after `main`'s. While one still waits, it watches sandbox `id` of `provider`
-    /// and each session that opened. A session that ended fails its container's meeting. A
-    /// sandbox that its provider lists as ended fails the start, as the failure returned last.
-    /// Either sets `stop`.
+    /// and each session that opened. A session that ended fails its container's meeting, when the
+    /// session saw its end. A sandbox that its provider lists as ended fails the start, as the
+    /// failure returned last. Either sets `stop`.
     fn watch<'scope>(
         &self,
         (looks, provider, id): (&Looks<'_, H::Clock>, &dyn Provider, &SandboxId),
@@ -407,19 +407,17 @@ impl<H: Host> Sandboxes<'_, H> {
             if looks.ended(self.between_looks, || self.ended(provider, id)) {
                 let reason = "it ended before its companions met the gateway: expected it to \
                               run until each of them connects";
+                // The list can't say when the sandbox ended. Its end ranks after a session's at the
+                // same time.
                 ended = Some(failed((reason.to_owned(), false), clock.now(), stop));
                 break;
             }
-            let opened = meeting
-                .iter_mut()
-                .filter_map(|(_, meeting)| meeting.as_mut().err());
-            for opened in iter::once(&mut main).chain(opened) {
-                let ended = opened.session.as_ref().ok().and_then(Session::ended);
-                if let Some(reason) = ended.map(|reason| format!("its session ended: {reason}")) {
-                    opened.session = Err(failed((reason, false), clock.now(), stop));
-                }
-            }
+            sessions_ended(&mut main, &mut meeting, stop);
             thread::sleep(WATCH);
+        }
+        // A session may have ended before what stopped the start, and between two looks.
+        if stopped(stop) {
+            sessions_ended(&mut main, &mut meeting, stop);
         }
         // A thread that still runs ends once its wait has read `stop`, or its set-up is answered.
         let joined = |meeting: Meeting<'scope, _>| meeting.map_or_else(|opened| opened, joined);
@@ -432,6 +430,25 @@ impl<H: Host> Sandboxes<'_, H> {
 
 /// How the meetings of a sandbox's companions went, in the order declared.
 type Companions<C> = Vec<(CompanionName, Opened<C>)>;
+
+/// Fails the meeting of `main`, and of each ended one of `meeting`, whose session has ended. Each
+/// fails at the time that its session saw the end, and sets `stop`.
+fn sessions_ended<C>(
+    main: &mut Opened<C>,
+    meeting: &mut [(CompanionName, Meeting<'_, C>)],
+    stop: &AtomicBool,
+) {
+    let opened = meeting
+        .iter_mut()
+        .filter_map(|(_, meeting)| meeting.as_mut().err());
+    for opened in iter::once(main).chain(opened) {
+        let end = (opened.session.as_ref().ok().and_then(Session::ended))
+            .map(|(reason, at)| (format!("its session ended: {reason}"), at));
+        if let Some((reason, at)) = end {
+            opened.session = Err(failed((reason, false), at, stop));
+        }
+    }
+}
 
 /// How the meeting that `thread` ran went, once the thread has ended.
 fn joined<C>(thread: thread::ScopedJoinHandle<'_, Opened<C>>) -> Opened<C> {

@@ -508,7 +508,7 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
         }
         self.stdin.clear(self.session, (&self.child.clock, until))?;
         match self.session.ended() {
-            Some(reason) => Err(format!("the shared role's session ended: {reason}")),
+            Some((reason, _)) => Err(format!("the shared role's session ended: {reason}")),
             None => Ok(()),
         }
     }

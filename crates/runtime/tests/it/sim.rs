@@ -31,6 +31,7 @@
 )]
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::io::Read as _;
 use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
 use std::num::{NonZeroU32, NonZeroU64};
 use std::os::unix::fs::PermissionsExt;
@@ -167,6 +168,8 @@ pub(crate) struct Sim {
     turns: Option<&'static [(&'static str, u64)]>,
     // The companion that serves a certificate which the gateway didn't issue.
     impostor: Option<&'static str>,
+    // The companion at whose set-up `main`'s session ends.
+    ends_main: Option<&'static str>,
     // Whether a create that is given companions says where its relay listens.
     relays: bool,
 }
@@ -393,6 +396,7 @@ impl Sim {
             brief: None,
             turns: None,
             impostor: None,
+            ends_main: None,
             relays: true,
         }
     }
@@ -478,6 +482,39 @@ impl Sim {
         }
     }
 
+    // Ends, as `ending_main_at_set_up` says, `main`'s session of each sandbox of `run` whose
+    // companion has stalled at its set-up, then the companion's. Returns their ids.
+    fn end_mains(&self, run: &RunTag) -> BTreeSet<String> {
+        let state = self.state();
+        let Some(time) = state.time.clone().filter(|_| self.ends_main.is_some()) else {
+            return BTreeSet::new();
+        };
+        let stalled = |(shared, _): &&Beside| {
+            let status = status(shared);
+            status.stalled && status.stall_to.is_some_and(|to| time.now() >= to)
+        };
+        let ending: Vec<_> = (state.sandboxes.iter())
+            .filter(|(_, sandbox)| sandbox.of(run))
+            .filter_map(|(id, sandbox)| {
+                let (companion, _) = sandbox.companions.iter().find(stalled)?;
+                let main = status(&sandbox.shared).connection.take()?;
+                Some((id.clone(), main, status(companion).connection.take()?))
+            })
+            .collect();
+        drop(state);
+        let mut ended = BTreeSet::new();
+        for (id, mut main, companion) in ending {
+            // The gateway ends the session, and closes it, which the edge passes on only then. Were
+            // `main` to close first, the edge would close its side at once.
+            let _ = frame::write(&mut main, &FromSandbox::Done { stream: u32::MAX }, &[]);
+            while main.read(&mut [0; 64]).is_ok_and(|read| read > 0) {}
+            time.reach(Duration::from_secs(2));
+            let _ = companion.shutdown(Shutdown::Both);
+            ended.insert(id);
+        }
+        ended
+    }
+
     fn holds(&self, create: &Create) -> Result<(), String> {
         let reserved = (self.state().reserved.iter()).any(|reserved| {
             reserved.live.strong_count() > 0
@@ -553,6 +590,18 @@ impl Sim {
     pub(crate) fn impostor(self, name: &'static str) -> Self {
         Self {
             impostor: Some(name),
+            ..self
+        }
+    }
+
+    #[must_use]
+    /// Makes `main`'s session end while `companion` is between its hello and its set-up. The
+    /// companion's first request moves the clock to 1 s, and goes unanswered. The next list has
+    /// `main` break the protocol, for which the gateway ends its session. Once the gateway has
+    /// closed it, the list moves the clock to 2 s, ends `companion`'s, and finds the sandbox ended.
+    pub(crate) fn ending_main_at_set_up(self, companion: &'static str) -> Self {
+        Self {
+            ends_main: Some(companion),
             ..self
         }
     }
@@ -728,11 +777,12 @@ impl Sweep for Sim {
     }
 
     fn list(&self, run: &RunTag) -> Result<Vec<Listed>, String> {
+        let ended_mains = self.end_mains(run);
         let state = self.state();
         let ours = (state.sandboxes.iter()).filter(|(_, sandbox)| sandbox.of(run));
         let mut listed = Vec::new();
         for (id, sandbox) in ours {
-            let ended = sandbox.ended();
+            let ended = sandbox.ended() || ended_mains.contains(id);
             match sandbox.listing {
                 Listing::Failing => {
                     return Err(format!(
@@ -1024,11 +1074,16 @@ impl Sim {
             turns_of(self.turns.filter(|_| accompanied)),
         );
         let brief = (self.brief).and_then(|(sandbox, brief)| (sandbox == name).then_some(brief));
+        let ends_main = self.ends_main;
         move |container| {
             let mut status = Status::new(journal.clone(), record.clone(), time.clone());
             status.turn = turn(container);
             status.ends = status.turn.as_ref().map(|turn| Arc::clone(&turn.turns));
             status.brief = brief == Some(container);
+            if ends_main == Some(container) {
+                status.stalled = true;
+                status.stall_to = Some(Duration::from_secs(1));
+            }
             Arc::new(Mutex::new(status))
         }
     }
@@ -1161,6 +1216,7 @@ impl Subject for Sim {
             brief: self.brief,
             turns: self.turns,
             impostor: self.impostor,
+            ends_main: self.ends_main,
             relays: self.relays,
         }))
     }

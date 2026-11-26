@@ -4863,6 +4863,16 @@ fn fails_as_a_met_session_ends_while_a_companion_waits() {
         met ["main at 0ns", "scheduler at 0ns"]; failed at 0ns: the runner's sandbox didn't start: sandbox sim-2: its container `scheduler`: its session ended: the sandbox ended the session"#]].assert_eq(&format!("{}\n{}", ended("main"), ended("scheduler")));
 }
 
+// `main`'s session ends while `scheduler` is between its hello and its set-up. The set-up then
+// fails, and the list finds the sandbox ended, both later. The start names `main`'s end.
+#[test]
+fn names_mains_end_before_a_companions_failure() {
+    let sim = accompanied()
+        .meeting_in_turn(&[("main", 0), ("scheduler", 0)])
+        .ending_main_at_set_up("scheduler");
+    expect![[r#"met ["main at 0ns", "scheduler at 0ns"]; failed at 2s: the runner's sandbox didn't start: sandbox sim-2: its container `main`: its session ended: the sandbox broke the protocol: it sent `done` on stream 4294967295 out of turn: expected nothing on a stream no request has opened"#]].assert_eq(&start_failed(&SimHost::new(), &sim, &failing()));
+}
+
 // A create that was given companions and names no relay leaves a sandbox that can't be met, which
 // is deleted.
 #[test]

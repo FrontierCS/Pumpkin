@@ -480,7 +480,7 @@ impl Registration {
     /// `stopped` is asked while the call waits, and once it says yes the call fails. A sandbox that
     /// has not met the gateway by `by` fails it with `TimedOut`, and a hello that is wrong, which
     /// the sandbox is told of, with `InvalidData`.
-    pub fn accept<C: Clock, T: Send + 'static>(
+    pub fn accept<C: Clock + Send + Sync + 'static, T: Send + 'static>(
         self,
         (clock, by): (&C, Duration),
         ops: Option<OpPayloadLimit>,
