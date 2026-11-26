@@ -182,7 +182,8 @@ fn unphased() {
     let deleted = serde_json::json!({"id": "sb-1"});
     let phases = ["lookup", "create", "tunnels", "list"];
     let all_phases = ["lookup", "create", "tunnels", "list", "companions"];
-    let shown = |(case, phases, companions): (&str, &[&str], bool)| {
+    let mounted = ["lookup", "create", "tunnels", "list", "assets"];
+    let shown = |(case, phases, assets, companions): (&str, &[&str], bool, bool)| {
         let (kind, sandbox, at, fields) = created("lease-0", phases);
         let mut events = vec![(kind, sandbox.as_str(), at, fields)];
         if companions {
@@ -191,20 +192,51 @@ fn unphased() {
         events.push(("sandbox_deleted", "lease-0", 2000, deleted.clone()));
         let lines = log(&events);
         // The message holds the create's line, which the case's name says.
-        let unphased = record::unphased(&lines).join("; ");
+        let unphased = record::unphased(&lines, assets).join("; ");
         let unphased = unphased.replace(&lines[0].to_string(), "<create>");
         format!("{case}: {unphased}")
     };
-    let cases: [(&str, &[&str], bool); 3] = [
-        ("with companions", &all_phases, true),
-        ("with companions, their phase missing", &phases, true),
-        ("without companions, with their phase", &all_phases, false),
+    let cases: [(&str, &[&str], bool, bool); 5] = [
+        ("with companions", &all_phases, false, true),
+        ("with companions, their phase missing", &phases, false, true),
+        (
+            "without companions, with their phase",
+            &all_phases,
+            false,
+            false,
+        ),
+        ("with assets", &mounted, true, false),
+        ("with assets, their phase missing", &phases, true, false),
     ];
     let shown: Vec<String> = cases.into_iter().map(shown).collect();
     expect![[r#"
         with companions: 
         with companions, their phase missing: sandbox "lease-0"'s create on Modal has the phases ["lookup", "create", "tunnels", "list"]: expected ["lookup", "create", "tunnels", "list", "companions"], as its sandbox holds companions: <create>
-        without companions, with their phase: sandbox "lease-0"'s create on Modal has the phases ["lookup", "create", "tunnels", "list", "companions"]: expected ["lookup", "create", "tunnels", "list"], as its sandbox holds none: <create>"#]].assert_eq(&shown.join("\n"));
+        without companions, with their phase: sandbox "lease-0"'s create on Modal has the phases ["lookup", "create", "tunnels", "list", "companions"]: expected ["lookup", "create", "tunnels", "list"], as its sandbox holds no companions: <create>
+        with assets: 
+        with assets, their phase missing: sandbox "lease-0"'s create on Modal has the phases ["lookup", "create", "tunnels", "list"]: expected ["lookup", "create", "tunnels", "list", "assets"], as its sandbox holds assets and no companions: <create>"#]].assert_eq(&shown.join("\n"));
+}
+
+// Each case: a result that counts the facts that hold, then what is wrong in it.
+#[test]
+fn unscored() {
+    let result = |score: serde_json::Value| {
+        let values = [("score", score), ("of", 3.into()), ("pinned", true.into())];
+        let values = values.map(|(name, value)| serde_json::json!({"name": name, "value": value}));
+        values.to_vec()
+    };
+    let cases = [
+        ("every fact holds", result(3.into())),
+        ("a fact doesn't hold", result(2.into())),
+        ("no score", result(serde_json::Value::Null)),
+    ];
+    let shown: Vec<String> = (cases.into_iter())
+        .map(|(case, values)| format!("{case}: {:?}", record::unscored(&values)))
+        .collect();
+    expect![[r#"
+        every fact holds: []
+        a fact doesn't hold: ["the result scored 2 of 3: expected every fact to hold: score=2 of=3 pinned=true"]
+        no score: ["the result's `score` is None of Some(3): expected a count of the facts that hold, of one or more"]"#]].assert_eq(&shown.join("\n"));
 }
 
 // Each case: a result of `examples/companions`, then what is wrong in it.
