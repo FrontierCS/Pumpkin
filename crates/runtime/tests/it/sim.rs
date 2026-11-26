@@ -1196,6 +1196,8 @@ struct Caller {
     result: Option<Vec<u8>>,
     end: Option<End>,
     released: bool,
+    // Whether an `await_log` step waits for what the steps before it queued to go out.
+    flushing: bool,
     // Where the sandbox's stall moves the clock to, once a `stall` step says so.
     stall: Option<Duration>,
     /// The run's record, if `Sim::records` named it.
@@ -1226,6 +1228,7 @@ impl Caller {
             result: None,
             end: None,
             released: false,
+            flushing: false,
             stall: None,
             record,
             time,
@@ -1307,6 +1310,11 @@ impl Caller {
                     let record = self.record.as_ref().unwrap();
                     await_file(&record.join(path));
                     continue;
+                }
+                Some(Step::Logged(part)) if !replies.is_empty() => {
+                    self.steps.push_front(Step::Logged(part));
+                    self.flushing = true;
+                    return false;
                 }
                 Some(Step::Logged(part)) => {
                     let record = self.record.as_ref().unwrap();
@@ -1513,6 +1521,7 @@ fn state_name(reply: &OpReply) -> String {
 // reply's state is `state`; `await_transfer <session> <lease> moved|failed` until its last transfer
 // ended so. `await_log <kind>` waits until the run log holds an entry of kind `kind`, in the record
 // that `Sim::records` named. An optional caller limits that wait to the named caller's event.
+// It waits once what the steps before it sent has gone out, as a process's writes would.
 //
 // `model <model> <text> [<part>...]` is a model request that names `model`, with `text` as its
 // input, then each `part`, and the next step waits for its response's end; the body holds too the
@@ -2174,9 +2183,29 @@ fn serve(mut connection: UnixStream, model: bool, shared: &Mutex<Status>) {
         let caller = served.caller.as_ref();
         stall_after(caller, shared);
         let close = caller.and_then(|caller| caller.end) == Some(End::Close);
-        if !send(&mut connection, &mut replies, crashed, close) {
+        if !sent(&mut connection, &mut served, &mut replies, (crashed, close)) {
             return;
         }
+    }
+}
+
+// Sends what is queued, then plays the steps that waited for it to go out, and sends what they
+// queue in turn.
+fn sent(
+    connection: &mut UnixStream,
+    served: &mut Served,
+    replies: &mut Vec<(FromSandbox, Vec<u8>)>,
+    (mut crashed, close): (bool, bool),
+) -> bool {
+    loop {
+        if !send(connection, replies, crashed, close) {
+            return false;
+        }
+        let Some(caller) = (served.caller.as_mut()).filter(|caller| caller.flushing) else {
+            return true;
+        };
+        caller.flushing = false;
+        crashed = caller.next(replies);
     }
 }
 
