@@ -952,6 +952,39 @@ fn configurations() {
     );
 }
 
+#[test]
+fn open_files_raised() {
+    let scratch = Scratch::new();
+    scratch.write_task("workflow", &test_support::workflow());
+    write_configurations(&scratch);
+    // A `docker` that records whether the driver, which runs it, holds its soft limit at its hard.
+    let docker = "#!/bin/sh\nwhile read -r a b c soft hard unit; do\n\
+                  [ \"$a $b $c $soft\" = \"Max open files $hard\" ] && : > \"$0.raised\"\n\
+                  done < /proc/$PPID/limits\nexit 1\n";
+    scratch.write_executable("bin/docker", docker.as_bytes());
+    // Started at the soft limit that systemd gives a login or a unit.
+    let script = "ulimit -S -n 1024 && exec \"$0\" run workflow/task.star --sandboxd sandboxd \
+                  --runs runs --config conf/served.toml";
+    let pumpkin = scratch.0.join(".pumpkin/bin/pumpkin");
+    let mut run = scratch.program("/bin/sh", &["-c", script, pumpkin.to_str().unwrap()]);
+    run.env("PATH", scratch.0.join("bin"));
+    let ran = ran(run, &scratch.0, false);
+    let raised = scratch.0.join("bin/docker.raised").exists();
+    let raised = format!("the driver's soft limit is its hard limit: {raised}");
+    check(
+        &scratch,
+        [ran, raised].map(Step::Ran),
+        false,
+        &[],
+        &expect![[r#"
+            $ PATH=<scratch>/bin /bin/sh -c ulimit -S -n 1024 && exec "$0" run workflow/task.star --sandboxd sandboxd --runs runs --config conf/served.toml <scratch>/.pumpkin/bin/pumpkin
+            exit status: Some(1)
+            pumpkin: the Docker context `nowhere` can't be read: `docker context inspect` failed with exit status: 1 and wrote nothing to standard error: name one that `docker context ls` lists
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/conf/served.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
+            the driver's soft limit is its hard limit: true"#]],
+    );
+}
+
 /// Writes into `scratch` the `sandboxd` that [`configurations`] and [`refusals`] give `run`, the
 /// key `conf/key`, and a machine configuration `<name>.toml` for each name they run: `conf/served`
 /// and `docked`, which are accepted, and each other, which breaks the rule that its name says.
