@@ -33,6 +33,7 @@ use schema::sandbox::{RESULT_MAX_DEPTH, SocketDial};
 use schema::workflow::{ByRole, Placed, Workflow};
 use serde_json::{Value, json};
 use stdx::Deadline;
+use test_support::asset::{B, CONFIG, SHARD};
 use test_support::http::{read_request, write_chunk};
 use test_support::{TestDir, files, sandboxes, standard_outputs};
 
@@ -4902,33 +4903,22 @@ fn companions_where_sandboxes_dial() {
     ));
 }
 
-/// A file of an asset at `path`, of 2 bytes, whose SHA-256's digits are `sha256`, from `base`.
-fn asset_file(base: &str, path: &str, sha256: &str) -> Value {
+/// `file`, a path, its bytes and their SHA-256, as a file of an asset from `base`.
+fn asset_file(base: &str, file: (&str, &[u8], &str)) -> Value {
+    let (path, bytes, sha256) = file;
     let (url, sha256) = (format!("{base}/{path}"), format!("sha256:{sha256}"));
-    json!({ "path": path, "url": url, "size": 2, "sha256": sha256 })
+    json!({ "path": path, "url": url, "size": bytes.len(), "sha256": sha256 })
 }
-
-// The SHA-256s of `{}\n`, `1\n` and `b\n`, as `sha256sum` prints them.
-const CONFIG: &str = "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356";
-const SHARD: &str = "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865";
-const B: &str = "0263829989b6fd954f72baaf2fc64bc2e2f01d692d4de72986ea808f6e99813f";
-
-// The digests of `config.json` and `shards/1.bin` of those bytes, and of `b`. A shell prints each
-// in a directory of its files, by this command:
-// `find . -type f -printf '%P\n' | LC_ALL=C sort | xargs -d '\n' sha256sum | sha256sum`.
-const MODEL_DIGEST: &str =
-    "sha256:db7e6a1a23aacc416c441bbb070046f249bf5b5d7fb72273e956c45deb0a9d6e";
-const B_DIGEST: &str = "sha256:eeb0cd7d8c9d9d34ac22ea13505d7249a4f9f8408c491c32a4c2d2d300bf2efa";
 
 // Each digest is published once on its provider before the run, whatever roles hold it, from any
 // URL. So are a role's that never starts. Each create holds its role's assets.
 #[test]
 fn holds_each_roles_assets() {
     let model = json!([
-        asset_file("https://example.com", "config.json", CONFIG),
-        asset_file("https://example.com", "shards/1.bin", SHARD),
+        asset_file("https://example.com", CONFIG),
+        asset_file("https://example.com", SHARD),
     ]);
-    let b = |base: &str| json!([asset_file(base, "b", B)]);
+    let b = |base: &str| json!([asset_file(base, B)]);
     let mut ir = workflow(&["exit", "0"]);
     ir["roles"][0]["assets"] = json!([{ "path": "/opt/model", "files": model.clone() }]);
     ir["roles"][1]["assets"] = json!([{ "path": "/opt/b", "files": b("https://example.com") }]);
@@ -4948,27 +4938,21 @@ fn holds_each_roles_assets() {
     let ended = shown.lines().take(1).map(str::to_owned);
     let published =
         (sim.published().into_iter()).filter(|published| published.starts_with("asset"));
-    let mut digests = Vec::new();
     let logged = (shown.lines())
         .filter(|line| line.contains("asset_published"))
         .map(|line| {
             let mut line: Value = serde_json::from_str(line).unwrap();
-            digests.push(line["event"]["digest"].as_str().unwrap().to_owned());
             // The machine's clock times a publish, on any host.
             line["event"]["took_ns"] = json!("<ns>");
             line.to_string()
         });
-    let logged: Vec<String> = logged.collect();
-    assert_eq!(
-        digests,
-        [MODEL_DIGEST, B_DIGEST],
-        "the digests that the shell prints"
-    );
     let shown: Vec<String> = (ended
         .chain(published)
         .chain(sim.held_assets())
         .chain(logged))
     .collect();
+    // Each digest is what a shell prints in a directory of the asset's files, by this command:
+    // `find . -type f -printf '%P\n' | LC_ALL=C sort | xargs -d '\n' sha256sum | sha256sum`.
     expect![[r#"
         finished, showing [score=0]
         asset sha256:db7e6a1a23aacc416c441bbb070046f249bf5b5d7fb72273e956c45deb0a9d6e: config.json, shards/1.bin
@@ -4986,7 +4970,7 @@ fn holds_each_roles_assets() {
 fn assets_where_none_are_published() {
     let sim = Sim::new().offering_assets();
     let mut ir = workflow(&["exit", "0"]);
-    let b = json!([asset_file("https://example.com", "b", B)]);
+    let b = json!([asset_file("https://example.com", B)]);
     ir["roles"][1]["assets"] = json!([{ "path": "/opt/b", "files": b }]);
     let ir = serde_json::from_value(ir).unwrap();
     let placed = placed(&ir, sim.ready()).unwrap();

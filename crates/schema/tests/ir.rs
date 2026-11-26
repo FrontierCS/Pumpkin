@@ -1816,18 +1816,12 @@ impl Case for Accompanying {
         let companions = (0..self.companions).map(|index| companion(&format!("c{index}"), '4'));
         let mut ir = accompanied(companions.collect());
         ir["roles"][3]["needs"] = self.needs.clone();
-        let ir = serde_json::from_value::<ir::Workflow>(ir).unwrap();
-        let placed = Workflow::parse(&ir)
-            .unwrap()
-            .place(self.offered, |classes| classes);
-        let at = match placed {
-            Ok((placed, _)) => {
-                let (runner, _) = placed.workflow().roles().nth(3).unwrap();
-                let placement = placed.placement(runner);
-                format!("`{}` `{}`", placement.provider, placement.class)
-            }
-            Err(errors) => errors.to_string(),
-        };
+        let at = Holding {
+            ir,
+            role: 3,
+            offered: self.offered,
+        }
+        .outcome();
         format!("{} with {}: {at}", self.needs, self.companions)
     }
 }

@@ -23,6 +23,7 @@ use serde_json::Value;
 use stdx::process::Environment;
 use stdx::time::{Clock as _, Machine};
 
+pub mod asset;
 pub mod edge;
 pub mod http;
 pub mod relayed;

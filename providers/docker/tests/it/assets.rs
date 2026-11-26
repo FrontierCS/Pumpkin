@@ -14,21 +14,8 @@ use expect_test::{Expect, expect};
 use provider::{AssetDigest, Assets as _, PublishedAsset, RunTag};
 use schema::ir::{AssetFiles, Sha256Digest};
 use serde_json::json;
+use test_support::asset::{B, CONFIG, SHARD};
 use test_support::{TestDir, edge, http};
-
-// `{}\n`, `1\n` and `b\n`, and their SHA-256s, as `sha256sum` prints them.
-const CONFIG: (&str, &[u8], &str) = (
-    "config.json",
-    b"{}\n",
-    "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
-);
-const SHARD: (&str, &[u8], &str) = (
-    "shards/1.bin",
-    b"1\n",
-    "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
-);
-const B: &[u8] = b"b\n";
-const B_SHA256: &str = "0263829989b6fd954f72baaf2fc64bc2e2f01d692d4de72986ea808f6e99813f";
 
 /// Any digest: the runtime computes it, and the cache only names an entry by it.
 const DIGEST: &str = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
@@ -91,7 +78,7 @@ fn published(dir: &Path, files: &AssetFiles) -> String {
 }
 
 /// Checks against `expect` each of `outcomes`, then what the cache at `dir` holds, each with its
-/// mode. A port, the digest and each of `masked` are masked.
+/// mode. The digest and each of `masked` are masked.
 fn check(dir: &Path, outcomes: &[String], masked: &[(&str, &str)], expect: &Expect) {
     let mut lines = outcomes.to_vec();
     lines.push("the cache holds:".to_owned());
@@ -102,16 +89,7 @@ fn check(dir: &Path, outcomes: &[String], masked: &[(&str, &str)], expect: &Expe
         .join("\n")
         .replace(&DIGEST["sha256:".len()..], "<digest>");
     let shown = (masked.iter()).fold(shown, |shown, (from, to)| shown.replace(from, to));
-    let mut unported = String::new();
-    let mut rest = shown.as_str();
-    while let Some(at) = rest.find("localhost:") {
-        let (before, after) = rest.split_at(at + "localhost:".len());
-        unported.push_str(before);
-        unported.push_str("PORT");
-        rest = after.trim_start_matches(|c: char| c.is_ascii_digit());
-    }
-    unported.push_str(rest);
-    expect.assert_eq(&unported);
+    expect.assert_eq(&shown);
 }
 
 /// Each entry below `dir`, sorted, by its path from `base`, with its mode, and a file's bytes.
@@ -171,23 +149,24 @@ fn refuses_what_isnt_pinned() {
     let cache = dir.path().join("assets");
     let served = vec![
         (CONFIG.0, CONFIG.1),
-        ("b", B),
+        (B.0, B.1),
         ("long", b"bb\n"),
         ("short", b"b"),
     ];
     let port = serving(served, None, None);
-    let pinned = |path| files(port, &[(CONFIG.0, CONFIG.2, 3), (path, B_SHA256, 2)]);
-    let mut wrong = vec![(CONFIG.0, CONFIG.2, 3), ("b", B_SHA256, 2)];
+    let pinned = |path| files(port, &[(CONFIG.0, CONFIG.2, 3), (path, B.2, 2)]);
+    let mut wrong = vec![(CONFIG.0, CONFIG.2, 3), (B.0, B.2, 2)];
     wrong[1].1 = SHARD.2;
     let outcomes = [
         published(&cache, &files(port, &wrong)),
         published(&cache, &pinned("short")),
         published(&cache, &pinned("long")),
     ];
+    let at = format!("{}:{port}", edge::NAME);
     check(
         &cache,
         &outcomes,
-        &[],
+        &[(&at, "localhost:PORT")],
         &expect![[r#"
         `b` from https://localhost:PORT/b has the SHA-256 sha256:0263829989b6fd954f72baaf2fc64bc2e2f01d692d4de72986ea808f6e99813f, not the pinned sha256:4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865: give the SHA-256 of the file that the URL serves
         `short` from https://localhost:PORT/short ends after 1 of its 2 bytes: give the size of the file that the URL serves
