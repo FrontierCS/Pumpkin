@@ -14,6 +14,9 @@ use crate::flags::SampleDriver;
 use crate::repo::STEP_TIMEOUT;
 use crate::settings::{Provider, Settings};
 
+// As often as htop's finest step, as a meet of companions starts the driver's threads within a
+// fraction of a second. A coarser step shows such a meet as one jump:
+// https://github.com/htop-dev/htop/blob/b9dc8aae875cfe2f6f21131bd86c56b8b4c8ef6d/CommandLine.c#L228-L229
 const EVERY: Duration = Duration::from_millis(100);
 
 /// How many samples apart each task's own line is printed.

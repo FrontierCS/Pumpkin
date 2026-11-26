@@ -31,7 +31,10 @@ RUN_TAG = "pumpkin-run"
 ROLE_TAG = "pumpkin-role"
 
 # How many images an import builds at once, and how many sidecars a create makes at once. Each
-# waits on Modal on a thread of its own, and this bounds the helper's threads.
+# waits on Modal on a thread of its own. The builds share the SDK's one HTTP/2 connection, a stream
+# each. HTTP/2 asks a server to allow at least 100 streams at once, so 64 leaves room for the calls
+# beside them: https://www.rfc-editor.org/rfc/rfc9113.html#section-6.5.2
+# Past what Modal allows, its SDK waits rather than fails.
 AT_ONCE = 64
 
 # How often a create lists its run until the list finds its sandbox: as often as Modal's SDK asks
