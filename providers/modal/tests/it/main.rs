@@ -1,6 +1,6 @@
 //! What the Modal provider decides without Modal. That is the references of a batch of images
-//! (`images`), and the memory and companions that a sandbox holds (`create`). This binary compiles
-//! both modules itself, as the crate keeps them private.
+//! (`images`), the memory and companions that a sandbox holds, and where it holds an asset
+//! (`create`). This binary compiles both modules itself, as the crate keeps them private.
 
 #![expect(
     clippy::unwrap_used,
@@ -11,7 +11,7 @@ use std::num::{NonZeroU32, NonZeroU64};
 
 use expect_test::{Expect, expect};
 use provider::{ImageRef, Role};
-use schema::ir::{Image, Name, Resources, User};
+use schema::ir::{AssetPath, Image, Name, Resources, User};
 
 #[path = "../../src/create.rs"]
 #[expect(
@@ -20,6 +20,7 @@ use schema::ir::{Image, Name, Resources, User};
 )]
 mod create;
 #[path = "../../src/images.rs"]
+#[expect(dead_code, reason = "the tests read no image's id")]
 mod images;
 
 use images::Batch;
@@ -135,5 +136,31 @@ fn batches() {
         &expect![[r#"
         imported once each: sha256:a sha256:b sha256:c
         referenced: im-2@sha256:b im-1@sha256:a im-2@sha256:b im-3@sha256:c"#]],
+    );
+}
+
+/// Whether Modal holds an asset at `path`, or why not.
+fn holding(path: &str) -> String {
+    let path = AssetPath::try_from(path.to_owned()).unwrap();
+    let held = create::asset_held(&path).map_or_else(|refused| refused, |()| "held".into());
+    format!("{path}: {held}")
+}
+
+// Modal refuses an asset in `/__modal` or below, and holds one at a path that only starts with
+// its name.
+#[test]
+fn assets_held() {
+    check(
+        [
+            holding("/opt/model"),
+            holding("/__modal"),
+            holding("/__modal/weights"),
+            holding("/__modalities"),
+        ],
+        &expect![[r#"
+            /opt/model: held
+            /__modal: Modal keeps its own files in `/__modal`: hold the asset outside it
+            /__modal/weights: Modal keeps its own files in `/__modal`: hold the asset outside it
+            /__modalities: held"#]],
     );
 }

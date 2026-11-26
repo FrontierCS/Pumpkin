@@ -51,7 +51,8 @@ imports from the envelope's ECR repositories with a role that it assumes by its 
 no AWS credential of the operator's reaches Modal. A sandbox's containers connect only to one
 another and to Modal's resolver. It answers for public names, so code in any container can send
 data out in DNS queries. The driver dials each sandbox through Modal's TLS tunnel, which takes
-connections from `dials_from` alone. Modal ends each sandbox at its hard end.
+connections from `dials_from` alone. Modal ends each sandbox at its hard end. Its classes hold
+assets, outside `/__modal`.
 
 Its classes hold a runner's [companions](glossary.md#companion), each as a
 [sidecar of Modal's](https://modal.com/docs/guide/sandbox-sidecars), which has no GPU. A sandbox

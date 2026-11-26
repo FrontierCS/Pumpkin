@@ -1,10 +1,58 @@
-//! The references of the images that the provider publishes. Each is the image's id in Modal,
-//! then `@` and the image's digest, such as `im-…@sha256:…`.
+//! The references of the images that the provider publishes. Each of a role's or a companion's is
+//! the image's id in Modal, then `@` and the image's digest, such as `im-…@sha256:…`. Each of an
+//! asset's is the id alone ([`ImageId`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use provider::ImageRef;
+use provider::{AssetRef, ImageRef};
 use schema::ir::Image;
+use serde::Deserialize;
+
+const ID_PREFIX: &str = "im-";
+
+/// The id of an image of Modal's: `im-`, then letters and digits.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
+pub(crate) struct ImageId(String);
+
+impl ImageId {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for ImageId {
+    type Error = String;
+
+    fn try_from(id: String) -> Result<Self, Self::Error> {
+        let rest = id.strip_prefix(ID_PREFIX).unwrap_or_default();
+        if rest.is_empty() || !rest.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+            return Err(format!(
+                "`{}` is no id of an image of Modal's: expected `{ID_PREFIX}`, then letters and \
+                 digits",
+                id.escape_debug()
+            ));
+        }
+        Ok(Self(id))
+    }
+}
+
+impl From<ImageId> for AssetRef {
+    fn from(id: ImageId) -> Self {
+        Self::from(id.0)
+    }
+}
+
+/// The id in Modal of the image that holds an asset's files, as its reference holds it.
+pub(crate) fn asset_image(asset: &AssetRef) -> Result<&str, String> {
+    match ImageId::try_from(asset.as_str().to_owned()) {
+        Ok(_) => Ok(asset.as_str()),
+        Err(_) => Err(format!(
+            "`{}` is no asset this provider published: publish one first",
+            asset.as_str()
+        )),
+    }
+}
 
 /// The reference of `image`, which Modal imported as `imported`, its id there.
 pub(crate) fn reference(imported: &str, image: &Image) -> ImageRef {
