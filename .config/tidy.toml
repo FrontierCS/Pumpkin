@@ -9,7 +9,7 @@
 # The Markdown documents over `WORD_CAP` words, as `wc -w` counts them.
 [words]
 "ARCHITECTURE.md" = 2787
-"deploy/aws/README.md" = 2110
+"deploy/aws/README.md" = 2107
 "docs/language.md" = 1534
 
 # The Markdown documents, and the Rust files by their comments, with sentences to split: those
@@ -276,7 +276,7 @@
 "xtask/src/figure.rs" = 11
 "xtask/src/live.rs" = 14
 "xtask/src/live/controller.rs" = 12
-"xtask/src/main.rs" = 7
+"xtask/src/main.rs" = 6
 "xtask/src/page.rs" = 1
 "xtask/src/repo.rs" = 2
 "xtask/src/settings.rs" = 2

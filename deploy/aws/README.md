@@ -124,7 +124,7 @@ an `output` of its own.
 - `terraform output -raw contributor_policy_arn` is the managed IAM policy that a contributor's
   machine needs for `cargo xtask live`, which the root attaches to it as it does any policy.
   `policies/contributor.json.tftpl` says what it allows: the client's, what `pumpkin-admin
-  check` reads, and the list of the timer's schedules that a run left.
+  check` reads, and the timer's schedules that a run left.
 - `[gateway] private`, the address the sandboxes dial, is `"<private ip>:0"`, as each job sets it
   on the controller: the groups admit only the ephemeral ports that `gateway_ports.json` holds,
   where the kernel's pick for port 0 falls.

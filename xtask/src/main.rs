@@ -101,11 +101,13 @@ mod flags {
                 /// the smoke's GPU runner needs.
                 optional --gpu-model model: String
                 /// With `ec2` or `modal`, kills the run's job on the controller once the agent
-                /// holds a lease of each grant. Checks that each sandbox ends by itself at the
-                /// run's hard end, about 95 minutes after its start, and that `pumpkin reap` then
-                /// removes what is left. Costs at most about $1 on EC2 and $4 on Modal. With
-                /// `controller`, kills the job likewise, makes the controller's container anew, and
-                /// checks that its boot reaped the run.
+                /// holds a lease of each grant. Checks that each EC2 instance of the run has one
+                /// timer, at its sandbox's hard end in the run's log, rounded up to the minute.
+                /// Checks that each sandbox ends by itself. A sandbox ends once its session does,
+                /// or else by the run's hard end, about 95 minutes after its start. Checks that
+                /// `pumpkin reap` then removes what is left. Costs at most about $1 on EC2 and $4
+                /// on Modal. With `controller`, kills the job likewise, makes the controller's
+                /// container anew, and checks that its boot reaped the run.
                 optional --lost
             }
 

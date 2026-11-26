@@ -2,7 +2,8 @@
 //!
 //! The provider's calls are made with the credentials of the process that runs it ([`caller`]).
 //! Its sandboxes rely on the timer's role ([`timer`]) and the sandbox instances' ([`sandbox`]).
-//! A check of the envelope reads it with calls of its own ([`checker`]).
+//! A check of the envelope reads it with calls of its own ([`checker`]). A reader of the timers'
+//! schedules reads them ([`timers_reader`]).
 
 use aws::iam::{Allow, Call, Condition, Ecr, Key, List, Part, Placeholder, Resource, Test, Values};
 
@@ -237,6 +238,13 @@ pub fn caller() -> impl Iterator<Item = &'static Allow> {
         console,
     ];
     calls.into_iter().flat_map(Call::allows).chain(ECR.allows())
+}
+
+/// What IAM must allow the credentials that read the schedules of the timer, each instance's
+/// (`launch::Ec2::set_timer`), as `aws scheduler get-schedule` does.
+pub fn timers_reader() -> impl Iterator<Item = &'static Allow> {
+    static READ: Allow = Allow::new(&["scheduler:GetSchedule"], TIMER_SCHEDULES);
+    [&READ].into_iter()
 }
 
 /// What IAM must allow the timer's role. Each schedule's target terminates its instance with it

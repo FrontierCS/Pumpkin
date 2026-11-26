@@ -260,7 +260,7 @@ impl<'r, H: Host> Run<'r, H> {
             host,
             inbox.sender(),
         );
-        let log = Log::create(host, clock.clone(), &self.dir)?;
+        let log = Log::create(host, clock.clone(), unix, &self.dir)?;
         let mut runtime = Runtime {
             placed: &self.placed,
             routes: &self.routes,
@@ -287,7 +287,7 @@ impl<'r, H: Host> Run<'r, H> {
             inbox,
             held: None,
         };
-        let mut outcome = runtime.drive(unix);
+        let mut outcome = runtime.drive();
         // In-flight exchanges have ended, so each route has its final status.
         let keyed = runtime.routes_held(&mut outcome);
         let outcome = failed_also(failed_also(outcome, keyed), runtime.sweep());
@@ -425,10 +425,9 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         self.placed.workflow()
     }
 
-    fn drive(&mut self, unix: UnixTime) -> Result<Outcome, Stopped> {
+    fn drive(&mut self) -> Result<Outcome, Stopped> {
         let (mut core, actions) = Core::start(self.placed);
-        self.log
-            .start(self.workflow(), unix, self.hard_end(), &actions)?;
+        self.log.start(self.workflow(), self.hard_end(), &actions)?;
         // The threads of calls borrow the run's workflow and sandboxes, and the scope ends
         // once each has, so that no sandbox starts after the run's end, and the drain takes all
         // they reported. A stop waits so for a child whose provider's create is under way, which
