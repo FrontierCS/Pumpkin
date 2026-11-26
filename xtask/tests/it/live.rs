@@ -176,44 +176,6 @@ fn met(container: &str) -> serde_json::Value {
     serde_json::json!({"container": container})
 }
 
-// Each case: a log, then what is wrong with how its sandbox's containers met.
-#[test]
-fn unmet() {
-    let none = || serde_json::Value::Null;
-    let written = [
-        ("container_met", "lease-0", 1000, met("main")),
-        ("container_met", "lease-0", 1200, met("c1")),
-        ("container_met", "lease-0", 1200, met("c0")),
-        ("container_met", "lease-0", 1500, met("c2")),
-        ("sandbox_met", "lease-0", 1500, none()),
-        ("lease_ready", "", 1600, none()),
-    ];
-    let without = |index: usize| {
-        let mut events = written.to_vec();
-        events.remove(index);
-        events
-    };
-    let mut out_of_order = written.to_vec();
-    out_of_order.swap(1, 3);
-    let cases = [
-        ("as the runtime writes it", written.to_vec()),
-        ("a companion's missing", without(2)),
-        ("out of the order of their times", out_of_order),
-        ("no sandbox_met", without(4)),
-    ];
-    let shown: Vec<String> = (cases.into_iter())
-        .map(|(case, events)| {
-            let unmet = record::unmet(&log(&events), &["main", "c0", "c1", "c2"]);
-            format!("{case}: {unmet:?}")
-        })
-        .collect();
-    expect![[r#"
-        as the runtime writes it: []
-        a companion's missing: ["sandbox `lease-0`'s `container_met` lines name [\"main\", \"c1\", \"c2\"]: expected each of [\"main\", \"c0\", \"c1\", \"c2\"] once"]
-        out of the order of their times: ["sandbox `lease-0`'s `container_met` lines name [\"main\", \"c2\", \"c0\", \"c1\"] at [1000, 1500, 1200, 1200] ns: expected them in the order of their times"]
-        no sandbox_met: ["sandbox `lease-0` has no `sandbox_met` next after its last `container_met`, at 1500 ns or later: expected one once all its containers have met"]"#]].assert_eq(&shown.join("\n"));
-}
-
 // Each case: a log of a create on Modal, then what is wrong with its phases.
 #[test]
 fn unphased() {

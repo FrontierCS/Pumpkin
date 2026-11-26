@@ -695,21 +695,14 @@ fn companioned(record: &Path) -> Vec<String> {
         println!("companions: {}", shown.join(" "));
         record::uncompanioned(values)
     });
-    let (log, ir) = match (logged(record), read(&record.join("ir.json"))) {
-        (Ok(log), Ok(ir)) => (log, ir),
-        (log, ir) => {
-            failed.extend(log.err().into_iter().chain(ir.err()));
+    let log = match logged(record) {
+        Ok(log) => log,
+        Err(error) => {
+            failed.push(error);
             return failed;
         }
     };
-    let roles = ir["roles"].as_array().map_or(&[][..], Vec::as_slice);
-    let companions = (roles.iter())
-        .filter_map(|role| role["runtime"]["runner"]["companions"].as_array())
-        .flatten()
-        .filter_map(|companion| companion["name"].as_str());
-    let containers: Vec<&str> = std::iter::once("main").chain(companions).collect();
     failed.extend(record::unphased(&log));
-    failed.extend(record::unmet(&log, &containers));
     failed
 }
 

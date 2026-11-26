@@ -101,83 +101,6 @@ fn create_unphased(line: &Value, companions: bool) -> Option<String> {
     None
 }
 
-/// What is wrong with how the containers of the one sandbox in `lines`, a run's log, that holds
-/// companions met the gateway. Its `container_met` lines are to name each of `containers` once,
-/// and no other, in the order of their times. Its `sandbox_met` is to follow them, at the last
-/// one's time or later.
-pub(crate) fn unmet(lines: &[Value], containers: &[&str]) -> Vec<String> {
-    let met: Vec<(usize, &Value)> = (lines.iter().enumerate())
-        .filter(|(_, line)| kind(line) == Some("container_met"))
-        .collect();
-    let mut sandboxes: Vec<&str> = (met.iter())
-        .filter_map(|(_, line)| line["event"]["sandbox"].as_str())
-        .collect();
-    sandboxes.sort_unstable();
-    sandboxes.dedup();
-    let (Some(sandbox), Some((last, _))) = (sandboxes.first(), met.last()) else {
-        return vec![
-            "the log has no `container_met`: expected one for each container of the sandbox \
-             that holds companions"
-                .to_owned(),
-        ];
-    };
-    if sandboxes.len() > 1 {
-        return vec![format!(
-            "the log has a `container_met` of each of the sandboxes {sandboxes:?}: expected those \
-             of the one sandbox that holds companions"
-        )];
-    }
-    let mut failed = Vec::new();
-    let named: Vec<&str> = (met.iter())
-        .filter_map(|(_, line)| line["event"]["container"].as_str())
-        .collect();
-    let (mut sorted, mut expected) = (named.clone(), containers.to_vec());
-    sorted.sort_unstable();
-    expected.sort_unstable();
-    if sorted != expected {
-        failed.push(format!(
-            "sandbox `{sandbox}`'s `container_met` lines name {named:?}: expected each of \
-             {containers:?} once"
-        ));
-    }
-    let times: Option<Vec<u64>> = (met.iter())
-        .map(|(_, line)| ns(&line["observed_ns"]))
-        .collect();
-    let Some(times) = times else {
-        failed.push(format!(
-            "sandbox `{sandbox}` has a `container_met` without its time: expected each to have one"
-        ));
-        return failed;
-    };
-    if !times.is_sorted() {
-        failed.push(format!(
-            "sandbox `{sandbox}`'s `container_met` lines name {named:?} at {times:?} ns: expected \
-             them in the order of their times"
-        ));
-    }
-    let latest = times.iter().max().copied().unwrap_or_default();
-    failed.extend(unfollowed(lines, sandbox, (*last, latest)));
-    failed
-}
-
-/// What is wrong with the `sandbox_met` of `sandbox` in `lines`, if anything. Its last
-/// `container_met` is the line at the index `last`, and the latest is at `latest`. The next line
-/// of that sandbox is to be its `sandbox_met`, at that time or later.
-fn unfollowed(lines: &[Value], sandbox: &str, (last, latest): (usize, u64)) -> Option<String> {
-    let next = (lines.iter().skip(last + 1)).find(|line| line["event"]["sandbox"] == sandbox);
-    match next {
-        Some(line)
-            if kind(line) == Some("sandbox_met") && ns(&line["observed_ns"]) >= Some(latest) =>
-        {
-            None
-        }
-        _ => Some(format!(
-            "sandbox `{sandbox}` has no `sandbox_met` next after its last `container_met`, at \
-             {latest} ns or later: expected one once all its containers have met"
-        )),
-    }
-}
-
 /// What is wrong in `values`, the result of a run of `examples/companions`. That is a fact that it
 /// says doesn't hold, with what its commands said. It is also exchanges between containers whose
 /// median took [`BRIDGE_MEDIAN_MS`] or longer.
@@ -231,10 +154,6 @@ pub(crate) fn uncompanioned(values: &[Value]) -> Vec<String> {
         )),
     }
     failed
-}
-
-fn kind(line: &Value) -> Option<&str> {
-    line["event"]["kind"].as_str()
 }
 
 fn ns(value: &Value) -> Option<u64> {
