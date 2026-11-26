@@ -95,7 +95,7 @@
 "crates/pumpkin/src/job/store.rs" = 1
 "crates/pumpkin/src/keydir.rs" = 1
 "crates/pumpkin/src/link.rs" = 13
-"crates/pumpkin/src/main.rs" = 18
+"crates/pumpkin/src/main.rs" = 17
 "crates/pumpkin/src/manifest.rs" = 6
 "crates/pumpkin/src/next.rs" = 3
 "crates/pumpkin/src/progress.rs" = 9
