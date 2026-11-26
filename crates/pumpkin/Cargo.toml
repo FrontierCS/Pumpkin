@@ -43,7 +43,10 @@ tempfile.workspace = true
 toml.workspace = true
 
 [target.'cfg(target_env = "musl")'.dependencies]
-mimalloc.workspace = true
+# Without `no_thp`, mimalloc advises the kernel to back its arena with 2 MiB pages. A fault there
+# makes the whole 2 MiB resident, with the parts of each thread's 64 KiB pages that it never
+# touches. A thread of the driver then holds about 1 MiB, against 0.1 MiB without.
+mimalloc = { workspace = true, features = ["no_thp"] }
 
 [dev-dependencies]
 test-support = { path = "../test-support" }
