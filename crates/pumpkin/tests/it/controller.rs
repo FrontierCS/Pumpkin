@@ -17,8 +17,9 @@ use stdx::process::Environment;
 
 use super::view::Served;
 use super::{
-    PUMPKIN, Prices, Scratch, asked, cut, ended, install, invocation, lease_places, lock_driver,
-    masked_members, poll, report, returned, whole_log, workflow, write_record, write_run,
+    PUMPKIN, Prices, Scratch, asked, cut, days_ago, ended, install, invocation, lease_places,
+    lock_driver, masked_members, poll, report, returned, whole_log, workflow, write_record,
+    write_run,
 };
 
 const SENT_MODAL: &str = r#"[modal]
@@ -2073,11 +2074,6 @@ fn move_runs(scratch: &Scratch, to: &str) {
         fs::create_dir_all(dir.parent().unwrap()).unwrap();
         fs::rename(entry.path(), dir).unwrap();
     }
-}
-
-fn days_ago(path: &Path, days: u64) {
-    let at = SystemTime::now() - Duration::from_hours(24 * days);
-    File::open(path).unwrap().set_modified(at).unwrap();
 }
 
 fn ls_ran(scratch: &Scratch, client: &[(String, String); 2], args: &[&str]) -> String {

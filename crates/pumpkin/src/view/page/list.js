@@ -11,7 +11,7 @@ import { returnedView } from "./returned.js";
  * @property {string} id
  * @property {string} [member] the member whose job the run is, on a controller whose job names one
  * @property {boolean} live
- * @property {string} state "unread" for a run that another build made, whose page this build can't draw
+ * @property {string} state "unread" for a run that another build made, whose page this build can't draw, and "waiting", "building" or "unstarted" for a job whose run has no record
  * @property {boolean} has_result
  * @property {string} time
  * @property {string} bound
@@ -37,6 +37,10 @@ const COLUMNS = [
   ["Tokens out", "num"],
   ["", "rest"],
 ];
+
+// The states of a run whose page this build can't draw: another build's, and those of a job
+// whose run has no record.
+const UNOPENED = new Set(["unread", "waiting", "building", "unstarted"]);
 
 // After the run's id, when some run names its member.
 const MEMBER = ["Member", ""];
@@ -106,8 +110,8 @@ export async function runsView() {
     draw();
   };
   // Whether a run's page can be opened: not for one whose record can't be read, or is another
-  // build's.
-  const opens = (/** @type {ListedRun | Unlisted} */ run) => run.error === undefined && run.state !== "unread";
+  // build's, or for a job whose run has no record.
+  const opens = (/** @type {ListedRun | Unlisted} */ run) => run.error === undefined && !UNOPENED.has(run.state);
 
   // A row's cells: each its class, title and text, and the state's its mark.
   /** @typedef {{ cls: string, title: string | null, text: string, mark?: string, span?: number }} Cell */
@@ -154,12 +158,12 @@ export async function runsView() {
     const want = cells(run);
     let tr = rows.get(run.id);
     if (!tr || tr.children.length !== want.length) {
-      tr = /** @type {HTMLTableRowElement} */ (
-        h("tr", { onclick: (/** @type {MouseEvent} */ event) => (event.target instanceof Element && event.target.closest("td.toggle") ? toggle(run.id) : opens(run) && open(run.id)) })
-      );
+      tr = /** @type {HTMLTableRowElement} */ (h("tr", {}));
       for (const cell of want) tr.append(h("td", {}, cell.mark !== undefined ? h("span") : null, ""));
       rows.set(run.id, tr);
     }
+    // Set at each draw, as a job's row turns into its run's once the run's record is begun.
+    tr.onclick = (event) => (event.target instanceof Element && event.target.closest("td.toggle") ? toggle(run.id) : opens(run) && open(run.id));
     const listed = opens(run) ? /** @type {ListedRun} */ (run) : null;
     attr(tr, "class", (listed ? "link" : "unread") + (index === state.cursor ? " on" : ""));
     attr(tr, "title", listed ? (listed.live ? "Live: open it to follow it" : "Open this run") : null);

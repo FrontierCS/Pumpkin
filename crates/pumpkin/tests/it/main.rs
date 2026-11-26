@@ -20,7 +20,7 @@ use std::os::unix::fs::{PermissionsExt as _, symlink};
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use std::{fs, iter, thread};
 
 use docker::{Docker, Reached};
@@ -1197,6 +1197,11 @@ fn lock_driver(dir: &Path) -> fs::File {
     let driver = fs::File::open(dir.join("driver.pid")).unwrap();
     driver.lock().unwrap();
     driver
+}
+
+fn days_ago(path: &Path, days: u64) {
+    let at = SystemTime::now() - Duration::from_hours(24 * days);
+    fs::File::open(path).unwrap().set_modified(at).unwrap();
 }
 
 /// What a record made by this build names as its `pumpkin`.
