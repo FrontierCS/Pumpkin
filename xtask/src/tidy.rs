@@ -1,7 +1,8 @@
 //! The checks of the rules that a machine can check, which `cargo xtask ci` runs: of comments and
 //! docs, of a source file's lines and a document's words, of the sentences of documents and
-//! comments, of links, of the figures and of the layout of `tests/`. `docs/dev/` doesn't restate a
-//! rule that a check holds, so each problem says what is wrong and what to do.
+//! comments, of links, of retired words, of the figures and of the layout of `tests/`.
+//! `docs/dev/` doesn't restate a rule that a check holds, so each problem says what is wrong and
+//! what to do.
 //!
 //! Each file is read as proc-macro2's tokens, so a string literal is never taken for a comment: a
 //! doc comment is a token, and any other comment lies between two. Code in a comment is told from
@@ -26,6 +27,8 @@ mod ceilings;
 mod figures;
 #[path = "tidy/links.rs"]
 mod links;
+#[path = "tidy/retired.rs"]
+mod retired;
 #[path = "tidy/sentences.rs"]
 mod sentences;
 
@@ -118,6 +121,10 @@ pub(crate) fn check(repo: &Repo<'_>) -> Result<()> {
     }
     problems.extend(capped(&ceilings, &sentences::CAP, to_split)?);
     problems.extend(links::check(repo, &listed)?);
+    problems.extend(retired::check(
+        &ceilings,
+        &texts(repo, &listed, documents)?,
+    )?);
     names.extend(figures::packages(repo, &listed)?);
     problems.extend(figures::check(repo, &listed, &names)?);
     if problems.is_empty() {
@@ -283,6 +290,26 @@ fn documents(repo: &Repo<'_>) -> Result<Vec<(String, String)>> {
         }
     }
     Ok(documents)
+}
+
+/// `documents`, and each of `paths` that is a source file ([`SOURCES`]) but for the vendored
+/// suites, each with its text.
+fn texts(
+    repo: &Repo<'_>,
+    paths: &[String],
+    documents: Vec<(String, String)>,
+) -> Result<Vec<(String, String)>> {
+    let mut texts = documents;
+    for path in paths {
+        let extension = Path::new(path)
+            .extension()
+            .and_then(|extension| extension.to_str());
+        let source = extension.is_some_and(|extension| SOURCES.contains(&extension));
+        if source && !path.starts_with(VENDORED) {
+            texts.push((path.clone(), repo.read(path)?));
+        }
+    }
+    Ok(texts)
 }
 
 /// The words of each of `documents`, as `wc -w` counts them.
