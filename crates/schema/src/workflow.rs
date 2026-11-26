@@ -388,6 +388,13 @@ pub struct Sandbox {
     pub(crate) at: JsonPointer,
 }
 
+impl Sandbox {
+    /// The role's place in the IR, such as `/roles/1`.
+    pub fn at(&self) -> &JsonPointer {
+        &self.at
+    }
+}
+
 /// The agent role; see [`ir::AgentRuntime`](crate::ir::AgentRuntime), whose rules its `dirs`
 /// and `files` keep.
 #[derive(Clone, Debug, PartialEq, Eq)]

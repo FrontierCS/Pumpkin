@@ -23,10 +23,7 @@ use std::path::Path;
 use std::process::Output;
 
 pub use assets::AssetCache;
-use engine::{
-    ContextName, Engine, READ_ONLY_TMP, REMOVE_TIMEOUT, confinement, docker, docker_to,
-    fix_reported,
-};
+use engine::{ContextName, Engine, REMOVE_TIMEOUT, confinement, docker, docker_to, fix_reported};
 use provider::{
     Assets, Console, Create, Created, Creator, HeldAsset, ImageRef, Listed, Meeting, Provider,
     Ready, Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
@@ -161,19 +158,6 @@ impl Provider for Docker<'_> {
     }
 
     fn fits(&self, phases: &[Vec<Role>]) -> Result<(), String> {
-        // A container's empty tmpfs there hides whatever is mounted at its path (`confinement`).
-        let at_tmp = (phases.iter().flatten()).find(|role| {
-            role.assets
-                .iter()
-                .any(|path| path.as_str() == READ_ONLY_TMP)
-        });
-        if let Some(role) = at_tmp {
-            return Err(format!(
-                "role `{}` holds an asset at `{READ_ONLY_TMP}`, where each sandbox has an empty \
-                 read-only tmpfs: hold it at another path, such as one below `{READ_ONLY_TMP}`",
-                role.name
-            ));
-        }
         cpus::fits(&self.cpus, phases).map(|_| ())
     }
 
@@ -294,8 +278,6 @@ fn create_args(create: &Create, dial: &SocketDial, cpus: &Cpus) -> Result<Vec<St
         instances: _,
         // Its class holds no companions.
         companions: _,
-        // `assets` gives each one's path, with its files.
-        assets: _,
     } = role;
     let sandboxd = Path::new(sandboxd.as_str());
     let mut args = vec![

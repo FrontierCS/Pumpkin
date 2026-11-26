@@ -4987,6 +4987,29 @@ fn assets_where_none_are_published() {
     .assert_eq(&unprepared(&sim, ir));
 }
 
+// Each asset at a path where its provider holds none is refused at that path in the IR. A provider
+// that could never hold the roles at once is refused beside them.
+#[test]
+fn refuses_each_unheld_asset_and_unfit_provider() {
+    let sim = Sim::new().holding_no_asset_at("/tmp").with_cpus(1);
+    let mut ir = workflow(&["exit", "0"]);
+    let b = json!([asset_file("https://example.com", B)]);
+    let held = |path: &str| json!({ "path": path, "files": b.clone() });
+    ir["roles"][1]["assets"] = json!([held("/opt/b"), held("/tmp")]);
+    ir["roles"][2]["assets"] = json!([held("/tmp")]);
+    let ir = serde_json::from_value(ir).unwrap();
+    let placed = placed(&ir, sim.ready()).unwrap();
+    let on = providers_of(&placed, |_| &sim);
+    let fits = runtime::fits(&placed, &on).unwrap().unwrap_err();
+    expect![[r#"
+        error: role `trainer` holds an asset at `/tmp`, where provider `simulated` holds none: its sandboxes hold none at `/tmp`: hold it elsewhere
+          --> roles[1].assets[1].path
+        error: role `final_judge` holds an asset at `/tmp`, where provider `simulated` holds none: its sandboxes hold none at `/tmp`: hold it elsewhere
+          --> roles[2].assets[0].path
+        error: provider `simulated`: the run needs 16 simulated CPUs, and it has 1: need fewer
+          --> roles"#]].assert_eq(&fits.to_string());
+}
+
 #[test]
 fn lease_ends() {
     let argv = [

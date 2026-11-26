@@ -5,7 +5,7 @@ use std::collections::btree_map::Entry;
 
 use provider::{AssetDigest, AssetRef, Assets, HeldAsset, Provider, PublishedAsset, RunTag};
 use schema::ir::{Asset, AssetFiles, Name, Sha256Digest};
-use schema::workflow::{ByProvider, Placed, Placement, RoleId};
+use schema::workflow::{At, ByProvider, ParseError, Placed, Placement, RoleId};
 use sha2::{Digest as _, Sha256};
 use stdx::Context as _;
 use stdx::time::{Clock as _, Machine};
@@ -48,6 +48,37 @@ pub(crate) fn holding<'p>(
         holding.insert(role, assets);
     }
     Ok(Holding(holding))
+}
+
+/// Each asset of a role that `holding` gives whose provider there can't hold it at its path, at
+/// that path in the IR, with why.
+pub(crate) fn unheld(placed: &Placed, holding: &Holding<'_>) -> Vec<ParseError> {
+    let workflow = placed.workflow();
+    let mut unheld = Vec::new();
+    for (&role, &assets) in &holding.0 {
+        let sandbox = workflow.sandbox(role);
+        let on = &placed.placement(role).provider;
+        for (index, Asset { path, files: _ }) in sandbox.assets.iter().enumerate() {
+            if let Err(why) = assets.holds(path) {
+                let at = sandbox.at().token("assets").token(index).token("path");
+                unheld.push(ParseError {
+                    at: At {
+                        ir: at,
+                        source: None,
+                    },
+                    message: format!(
+                        "role `{}` holds an asset at `{path}`, where provider `{on}` holds none: \
+                         {why}",
+                        sandbox.name
+                    ),
+                    label: None,
+                    why: Vec::new(),
+                    help: Vec::new(),
+                });
+            }
+        }
+    }
+    unheld
 }
 
 /// Publishes the files of each asset of each role that `holding` gives, on the role's provider

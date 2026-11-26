@@ -30,9 +30,7 @@ use provider::{
 };
 use recipe::Given;
 use schema::frame::MAX_MESSAGE_BYTES;
-use schema::ir::{
-    AbsolutePath, Argv, AssetPath, Container, Env, EnvVar, Image, Mode, Name, Resources,
-};
+use schema::ir::{AbsolutePath, Argv, Container, Env, EnvVar, Image, Mode, Name, Resources};
 use schema::sandbox::op::{
     CallReply, CommandEnd, CommandStatus, Failure, FailureCode, JobReply, JobState, Last,
     LeaseRemaining, LeaseReply, LeaseState, LeaseStatusReply, NowReply, OpReply, OpsReply,
@@ -716,30 +714,6 @@ fn volume(sandbox: &Started) -> String {
     let name = String::from_utf8(output.stdout).unwrap().trim().to_owned();
     assert!(!name.is_empty(), "the sandbox has no volume at /volume");
     name
-}
-
-// The provider refuses an asset at `/tmp`, and not one below it.
-#[test]
-#[ignore = "needs Docker: run cargo xtask live docker"]
-fn assets_at_tmp() {
-    let holding = |path: &str| Role {
-        assets: vec![AssetPath::try_from(path.to_owned()).unwrap()],
-        ..suite_role("runner")
-    };
-    let fits = |path: &str| {
-        let fits = provider().fits(&[vec![holding(path)]]);
-        format!(
-            "{path}: {}",
-            fits.err().unwrap_or_else(|| "fits".to_owned())
-        )
-    };
-    check(
-        "assets-at-tmp",
-        |_| vec![fits("/tmp"), fits("/tmp/model")],
-        &expect![[r#"
-            /tmp: role `runner` holds an asset at `/tmp`, where each sandbox has an empty read-only tmpfs: hold it at another path, such as one below `/tmp`
-            /tmp/model: fits"#]],
-    );
 }
 
 #[test]

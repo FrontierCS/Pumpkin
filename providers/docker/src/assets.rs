@@ -8,8 +8,9 @@ use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use engine::READ_ONLY_TMP;
 use provider::{AssetDigest, AssetRef, Assets, PublishedAsset, RunTag};
-use schema::ir::{AssetFile, AssetFiles, Sha256Digest};
+use schema::ir::{AssetFile, AssetFiles, AssetPath, Sha256Digest};
 use sha2::{Digest as _, Sha256};
 use stdx::{Context as _, Deadline};
 use ureq::tls::{Certificate, RootCerts, TlsConfig};
@@ -136,6 +137,16 @@ impl AssetCache {
 }
 
 impl Assets for AssetCache {
+    fn holds(&self, path: &AssetPath) -> Result<(), String> {
+        if path.as_str() == READ_ONLY_TMP {
+            return Err(format!(
+                "each sandbox has an empty read-only tmpfs at `{READ_ONLY_TMP}`: hold the asset at \
+                 another path, such as one below `{READ_ONLY_TMP}`"
+            ));
+        }
+        Ok(())
+    }
+
     // It makes no sandbox, so it has nothing to tag with the run.
     fn publish_asset(
         &self,

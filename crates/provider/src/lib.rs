@@ -6,7 +6,7 @@ use std::fmt;
 use std::net::IpAddr;
 use std::path::Path;
 
-use schema::ir::{AssetFiles, Image};
+use schema::ir::{AssetFiles, AssetPath, Image};
 use schema::sandbox::{Attestation, PrivateDial, SocketDial};
 pub use values::{
     AssetDigest, AssetRef, CompanionDial, Console, Create, Created, HeldAsset, ImageRef, Listed,
@@ -113,8 +113,13 @@ pub trait Listens: Creator<ListenDials, Listened> {
     ) -> Result<Vec<ImageRef>, String>;
 }
 
-/// A provider whose sandboxes hold assets ([`Create::assets`]): what publishes the files of each.
+/// A provider whose sandboxes hold assets ([`Create::assets`]): where they hold one, and what
+/// publishes the files of each.
 pub trait Assets: Sync {
+    /// Fails, saying why and where it would hold one, if this provider's sandboxes can't hold an
+    /// asset at `path`. Holds nothing.
+    fn holds(&self, path: &AssetPath) -> Result<(), String>;
+
     /// Publishes `files`, whose digest is `digest`, so that this provider's sandboxes can hold
     /// them. It keeps them only if each file's URL gives the file's size and SHA-256. Fails, naming
     /// the first file that didn't, and then keeps none of them by `digest`. Each sandbox that it

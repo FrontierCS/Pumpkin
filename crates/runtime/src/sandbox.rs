@@ -21,15 +21,15 @@ use provider::{
     Create, Created, ImageRef, Listed, Meeting, Provider, Role, RunTag, SandboxId, SandboxdRef,
     Sweep, Undeleted, UnixTime,
 };
-use schema::ir::{Command, GpuModel, Image, Name};
+use schema::ir::{Command, GpuModel, Image, JsonPointer, Name};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
     Launch, OpPayloadLimit, PUMPKIN_BYTES, RelativePath, command_env, command_stderr,
     command_stdout, pumpkin_dir,
 };
 use schema::workflow::{
-    AgentId, ByProvider, ByRole, ContainerId, JobFunctionId, Placed, RoleId, RunnerId, SessionId,
-    TargetId, Workflow,
+    AgentId, At, ByProvider, ByRole, ContainerId, JobFunctionId, ParseError, ParseErrors, Placed,
+    RoleId, RunnerId, SessionId, TargetId, Workflow,
 };
 use serde::{Deserialize, Deserializer, de};
 use stdx::time::Clock as _;
@@ -157,9 +157,6 @@ fn provider_role(workflow: &Workflow, role: RoleId, instances: NonZeroU32) -> Ro
         resources: sandbox.needs.resources(),
         instances,
         companions,
-        assets: (sandbox.assets.iter())
-            .map(|asset| asset.path.clone())
-            .collect(),
     }
 }
 
@@ -168,6 +165,40 @@ fn provider_role(workflow: &Workflow, role: RoleId, instances: NonZeroU32) -> Ro
 pub(super) struct Capable<'p> {
     listening: Listening<'p>,
     holding: Holding<'p>,
+}
+
+/// Fails if a provider could never hold the roles that `placed` places on it, whatever other runs
+/// hold. It holds nothing. `providers` holds each provider that `placed` names.
+///
+/// Each refusal of the workflow is in the inner error, which holds them all. One is of an asset
+/// that its provider can't hold, at the asset's path in the IR. Another is of the roles that a
+/// provider could never hold at once, at the roles, naming the provider and why, as
+/// [`Provider::fits`] says. The outer error is a provider that offers what it can't give.
+// A request that no resources could ever satisfy is refused as it is made, as Slurm fails a job
+// whose request has a fundamental flaw:
+// https://github.com/SchedMD/slurm/blob/4e8cf4192ade61024f04a1d466d4f97456d178bf/src/slurmctld/job_mgr.c#L5588-L5599
+pub fn fits(
+    placed: &Placed,
+    providers: &ByProvider<&dyn Provider>,
+) -> Result<Result<(), ParseErrors>, String> {
+    let Capable { holding, .. } = capable(placed, providers)?;
+    let capacity = Capacity::of(placed.workflow())?;
+    let mut refused = assets::unheld(placed, &holding);
+    for (name, provider) in providers.iter() {
+        if let Err(why) = provider.fits(&capacity.phases(placed, name)) {
+            refused.push(ParseError {
+                at: At {
+                    ir: JsonPointer::root().token("roles"),
+                    source: None,
+                },
+                message: format!("provider `{name}`: {why}"),
+                label: None,
+                why: Vec::new(),
+                help: Vec::new(),
+            });
+        }
+    }
+    Ok(ParseErrors::check(refused))
 }
 
 /// What [`listening`] and [`holding`] find of `placed`, on `providers`. Fails as either does.

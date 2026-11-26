@@ -49,7 +49,7 @@ use provider::{
 };
 use schema::frame;
 use schema::ir::{
-    AbsolutePath, Argv, AssetFiles, Container, CpuModel, Image, Mode, Name, Sha256Digest,
+    AbsolutePath, Argv, AssetFiles, AssetPath, Container, CpuModel, Image, Mode, Name, Sha256Digest,
 };
 use schema::sandbox::op::{
     JobState, Last, LeaseStatusReply, OpCall, OpReply, SessionOp, StatusReply, TransferStatus,
@@ -173,6 +173,8 @@ pub(crate) struct Sim {
     // The companion at whose set-up `main`'s session ends.
     ends_main: Option<&'static str>,
     publishes_assets: bool,
+    // The path where its sandboxes hold no asset.
+    unheld: Option<&'static str>,
 }
 
 // What is called once the run log holds each part in a line.
@@ -402,6 +404,7 @@ impl Sim {
             impostor: None,
             ends_main: None,
             publishes_assets: false,
+            unheld: None,
         }
     }
 
@@ -593,6 +596,16 @@ impl Sim {
         Self {
             publishes_assets: true,
             ..self.offering_assets()
+        }
+    }
+
+    #[must_use]
+    /// Makes each class hold assets, as [`holding_assets`](Self::holding_assets) does, but none at
+    /// `path`.
+    pub(crate) fn holding_no_asset_at(self, path: &'static str) -> Self {
+        Self {
+            unheld: Some(path),
+            ..self.holding_assets()
         }
     }
 
@@ -824,16 +837,7 @@ impl Provider for Sim {
     }
 
     fn reserve(&self, run: &RunTag, phases: &[Vec<Role>]) -> Result<Reservation, String> {
-        let needs = |phase: &Vec<Role>| -> u64 {
-            (phase.iter())
-                .map(|role| {
-                    let cpus = role.resources.cpu_millis.get().div_ceil(1000);
-                    cpus * u64::from(role.instances.get())
-                })
-                .sum()
-        };
-        // A phase starts only once the one before has ended, so the run holds the most of any.
-        let needed = phases.iter().map(needs).max().unwrap_or(0);
+        let needed = needed(phases);
         let mut roles: Vec<(Name, NonZeroU32)> = phases
             .iter()
             .flatten()
@@ -863,6 +867,16 @@ impl Provider for Sim {
             live: Arc::downgrade(&live),
         });
         Ok(Reservation::new(live))
+    }
+
+    fn fits(&self, phases: &[Vec<Role>]) -> Result<(), String> {
+        let (needed, cpus) = (needed(phases), self.state().cpus);
+        if needed > cpus {
+            return Err(format!(
+                "the run needs {needed} simulated CPUs, and it has {cpus}: need fewer"
+            ));
+        }
+        Ok(())
     }
 
     fn publish_image(&self, image: &Image) -> Result<ImageRef, String> {
@@ -903,7 +917,30 @@ impl Provider for Sim {
     }
 }
 
+/// The simulated CPUs that a run of `phases` holds: the most of any phase, as a phase starts only
+/// once the one before has ended.
+fn needed(phases: &[Vec<Role>]) -> u64 {
+    let needs = |phase: &Vec<Role>| -> u64 {
+        (phase.iter())
+            .map(|role| {
+                let cpus = role.resources.cpu_millis.get().div_ceil(1000);
+                cpus * u64::from(role.instances.get())
+            })
+            .sum()
+    };
+    phases.iter().map(needs).max().unwrap_or(0)
+}
+
 impl Assets for Sim {
+    fn holds(&self, path: &AssetPath) -> Result<(), String> {
+        if self.unheld == Some(path.as_str()) {
+            return Err(format!(
+                "its sandboxes hold none at `{path}`: hold it elsewhere"
+            ));
+        }
+        Ok(())
+    }
+
     fn publish_asset(
         &self,
         _run: &RunTag,
@@ -1271,6 +1308,7 @@ impl Subject for Sim {
             impostor: self.impostor,
             ends_main: self.ends_main,
             publishes_assets: self.publishes_assets,
+            unheld: self.unheld,
         }))
     }
 

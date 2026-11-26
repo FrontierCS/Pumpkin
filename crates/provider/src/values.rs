@@ -141,11 +141,6 @@ pub struct Role {
     /// it declares them, and none for any other role. [`fits`](crate::Provider::fits) refuses
     /// more than its sandbox holds.
     pub companions: usize,
-    /// Where each of its sandboxes holds each of its assets ([`ir::Role::assets`]).
-    /// [`fits`](crate::Provider::fits) refuses a path where its sandboxes can't hold one.
-    ///
-    /// [`ir::Role::assets`]: schema::ir::Role::assets
-    pub assets: Vec<AssetPath>,
 }
 
 /// What a provider's `publish_image` made of a role's image, for the role's creates to name: a

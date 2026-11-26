@@ -12,7 +12,7 @@ use std::{fs, thread};
 use docker::AssetCache;
 use expect_test::{Expect, expect};
 use provider::{AssetDigest, Assets as _, PublishedAsset, RunTag};
-use schema::ir::{AssetFiles, Sha256Digest};
+use schema::ir::{AssetFiles, AssetPath, Sha256Digest};
 use serde_json::json;
 use test_support::asset::{B, CONFIG, SHARD};
 use test_support::{TestDir, edge, http};
@@ -114,6 +114,30 @@ fn listed(base: &Path, dir: &Path, lines: &mut Vec<String>) {
             lines.push(held.trim_end().to_owned());
         }
     }
+}
+
+// The cache refuses an asset at `/tmp`, and not one below it.
+#[test]
+fn holds_none_at_tmp() {
+    let dir = TestDir::new();
+    let cache = dir.path().join("assets");
+    let holds = |path: &str| {
+        let path = AssetPath::try_from(path.to_owned()).unwrap();
+        let held = AssetCache::new(&cache).holds(&path);
+        format!(
+            "{path}: {}",
+            held.err().unwrap_or_else(|| "held".to_owned())
+        )
+    };
+    check(
+        &cache,
+        &[holds("/tmp"), holds("/tmp/model")],
+        &[],
+        &expect![[r#"
+        /tmp: each sandbox has an empty read-only tmpfs at `/tmp`: hold the asset at another path, such as one below `/tmp`
+        /tmp/model: held
+        the cache holds:"#]],
+    );
 }
 
 // The first publish of a digest fetches its files, read-only, into an entry that only the
