@@ -254,8 +254,8 @@ impl From<UsdPerHour> for f64 {
 /// What a class of sandbox offers the roles of its sandboxes, as its provider states it.
 ///
 /// It is the most CPU and memory that a role may need, its GPUs, and its CPU's flags and model,
-/// which a role's [needs](crate::ir::Needs) are matched against, and whether its sandboxes hold a
-/// runner's companions ([`Workflow::place`]).
+/// which a role's [needs](crate::ir::Needs) are matched against. It is also whether its sandboxes
+/// hold a runner's companions, and a role's assets ([`Workflow::place`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Offers {
     /// In thousandths of a CPU.
@@ -269,6 +269,10 @@ pub struct Offers {
     /// Whether each sandbox holds a runner's companions beside its own container
     /// ([`ir::RunnerRuntime::companions`](crate::ir::RunnerRuntime::companions)).
     pub companions: bool,
+    /// Whether each sandbox holds a role's assets, each read-only at its path
+    /// ([`ir::Role::assets`](crate::ir::Role::assets)). A role that declares any fits no other
+    /// class.
+    pub assets: bool,
 }
 
 /// A value for each provider that a [`Placed`] workflow places a role on: what its placing gave

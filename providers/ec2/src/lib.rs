@@ -90,6 +90,7 @@ impl Settings {
                 cpu_features: class.cpu_features.clone(),
                 cpu_model: class.cpu_model.clone(),
                 companions: false,
+                assets: false,
             };
             let class = Class {
                 offers,

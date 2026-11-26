@@ -82,9 +82,10 @@ pub enum IrVersion {
 pub struct Role {
     pub name: Name,
     pub image: Image,
-    /// The files that each of the role's sandboxes holds, each asset read-only at its path. No two
-    /// are at one path, or one below another, and an agent's `dirs` and `files` are outside them.
-    /// Absent, none.
+    /// The files that each of the role's sandboxes holds in `main`, never in a companion, each
+    /// asset read-only at its path. No two are at one path, or one below another, and an agent's
+    /// `dirs` and `files` are outside them. The role fits only a class that holds assets
+    /// ([`Offers::assets`](crate::workflow::Offers::assets)). Absent, none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assets: Vec<Asset>,
     /// The user the role's commands run as.

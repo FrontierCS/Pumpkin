@@ -675,6 +675,7 @@ fn ready(startup_seconds: NonZeroU64) -> Ready {
             cpu_features: BTreeSet::new(),
             cpu_model,
             companions: false,
+            assets: false,
         };
         let class = Class {
             offers,

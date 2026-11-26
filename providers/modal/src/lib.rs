@@ -182,6 +182,7 @@ impl TryFrom<ClassTable> for SandboxClass {
             cpu_features: BTreeSet::new(),
             cpu_model: None,
             companions: true,
+            assets: false,
         };
         let class = Class {
             offers,
@@ -201,7 +202,7 @@ impl From<SandboxClass> for ClassTable {
             usd_per_hour,
         } = class;
         // Its GPU's count is `gpu`'s, a class of the settings names no CPU's flags or model, and
-        // every class holds companions.
+        // every class holds companions and no assets.
         let Offers {
             cpu_millis,
             memory_bytes,
@@ -209,6 +210,7 @@ impl From<SandboxClass> for ClassTable {
             cpu_features: _,
             cpu_model: _,
             companions: _,
+            assets: _,
         } = offers;
         Self {
             gpu,

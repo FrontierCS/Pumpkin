@@ -94,6 +94,7 @@ impl<'e> Docker<'e> {
             // and the engine has this one class, which every role is to fit.
             cpu_model: None,
             companions: false,
+            assets: false,
         };
         Ok(Self {
             engine,

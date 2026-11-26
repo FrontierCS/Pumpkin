@@ -35,6 +35,7 @@ fn check(fixture: &str, expect: &Expect) {
                 cpu_features: BTreeSet::new(),
                 cpu_model: None,
                 companions: false,
+                assets: false,
             },
             startup_seconds: NonZeroU64::new(60).unwrap(),
             usd_per_hour: None,
@@ -86,5 +87,38 @@ GPU = {
               = `aws/small`: 2 CPUs
               = help: add a class with at least 4 CPUs and 512.0 MiB,
                       or lower the role's `cpu_millis` to 2000, which `aws/small` offers"#]],
+    );
+}
+
+// An asset that no class holds is refused at the role's assets, in the file that wrote them.
+#[test]
+fn assets() {
+    check(
+        r#"
+#- //assets/task.star
+load("//lib/parts.star", "AGENT", "FINAL_TARGET", "FINAL")
+load("//assets/model.star", "MODEL")
+
+workflow(
+    name = "neutral/assets",
+    roles = [AGENT, FINAL_TARGET | {"assets": MODEL}],
+    final = FINAL,
+    deadline_seconds = 3600,
+)
+#- //assets/model.star
+CONFIG = {
+    "path": "config.json",
+    "url": "https://example.com/config.json",
+    "size": 963,
+    "sha256": "sha256:e2c8d8ee53f9f4d5d0c6a1f3b7a9e0c4d2f1b3a5c7e9f1d3b5a7c9e1f3d5b7a9",
+}
+
+MODEL = [{"path": "/opt/model", "files": [CONFIG]}]
+"#,
+        &expect![[r#"
+            error: role `final_judge` declares assets, and no class of sandbox holds them
+              --> assets/model.star:8:9: roles[1].assets: 1 asset at `/opt/model`
+              = help: declare none,
+                      or run it where a class holds them"#]],
     );
 }

@@ -175,6 +175,7 @@ fn offered() -> BTreeMap<ir::Name, BTreeMap<ir::Name, Class>> {
         cpu_features: flags(&["avx2", "sse4_2"]),
         cpu_model: None,
         companions: false,
+        assets: false,
     };
     let h100 = |count, cpus, memory_gib| {
         let model = valid("NVIDIA H100 80GB HBM3");
@@ -1911,6 +1912,77 @@ fn placed_companions() {
               --> roles[3].needs: 0.5 CPUs, 1.0 GiB, 1 × `NVIDIA H100 80GB HBM3`
               = no class is offered
               = help: add a class with 1 × `NVIDIA H100 80GB HBM3`, and at least 0.5 CPUs and 1.0 GiB"#]],
+    );
+}
+
+/// Role `role` of `ir` placed on `offered`: where it is placed, or why it can't be.
+struct Holding {
+    ir: Value,
+    role: usize,
+    offered: BTreeMap<ir::Name, BTreeMap<ir::Name, Class>>,
+}
+
+impl Case for Holding {
+    fn outcome(self) -> String {
+        let ir = serde_json::from_value::<ir::Workflow>(self.ir).unwrap();
+        let placed = Workflow::parse(&ir)
+            .unwrap()
+            .place(self.offered, |classes| classes);
+        match placed {
+            Ok((placed, _)) => {
+                let (role, _) = placed.workflow().roles().nth(self.role).unwrap();
+                let placement = placed.placement(role);
+                format!("`{}` `{}`", placement.provider, placement.class)
+            }
+            Err(errors) => errors.to_string(),
+        }
+    }
+}
+
+/// `offered`, with each of `classes`, by its provider's name and its own, holding assets.
+fn holding_assets(
+    mut offered: BTreeMap<ir::Name, BTreeMap<ir::Name, Class>>,
+    classes: &[(&str, &str)],
+) -> BTreeMap<ir::Name, BTreeMap<ir::Name, Class>> {
+    for (provider, class) in classes {
+        let class = offered
+            .get_mut(&valid::<ir::Name>(provider))
+            .and_then(|classes| classes.get_mut(&valid::<ir::Name>(class)))
+            .unwrap();
+        class.offers.assets = true;
+    }
+    offered
+}
+
+#[test]
+fn placed_assets() {
+    let asset = |path: &str| json!({ "path": path, "files": [asset_file("config.json", 'a')] });
+    let trainer = || holding("/opt/model", json!([asset_file("config.json", 'a')]));
+    let mut runner = accompanied(json!([companion("scheduler", '4')]));
+    runner["roles"][3]["assets"] = json!([asset("/opt/a"), asset("/opt/b")]);
+    runner["roles"][3]["needs"] = json!({ "cpu_millis": 500, "memory_bytes": 1 << 30 });
+    let on = |ir: Value, role: usize, offered| Holding { ir, role, offered };
+    check(
+        [
+            on(trainer(), 1, holding_assets(offered(), &[("aws", "judge")])),
+            on(trainer(), 1, holding_assets(offered(), &[("gpus", "h100")])),
+            on(trainer(), 1, offered()),
+            on(runner, 3, holding_assets(with_cpu(), &[("aws", "judge")])),
+        ],
+        &expect![[r#"
+            `aws` `judge`
+            error: role `trainer` declares assets, and no class that fits its needs holds them
+              --> roles[1].assets: 1 asset at `/opt/model`
+              = help: declare none,
+                      or change its needs to fit a class that holds them
+            error: role `trainer` declares assets, and no class of sandbox holds them
+              --> roles[1].assets: 1 asset at `/opt/model`
+              = help: declare none,
+                      or run it where a class holds them
+            error: role `gpu` declares assets, and no class that fits its needs and holds its companions holds them
+              --> roles[3].assets: 2 assets at `/opt/a`, `/opt/b`
+              = help: declare none,
+                      or change its needs to fit a class that holds them"#]],
     );
 }
 
