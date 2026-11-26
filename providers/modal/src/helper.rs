@@ -28,11 +28,14 @@ const CALL_ENVIRONMENT: Environment = Environment::Only(&["HOME", "PATH"]);
 // https://github.com/modal-labs/modal-client/blob/dbb24aba92e2c6c4fa8a123234813cfa48e09b0b/py/modal/_utils/grpc_utils.py#L427-L428
 pub(crate) const ASK_TIMEOUT: Duration = Duration::from_mins(2);
 
-// Modal pulls the images and builds them within the call. Its time grows with their size and falls
-// with how fast Modal copies them, which no bound can know. So this bound is sized only to turn an
-// import that hangs into a failure, as the engine's push is. Modal goes on with a build whose call
-// was killed, and a later import of the same image waits for that build.
-pub(crate) const IMPORT_TIMEOUT: Duration = Duration::from_hours(2);
+// Modal pulls the images and builds them within the call, with a role that it assumes through
+// STS's `AssumeRoleWithWebIdentity`. It asks for no `DurationSeconds`, so the credentials last
+// STS's default of 3600 s, whatever the role allows:
+// https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRoleWithWebIdentity.html
+// A copy that outlasts them fails. So an import that hasn't ended by then never will. Modal goes
+// on with a build whose call was killed, and a later import of the same image waits for that
+// build.
+pub(crate) const IMPORT_TIMEOUT: Duration = Duration::from_secs(3600);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 // The name of a profile in Modal's configuration file, which Modal refuses if the file lacks it.
@@ -124,6 +127,17 @@ impl Helper {
         request: &Request<'_>,
         by: Deadline,
     ) -> Result<T, String> {
+        self.call_expecting(request, by, "expected Modal to answer by then")
+    }
+
+    /// Makes `request` as [`call`](Self::call) does, and says `expected` of a helper that it
+    /// killed at `by`.
+    pub(crate) fn call_expecting<T: DeserializeOwned>(
+        &self,
+        request: &Request<'_>,
+        by: Deadline,
+        expected: &str,
+    ) -> Result<T, String> {
         // A request derives its `Serialize`, of strings, numbers, and lists of them. Its one map
         // has strings as its keys (`create::Start`).
         let Ok(input) = serde_json::to_value(request) else {
@@ -149,7 +163,7 @@ impl Helper {
         let output = stdx::process::run(&mut uv, how).map_err(|failure| {
             let failed = match failure {
                 Failure::Unended { started: true, .. } => {
-                    format!("{}: expected Modal to answer by then", failure.unadvised())
+                    format!("{}: {expected}", failure.unadvised())
                 }
                 // Only the caller, which chose the deadline, can say what to do.
                 Failure::Unended { started: false, .. } => failure.unadvised(),

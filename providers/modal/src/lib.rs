@@ -412,7 +412,14 @@ impl Modal<'_> {
             region: region.as_str(),
             sandboxd,
         };
-        (self.reached.helper).call(&request, Deadline::after(IMPORT_TIMEOUT))
+        let expected = format!(
+            "expected Modal to import `{}` within {} s, as long as its credentials to pull from \
+             ECR last: an image whose largest layers copy slowly can't finish",
+            references.join("`, `"),
+            IMPORT_TIMEOUT.as_secs()
+        );
+        let by = Deadline::after(IMPORT_TIMEOUT);
+        (self.reached.helper).call_expecting(&request, by, &expected)
     }
 }
 
