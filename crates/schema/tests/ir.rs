@@ -1681,10 +1681,13 @@ fn companions() {
         ],
         &expect![[r#"
             parsed
-            /roles/3/runtime/runner/companions/1/name: `scheduler` also names /roles/3/runtime/runner/companions/0: give each a unique name
+            error: `scheduler` also names /roles/3/runtime/runner/companions/0: give each a unique name
+              --> roles[3].runtime.runner.companions[1].name
             unknown field `command`, expected one of `name`, `image`, `user`, `cwd`, `env`
-            /roles/0/runtime/agent/grants/1/session/runner: `gpu`'s companion `scorer` runs target `trainer`'s image, sha256:2222222222222222222222222222222222222222222222222222222222222222: give the companion an image no target has
-            /roles/0/runtime/agent/grants/1/session/runner: `gpu`'s companion `judge` runs target `trainer`'s image, sha256:2222222222222222222222222222222222222222222222222222222222222222: give the companion an image no target has
+            error: `gpu`'s companion `scorer` runs target `trainer`'s image, sha256:2222222222222222222222222222222222222222222222222222222222222222: give the companion an image no target has
+              --> roles[0].runtime.agent.grants[1].session.runner
+            error: `gpu`'s companion `judge` runs target `trainer`'s image, sha256:2222222222222222222222222222222222222222222222222222222222222222: give the companion an image no target has
+              --> roles[0].runtime.agent.grants[1].session.runner
             parsed"#]],
     );
 }
@@ -1773,13 +1776,31 @@ fn placed_companions() {
         ],
         &expect![[r#"
             {"cpu_millis":500,"gpu":{"count":1,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":1073741824} with 15: `gpus` `h100`
-            {"cpu_millis":500,"memory_bytes":1073741824} with 1: /roles/3/runtime/runner/companions: `gpu` declares 1 companion, and no class that fits its needs offers companions: declare none, or change its needs to fit a class that offers them
+            {"cpu_millis":500,"memory_bytes":1073741824} with 1: error: role `gpu` declares companions, and no class that fits its needs offers them
+              --> roles[3].runtime.runner.companions: 1 companion
+              = help: declare none,
+                      or change its needs to fit a class that offers them
             {"cpu_millis":500,"memory_bytes":1073741824} with 1: `modal` `cpu`
-            {"cpu_millis":500,"gpu":{"count":1,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":1073741824} with 1: /roles/3/runtime/runner/companions: `gpu` declares 1 companion, and no class of sandbox offers companions: declare none, or run it where a class offers them
-            {"cpu_millis":500,"gpu":{"count":1,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":1073741824} with 1: /roles/0/needs: `agent` fits no class of sandbox, as no class is offered: change its needs, or run it where sandboxes are larger
-            /roles/1/needs: `trainer` fits no class of sandbox, as no class is offered: change its needs, or run it where sandboxes are larger
-            /roles/2/needs: `final_judge` fits no class of sandbox, as no class is offered: change its needs, or run it where sandboxes are larger
-            /roles/3/needs: `gpu` fits no class of sandbox, as no class is offered: change its needs, or run it where sandboxes are larger"#]],
+            {"cpu_millis":500,"gpu":{"count":1,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":1073741824} with 1: error: role `gpu` declares companions, and no class of sandbox offers them
+              --> roles[3].runtime.runner.companions: 1 companion
+              = help: declare none,
+                      or run it where a class offers them
+            {"cpu_millis":500,"gpu":{"count":1,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":1073741824} with 1: error: role `agent` fits no class of sandbox
+              --> roles[0].needs: 8 CPUs, 32.0 GiB
+              = no class is offered
+              = help: add a class with at least 8 CPUs and 32.0 GiB
+            error: role `trainer` fits no class of sandbox
+              --> roles[1].needs: 8 CPUs, 2.0 GiB
+              = no class is offered
+              = help: add a class with at least 8 CPUs and 2.0 GiB
+            error: role `final_judge` fits no class of sandbox
+              --> roles[2].needs: 8 CPUs, 2.0 GiB
+              = no class is offered
+              = help: add a class with at least 8 CPUs and 2.0 GiB
+            error: role `gpu` fits no class of sandbox
+              --> roles[3].needs: 0.5 CPUs, 1.0 GiB, 1 × `NVIDIA H100 80GB HBM3`
+              = no class is offered
+              = help: add a class with 1 × `NVIDIA H100 80GB HBM3`, and at least 0.5 CPUs and 1.0 GiB"#]],
     );
 }
 

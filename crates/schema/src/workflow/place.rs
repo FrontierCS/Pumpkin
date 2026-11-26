@@ -4,7 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU64;
 
 use super::errors::{Errors, Reported};
-use super::{ByProvider, ByRole, Class, Offers, ParseErrors, Placed, Placement, Sandbox, Workflow};
+use super::{
+    At, ByProvider, ByRole, Class, Offers, ParseError, ParseErrors, Placed, Placement, Sandbox,
+    Workflow,
+};
 use crate::ir::Name;
 use crate::words;
 
@@ -18,9 +21,8 @@ impl Workflow {
     /// GPUs and CPU model it needs, so a class with GPUs, or a stated CPU model, goes only to roles
     /// that need them. A runner that declares companions fits only a class that holds companions.
     ///
-    /// Fails with each role that fits no class, [at](super::ParseError::at) its needs. Each error
-    /// says what each class offers short of them, and the changes that would place the role. A
-    /// runner whose needs fit only classes that hold no companions fails at its companions.
+    /// Fails with each role that fits no class, [at](super::ParseError::at) its needs, or at its
+    /// companions if only classes without them fit. Each says why, and how to place it.
     pub fn place<P>(
         self,
         offered: BTreeMap<Name, P>,
@@ -85,31 +87,29 @@ fn smallest<'p>(
     if let Some(smallest) = holding.min_by_key(|placement| size(placement)) {
         return Ok(smallest);
     }
-    let declared = words::counted(companions, "companion");
-    let at_companions = at.token("runtime").token("runner").token("companions");
+    let unheld = |classes: &str, change: &str| ParseError {
+        at: At {
+            ir: at.token("runtime").token("runner").token("companions"),
+            source: None,
+        },
+        message: format!("role `{name}` declares companions, and no {classes} offers them"),
+        label: Some(words::counted(companions, "companion")),
+        why: Vec::new(),
+        help: Vec::from(["declare none".to_owned(), change.to_owned()]),
+    };
     // First, as no change of its needs could place it.
     let unoffered = (offered.iter()).all(|placement| !placement.declared.offers.companions);
     if companions > 0 && !offered.is_empty() && unoffered {
-        return Err(errors.report(
-            at_companions,
-            format!(
-                "`{name}` declares {declared}, and no class of sandbox offers companions: declare \
-                 none, or run it where a class offers them"
-            ),
-        ));
+        let refused = unheld("class of sandbox", "run it where a class offers them");
+        return Err(errors.add(refused));
     }
     if fitting.is_empty() {
         let refused = misfit::refusal(name, needs, &at.token("needs"), &misfits);
         return Err(errors.add(refused));
     }
     // Some class fits its needs, so it declares companions, and none of them holds any.
-    Err(errors.report(
-        at_companions,
-        format!(
-            "`{name}` declares {declared}, and no class that fits its needs offers companions: \
-             declare none, or change its needs to fit a class that offers them"
-        ),
-    ))
+    let change = "change its needs to fit a class that offers them";
+    Err(errors.add(unheld("class that fits its needs", change)))
 }
 
 /// How [`Workflow::place`] orders the classes that a role fits, smallest first.
