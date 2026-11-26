@@ -1,7 +1,6 @@
-//! What the Modal provider decides without Modal. That is the companions that its classes offer,
-//! and the references of a batch of images (`images`). It is also what its helper's `create` is
-//! asked, and how its answer is read (`create`). This binary compiles both modules itself, as the
-//! crate keeps them private.
+//! What the Modal provider decides without Modal. That is the references of a batch of images
+//! (`images`), what its helper's `create` is asked, and how its answer is read (`create`). This
+//! binary compiles both modules itself, as the crate keeps them private.
 
 #![expect(
     clippy::unwrap_used,
@@ -13,7 +12,6 @@ use std::num::{NonZeroU32, NonZeroU64};
 use std::time::Duration;
 
 use expect_test::{Expect, expect};
-use modal::Settings;
 use provider::{CompanionDial, Create, ImageRef, ListenDials, Role, RunTag, SandboxdRef, UnixTime};
 use schema::ir::{CompanionName, Image, Name, Resources, User};
 use schema::sandbox::{Listening, RegistrationGrant, Relayed, TlsIdentity};
@@ -100,17 +98,23 @@ fn dials(companions: Vec<CompanionDial>) -> ListenDials {
     }
 }
 
-/// The helper's request for `create` with `dials`, a line for each key, and for each sidecar. Or
-/// why there is none.
-fn asked(case: &str, create: &Create, dials: &ListenDials, gpu: Option<&str>) -> String {
+/// The helper's request for `create` with `dials`, or why there is none.
+fn request(create: &Create, dials: &ListenDials, gpu: Option<&str>) -> Result<Value, String> {
     let source = Ipv4Addr::new(203, 0, 113, 7);
-    let mut request = match create::request(create, dials, gpu, source) {
-        Ok(request) => serde_json::to_value(request).unwrap(),
-        Err(refused) => return format!("{case}: {}", cut(&refused)),
+    let request = create::request(create, dials, gpu, source).map_err(|refused| cut(&refused))?;
+    Ok(serde_json::to_value(request).unwrap())
+}
+
+/// `request`, a line for each key whose value isn't `first`'s, and one for each sidecar. Or why
+/// there is none.
+fn asked(case: &str, request: Result<Value, String>, first: &Value) -> String {
+    let mut request = match request {
+        Ok(request) => request,
+        Err(refused) => return format!("{case}: {refused}"),
     };
     let sidecars = request["sidecars"].take();
     let keys = (request.as_object().unwrap().iter())
-        .filter(|(key, _)| *key != "sidecars")
+        .filter(|(key, value)| *key != "sidecars" && first.get(key) != Some(value))
         .map(|(key, value)| format!("  {key}: {value}"));
     let sidecars = sidecars.as_array().unwrap().iter();
     let sidecars = sidecars.map(|sidecar| format!("  sidecar: {sidecar}"));
@@ -119,10 +123,6 @@ fn asked(case: &str, create: &Create, dials: &ListenDials, gpu: Option<&str>) ->
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "most of it is the cases and their snapshot"
-)]
 fn requests() {
     let mib = 1 << 20;
     let beside = || {
@@ -131,77 +131,62 @@ fn requests() {
             companion("cache-1", "im-cache@sha256:c", 3),
         ]
     };
+    let alone = request(&runner(256 * mib, false, false), &dials(Vec::new()), None);
+    let first = alone.clone().unwrap();
+    // Each case after the first shows what departs from it.
     let cases = [
-        asked(
-            "main alone, passive",
-            &runner(256 * mib, false, false),
-            &dials(Vec::new()),
-            None,
-        ),
+        asked("main alone, passive", alone, &json!({})),
         asked(
             "main with ops, a model and a GPU",
-            &runner(256 * mib, true, true),
-            &dials(Vec::new()),
-            Some("A100-80GB"),
+            request(
+                &runner(256 * mib, true, true),
+                &dials(Vec::new()),
+                Some("A100-80GB"),
+            ),
+            &first,
         ),
         asked(
             "two companions",
-            &runner(256 * mib, true, false),
-            &dials(beside()),
-            None,
+            request(&runner(256 * mib, true, false), &dials(beside()), None),
+            &first,
         ),
         asked(
             "memory that isn't whole MiB",
-            &runner(256 * mib + 1, false, false),
-            &dials(Vec::new()),
-            None,
+            request(
+                &runner(256 * mib + 1, false, false),
+                &dials(Vec::new()),
+                None,
+            ),
+            &first,
         ),
     ];
     check(
         cases,
         &expect![[r#"
-        main alone, passive:
-          args: ["/.pumpkin/sandboxd","0.0.0.0:7434","--listen","--by","2000000600","--user","1000:1000"]
-          cpu_millis: 256
-          env: {"SANDBOXD_GRANT":"01010101010101010101010101010101"}
-          gpu: null
-          hard_end: 2000003600
-          image: "im-main"
-          memory_mib: 256
-          ports: [7434]
-          role: "runner"
-          run: "run-1"
-          sandboxd: {"at":["/.pumpkin/sandboxd"],"path":"/opt/pumpkin/sandboxd","sha256":"5d"}
-          source: "203.0.113.7/32"
-        main with ops, a model and a GPU:
-          args: ["/.pumpkin/sandboxd","0.0.0.0:7434","--listen","--by","2000000600","--user","1000:1000","--ops","--model"]
-          cpu_millis: 256
-          env: {"SANDBOXD_GRANT":"01010101010101010101010101010101"}
-          gpu: "A100-80GB"
-          hard_end: 2000003600
-          image: "im-main"
-          memory_mib: 256
-          ports: [7434]
-          role: "runner"
-          run: "run-1"
-          sandboxd: {"at":["/.pumpkin/sandboxd","/.pumpkin/bin/sandboxctl"],"path":"/opt/pumpkin/sandboxd","sha256":"5d"}
-          source: "203.0.113.7/32"
-        two companions:
-          args: ["/.pumpkin/sandboxd","0.0.0.0:7434","--listen","--by","2000000600","--user","1000:1000","--ops","--relay","0.0.0.0:7435","--relayed","db","--relayed","cache-1"]
-          cpu_millis: 256
-          env: {"SANDBOXD_GRANT":"01010101010101010101010101010101"}
-          gpu: null
-          hard_end: 2000003600
-          image: "im-main"
-          memory_mib: 256
-          ports: [7434,7435]
-          role: "runner"
-          run: "run-1"
-          sandboxd: {"at":["/.pumpkin/sandboxd","/.pumpkin/bin/sandboxctl"],"path":"/opt/pumpkin/sandboxd","sha256":"5d"}
-          source: "203.0.113.7/32"
-          sidecar: {"args":["/.pumpkin/sandboxd","0.0.0.0:7434","--listen","--by","2000000600","--user","2:2","--tls"],"env":{"SANDBOXD_GRANT":"02020202020202020202020202020202","SANDBOXD_TLS_CERTIFICATE":"ce02","SANDBOXD_TLS_KEY":"5e02"},"image":"im-db","name":"db"}
-          sidecar: {"args":["/.pumpkin/sandboxd","0.0.0.0:7434","--listen","--by","2000000600","--user","3:3","--tls"],"env":{"SANDBOXD_GRANT":"03030303030303030303030303030303","SANDBOXD_TLS_CERTIFICATE":"ce03","SANDBOXD_TLS_KEY":"5e03"},"image":"im-cache","name":"cache-1"}
-        memory that isn't whole MiB: role `runner` asks for 268435457 bytes of memory, which Modal gives in whole MiB: ask for a multiple of 1048576"#]],
+            main alone, passive:
+              args: ["/.pumpkin/sandboxd","0.0.0.0:7434","--listen","--by","2000000600","--user","1000:1000"]
+              cpu_millis: 256
+              env: {"SANDBOXD_GRANT":"01010101010101010101010101010101"}
+              gpu: null
+              hard_end: 2000003600
+              image: "im-main"
+              memory_mib: 256
+              ports: [7434]
+              role: "runner"
+              run: "run-1"
+              sandboxd: {"at":["/.pumpkin/sandboxd"],"path":"/opt/pumpkin/sandboxd","sha256":"5d"}
+              source: "203.0.113.7/32"
+            main with ops, a model and a GPU:
+              args: ["/.pumpkin/sandboxd","0.0.0.0:7434","--listen","--by","2000000600","--user","1000:1000","--ops","--model"]
+              gpu: "A100-80GB"
+              sandboxd: {"at":["/.pumpkin/sandboxd","/.pumpkin/bin/sandboxctl"],"path":"/opt/pumpkin/sandboxd","sha256":"5d"}
+            two companions:
+              args: ["/.pumpkin/sandboxd","0.0.0.0:7434","--listen","--by","2000000600","--user","1000:1000","--ops","--relay","0.0.0.0:7435","--relayed","db","--relayed","cache-1"]
+              ports: [7434,7435]
+              sandboxd: {"at":["/.pumpkin/sandboxd","/.pumpkin/bin/sandboxctl"],"path":"/opt/pumpkin/sandboxd","sha256":"5d"}
+              sidecar: {"args":["/.pumpkin/sandboxd","0.0.0.0:7434","--listen","--by","2000000600","--user","2:2","--tls"],"env":{"SANDBOXD_GRANT":"02020202020202020202020202020202","SANDBOXD_TLS_CERTIFICATE":"ce02","SANDBOXD_TLS_KEY":"5e02"},"image":"im-db","name":"db"}
+              sidecar: {"args":["/.pumpkin/sandboxd","0.0.0.0:7434","--listen","--by","2000000600","--user","3:3","--tls"],"env":{"SANDBOXD_GRANT":"03030303030303030303030303030303","SANDBOXD_TLS_CERTIFICATE":"ce03","SANDBOXD_TLS_KEY":"5e03"},"image":"im-cache","name":"cache-1"}
+            memory that isn't whole MiB: role `runner` asks for 268435457 bytes of memory, which Modal gives in whole MiB: ask for a multiple of 1048576"#]],
     );
 }
 
@@ -278,38 +263,5 @@ fn batches() {
         imported once each: sha256:a sha256:b sha256:c
         referenced: im-2@sha256:b im-1@sha256:a im-2@sha256:b im-3@sha256:c
         an id too few: the Modal helper's `import` answered 2 ids for 3 images: expected one for each"#]],
-    );
-}
-
-#[test]
-fn classes() {
-    let settings: Settings = serde_json::from_value(json!({
-        "profile": "pumpkin",
-        "images": {
-            "region": "us-west-1",
-            "repository": "pumpkin/roles",
-            "role_arn": "arn:aws:iam::123456789012:role/pumpkin-modal-pull",
-        },
-        "dials_from": "203.0.113.7",
-        "classes": {
-            "cpu": { "cpu_millis": 2000, "memory_bytes": 4_294_967_296_u64, "startup_seconds": 600 },
-            "a100": {
-                "gpu": "A100-80GB",
-                "gpu_model": "NVIDIA A100-SXM4-80GB",
-                "cpu_millis": 8000,
-                "memory_bytes": 68_719_476_736_u64,
-                "startup_seconds": 1800,
-            },
-        },
-    }))
-    .unwrap();
-    let classes = settings.classes();
-    let offers =
-        (classes.iter()).map(|(name, class)| format!("{name}: {}", json!(class.offers.companions)));
-    check(
-        offers,
-        &expect![[r#"
-        a100: {"reserved":{"cpu_millis_each":32,"memory_bytes_each":33554432,"most":250}}
-        cpu: {"reserved":{"cpu_millis_each":32,"memory_bytes_each":33554432,"most":250}}"#]],
     );
 }

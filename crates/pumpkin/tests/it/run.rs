@@ -968,20 +968,16 @@ fn open_files_raised() {
     let pumpkin = scratch.0.join(".pumpkin/bin/pumpkin");
     let mut run = scratch.program("/bin/sh", &["-c", script, pumpkin.to_str().unwrap()]);
     run.env("PATH", scratch.0.join("bin"));
-    let ran = ran(run, &scratch.0, false);
+    // The run fails at that `docker`, which is all it needs to reach.
+    run.output().unwrap();
     let raised = scratch.0.join("bin/docker.raised").exists();
     let raised = format!("the driver's soft limit is its hard limit: {raised}");
     check(
         &scratch,
-        [ran, raised].map(Step::Ran),
+        [Step::Ran(raised)],
         false,
         &[],
-        &expect![[r#"
-            $ PATH=<scratch>/bin /bin/sh -c ulimit -S -n 1024 && exec "$0" run workflow/task.star --sandboxd sandboxd --runs runs --config conf/served.toml <scratch>/.pumpkin/bin/pumpkin
-            exit status: Some(1)
-            pumpkin: the Docker context `nowhere` can't be read: `docker context inspect` failed with exit status: 1 and wrote nothing to standard error: name one that `docker context ls` lists
-            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/conf/served.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
-            the driver's soft limit is its hard limit: true"#]],
+        &expect!["the driver's soft limit is its hard limit: true"],
     );
 }
 

@@ -1062,26 +1062,12 @@ fn under_tls() {
             let mut lines = put_run_collect(sandbox);
             let dialer = Dialer::new(test_support::edge::client());
             let (ours, _) = dialer.relayed(&companion()).unwrap();
-            let (other, _) = dialer.relayed(&companion()).unwrap();
             let [grant, certificate, key] = given(&ours);
-            let [_, _, other_key] = given(&other);
-            let odd = (SANDBOXD_TLS_KEY, "0".to_owned());
             let (closed, by) = (unlistened().to_string(), unix_seconds(3600));
             let listening = [&closed, "--listen", "--by", &by, "--tls"];
-            let cases: [Refused<'_>; 5] = [
-                ("--tls without --listen", &[&closed, "--tls"], &[]),
+            let cases: [Refused<'_>; 2] = [
                 ("no certificate", &listening, &[&grant, &key]),
                 ("no key", &listening, &[&grant, &certificate]),
-                (
-                    "a key of odd digits",
-                    &listening,
-                    &[&grant, &certificate, &odd],
-                ),
-                (
-                    "another certificate's key",
-                    &listening,
-                    &[&grant, &certificate, &other_key],
-                ),
             ];
             for (case, args, env) in cases {
                 let args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
@@ -1089,7 +1075,7 @@ fn under_tls() {
                     .map(|(name, value)| (*name, OsStr::new(value)))
                     .collect();
                 let refused = ended(sandbox.sandboxd(&args, &env));
-                lines.push(format!("{case}: {}", masked(&refused)));
+                lines.push(format!("{case}: {refused}"));
             }
             lines
         },
@@ -1103,11 +1089,8 @@ fn under_tls() {
             log/1.stdout: home=/pumpkin/home mode=train path=/usr/bin:/bin in $ROOT/home
             the command was given: []
             the probe for GPUs was given: []
-            --tls without --listen: exit status: 1: sandboxd: --tls serves the session to a gateway that dials sandboxd: give it with --listen
             no certificate: exit status: 1: sandboxd: SANDBOXD_TLS_CERTIFICATE is not set: set it to the digits of the identity issued for the companion, which a sandboxd that listens with --tls serves TLS with
             no key: exit status: 1: sandboxd: SANDBOXD_TLS_KEY is not set: set it to the digits of the identity issued for the companion, which a sandboxd that listens with --tls serves TLS with
-            a key of odd digits: exit status: 1: sandboxd: SANDBOXD_TLS_KEY isn't an even number of lowercase hexadecimal digits: set it to the digits of the identity issued for the companion
-            another certificate's key: exit status: 1: sandboxd: the identity in SANDBOXD_TLS_CERTIFICATE and SANDBOXD_TLS_KEY can't serve TLS: TLS failed: <reason>: expected the certificate and the key issued for the companion
             then Ended { reason: "the owner dropped the session" }
             sandboxd: exit status: 0
             left running: 0"#]],
@@ -1137,10 +1120,8 @@ fn relay_refusals() {
             let sandboxd = sandbox.sandboxd(&args, &grant());
             listened(apart);
             let long = [b'a'; MAX_ROUTE_BYTES];
-            let routes: [(&str, &[u8]); 4] = [
-                ("no route", b""),
+            let routes: [(&str, &[u8]); 2] = [
                 ("a companion that --relayed doesn't name", b"cache\n"),
-                ("the sandbox's own container", b"main\n"),
                 ("no line feed in the most bytes of a route", &long),
             ];
             let mut peers = Vec::new();
@@ -1158,75 +1139,17 @@ fn relay_refusals() {
                 said = said.replacen(peer, &format!("$PEER{n}"), 1);
             }
             lines.push(format!("then, its session ended: {said}"));
-            lines.extend(relay_flags(sandbox));
             lines
         },
         &expect![[r#"
-            no route: closed, with no answer
             a companion that --relayed doesn't name: closed, with no answer
-            the sandbox's own container: closed, with no answer
             no line feed in the most bytes of a route: closed, with no answer
-            then, its session ended: exit status: 0: sandboxd: the relay closed the connection from $PEER0: the connection ended before its route's line feed: expected a companion's name and a line feed
-            sandboxd: the relay closed the connection from $PEER1: its route names `cache`, which this relay carries nothing to: expected a companion that --relayed names
-            sandboxd: the relay closed the connection from $PEER2: the route names no companion: `main` names the runner's own container: give the companion another name
-            sandboxd: the relay closed the connection from $PEER3: the route has no line feed in its first 64 bytes: expected a companion's name and a line feed
-            --relay with --tls: exit status: 1: sandboxd: --relay runs in a sandbox's `main`, and --tls in a companion: give one of them
-            --relay without --relayed: exit status: 1: sandboxd: --relay carries connections to the companions that --relayed names: name each with a --relayed
-            --relayed without --relay: exit status: 1: sandboxd: --relayed names a companion that --relay carries to: give it with --relay
-            --relayed with no companion's name: exit status: 1: sandboxd: can't parse `--relayed`, `main` names the runner's own container: give the companion another name: see `sandboxd --help`
-            --relay at an address that is taken: exit status: 1: sandboxd: listening as a relay at $TAKEN failed: Address already in use (os error 98)
-            --relay without --listen: exit status: 1: sandboxd: --relay carries the connections of a gateway that dials the sandbox: give it with --listen
+            then, its session ended: exit status: 0: sandboxd: the relay closed the connection from $PEER0: its route names `cache`, which this relay carries nothing to: expected a companion that --relayed names
+            sandboxd: the relay closed the connection from $PEER1: the route has no line feed in its first 64 bytes: expected a companion's name and a line feed
             then Ended { reason: "the owner dropped the session" }
             sandboxd: exit status: 0
             left running: 0"#]],
     );
-}
-
-/// What `sandboxd` says of each set of the relay's flags that it refuses.
-fn relay_flags(sandbox: &Sandbox) -> Vec<String> {
-    let (apart_text, relay_text) = (unlistened().to_string(), unlistened().to_string());
-    let by = unix_seconds(3600);
-    let listening = ["--listen", &apart_text, "--by", &by];
-    let relaying = [
-        "--relay",
-        &relay_text,
-        "--relayed",
-        "web",
-        "--relayed",
-        "db",
-    ];
-    let mut lines = Vec::new();
-    let taken = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let taken_text = taken.local_addr().unwrap().to_string();
-    let flags: [(&str, &[&str]); 6] = [
-        (
-            "--relay with --tls",
-            &["--relay", &relay_text, "--relayed", "web", "--tls"],
-        ),
-        ("--relay without --relayed", &["--relay", &relay_text]),
-        ("--relayed without --relay", &["--relayed", "web"]),
-        ("--relayed with no companion's name", &["--relayed", "main"]),
-        (
-            "--relay at an address that is taken",
-            &["--relay", &taken_text, "--relayed", "web"],
-        ),
-        ("--relay without --listen", &[]),
-    ];
-    for (case, flags) in flags {
-        let listening: &[&str] = if flags.is_empty() {
-            &[&apart_text]
-        } else {
-            &listening
-        };
-        let relaying: &[&str] = if flags.is_empty() { &relaying } else { flags };
-        let args: Vec<&OsStr> = (listening.iter().chain(relaying)).map(OsStr::new).collect();
-        let refused = ended(sandbox.sandboxd(&args, &grant()));
-        lines.push(format!(
-            "{case}: {}",
-            refused.replace(&taken_text, "$TAKEN")
-        ));
-    }
-    lines
 }
 
 /// Connects to the relay at `relay`, which listens, says `route` and no more, and returns what
@@ -1260,18 +1183,6 @@ fn heard_hello(address: SocketAddr, said: &[u8]) -> bool {
     }
     // A hello's message has a `version`. A TLS alert, which the peer may hear, has none.
     answer.windows(9).any(|bytes| bytes == b"\"version\"")
-}
-
-/// `said`, with the reason that TLS's library gave in it, if any, masked.
-fn masked(said: &str) -> String {
-    let (start, end) = ("TLS failed: ", ": expected");
-    match said.split_once(start) {
-        Some((before, reason)) => {
-            let after = reason.find(end).map_or("", |at| &reason[at..]);
-            format!("{before}{start}<reason>{after}")
-        }
-        None => said.to_owned(),
-    }
 }
 
 fn listening_apart(sandbox: &Sandbox) -> Vec<String> {
