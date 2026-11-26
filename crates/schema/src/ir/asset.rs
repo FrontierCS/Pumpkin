@@ -27,7 +27,6 @@ pub struct Asset {
 #[serde(try_from = "Vec<AssetFile>", into = "Vec<AssetFile>")]
 pub struct AssetFiles(Vec<AssetFile>);
 
-/// A file of an asset.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AssetFile {

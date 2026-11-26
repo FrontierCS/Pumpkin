@@ -4913,7 +4913,6 @@ fn unprepared(sim: &Sim, ir: Value) -> String {
     )
 }
 
-/// `file` as a file of an asset at `base`.
 fn asset_file(base: &str, file: (&str, &[u8], &str)) -> Value {
     let (path, bytes, sha256) = file;
     let (url, sha256) = (format!("{base}/{path}"), format!("sha256:{sha256}"));
