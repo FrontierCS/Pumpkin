@@ -31,6 +31,7 @@ mod figure;
 mod live;
 mod op_stats;
 mod page;
+mod premises;
 mod release;
 mod repo;
 mod settings;
@@ -107,6 +108,20 @@ mod flags {
                 /// `controller`, kills the job likewise, makes the controller's container anew, and
                 /// checks that its boot reaped the run.
                 optional --lost
+            }
+
+            /// Lists the premises that the working tree adds or changes since `base`, not in tests.
+            /// A premise is an `unreachable!`, `panic!`, `assert!`, `debug_assert!`, `.expect(` or
+            /// `.unwrap()`. Each line gives its file, line and message. A call counts if any of
+            /// its lines changed. Tests are the files below a `tests/` directory, the files of
+            /// `crates/test-support`, and the items that `#[test]` or `#[cfg(test)]` marks. Each
+            /// call is read as written. So a premise that a macro or a derive expands to is out
+            /// of sight, as are the panics of `assert_eq!`, indexing and arithmetic. A file that
+            /// isn't Rust tokens is named and skipped. It fails on an untracked Rust file, as
+            /// `mutants` does: add the file with `--intent-to-add`.
+            cmd premises {
+                /// The revision to compare with, such as `origin/main`.
+                required base: String
             }
 
             /// Counts incoming operations by request kind in a run's `log.jsonl`. Reports the
@@ -194,6 +209,7 @@ mod flags {
         Figures(Figures),
         AwsCertificates(AwsCertificates),
         Live(Live),
+        Premises(Premises),
         OpStats(OpStats),
         Sandboxd(Sandboxd),
         Build(Build),
@@ -223,6 +239,11 @@ mod flags {
 
         pub gpu_model: Option<String>,
         pub lost: bool,
+    }
+
+    #[derive(Debug)]
+    pub struct Premises {
+        pub base: String,
     }
 
     #[derive(Debug)]
@@ -342,6 +363,10 @@ fn try_main() -> Result<()> {
                 }
             };
             live::smoke(provider, gpu_model.as_deref(), lost)
+        }
+        flags::XtaskCmd::Premises(flags::Premises { base }) => {
+            print!("{}", premises::list(&Repo { root: root() }, &base)?);
+            Ok(())
         }
         flags::XtaskCmd::OpStats(flags::OpStats { run_dir, caller }) => {
             op_stats::report(&run_dir, caller.as_deref())
