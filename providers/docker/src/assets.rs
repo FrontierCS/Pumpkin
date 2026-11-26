@@ -6,12 +6,12 @@ use std::fs::{self, DirBuilder, File, Permissions};
 use std::io::{self, Read as _, Write};
 use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use provider::{AssetDigest, AssetRef, Assets, PublishedAsset, RunTag};
 use schema::ir::{AssetFile, AssetFiles, Sha256Digest};
 use sha2::{Digest as _, Sha256};
-use stdx::Context as _;
+use stdx::{Context as _, Deadline};
 use ureq::tls::{Certificate, RootCerts, TlsConfig};
 
 /// How long a fetch may take to resolve a server's name, and then to connect to it, its TLS
@@ -24,10 +24,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 // As long as cargo lets a download stall, below 10 bytes a second, at the lines above.
 const STALL_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How long a fetch of one file may take in all.
-// Sized only to turn a server that trickles into a failure, as the engine's push timeout is. A
-// file of 5 GiB, the size of a model's shard, takes 85 minutes at 1 MiB a second.
-const FILE_TIMEOUT: Duration = Duration::from_hours(2);
+/// How long a fetch of an asset's files may take in all.
+// Sized only to turn a server that trickles into a failure, as the engine's push timeout is. The
+// vLLM task's 57 GiB take 8 minutes at 128 MiB a second, and 97 at 10.
+const FETCH_TIMEOUT: Duration = Duration::from_hours(2);
 
 /// The most redirects that a fetch follows.
 // As many as Bazel's downloader follows:
@@ -38,10 +38,10 @@ const MAX_REDIRECTS: u32 = 40;
 /// the servers that it fetches them from.
 ///
 /// It fetches each digest's files once, into an entry named by the digest, which each sandbox that
-/// holds them mounts read-only. A fetch fills a directory of its own. It renames that to the entry
-/// once each file has the size and SHA-256 that its asset pins. So no fetch, even another
-/// process's, finds an entry half made. A fetch that fails removes its directory. One whose
-/// process is killed leaves it, `.<the digest's hex>.` and random characters, which no fetch reads.
+/// holds them mounts read-only. A fetch fills a directory of its own, then makes it read-only. It
+/// renames that to the entry once each file has the size and SHA-256 that its asset pins. So no
+/// fetch, even another process's, finds an entry half made. A fetch that fails removes its
+/// directory. A later fetch of the digest removes one that a killed fetch left.
 // Bazel's repository cache moves a download into place alike:
 // https://github.com/bazelbuild/bazel/blob/06deebfb5b73f848de5a0ea0e00fcfaa26788d1f/src/main/java/com/google/devtools/build/lib/bazel/repository/cache/RepositoryCache.java#L231-L236
 #[derive(Debug)]
@@ -84,9 +84,9 @@ impl AssetCache {
         }
     }
 
-    /// Fetches `file` into `staging`, at its path, and fails unless its URL gives exactly its size
-    /// and its SHA-256.
-    fn fetch(&self, staging: &Path, file: &AssetFile) -> Result<(), String> {
+    /// Fetches `file` into `staging`, at its path, by `by`, and fails unless its URL gives exactly
+    /// its size and its SHA-256.
+    fn fetch(&self, staging: &Path, file: &AssetFile, by: Deadline) -> Result<(), String> {
         let AssetFile {
             path,
             url,
@@ -107,8 +107,13 @@ impl AssetCache {
         }
         let failed =
             |error: &dyn std::fmt::Display| format!("fetching `{path}` from {url} failed: {error}");
+        let Some(left) = by.remaining() else {
+            return Err(failed(&format_args!(
+                "the fetch took over {FETCH_TIMEOUT:?}"
+            )));
+        };
         let call = self.agent.get(url.as_str()).config();
-        let call = call.timeout_global(Some(FILE_TIMEOUT)).build();
+        let call = call.timeout_global(Some(left)).build();
         let response = call.call().map_err(|error| failed(&error))?;
         let mut written = File::create_new(&to).context(to.display())?;
         let mut hashed = Hashed {
@@ -143,11 +148,35 @@ impl AssetCache {
         }
         // So that a crash once the entry is named leaves none of its files short.
         written.sync_all().context(to.display())?;
-        // Writable by its mode, so that only the read-only mount refuses a sandbox's write. Its
-        // refusal, `EROFS`, then shows the mount's flag at work. The cache's own mode keeps the
-        // machine's other users from the files.
-        let writable = fs::set_permissions(&to, Permissions::from_mode(0o666));
-        writable.context(to.display())
+        // Read-only, as the mount is: a second guard, should the mount's flag ever fail, against a
+        // sandbox's user that isn't the file's owner.
+        let read_only = fs::set_permissions(&to, Permissions::from_mode(0o444));
+        read_only.context(to.display())
+    }
+
+    /// Removes each directory that a fetch of `digest` began over [`FETCH_TIMEOUT`] ago, as of
+    /// `now`, a time since the Unix epoch. Its fetch has failed, or its process was killed.
+    fn remove_stale(&self, digest: &AssetDigest, now: Duration) -> Result<(), String> {
+        let prefix = format!(".{}.", digest.hex());
+        let entries = fs::read_dir(&self.dir).context(self.dir.display())?;
+        for entry in entries {
+            let entry = entry.context(self.dir.display())?;
+            let name = entry.file_name();
+            let began = (name.to_str())
+                .and_then(|name| name.strip_prefix(&prefix))
+                .and_then(|rest| rest.split_once('.'))
+                .and_then(|(seconds, _)| seconds.parse().ok())
+                .map(Duration::from_secs);
+            if began.is_some_and(|began| now.saturating_sub(began) > FETCH_TIMEOUT) {
+                let path = entry.path();
+                match remove(&path) {
+                    // Its own fetch, just past its bound, removed it first.
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    removed => removed.context(format_args!("removing {}", path.display()))?,
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -179,23 +208,31 @@ impl Assets for AssetCache {
             .recursive(true)
             .create(&self.dir);
         made.context(self.dir.display())?;
+        let by = Deadline::after(FETCH_TIMEOUT);
+        let began = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        self.remove_stale(digest, began)?;
+        // Named by when it began, for a later fetch to tell it stale, then by random characters.
+        // `tempdir_in` tries others until no directory has the name.
         let staging = tempfile::Builder::new()
-            .prefix(&format!(".{}.", digest.hex()))
+            .prefix(&format!(".{}.{}.", digest.hex(), began.as_secs()))
             .tempdir_in(&self.dir)
             .context(self.dir.display())?;
+        let staging = Staging(staging.keep());
         let mut dirs = BTreeSet::new();
         for file in files.as_slice() {
-            self.fetch(staging.path(), file)?;
+            self.fetch(&staging.0, file, by)?;
             let below = Path::new(file.path.as_str()).ancestors().skip(1);
-            dirs.extend(below.map(|dir| staging.path().join(dir)));
+            dirs.extend(below.map(|dir| staging.0.join(dir)));
         }
-        let readable = fs::set_permissions(staging.path(), Permissions::from_mode(0o755));
-        readable.context(staging.path().display())?;
-        // So that a crash once the entry is named leaves none of its files out.
+        // Deepest first, so that a crash once the entry is named leaves none of its files out.
         for dir in dirs.iter().rev() {
+            let read_only = fs::set_permissions(dir, Permissions::from_mode(0o555));
+            read_only.context(dir.display())?;
             sync(dir)?;
         }
-        match fs::rename(staging.path(), &entry) {
+        match fs::rename(&staging.0, &entry) {
             Ok(()) => sync(&self.dir)?,
             // Another fetch at once named it first, which checked each file as this one did. The
             // staging directory goes as it drops.
@@ -203,7 +240,7 @@ impl Assets for AssetCache {
             Err(error) => {
                 return Err(format!(
                     "renaming {} to {} failed: {error}",
-                    staging.path().display(),
+                    staging.0.display(),
                     entry.display()
                 ));
             }
@@ -213,6 +250,31 @@ impl Assets for AssetCache {
             fetched: true,
         })
     }
+}
+
+/// A fetch's directory, which it removes as it drops unless the fetch renamed it.
+struct Staging(PathBuf);
+
+impl Drop for Staging {
+    fn drop(&mut self) {
+        // Gone once renamed. A directory left by a failed removal is stale to a later fetch.
+        let _ = remove(&self.0);
+    }
+}
+
+/// Removes the tree at `root`, though its directories may be read-only, as a fetch leaves them.
+fn remove(root: &Path) -> io::Result<()> {
+    let mut dirs = Vec::from([root.to_owned()]);
+    while let Some(dir) = dirs.pop() {
+        fs::set_permissions(&dir, Permissions::from_mode(0o755))?;
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                dirs.push(entry.path());
+            }
+        }
+    }
+    fs::remove_dir_all(root)
 }
 
 /// Syncs the directory at `dir`, so that the entries made or renamed in it last.

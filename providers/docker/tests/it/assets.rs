@@ -1,11 +1,13 @@
 //! The asset cache's fetch, from a stand-in HTTPS server behind the stand-in TLS edge
 //! ([`test_support::edge`]), on the loopback. A file's server is HTTP's documented API.
 
+use std::fs::{DirBuilder, Permissions};
 use std::io::{BufReader, Write as _};
 use std::net::TcpStream;
-use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{fs, thread};
 
 use docker::AssetCache;
@@ -90,8 +92,8 @@ fn published(dir: &Path, files: &AssetFiles) -> String {
 }
 
 /// Checks against `expect` each of `outcomes`, then what the cache at `dir` holds, each with its
-/// mode. A port and the digest are masked.
-fn check(dir: &Path, outcomes: &[String], expect: &Expect) {
+/// mode. A port, the digest and each of `masked` are masked.
+fn check(dir: &Path, outcomes: &[String], masked: &[(&str, &str)], expect: &Expect) {
     let mut lines = outcomes.to_vec();
     lines.push("the cache holds:".to_owned());
     if dir.exists() {
@@ -100,6 +102,7 @@ fn check(dir: &Path, outcomes: &[String], expect: &Expect) {
     let shown = lines
         .join("\n")
         .replace(&DIGEST["sha256:".len()..], "<digest>");
+    let shown = (masked.iter()).fold(shown, |shown, (from, to)| shown.replace(from, to));
     let mut unported = String::new();
     let mut rest = shown.as_str();
     while let Some(at) = rest.find("localhost:") {
@@ -147,15 +150,16 @@ fn fetches_each_digest_once() {
     check(
         &cache,
         &outcomes,
+        &[],
         &expect![[r#"
         fetched: true, at <cache>/<digest>
         fetched: false, at <cache>/<digest>
         the cache holds:
           0700 .
-          0755 <digest>/
-          0666 <digest>/config.json: {}\n
-          0755 <digest>/shards/
-          0666 <digest>/shards/1.bin: 1\n"#]],
+          0555 <digest>/
+          0444 <digest>/config.json: {}\n
+          0555 <digest>/shards/
+          0444 <digest>/shards/1.bin: 1\n"#]],
     );
 }
 
@@ -182,6 +186,7 @@ fn refuses_what_isnt_pinned() {
     check(
         &cache,
         &outcomes,
+        &[],
         &expect![[r#"
         `b` from https://localhost:PORT/b has the SHA-256 sha256:0263829989b6fd954f72baaf2fc64bc2e2f01d692d4de72986ea808f6e99813f, not the pinned sha256:4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865: give the SHA-256 of the file that the URL serves
         `short` from https://localhost:PORT/short ends after 1 of its 2 bytes: give the size of the file that the URL serves
@@ -213,12 +218,61 @@ fn fetches_at_once() {
     check(
         &cache,
         &[first, second],
+        &[],
         &expect![[r#"
         fetched: true, at <cache>/<digest>
         fetched: true, at <cache>/<digest>
         the cache holds:
           0700 .
-          0755 <digest>/
-          0666 <digest>/config.json: {}\n"#]],
+          0555 <digest>/
+          0444 <digest>/config.json: {}\n"#]],
+    );
+}
+
+// A fetch removes each directory that a fetch of its digest began past their bound, as a killed one
+// leaves, though read-only. It keeps one that began within the bound, and another digest's.
+#[test]
+fn removes_what_a_killed_fetch_left() {
+    let dir = TestDir::new();
+    let cache = dir.path().join("assets");
+    // As the cache makes itself.
+    DirBuilder::new().mode(0o700).create(&cache).unwrap();
+    let left = |name: &str| {
+        let shards = cache.join(name).join("shards");
+        fs::create_dir_all(&shards).unwrap();
+        fs::write(shards.join("1.bin"), SHARD.1).unwrap();
+        fs::set_permissions(shards.join("1.bin"), Permissions::from_mode(0o444)).unwrap();
+        for read_only in [shards.clone(), cache.join(name)] {
+            fs::set_permissions(read_only, Permissions::from_mode(0o555)).unwrap();
+        }
+    };
+    let (hex, other) = (&DIGEST["sha256:".len()..], "e".repeat(64));
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    left(&format!(".{hex}.0.killed"));
+    left(&format!(".{hex}.{now}.running"));
+    left(&format!(".{other}.0.killed"));
+    let port = serving(vec![(CONFIG.0, CONFIG.1)], None, None);
+    let outcomes = [published(&cache, &files(port, &[(CONFIG.0, CONFIG.2, 3)]))];
+    let now = now.to_string();
+    let masked = [(now.as_str(), "<now>"), (other.as_str(), "<other>")];
+    check(
+        &cache,
+        &outcomes,
+        &masked,
+        &expect![[r#"
+        fetched: true, at <cache>/<digest>
+        the cache holds:
+          0700 .
+          0555 .<digest>.<now>.running/
+          0555 .<digest>.<now>.running/shards/
+          0444 .<digest>.<now>.running/shards/1.bin: 1\n
+          0555 .<other>.0.killed/
+          0555 .<other>.0.killed/shards/
+          0444 .<other>.0.killed/shards/1.bin: 1\n
+          0555 <digest>/
+          0444 <digest>/config.json: {}\n"#]],
     );
 }
