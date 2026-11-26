@@ -7,7 +7,7 @@ use serde_json::Value;
 const PHASES: [&str; 4] = ["lookup", "create", "tunnels", "list"];
 
 /// The phase that the Modal helper times after [`PHASES`] for a sandbox that holds companions.
-const SIDECARS: &str = "sidecars";
+const COMPANIONS: &str = "companions";
 
 /// The longest that the median exchange between two containers of a sandbox may take, in
 /// milliseconds.
@@ -17,8 +17,8 @@ const BRIDGE_MEDIAN_MS: f64 = 50.0;
 
 /// What is wrong with each create on Modal in `lines`, a run's log. That is a phase missing, out of
 /// order or outside its create, or a log without one. A create of a sandbox that holds companions,
-/// one whose containers the log says met, is to have [`SIDECARS`] last, and any other none. A Modal
-/// sandbox's id starts with `sb-`, and its delete in the log names it.
+/// one whose containers the log says met, is to have [`COMPANIONS`] last, and any other none. A
+/// Modal sandbox's id starts with `sb-`, and its delete in the log names it.
 pub(crate) fn unphased(lines: &[Value]) -> Vec<String> {
     let logged = |kind: &str, sandbox: &Value| {
         lines.iter().any(|line| {
@@ -49,7 +49,7 @@ pub(crate) fn unphased(lines: &[Value]) -> Vec<String> {
 }
 
 /// What is wrong with `line`, a create on Modal in the run log, if anything. Its phases are to be
-/// those that the helper times, in order, each within the create, with [`SIDECARS`] last if its
+/// those that the helper times, in order, each within the create, with [`COMPANIONS`] last if its
 /// sandbox holds `companions`. One begins after the create did, as the helper's interpreter starts
 /// first, unless the helper's clock and this one differ.
 fn create_unphased(line: &Value, companions: bool) -> Option<String> {
@@ -67,7 +67,7 @@ fn create_unphased(line: &Value, companions: bool) -> Option<String> {
         .collect();
     let mut expected = PHASES.to_vec();
     let held = if companions {
-        expected.push(SIDECARS);
+        expected.push(COMPANIONS);
         "holds companions"
     } else {
         "holds none"

@@ -181,7 +181,7 @@ fn met(container: &str) -> serde_json::Value {
 fn unphased() {
     let deleted = serde_json::json!({"id": "sb-1"});
     let phases = ["lookup", "create", "tunnels", "list"];
-    let sidecars = ["lookup", "create", "tunnels", "list", "sidecars"];
+    let all_phases = ["lookup", "create", "tunnels", "list", "companions"];
     let shown = |(case, phases, companions): (&str, &[&str], bool)| {
         let (kind, sandbox, at, fields) = created("lease-0", phases);
         let mut events = vec![(kind, sandbox.as_str(), at, fields)];
@@ -196,15 +196,15 @@ fn unphased() {
         format!("{case}: {unphased}")
     };
     let cases: [(&str, &[&str], bool); 3] = [
-        ("with companions", &sidecars, true),
-        ("with companions, sidecars missing", &phases, true),
-        ("without companions, with sidecars", &sidecars, false),
+        ("with companions", &all_phases, true),
+        ("with companions, their phase missing", &phases, true),
+        ("without companions, with their phase", &all_phases, false),
     ];
     let shown: Vec<String> = cases.into_iter().map(shown).collect();
     expect![[r#"
         with companions: 
-        with companions, sidecars missing: sandbox "lease-0"'s create on Modal has the phases ["lookup", "create", "tunnels", "list"]: expected ["lookup", "create", "tunnels", "list", "sidecars"], as its sandbox holds companions: <create>
-        without companions, with sidecars: sandbox "lease-0"'s create on Modal has the phases ["lookup", "create", "tunnels", "list", "sidecars"]: expected ["lookup", "create", "tunnels", "list"], as its sandbox holds none: <create>"#]].assert_eq(&shown.join("\n"));
+        with companions, their phase missing: sandbox "lease-0"'s create on Modal has the phases ["lookup", "create", "tunnels", "list"]: expected ["lookup", "create", "tunnels", "list", "companions"], as its sandbox holds companions: <create>
+        without companions, with their phase: sandbox "lease-0"'s create on Modal has the phases ["lookup", "create", "tunnels", "list", "companions"]: expected ["lookup", "create", "tunnels", "list"], as its sandbox holds none: <create>"#]].assert_eq(&shown.join("\n"));
 }
 
 // Each case: a result of `examples/companions`, then what is wrong in it.

@@ -123,7 +123,7 @@ def unchanged(sandboxd: dict) -> None:
 def create(modal, request: dict) -> dict:
     """Creates the run's sandbox of the request's role, then its `sidecars`, and returns its ID,
     the tunnel to each of the request's `ports`, in their order, and the `phases` that it timed:
-    `lookup`, `create`, `tunnels` and `list`, then `sidecars` if it made any, in order.
+    `lookup`, `create`, `tunnels` and `list`, then `companions` if it made any, in order.
 
     Each container starts with the `args` and `env` that the request gives it, which this passes
     on as they are. `main` has the request's `sandboxd` attached at each path of its `at`.
@@ -166,7 +166,7 @@ def create(modal, request: dict) -> dict:
         while sandbox.object_id not in ids(modal, app, run) and sandbox.poll() is None:
             time.sleep(LISTED_EVERY)
     if request["sidecars"]:
-        with timed(phases, "sidecars"):
+        with timed(phases, "companions"):
             accompany(modal, sandbox, request["sidecars"])
     return {
         "id": sandbox.object_id,

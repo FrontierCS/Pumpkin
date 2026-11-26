@@ -303,3 +303,4 @@ pod = { use = "sandbox", except = [
     "crates/engine/src/prune.rs",
     "crates/schema/src/ir/container.rs",
 ] }
+sidecar = { use = "companion", except = ["docs/providers.md", "providers/modal/"] }
