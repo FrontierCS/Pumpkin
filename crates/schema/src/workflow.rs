@@ -269,9 +269,7 @@ pub struct Offers {
     /// Whether each sandbox holds a runner's companions beside its own container
     /// ([`ir::RunnerRuntime::companions`](crate::ir::RunnerRuntime::companions)).
     pub companions: bool,
-    /// Whether each sandbox holds a role's assets, each read-only at its path
-    /// ([`ir::Role::assets`](crate::ir::Role::assets)). A role that declares any fits no other
-    /// class.
+    /// Whether each sandbox holds a role's assets ([`ir::Role::assets`](crate::ir::Role::assets)).
     pub assets: bool,
 }
 

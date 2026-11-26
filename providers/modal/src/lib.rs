@@ -382,7 +382,6 @@ impl Provider for Modal<'_> {
         Meeting::Listen(self)
     }
 
-    // Its sandboxes hold no assets.
     fn assets(&self) -> Option<&dyn Assets> {
         None
     }

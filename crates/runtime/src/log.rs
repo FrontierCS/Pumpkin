@@ -76,7 +76,6 @@ pub(super) struct Log<'h, H: Host> {
     seq: u64,
     host: &'h H,
     clock: H::Clock,
-    // Told once the start is.
     published: Vec<AssetPublished>,
 }
 
@@ -465,8 +464,7 @@ impl<'h, H: Host> Log<'h, H> {
     }
 }
 
-/// A publish of an asset's files, `digest`, on `provider`, before the run started: whether it
-/// `fetched` them, and how long it `took`.
+/// A publish of an asset's files before the run started.
 pub(super) struct AssetPublished {
     pub(super) provider: Name,
     pub(super) digest: AssetDigest,

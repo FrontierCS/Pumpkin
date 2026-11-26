@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use super::values::{AssetPath, HttpsUrl, RelativePath, Sha256Digest};
 
-/// Files at a path in each of a role's sandboxes, read-only.
+/// Files at a path in each of a role's sandboxes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Asset {
@@ -27,7 +27,7 @@ pub struct Asset {
 #[serde(try_from = "Vec<AssetFile>", into = "Vec<AssetFile>")]
 pub struct AssetFiles(Vec<AssetFile>);
 
-/// A file of an asset, at `url`, of `size` bytes, whose SHA-256 is `sha256`.
+/// A file of an asset.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AssetFile {

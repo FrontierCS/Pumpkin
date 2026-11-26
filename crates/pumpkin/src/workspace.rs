@@ -80,7 +80,6 @@ impl Workspace {
         self.0.join("docker")
     }
 
-    /// The cache of the files of the assets that the Docker provider's sandboxes hold.
     pub(crate) fn docker_assets(&self) -> PathBuf {
         self.0.join("assets")
     }

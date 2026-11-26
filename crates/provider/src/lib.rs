@@ -114,14 +114,11 @@ pub trait Listens: Creator<ListenDials, Listened> {
 }
 
 /// A provider whose sandboxes hold assets ([`Create::assets`]): what publishes the files of each.
-///
-/// Only such a provider is given an asset, so only its classes hold any
-/// ([`Offers::assets`](schema::workflow::Offers::assets)).
 pub trait Assets: Sync {
-    /// Publishes `files`, whose digest is `digest`, so that this provider's sandboxes can hold them
-    /// read-only. It keeps them only if each file's URL gives the file's size and SHA-256. Fails,
-    /// naming the first file that didn't, and then keeps none of them by `digest`. Each sandbox that
-    /// it makes carries `run`'s tag, so that `run`'s [`list`](Sweep::list) finds one that it left.
+    /// Publishes `files`, whose digest is `digest`, so that this provider's sandboxes can hold
+    /// them. It keeps them only if each file's URL gives the file's size and SHA-256. Fails, naming
+    /// the first file that didn't, and then keeps none of them by `digest`. Each sandbox that it
+    /// makes carries `run`'s tag, so that `run`'s [`list`](Sweep::list) finds one that it left.
     fn publish_asset(
         &self,
         run: &RunTag,

@@ -22,9 +22,8 @@ A [role](#role) that works on the [task](#task), such as an AI coding agent, in 
 
 Files that each [sandbox](#sandbox) of a [role](#role) holds read-only at a path, such as a model's
 weights. Each file is pinned by its SHA-256 and fetched from an `https` URL. A digest over the files
-names them, so a [provider](#provider) keeps them once, as a read-only mount or an
-[image](#image)'s layer. The role's `assets` key lists them (`ir::Asset`). Only a [class](#class)
-whose `Offers::assets` is set holds any.
+names them, so a [provider](#provider) keeps them once. The role's `assets` key lists them
+(`ir::Asset`).
 
 ### Body
 

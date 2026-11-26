@@ -378,7 +378,6 @@ impl Provider for Ec2<'_> {
         Meeting::Private(self)
     }
 
-    // Its sandboxes hold no assets.
     fn assets(&self) -> Option<&dyn Assets> {
         None
     }

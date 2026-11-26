@@ -1,9 +1,7 @@
 """A check of a role's assets, with no model, for a provider whose classes hold assets.
 
 The runner holds an asset at `/opt/model`: two license files of ripgrep on GitHub, at a pinned
-revision. The final call leases the runner, checks each file's SHA-256 and that the asset is
-mounted read-only, and tries each write there as the runner's user. A second lease, in a fresh
-sandbox, checks the SHA-256s again. The score counts the facts that hold.
+revision. The final call checks it in two leases, each in a fresh sandbox.
 """
 
 load("//assets/final.star", "final_call")

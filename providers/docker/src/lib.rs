@@ -199,7 +199,6 @@ impl Provider for Docker<'_> {
         Meeting::Local(self)
     }
 
-    // A sandbox mounts each asset's files from the cache on the machine.
     fn assets(&self) -> Option<&dyn Assets> {
         Some(&self.assets)
     }

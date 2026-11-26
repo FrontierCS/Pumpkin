@@ -1,7 +1,5 @@
 """The assets example's final call: it leases the runner twice, and checks its asset in each."""
 
-# Prints the SHA-256 and the path of each file that an argument after the first names, in the
-# directory that the first names, as `sha256sum` does.
 SUMS = 'cd "$1" && shift && sha256sum "$@"'
 
 # The texts of the errors that refuse a write: the mount's, and the file's mode's.

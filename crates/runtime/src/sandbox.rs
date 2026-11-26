@@ -384,8 +384,7 @@ impl<'p> Published<'p> {
     /// role's provider, however many roles name it, through what `capable` found there for assets
     /// and companions. Last, it makes the run's sockets directory in `record`, which must not exist
     /// yet. A private provider meets the gateway at `private`, which then must be some, and one
-    /// whose sandboxes listen, through `dialer`. It returns each publish of assets too, for the
-    /// run's log.
+    /// whose sandboxes listen, through `dialer`. It returns each publish of assets too.
     ///
     /// Stops as interrupted before each publish once a signal has come, as one may take minutes.
     pub(super) fn create(

@@ -62,8 +62,7 @@ impl Ec2<'_> {
             instance: _,
             class,
             image,
-            // Only a provider that publishes assets is given any (`provider::Assets`), and this
-            // one publishes none.
+            // It publishes no assets, so a create holds none (`provider::Create::assets`).
             assets: _,
             sandboxd,
             ops,

@@ -20,11 +20,10 @@ pub(super) type Held = BTreeMap<RoleId, Vec<HeldAsset>>;
 /// ([`holding`]).
 pub(crate) struct Holding<'p>(BTreeMap<RoleId, &'p dyn Assets>);
 
-/// Each role of `placed` that declares assets, with its provider's [`Assets`], of `providers`, as
-/// only a provider that publishes assets is given any.
+/// The [`Holding`] of `placed` on `providers`.
 ///
-/// Fails if such a role is placed on a provider that publishes none. That is the provider's
-/// fault, as placing put the role in one of its classes that holds assets.
+/// Fails if a role that declares assets is placed on a provider that publishes none. That is the
+/// provider's fault, as placing put the role in one of its classes that holds assets.
 pub(crate) fn holding<'p>(
     placed: &Placed,
     providers: &ByProvider<&'p dyn Provider>,
@@ -53,9 +52,7 @@ pub(crate) fn holding<'p>(
 
 /// Publishes the files of each asset of each role that `holding` gives, on the role's provider
 /// there, for `run`. It publishes each digest once on each provider. Returns the assets that
-/// those roles' sandboxes hold, by the role, and each publish, for the run's log.
-///
-/// Stops as interrupted before each publish once a signal has come.
+/// those roles' sandboxes hold, by the role, and each publish.
 pub(super) fn publish(
     run: &RunTag,
     placed: &Placed,

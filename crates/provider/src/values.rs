@@ -141,9 +141,8 @@ pub struct Role {
     /// it declares them, and none for any other role. [`fits`](crate::Provider::fits) refuses
     /// more than its sandbox holds.
     pub companions: usize,
-    /// Where each of its sandboxes holds each of its assets ([`ir::Role::assets`]). Only a class
-    /// that holds assets is given a role with any, and [`fits`](crate::Provider::fits) refuses a
-    /// path where its sandboxes can't hold one.
+    /// Where each of its sandboxes holds each of its assets ([`ir::Role::assets`]).
+    /// [`fits`](crate::Provider::fits) refuses a path where its sandboxes can't hold one.
     ///
     /// [`ir::Role::assets`]: schema::ir::Role::assets
     pub assets: Vec<AssetPath>,
@@ -166,8 +165,7 @@ impl From<String> for ImageRef {
     }
 }
 
-/// The digest that names an asset's files, as [`AssetFiles`](schema::ir::AssetFiles) defines it,
-/// by which a provider keeps them.
+/// The digest that names an asset's files, as [`AssetFiles`](schema::ir::AssetFiles) defines it.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct AssetDigest(Sha256Digest);
 
@@ -190,8 +188,7 @@ impl fmt::Display for AssetDigest {
     }
 }
 
-/// What a provider's `publish_asset` made of an asset's files
-/// ([`Assets::publish_asset`](crate::Assets::publish_asset)).
+/// What [`Assets::publish_asset`](crate::Assets::publish_asset) made of an asset's files.
 #[derive(Debug)]
 pub struct PublishedAsset {
     /// For each create whose sandbox holds the files to name ([`HeldAsset::reference`]).
@@ -217,7 +214,7 @@ impl From<String> for AssetRef {
     }
 }
 
-/// An asset that a sandbox holds read-only at `path`, of the files that its provider published as
+/// An asset that a sandbox holds at `path`, of the files that its provider published as
 /// `reference` ([`Create::assets`]).
 #[derive(Clone, Debug)]
 pub struct HeldAsset {

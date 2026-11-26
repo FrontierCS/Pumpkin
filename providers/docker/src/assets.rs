@@ -25,8 +25,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const STALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long a fetch of an asset's files may take in all.
-// Sized only to turn a server that trickles into a failure, as the engine's push timeout is. The
-// vLLM task's 57 GiB take 8 minutes at 128 MiB a second, and 97 at 10.
+// Sized only to turn a server that trickles into a failure, as the engine's push timeout is. At
+// 10 MiB a second, it admits 70 GiB.
 const FETCH_TIMEOUT: Duration = Duration::from_hours(2);
 
 /// The most redirects that a fetch follows.
@@ -37,14 +37,8 @@ const MAX_REDIRECTS: u32 = 40;
 /// The cache of the files of the assets that the provider's sandboxes hold, on the machine, and
 /// the servers that it fetches them from.
 ///
-/// It fetches each digest's files once, into an entry named by the digest, which each sandbox that
-/// holds them mounts read-only. A fetch holds the digest's lock, which a fetch in any process waits
-/// for. It fills the digest's staging directory, then makes it read-only. It renames that to the
-/// entry once each file has the size and SHA-256 that its asset pins. So no fetch finds an entry
-/// half made. A fetch that fails removes its directory. A later fetch of the digest removes one
-/// that a killed fetch left.
-// Bazel's repository cache moves a download into place alike:
-// https://github.com/bazelbuild/bazel/blob/06deebfb5b73f848de5a0ea0e00fcfaa26788d1f/src/main/java/com/google/devtools/build/lib/bazel/repository/cache/RepositoryCache.java#L231-L236
+/// Processes may share its directory. A publish fetches a digest's files only if no earlier
+/// publish did, and never names an entry whose files aren't all as pinned.
 #[derive(Debug)]
 pub struct AssetCache {
     dir: PathBuf,
@@ -59,7 +53,7 @@ impl AssetCache {
     }
 
     /// The cache in `dir`, as [`new`](Self::new) makes it, but trusting only `root`, a
-    /// certificate in DER, such as a stand-in's.
+    /// certificate in DER.
     pub fn trusting(dir: &Path, root: &[u8]) -> Self {
         let root = Certificate::from_der(root).to_owned();
         Self::of(dir, RootCerts::new_with_certs(&[root]))
@@ -162,6 +156,10 @@ impl Assets for AssetCache {
             .recursive(true)
             .create(&self.dir);
         made.context(self.dir.display())?;
+        // The wait for the lock is unbounded, as Go's module cache waits for its lockfile. Its
+        // holder's fetch is bounded by `FETCH_TIMEOUT`, and the kernel releases the lock of a
+        // killed holder.
+        // https://github.com/golang/go/blob/46b62495e1bf4d56e0313320772ae588d9119aed/src/cmd/go/internal/modfetch/fetch.go#L218-L234
         let lock = self.dir.join(format!(".{}.lock", digest.hex()));
         let lock = (OpenOptions::new().create(true).truncate(false).write(true))
             .mode(0o600)
@@ -175,14 +173,11 @@ impl Assets for AssetCache {
                 fetched: false,
             });
         }
-        // The wait for the lock is unbounded, as Go's module cache waits for its lockfile. Its
-        // holder's fetch is bounded by `FETCH_TIMEOUT`, and the kernel releases the lock of a
-        // killed holder. So a staging directory that the holder finds is a dead fetch's.
-        // https://github.com/golang/go/blob/46b62495e1bf4d56e0313320772ae588d9119aed/src/cmd/go/internal/modfetch/fetch.go#L218-L234
         let staging = Staging {
             dir: self.dir.join(format!(".{}.part", digest.hex())),
             _lock: lock,
         };
+        // A staging directory that the lock's holder finds is a dead fetch's.
         match remove(&staging.dir) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             removed => removed.context(format_args!("removing {}", staging.dir.display()))?,
@@ -200,6 +195,8 @@ impl Assets for AssetCache {
             read_only.context(dir.display())?;
             sync(dir)?;
         }
+        // Bazel's repository cache moves a download into place alike:
+        // https://github.com/bazelbuild/bazel/blob/06deebfb5b73f848de5a0ea0e00fcfaa26788d1f/src/main/java/com/google/devtools/build/lib/bazel/repository/cache/RepositoryCache.java#L231-L236
         let renamed = fs::rename(&staging.dir, &entry);
         renamed.context(format_args!(
             "renaming {} to {}",
