@@ -1976,6 +1976,9 @@ fn listening(closes_first: bool, (hello, body): Said) -> (u16, JoinHandle<Option
 
 // The deadline of an accept whose peer stalls, on a `Still` whose event is the stall, and so the
 // bound of each of its dials. A dial that ends before the stall is made again.
+// Unlike `HELLO_BOUND`, it holds a whole TLS handshake on the real clock. A handshake that
+// outlasts it ends the case as the handshake's timeout. One takes a few milliseconds on loopback,
+// so 250 ms leaves a loaded host its margin.
 const STALL_BOUND: Duration = Duration::from_millis(250);
 
 // What a fake companion says once a connection has its TLS: a hello, or nothing, having marked

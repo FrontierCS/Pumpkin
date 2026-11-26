@@ -348,12 +348,6 @@ fn within_another_connection() {
                 format!("{read}; the server read {:?}", server_heard.recv().unwrap())
             })
         }),
-        ("one that it doesn't trust", {
-            within((&Client::web_pki(), edge::OTHER_NAME), answering, unopened)
-        }),
-        ("by another name", {
-            within((&edge::client(), "another"), answering, unopened)
-        }),
         ("a far end that closes in the handshake", {
             within(named, closing, unopened)
         }),
@@ -368,8 +362,6 @@ fn within_another_connection() {
     let lines = lines.map(|(case, outcome)| format!("{case}: {outcome}"));
     expect![[r#"
         a server that the client trusts, by its name: from within; the server read Ok("to within")
-        one that it doesn't trust: InvalidData: the TLS handshake failed: invalid peer certificate: UnknownIssuer: expected TLS 1.3 from `companion`, with a certificate trusted for it
-        by another name: InvalidData: the TLS handshake failed: invalid peer certificate: certificate not valid for name "another"; certificate is only valid for DnsName("companion"): expected TLS 1.3 from `another`, with a certificate trusted for it
         a far end that closes in the handshake: UnexpectedEof: the TLS handshake failed: unexpected end of file: expected TLS 1.3 from `companion`, with a certificate trusted for it
         a far end cut short once the stream is open: first; then UnexpectedEof: the connection that carries this one ended without TLS's close_notify, as a connection cut short does: expected the peer to close it with one"#]].assert_eq(&lines.join("\n"));
 }

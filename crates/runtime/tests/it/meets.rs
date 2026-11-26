@@ -10,8 +10,7 @@ use std::time::Duration;
 use expect_test::{Expect, expect};
 use schema::ir::CompanionName;
 
-// The runtime's own module, which does no I/O and reads no clock, so a test calls it on values.
-// The runtime exports none of it.
+// The runtime's own module, which it exports none of, so a test includes it.
 #[path = "../../src/sandbox/meets/gathered.rs"]
 mod gathered;
 

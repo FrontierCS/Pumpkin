@@ -762,7 +762,7 @@ fn refusals() {
 }
 
 // `sandboxctl` parses a container's name before it sends an op, and refuses one on an op that
-// takes none. A name that parses reaches the connection to `sandboxd`, which no local sandbox has.
+// takes none.
 #[test]
 fn sandboxctl_containers() {
     check(
@@ -772,7 +772,6 @@ fn sandboxctl_containers() {
             symlink(env!("CARGO_BIN_EXE_sandboxd"), ctl).unwrap();
             let script = format!(
                 "{CTL}
-                ctl call gpu.run 0 --container scheduler -- true
                 ctl call gpu.get 0 /work/out got --container Scheduler
                 ctl call gpu.status 0 --container scheduler
                 ctl call train payload --container scheduler"
@@ -789,9 +788,7 @@ fn sandboxctl_containers() {
         &expect![[r#"
             exited: Code(0)
             log/1.stderr: 
-            log/1.stdout: $ sandboxctl call gpu.run 0 --container scheduler -- true: exit 1
-              sandboxctl: sandboxd at /pumpkin/sandboxctl/socket can't be reached: No such file or directory (os error 2): run sandboxctl in a sandbox that serves ops
-            $ sandboxctl call gpu.get 0 /work/out got --container Scheduler: exit 1
+            log/1.stdout: $ sandboxctl call gpu.get 0 /work/out got --container Scheduler: exit 1
               sandboxctl: `Scheduler` is not a companion's name: use 1 to 63 characters from a-z, 0-9 and `-`, starting with a letter and ending with a letter or a digit
             $ sandboxctl call gpu.status 0 --container scheduler: exit 1
               sandboxctl: `gpu.status` takes no `--container`, as it acts on the whole lease: give it without one

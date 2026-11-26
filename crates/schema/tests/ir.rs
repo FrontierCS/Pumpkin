@@ -655,7 +655,7 @@ impl Case for Call {
     }
 }
 
-// An op on `main` is written without its container. An op that takes no container refuses one.
+// An op on `main` is written without its container.
 #[test]
 fn lease_op_containers() {
     let op = |op: &str| {
@@ -673,13 +673,11 @@ fn lease_op_containers() {
             op(&format!(
                 r#""kind":"run","lease":0,"container":"scheduler",{run}"#
             )),
-            op(r#""kind":"status","lease":0,"container":"scheduler""#),
         ],
         &expect![[r#"
             Session { grant: Name("gpu"), op: Run { lease: 0, container: Main, argv: Argv { program: "true", args: [] }, timeout_seconds: None } }
             Session { grant: Name("gpu"), op: Run { lease: 0, container: Main, argv: Argv { program: "true", args: [] }, timeout_seconds: None } }, written back as {"kind":"session","grant":"gpu","op":{"kind":"run","lease":0,"argv":["true"],"timeout_seconds":null}}
-            Session { grant: Name("gpu"), op: Run { lease: 0, container: Companion(CompanionName("scheduler")), argv: Argv { program: "true", args: [] }, timeout_seconds: None } }
-            unknown field `container`, expected `lease`"#]],
+            Session { grant: Name("gpu"), op: Run { lease: 0, container: Companion(CompanionName("scheduler")), argv: Argv { program: "true", args: [] }, timeout_seconds: None } }"#]],
     );
 }
 

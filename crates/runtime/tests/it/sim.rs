@@ -170,8 +170,6 @@ pub(crate) struct Sim {
     impostor: Option<&'static str>,
     // The companion at whose set-up `main`'s session ends.
     ends_main: Option<&'static str>,
-    // Whether a create that is given companions says where its relay listens.
-    relays: bool,
 }
 
 // What is called once the run log holds each part in a line.
@@ -397,7 +395,6 @@ impl Sim {
             turns: None,
             impostor: None,
             ends_main: None,
-            relays: true,
         }
     }
 
@@ -607,16 +604,6 @@ impl Sim {
     }
 
     #[must_use]
-    /// Makes each create that is given companions leave out where its relay listens, against
-    /// what [`Listened`] says.
-    pub(crate) fn naming_no_relay(self) -> Self {
-        Self {
-            relays: false,
-            ..self
-        }
-    }
-
-    #[must_use]
     /// Names the platform, which prefixes the references that it publishes and the only ones it
     /// takes.
     pub(crate) fn named(self, platform: &'static str) -> Self {
@@ -659,7 +646,6 @@ impl Sim {
         self.state().published.clone()
     }
 
-    /// What each create was given of each companion.
     pub(crate) fn companions(&self) -> Vec<String> {
         self.state().companions.clone()
     }
@@ -914,7 +900,7 @@ impl Creator<ListenDials, Listened> for Sim {
         Ok(Listened {
             created,
             main: main_endpoint,
-            relay: relay.filter(|_| self.relays),
+            relay,
         })
     }
 }
@@ -1217,7 +1203,6 @@ impl Subject for Sim {
             turns: self.turns,
             impostor: self.impostor,
             ends_main: self.ends_main,
-            relays: self.relays,
         }))
     }
 

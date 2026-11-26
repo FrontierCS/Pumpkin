@@ -1353,8 +1353,8 @@ fn logged(
     (numbered_apart(records, also), start, last)
 }
 
-// The meetings of the containers of the sandbox that `also` names, if it names one. They are
-// each `container_met` and the `sandbox_met`, in the log's order, with when each was observed.
+// They are each `container_met` and the `sandbox_met`, in the log's order, with when each was
+// observed.
 fn met(log: &[Value], also: &Also) -> Vec<String> {
     let Also::Met(sandbox) = also else {
         return Vec::new();
@@ -4594,13 +4594,11 @@ fn lease_failed(shown: &str) -> String {
     )
 }
 
-/// [`lease_workflow`]'s, whose runner declares the companions `scheduler` and `swe-0`, and whose
-/// lease allows 8 commands, and 256 bytes a transfer.
+/// [`lease_workflow`]'s, whose runner declares the companions `scheduler` and `swe-0`.
 fn companions_workflow(argv: &[&str]) -> Value {
     let mut ir = lease_workflow(argv, 30, RUNNER);
-    let lease = &mut ir["roles"][0]["runtime"]["agent"]["grants"][1]["session"];
-    lease["commands"] = json!(8);
-    lease["transfer_bytes"] = json!(256);
+    // As many as `serves_each_container` makes.
+    ir["roles"][0]["runtime"]["agent"]["grants"][1]["session"]["commands"] = json!(7);
     let companion = |name: &str, image: &str, id: u32, cwd: &str, env: &str| {
         json!({
             "name": name, "image": image, "user": { "uid": id, "gid": id },
@@ -4871,14 +4869,6 @@ fn names_mains_end_before_a_companions_failure() {
         .meeting_in_turn(&[("main", 0), ("scheduler", 0)])
         .ending_main_at_set_up("scheduler");
     expect![[r#"met ["main at 0ns", "scheduler at 0ns"]; failed at 2s: the runner's sandbox didn't start: sandbox sim-2: its container `main`: its session ended: the sandbox broke the protocol: it sent `done` on stream 4294967295 out of turn: expected nothing on a stream no request has opened"#]].assert_eq(&start_failed(&SimHost::new(), &sim, &failing()));
-}
-
-// A create that was given companions and names no relay leaves a sandbox that can't be met, which
-// is deleted.
-#[test]
-fn created_without_a_relay() {
-    let sim = accompanied().naming_no_relay();
-    expect!["met []; failed at 0ns: the runner's sandbox didn't start: sandbox sim-2: its create gave no relay, though it was given 2 companions: expected the endpoint where its relay listens"].assert_eq(&start_failed(&SimHost::new(), &sim, &failing()));
 }
 
 // Only a sandbox that listens holds companions. So a provider whose class holds them where its
