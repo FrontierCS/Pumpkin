@@ -12,6 +12,7 @@
 
 mod copy;
 mod follow;
+pub(crate) mod pressure;
 mod reaping;
 
 use std::fs::{self, File};
@@ -294,12 +295,14 @@ fn health(home: &Path) -> Result<Health, String> {
         up_seconds,
         disk_size_bytes: size_bytes,
         disk_free_bytes: free_bytes,
+        pressure: pressure::pressure(),
         boot: crate::job::boot_state(home),
     })
 }
 
 /// The listing of the runs below `home` that `request` asks for, as [`crate::listed_in`] makes it,
-/// at this machine's time, with the jobs yet to start a run.
+/// at this machine's time, with the jobs yet to start a run, and what the unit of each live run's
+/// job uses.
 fn listed(home: &Path, request: ListRequest) -> Result<Listed, String> {
     let ListRequest {
         prefixes,
@@ -332,6 +335,15 @@ fn listed(home: &Path, request: ListRequest) -> Result<Listed, String> {
             }
         }
     });
+    let live = listing.runs.iter().filter_map(|(id, entry)| match entry {
+        Entry::Row(row) if row.live() => Some(id.as_str()),
+        Entry::Row(_) | Entry::Older => None,
+    });
+    for (id, used) in pressure::units(live) {
+        if let Some(Entry::Row(row)) = listing.runs.get_mut(&id) {
+            row.unit = Some(used);
+        }
+    }
     Ok(Listed { listing, unlisted })
 }
 

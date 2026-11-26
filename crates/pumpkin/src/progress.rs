@@ -181,10 +181,10 @@ impl State {
 }
 
 /// The lines of `ls` of `listing`, its runs by id, so oldest first, and so the live ones, which
-/// started last, nearest the line of totals that follows them, each live run with a line for
-/// each of its calls and leases that hasn't ended, and a column of each run's member if one
-/// names one. The totals line ends with the command that lists the runs left out, unless there
-/// are none, naming where `at` says.
+/// started last, nearest the line of totals that follows them, each live run with a line of what
+/// its job's unit uses, if the row has it, and a line for each of its calls and leases that
+/// hasn't ended, and a column of each run's member if one names one. The totals line ends with
+/// the command that lists the runs left out, unless there are none, naming where `at` says.
 pub(crate) fn lines(listing: &Listing, at: &next::At) -> String {
     let mut lines = String::new();
     let mut totals = Totals::default();
@@ -202,10 +202,18 @@ pub(crate) fn lines(listing: &Listing, at: &next::At) -> String {
             }
         };
         totals.add(row);
+        let mut under = row.unit.as_ref().map_or_else(String::new, |used| {
+            let said = driver::unit_said(used);
+            format!(
+                "{:24} {:<11} {:>7}  {:<9} {:>7}  {said}\n",
+                "", "job", "", "", ""
+            )
+        });
+        under.push_str(row.under());
         let Some(width) = member_width else {
             lines.push_str(&line(id, &row.cells));
             lines.push('\n');
-            lines.push_str(row.under());
+            lines.push_str(&under);
             continue;
         };
         let member = row
@@ -214,7 +222,7 @@ pub(crate) fn lines(listing: &Listing, at: &next::At) -> String {
             .map_or("-".to_owned(), Member::to_string);
         lines.push_str(&line(&format!("{id} {member:<width$}"), &row.cells));
         lines.push('\n');
-        for under in row.under().lines() {
+        for under in under.lines() {
             let _ = writeln!(lines, "{:width$} {under}", "");
         }
     }
@@ -286,6 +294,7 @@ impl Totals {
             spent,
             member: _,
             unread: _,
+            unit: _,
         } = row;
         *self.states.entry(stage.state()).or_default() += 1;
         match stage {

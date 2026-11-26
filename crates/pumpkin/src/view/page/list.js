@@ -1,12 +1,13 @@
 // The runs, newest first, a page of them at a time, as `GET /api/runs?before=<id>` gives them;
 // the first page read again while a run in it is live, each row's cells changed where they differ,
-// so that a selection of a row's text stays.
+// so that a selection of a row's text stays. On a controller, the first page says above the runs
+// what the controller is short of.
 
 import { POLL_MS, count, fill, follow, get, h, plural, sentence, setKeys, show, tone, typing } from "./h.js";
 import { returnedView } from "./returned.js";
 
 /**
- * @typedef {{ runs: Array<ListedRun | Unlisted>, next: string | null }} Runs
+ * @typedef {{ runs: Array<ListedRun | Unlisted>, next: string | null, pressure?: string }} Runs
  * @typedef {object} ListedRun a run as `ls` lists it
  * @property {string} id
  * @property {string} [member] the member whose job the run is, on a controller whose job names one
@@ -20,6 +21,7 @@ import { returnedView } from "./returned.js";
  * @property {number | null} requests
  * @property {Tokens | null} tokens
  * @property {string} [started_over] what the view found of the run's log when it last read it again from its start
+ * @property {{ cpu: string, memory: string }} [job] what the unit of the live run's job uses, on a controller
  * @property {undefined} [error]
  * @typedef {{ id: string, error: string }} Unlisted a run whose record can't be read
  * @typedef {{ input: number | null, output: number | null, cached: number | null }} Tokens
@@ -41,6 +43,12 @@ const COLUMNS = [
 // After the run's id, when some run names its member.
 const MEMBER = ["Member", ""];
 
+// Before the last, when some run's job says what its unit uses.
+const UNIT = [
+  ["CPU", "num"],
+  ["Memory", "num"],
+];
+
 // A run's `rest`, as `ls` writes it, in two: its task, a word before the first ": ", and what
 // follows it; a `rest` that begins with no such word, as a sentence does, is all the second.
 /** @param {string} rest @returns {[string, string]} */
@@ -60,10 +68,18 @@ export async function runsView() {
   const more = h("div", { class: "more" });
   const head = h("tr", {});
   const table = h("table", { class: "runs" }, h("thead", {}, head), body);
-  // Whether the columns hold the member's, as `ls` shows it only when some run names one.
+  const pressure = h("p", { class: "pressure", title: "The machine's memory used, its total less what is available, and the share of the last minute in which some task of the controller stalled on each, as pressure stall information's some avg60 gives it" });
+  // Whether the columns hold the member's, as `ls` shows it only when some run names one, and
+  // those of what a job's unit uses, when some run's job says it.
   /** @type {boolean | null} */
   let membered = null;
-  const columns = () => (membered ? [...COLUMNS.slice(0, 3), MEMBER, ...COLUMNS.slice(3)] : COLUMNS);
+  /** @type {boolean | null} */
+  let united = null;
+  const columns = () => {
+    const shown = membered ? [...COLUMNS.slice(0, 3), MEMBER, ...COLUMNS.slice(3)] : [...COLUMNS];
+    if (united) shown.splice(shown.length - 1, 0, ...UNIT);
+    return shown;
+  };
   /** @type {{ first: Array<ListedRun | Unlisted>, older: Array<ListedRun | Unlisted>, next: string | null, cursor: number }} */
   const state = { first: [], older: [], next: null, cursor: -1 };
   // Each run's row, by its id, made once and changed after.
@@ -139,6 +155,12 @@ export async function runsView() {
       { cls: faded("num", number(listed.requests)), title: listed.requests === null ? noLog : null, text: number(listed.requests) },
       { cls: faded("num", number(tokens && tokens.input)), title: counted(tokens && tokens.input), text: number(tokens && tokens.input) },
       { cls: faded("num", number(tokens && tokens.output)), title: counted(tokens && tokens.output), text: number(tokens && tokens.output) },
+      ...(united
+        ? [
+            { cls: faded("num", listed.job?.cpu ?? "-"), title: listed.job ? "The CPU time that the job's own processes, its driver and the commands it runs, have used so far; its sandboxes and image builds are the engine's" : null, text: listed.job?.cpu ?? "-" },
+            { cls: faded("num", listed.job?.memory ?? "-"), title: listed.job ? "The memory that the job's own processes hold now, less the page cache that the kernel reclaims first" : null, text: listed.job?.memory ?? "-" },
+          ]
+        : []),
       // A run with a result says so, in a word that opens the result under its row; any other run
       // says what it is doing, or how it ended.
       listed.has_result ? { cls: "rest toggle", title: "Show or hide what the run returned", text: (opened.has(listed.id) ? "▾" : "▸") + " Result" } : { cls: "rest", title: said || null, text: said },
@@ -178,8 +200,10 @@ export async function runsView() {
     const runs = [...state.first, ...state.older];
     if (!runs.length) return show(h("p", { class: "empty" }, "No runs here yet."));
     const members = runs.some((run) => run.error === undefined && run.member !== undefined);
-    if (members !== membered) {
+    const units = runs.some((run) => run.error === undefined && run.job !== undefined);
+    if (members !== membered || units !== united) {
       membered = members;
+      united = units;
       head.replaceChildren(...columns().map(([name, cls]) => h("th", { class: cls }, name)));
     }
     // Each run's row, under it the row that says its log started over, if it did, and the row of
@@ -203,7 +227,7 @@ export async function runsView() {
       h("span", { class: "empty" }, plural(runs.length, "run") + (state.next ? " shown, the newest; older ones left out " : "")),
       state.next ? h("button", { title: "Read the next page of runs, those older than the last one shown", onclick: older }, "Older runs") : null,
     );
-    if (!table.isConnected) show(table, more);
+    if (!table.isConnected) show(pressure, table, more);
     rows.get(runs[state.cursor]?.id)?.scrollIntoView({ block: "nearest" });
   };
   const older = async () => {
@@ -245,6 +269,10 @@ export async function runsView() {
     if (state.older.length && last(page.runs) !== last(state.first)) state.older = [];
     state.first = page.runs;
     if (!state.older.length) state.next = page.next;
+    // As read now, which the line says, as it stays once no run is live and the page reads no more.
+    const at = new Date().toISOString().slice(11, 19);
+    const said = page.pressure === undefined ? "" : "Controller at " + at + " UTC: " + page.pressure;
+    if (pressure.textContent !== said) pressure.textContent = said;
     draw();
     return page.runs.some((run) => run.error === undefined && run.live) ? POLL_MS : null;
   });

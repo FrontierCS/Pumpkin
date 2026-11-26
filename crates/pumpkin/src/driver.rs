@@ -33,7 +33,7 @@ use stdx::process::Environment;
 
 mod used;
 
-pub(crate) use used::used;
+pub(crate) use used::{CGROUPS, cgroup_cpu, used};
 
 /// The name that the driver gives its process, as `ps` and `pgrep` show it.
 pub(crate) const NAME: &CStr = c"pumpkin-driver";

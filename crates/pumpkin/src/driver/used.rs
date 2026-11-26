@@ -18,7 +18,7 @@ const CGROUP: &str = "/proc/self/cgroup";
 // Where systemd mounts the cgroup v2 hierarchy on a host whose hierarchy is unified, v2 alone.
 // `/proc/self/cgroup` names a cgroup from the root of the process's cgroup namespace, which is
 // what a namespace's own mount shows here.
-const CGROUPS: &str = "/sys/fs/cgroup";
+pub(crate) const CGROUPS: &str = "/sys/fs/cgroup";
 
 // The file that each cgroup v2 directory has, and none of a v1 hierarchy.
 const CONTROLLERS: &str = "cgroup.controllers";
@@ -76,18 +76,21 @@ fn job(unit: &str) -> Option<JobUse> {
     if !dir.join(CONTROLLERS).is_file() {
         return None;
     }
-    let read = |file: &str| fs::read_to_string(dir.join(file)).ok();
-    let number = |file: &str| read(file)?.trim().parse().ok();
-    let cpu = read("cpu.stat").and_then(|stat| {
-        let micros = stat
-            .lines()
-            .find_map(|line| line.strip_prefix("usage_usec "))?;
-        Some(Duration::from_micros(micros.trim().parse().ok()?))
-    });
+    let number = |file: &str| fs::read_to_string(dir.join(file)).ok()?.trim().parse().ok();
     Some(JobUse {
         unit: unit.to_owned(),
-        cpu,
+        cpu: cgroup_cpu(&dir),
         peak_memory_bytes: number("memory.peak"),
         peak_tasks_count: number("pids.peak"),
     })
+}
+
+/// The CPU time that the tasks of the cgroup v2 directory `dir` have used, as its `cpu.stat`'s
+/// `usage_usec` gives it.
+pub(crate) fn cgroup_cpu(dir: &Path) -> Option<Duration> {
+    let stat = fs::read_to_string(dir.join("cpu.stat")).ok()?;
+    let micros = stat
+        .lines()
+        .find_map(|line| line.strip_prefix("usage_usec "))?;
+    Some(Duration::from_micros(micros.trim().parse().ok()?))
 }

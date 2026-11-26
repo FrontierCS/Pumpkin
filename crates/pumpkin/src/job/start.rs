@@ -11,9 +11,9 @@ use provider::RunTag;
 use retention::KEPT_DAYS;
 use schema::ir::Sha256Digest;
 use stdx::Context as _;
-use stdx::process::{Bound, Echo, Environment, Failure, Run};
+use stdx::process::{Bound, Echo, Failure, Run};
 
-use super::{JOBS, OWN, SENT_CONFIG, SENT_MODAL, TREES};
+use super::{JOBS, OWN, SENT_CONFIG, SENT_MODAL, SYSTEMD, TREES};
 use crate::link::{self, JobStart, StartAnswer};
 use crate::{manifest, workspace};
 
@@ -142,13 +142,6 @@ fn new_job_dir(parent: &Path, id: &str, mode: u32) -> Result<tempfile::TempDir, 
         .tempdir_in(parent)
         .context(parent.join(id).display())
 }
-
-const SYSTEMD: Environment = Environment::Only(&[
-    "HOME",
-    "PATH",
-    "XDG_RUNTIME_DIR",
-    "DBUS_SESSION_BUS_ADDRESS",
-]);
 
 fn launch(
     pumpkin: &Path,

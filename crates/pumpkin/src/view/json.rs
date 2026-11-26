@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use super::failure::{self, Failures};
 use super::talk::Talk;
 use super::{Held, when};
+use crate::progress::driver::{self, UnitUse};
 use crate::progress::{self, Listed, Row};
 use crate::{controller, next};
 
@@ -100,6 +101,12 @@ pub(super) fn listed_json(id: &str, row: &Row) -> Value {
         "usd": usd,
         "rest": rest,
     })
+}
+
+/// What a live run's job's unit uses, each figure as `ls` says it, by its name.
+pub(super) fn unit_json(used: &UnitUse) -> Value {
+    let [(_, cpu), (_, memory)] = driver::unit_figures(used);
+    json!({ "cpu": cpu, "memory": memory })
 }
 
 /// A run's tokens, where `input` and `output` are `null` if requests were made and no response

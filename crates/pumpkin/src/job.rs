@@ -83,6 +83,14 @@ pub(crate) fn unit_name(id: &RunTag) -> String {
     format!("{UNIT_PREFIX}{}", id.as_str())
 }
 
+/// The environment of a command that reaches the user's systemd, which manages the jobs' units.
+pub(crate) const SYSTEMD: Environment = Environment::Only(&[
+    "HOME",
+    "PATH",
+    "XDG_RUNTIME_DIR",
+    "DBUS_SESSION_BUS_ADDRESS",
+]);
+
 // The link in a job's directory to the `pumpkin` that runs it.
 pub(crate) const OWN: &str = "pumpkin";
 

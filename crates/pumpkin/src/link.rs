@@ -174,7 +174,8 @@ impl Request for HealthRequest {
     }
 }
 
-/// What the controller's machine reads of itself: how long it has been up, its disk and its boot.
+/// What the controller's machine reads of itself: how long it has been up, its disk, what it is
+/// short of and its boot.
 /// It judges nothing: it reads the same whether or not the controller can run a job.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Health {
@@ -183,7 +184,31 @@ pub(crate) struct Health {
     pub(crate) disk_size_bytes: u64,
     /// What an ordinary user may still write of that disk, as `job::disk` gives it.
     pub(crate) disk_free_bytes: u64,
+    /// What the controller is short of, or why it can't be read.
+    pub(crate) pressure: Result<Pressure, String>,
     pub(crate) boot: Boot,
+}
+
+/// What the controller is short of, as `crate::serve` reads it.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Pressure {
+    /// `MemTotal` of `/proc/meminfo`.
+    pub(crate) memory_size_bytes: u64,
+    /// `MemAvailable` of `/proc/meminfo`: what a new task could take without swapping, which
+    /// counts the page cache that the kernel can drop.
+    pub(crate) memory_available_bytes: u64,
+    /// `None` if the kernel keeps no pressure stall information.
+    pub(crate) stalled_percent: Option<StalledPercent>,
+}
+
+/// The share of the last minute, in percent, in which some task of the controller's stalled on
+/// each resource. It is the `some avg60` of the pressure stall information:
+/// <https://github.com/torvalds/linux/blob/06090c9b622a7e1f797e775db4c035e0d779b76e/Documentation/accounting/psi.rst#L42-L65>.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct StalledPercent {
+    pub(crate) cpu: f64,
+    pub(crate) memory: f64,
+    pub(crate) io: f64,
 }
 
 /// The state of the controller's boot, the unit `pumpkin-boot.service`, as `systemctl` gives it.

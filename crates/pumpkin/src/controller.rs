@@ -21,7 +21,7 @@ use std::process::Command;
 use std::time::Duration;
 
 pub(crate) use commands::{cancel, here, reap, run, wait};
-pub(crate) use listing::{ls, scratch};
+pub(crate) use listing::{ls, scratch, short_of};
 use location::{Found, Located, Location};
 use serde::{Deserialize, Serialize};
 use stdx::Context as _;

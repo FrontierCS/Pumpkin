@@ -379,6 +379,7 @@ fn list(compose: &Compose, clients: &[&Client]) -> Result<()> {
 fn apart(compose: &Compose, client: &Client, other: &Client) -> Result<()> {
     let pumpkin = |args: &[&str]| client.pumpkin(args);
     let id = holding(&pumpkin, None)?;
+    used(client, &id)?;
     let Said { passed, said } = other.said(&["cancel", &id])?;
     // The client's refusal, from the members that `serve` lists for the controller's jobs.
     let refusal = format!("run {id} on controller `{NAME}` is {}'s", client.member);
@@ -418,6 +419,37 @@ fn apart(compose: &Compose, client: &Client, other: &Client) -> Result<()> {
         return Ok(());
     }
     Err(format!("{}; its member's `ls` said: {listed}", failed.join("; ")).into())
+}
+
+/// Fails unless `./pumpkin ls` of `client` says how long the controller's tasks stalled, and each
+/// figure of what the unit of run `id`'s job uses. Those come from the cgroups that the
+/// controller's container and its systemd name.
+fn used(client: &Client, id: &str) -> Result<()> {
+    let how = Run::new(Bound::Within(PUMPKIN_TIMEOUT), Echo::Silent).named("./pumpkin ls");
+    let output = ran(&mut client.pumpkin(&["ls", id]), how)?;
+    let printed = String::from_utf8_lossy(&output.stdout);
+    let said = String::from_utf8_lossy(&output.stderr);
+    let job = printed
+        .lines()
+        .map(str::trim_start)
+        .find(|line| line.starts_with("job "));
+    match job {
+        Some(job) if !job.contains("unread") && said.contains("; a task stalled on CPU ") => {
+            let job = job.split_whitespace().collect::<Vec<_>>().join(" ");
+            println!(
+                "xtask: `./pumpkin ls {id}` said {}, and `{job}` under the run",
+                said.trim()
+            );
+            Ok(())
+        }
+        _ => Err(format!(
+            "`./pumpkin ls {id}` said {} and printed:\n{printed}\nexpected the controller's line to \
+             say how long its tasks stalled, and a line under the run's of what its job's unit \
+             uses, with each figure read",
+            said.trim()
+        )
+        .into()),
+    }
 }
 
 /// Takes `client`'s key off the members' list, which keeps `other`'s, and fails unless the

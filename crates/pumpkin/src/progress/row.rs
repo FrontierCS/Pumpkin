@@ -6,6 +6,7 @@ use provider::UnixTime;
 use runtime::{Ending, Stopped};
 use serde::{Deserialize, Serialize};
 
+use super::driver::UnitUse;
 use super::{Columns, Listed, State, columns, under};
 use crate::next;
 
@@ -20,6 +21,8 @@ pub(crate) struct Row {
     pub(crate) member: Option<Member>,
     /// What of the run's log this `pumpkin` can't read, as `progress::unread` says it, if any.
     pub(crate) unread: Option<String>,
+    /// What the unit of the run's job uses, on a controller whose job runs the live run.
+    pub(crate) unit: Option<UnitUse>,
 }
 
 /// What a run is doing or how it ended, with what only that stage has.
@@ -80,6 +83,7 @@ impl Row {
             spent: Spent::of(listed),
             member: None,
             unread: None,
+            unit: None,
         }
     }
 

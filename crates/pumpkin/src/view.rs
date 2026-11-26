@@ -27,6 +27,7 @@ mod trace;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::convert::Infallible;
+use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{self, Read as _};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
@@ -44,11 +45,12 @@ use stdx::Context;
 use self::asked::{Asked, START, allowed, asked};
 use self::failure::Failures;
 use self::http::{Method, Request, Response, Sent};
-use self::json::{listed_json, live_row, record_json, run_json, tokens_json};
+use self::json::{listed_json, live_row, record_json, run_json, tokens_json, unit_json};
 use self::talk::Talk;
 use crate::cli::Exit;
 use crate::controller::{Unviewed, Viewing};
 use crate::link::{ViewRequest, Viewed};
+use crate::progress::driver::UnitUse;
 use crate::progress::{self, Listed};
 use crate::{cli, config, next, say};
 
@@ -604,6 +606,9 @@ impl View {
         }
     }
 
+    /// The page of runs before `before`, or the first. On a controller, where `jobs` is, each live
+    /// run's row says what its job's unit uses. The first page says what the controller is short
+    /// of there.
     fn runs_json(&mut self, before: Option<&str>) -> Result<Response, Failed> {
         let names =
             if self.at.dir().is_none() && !self.runs.try_exists().context(self.runs.display())? {
@@ -613,12 +618,17 @@ impl View {
             };
         let older = names.iter().rev();
         let mut page = older.filter(|name| before.is_none_or(|before| name.as_str() < before));
+        let mut units = if self.jobs.is_some() {
+            crate::serve::pressure::units(page.clone().map(String::as_str))
+        } else {
+            BTreeMap::new()
+        };
         let mut rows = Vec::new();
         let mut last = None;
         for name in page.by_ref() {
             last = Some(name.clone());
             let row = self
-                .row(name)
+                .row(name, &mut units)
                 .or_else(|error| self.unread_row(name, error).map(Some))
                 .unwrap_or_else(|error| Some(json!({ "id": name, "error": error }).into()));
             rows.extend(row);
@@ -629,7 +639,12 @@ impl View {
         let next = if page.next().is_some() { last } else { None };
         // Append completed JSON values as Git's json_writer does. A cached row is already encoded.
         // https://github.com/git/git/blob/5d826e972970a784bd7a7bdf587512510097b8c7/json-writer.c#L350-L355
-        let mut body = format!(r#"{{"next":{},"runs":["#, json!(next));
+        let mut body = format!(r#"{{"next":{},"#, json!(next));
+        if self.jobs.is_some() && before.is_none() {
+            let said = crate::controller::short_of(&crate::serve::pressure::pressure());
+            let _ = write!(body, r#""pressure":{},"#, json!(said));
+        }
+        body.push_str(r#""runs":["#);
         body.reserve(rows.iter().map(|row| row.0.len() + 1).sum::<usize>() + 2);
         for (at, row) in rows.iter().enumerate() {
             if at > 0 {
@@ -664,7 +679,12 @@ impl View {
         Ok(row)
     }
 
-    fn row(&mut self, id: &str) -> Result<Option<JsonRow>, ReadError> {
+    /// The row of run `id`, with what its job's unit uses, taken from `units`, if it is live.
+    fn row(
+        &mut self,
+        id: &str,
+        units: &mut BTreeMap<String, UnitUse>,
+    ) -> Result<Option<JsonRow>, ReadError> {
         if let Some(row) = self.ended.get(id) {
             if !row.lost || row.record.ending()? == Some(Ending::Lost) {
                 return Ok(Some(row.json.clone()));
@@ -691,7 +711,10 @@ impl View {
         match &held.ending {
             None => {
                 let row = live_row(held, &at);
-                let row = self.membered(id, row).map_err(ReadError::Failed)?;
+                let mut row = self.membered(id, row).map_err(ReadError::Failed)?;
+                if let Some(used) = units.remove(id) {
+                    row["job"] = unit_json(&used);
+                }
                 Ok(Some(row.into()))
             }
             Some(ending) => {

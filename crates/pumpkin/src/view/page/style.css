@@ -138,6 +138,8 @@ table.runs tr.on { background: var(--select); box-shadow: inset 3px 0 0 var(--ac
 table.runs td.state { color: var(--text-2); }
 table.runs td.error { color: var(--fail); white-space: normal; }
 .more { display: flex; align-items: center; gap: var(--s2); padding: 0 var(--s1); font-size: 13px; }
+p.pressure { margin: 0; color: var(--dim); }
+p.pressure:empty { display: none; }
 .more .empty { color: var(--faint); }
 
 /* A run's head, on the ground, in the levels its reader gave. What matters most is large: the task,

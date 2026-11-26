@@ -69,18 +69,12 @@ fn check(scratch: &Scratch, text: &str, shown: &[(&str, &str)], expect: &Expect)
     for (value, name) in shown {
         text = text.replace(value, name);
     }
-    // The uptime and the disk that the controller's health reports vary, as does the size of the
-    // fixture's files, which an upload shows in KiB, unlike a test's own file or a remainder.
+    // The uptime and the shares that the controller's health reports vary, as does the size of
+    // the fixture's files, which an upload shows in KiB, unlike a test's own file or a remainder.
     let lines = text.lines().map(|line| match line.split_once("`: up ") {
         Some((before, after)) => {
             let rest = after.split_once(',').map_or("", |(_, rest)| rest);
-            let (rest, disk) = rest.split_once(", disk ").unwrap_or((rest, ""));
-            let disk = disk
-                .split_once("% used")
-                .map_or(disk.to_owned(), |(_, rest)| {
-                    format!(", disk <n>% used{rest}")
-                });
-            format!("{before}`: up <t>,{rest}{disk}")
+            format!("{before}`: up <t>,{}", shares_masked(rest))
         }
         None => match (line.strip_suffix(" KiB")).and_then(|rest| rest.rsplit_once(": sending ")) {
             Some((before, _)) => format!("{before}: sending <n> KiB"),
@@ -88,6 +82,27 @@ fn check(scratch: &Scratch, text: &str, shown: &[(&str, &str)], expect: &Expect)
         },
     });
     expect.assert_eq(&lines.collect::<Vec<String>>().join("\n"));
+}
+
+/// `text`, what the controller's health says, with each whole number before a `%` as `<n>`. The
+/// stalls are cut, as only a kernel that keeps them gives them. The live suite reads them.
+fn shares_masked(text: &str) -> String {
+    let mut text = text.to_owned();
+    if let Some(at) = text.find("; a task stalled on ")
+        && let Some(end) = text[at..].find(" of the last minute")
+    {
+        text.replace_range(at..at + end + " of the last minute".len(), "");
+    }
+    let mut masked = String::new();
+    for c in text.chars() {
+        if c == '%' {
+            let digits = masked.trim_end_matches(|c: char| c.is_ascii_digit()).len();
+            masked.truncate(digits);
+            masked.push_str("<n>");
+        }
+        masked.push(c);
+    }
+    masked
 }
 
 // What a command on the controller wrote to its standard error, which `serve` writes only as it
@@ -2089,6 +2104,10 @@ fn ls_ran(scratch: &Scratch, client: &[(String, String); 2], args: &[&str]) -> S
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the fixture and its snapshot"
+)]
 fn ls_answered_there() {
     let scratch = Scratch::new();
     let client = connected_client(&scratch);
@@ -2144,19 +2163,22 @@ fn ls_answered_there() {
         &expect![[r#"
             $ pumpkin ls
             exit status: Some(0)
-            pumpkin: controller `alice`: up <t>, 4 jobs, disk <n>% used
+            pumpkin: controller `alice`: up <t>, 4 jobs, disk <n>% used, memory <n>% used
             printed:
               20261107-110000-0d0c0008 -     finished          -  -               -  -: score=3 metrics={"solved":3}
               20261107-120000-1b8a0001 alice finished          -  -               -  -: score=7 metrics={"solved":3}
               20261107-120100-1b8a0002 -     publishing      <t>                  -  -
               20261107-130000-2c9b0004 alice waiting         <t>                  -  waiting 24h for a build slot
+                                             job                                     CPU unread, memory unread
               20261107-130100-2c9b0005 alice building        <t>                  -  holding a build slot for 48h
+                                             job                                     CPU unread, memory unread
               20261107-130101-2c9b0008 alice building        <t>                  -  -
+                                             job                                     CPU unread, memory unread
               20261107-130200-2c9b0006 alice unstarted       <t>                  -  -: its job ended before the run started: to see why: pumpkin wait --controller alice 20261107-130200-2c9b0006
               7 runs: 1 waiting, 2 building, 1 running, 2 finished, 1 unstarted; 2 runs that ended over a day ago aren't listed: to list them: pumpkin ls --controller alice 20261106
             $ pumpkin ls 20261106
             exit status: Some(0)
-            pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
+            pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used, memory <n>% used
             printed:
               20261106-120000-1b8a0003 -     failed            -  -               -  -
               20261106-130300-2c9b0007 alice unstarted       <t>                  -  -: its job ended before the run started: to see why: pumpkin wait --controller alice 20261106-130300-2c9b0007
@@ -2194,7 +2216,7 @@ fn ls_leaves_its_streams_blocking() {
         &[],
         &expect![[r#"
             exit status: 0
-            pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
+            pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used, memory <n>% used
             20261107-120000-1b8a0001 finished          -  -               -  -: score=7 metrics={"solved":3}
             1 run: 1 finished
             blocking: true"#]],
@@ -2252,11 +2274,11 @@ fn ls_installs_its_serve_there() {
             $ pumpkin ls
             exit status: Some(0)
             pumpkin: controller `alice` has no serve of this pumpkin: installing it there
-            pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
+            pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used, memory <n>% used
             the calls: serve=.pumpkin/<this build>/bin/pumpkin, install=.pumpkin/<this build>, serve=.pumpkin/<this build>/bin/pumpkin
             $ pumpkin ls
             exit status: Some(0)
-            pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
+            pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used, memory <n>% used
             the calls: serve=.pumpkin/<this build>/bin/pumpkin
             the second serve marked the install as used: true
             the install: bin 700
@@ -2294,7 +2316,7 @@ fn ls_refusals() {
             $ pumpkin ls
             exit status: Some(1)
             pumpkin: <scratch>/home/.pumpkin/runs/20261107-120100-1b8a0002/driver.pid isn't there: expected the record of a run to have it
-            pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
+            pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used, memory <n>% used
             pumpkin: 1 run can't be listed, as said above
             printed:
               20261107-120000-1b8a0001 finished          -  -               -  -: score=7 metrics={"solved":3}
@@ -2519,7 +2541,7 @@ fn members_attributed() {
             systemd-run --user --quiet --expand-environment=no --unit=pumpkin-job-<id> --working-directory=<scratch>/home/trees/repo/<id> --property=ExitType=cgroup --property=ExecStopPost=/usr/bin/rm --recursive --force <scratch>/bin/../run/pumpkin/<id> --property=StandardOutput=append:<scratch>/home/jobs/<id>/out --property=StandardError=append:<scratch>/home/jobs/<id>/log -- <scratch>/home/.pumpkin/<install>/bin/pumpkin controller job <id> --tree <tree> -- run -- stand-in/task.star
             $ pumpkin ls
             exit status: Some(0)
-            pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
+            pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used, memory <n>% used
             printed:
               <id> alice unstarted         -                  -  -: its job ended before the run started: to see why: pumpkin wait --controller alice <id>
               1 run: 1 unstarted"#]],
@@ -2685,7 +2707,7 @@ fn ls_says_unread_lines_of_a_run_unlisted() {
         exit status: Some(1)
         pumpkin: run <id>: 1 part of its log can't be read by this pumpkin, the first at line 3: EOF while parsing a value, at column 7
         pumpkin: run <id>: <scratch>/home/jobs/<id>/member: `Bad!` is not a member's name: give one of 1 to 32 of a-z, 0-9 and `-`, starting with a letter
-        pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
+        pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used, memory <n>% used
         pumpkin: 1 run can't be listed, as said above"#]],
     );
 }
@@ -2731,7 +2753,7 @@ fn member_unread() {
             $ pumpkin ls
             exit status: Some(1)
             pumpkin: run <unread>: <scratch>/home/jobs/<unread>/member: `Bad!` is not a member's name: give one of 1 to 32 of a-z, 0-9 and `-`, starting with a letter
-            pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
+            pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used, memory <n>% used
             pumpkin: 1 run can't be listed, as said above
             printed:
               <other> bob unstarted         -                  -  -: its job ended before the run started: to see why: pumpkin wait --controller alice <other>
@@ -3397,7 +3419,11 @@ fn views_the_controllers_runs_over_a_reopened_connection() {
     let rows: Vec<String> = (listed["runs"].as_array().unwrap().iter())
         .map(|row| format!("{} {} {}", row["id"], row["state"], row["member"]))
         .collect();
-    steps.push(format!("GET /api/runs\n{status}\n{}", rows.join("\n")));
+    let pressure = shares_masked(listed["pressure"].as_str().unwrap());
+    steps.push(format!(
+        "GET /api/runs\n{status}\npressure: {pressure}\n{}",
+        rows.join("\n")
+    ));
     steps.push(got(
         &served,
         &format!("/api/runs/{ended}"),
@@ -3420,6 +3446,7 @@ fn views_the_controllers_runs_over_a_reopened_connection() {
             next: <log bytes>, end: <log bytes>
             GET /api/runs
             HTTP/1.1 200 OK
+            pressure: memory <n>% used
             "<live>" "work" null
             "<ended>" "finished" "alice"
             GET /api/runs/<ended>

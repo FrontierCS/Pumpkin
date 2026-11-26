@@ -113,7 +113,7 @@ enum Parsed {
     /// each as `ls` says it. A run's page shows its summary, its sandboxes' lanes, who talks to
     /// whom and its log. The page changes a run only by a cancel, which runs `pumpkin cancel`.
     /// With `[controllers.<name>]` in the configuration and no `--runs`, `view` serves the
-    /// controller's runs.
+    /// controller's runs. Above them, it says what `ls` says of the controller's memory and stalls.
     View(View),
     /// Print the help of a command or a topic.
     ///

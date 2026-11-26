@@ -1,9 +1,11 @@
-//! What a run's driver used, as its `outcome.json` keeps it, in the words that `wait`'s summary and
-//! the page share.
+//! What a run's driver used, as its `outcome.json` keeps it, and what a live run's job uses. Each
+//! is said in the words that `wait`'s summary, `ls` and the page share.
 
 use std::fmt::Write as _;
+use std::time::Duration;
 
 use runtime::{DriverUse, JobUse, Record};
+use serde::{Deserialize, Serialize};
 
 use super::model::seconds;
 
@@ -76,6 +78,29 @@ pub(crate) fn figures(used: &DriverUse) -> (Vec<Figure>, Option<Vec<Figure>>) {
         ]
     });
     (driver, job)
+}
+
+/// What the unit of a job that runs uses: the CPU time its tasks have used so far, and their
+/// working set. That is the memory they hold now, less the page cache that the kernel reclaims
+/// first. Its tasks are the job's driver and the commands it runs. The engine runs sandboxes and
+/// builds in cgroups of its own. A figure is `None` if it couldn't be read.
+#[derive(Default, Serialize, Deserialize)]
+pub(crate) struct UnitUse {
+    pub(crate) cpu: Option<Duration>,
+    pub(crate) memory_bytes: Option<u64>,
+}
+
+pub(crate) fn unit_figures(used: &UnitUse) -> [Figure; 2] {
+    let UnitUse { cpu, memory_bytes } = used;
+    [
+        ("CPU".to_owned(), value(*cpu, seconds)),
+        ("memory".to_owned(), value(*memory_bytes, crate::size)),
+    ]
+}
+
+/// `used`, as `ls` says it under its run's row, such as `CPU 57.03s, memory 483.2 MiB`.
+pub(crate) fn unit_said(used: &UnitUse) -> String {
+    said(&unit_figures(used))
 }
 
 fn value<T>(figure: Option<T>, shown: impl FnOnce(T) -> String) -> String {

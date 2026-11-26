@@ -2,6 +2,7 @@
 //! answers with its health and the rows of its runs and of its jobs yet to start one, made where
 //! the records are, and `ls` adds the rows of the copies of its runs here that it lacks.
 
+use std::fmt::Write as _;
 use std::time::Duration;
 
 use provider::UnixTime;
@@ -11,7 +12,7 @@ use tempfile::TempDir;
 use super::linking::Build;
 use super::{Name, Reached};
 use crate::cli::Exit;
-use crate::link::{Boot, Health, HealthRequest, ListRequest, Listed};
+use crate::link::{Boot, Health, HealthRequest, ListRequest, Listed, Pressure, StalledPercent};
 use crate::progress::{Entry, Listing, Unlisted};
 use crate::workspace::Workspace;
 use crate::{config, next, say};
@@ -122,14 +123,12 @@ fn said(name: &Name, health: &Health, jobs: usize) -> String {
         up_seconds,
         disk_size_bytes,
         disk_free_bytes,
+        pressure,
         boot,
     } = health;
-    // The share of the disk that an ordinary user may not write, rounded up: it counts the blocks
-    // reserved for root as used, so it reads a few points above `df`'s.
-    let used = disk_size_bytes
-        .saturating_sub(*disk_free_bytes)
-        .saturating_mul(100);
-    let used_percent = used.div_ceil((*disk_size_bytes).max(1)).min(100);
+    // The share of the disk that an ordinary user may not write: it counts the blocks reserved for
+    // root as used, so it reads a few points above `df`'s.
+    let used_percent = used_percent(*disk_size_bytes, *disk_free_bytes);
     let unit = crate::job::BOOT_UNIT;
     let boot = match boot {
         Boot::Failed { status, at, log } => {
@@ -149,10 +148,43 @@ fn said(name: &Name, health: &Health, jobs: usize) -> String {
         Boot::Done | Boot::Unknown => String::new(),
     };
     format!(
-        "controller `{name}`: up {}, {}, disk {used_percent}% used{boot}",
+        "controller `{name}`: up {}, {}, disk {used_percent}% used, {}{boot}",
         crate::progress::span(Duration::from_secs(*up_seconds)),
-        crate::counted(jobs, "job")
+        crate::counted(jobs, "job"),
+        short_of(pressure)
     )
+}
+
+/// What `ls` and the page say of what the controller is short of, such as `memory 6% used; a task
+/// stalled on CPU 1%, memory 0% and I/O 56% of the last minute`, or why it can't be read.
+pub(crate) fn short_of(pressure: &Result<Pressure, String>) -> String {
+    let Pressure {
+        memory_size_bytes,
+        memory_available_bytes,
+        stalled_percent,
+    } = match pressure {
+        Ok(pressure) => pressure,
+        Err(error) => return format!("what it is short of can't be read: {error}"),
+    };
+    let memory = used_percent(*memory_size_bytes, *memory_available_bytes);
+    let mut said = format!("memory {memory}% used");
+    // To the nearest, as a share that rounded up would say 1% for the hundredths that an idle
+    // machine stalls.
+    if let Some(StalledPercent { cpu, memory, io }) = stalled_percent {
+        let _ = write!(
+            said,
+            "; a task stalled on CPU {cpu:.0}%, memory {memory:.0}% and I/O {io:.0}% of the last \
+             minute"
+        );
+    }
+    said
+}
+
+/// The share of `size_bytes` used, of which `free_bytes` are left, in whole percent. It is rounded
+/// up, so that a share that isn't 0 never reads as 0.
+fn used_percent(size_bytes: u64, free_bytes: u64) -> u64 {
+    let used = size_bytes.saturating_sub(free_bytes).saturating_mul(100);
+    used.div_ceil(size_bytes.max(1)).min(100)
 }
 
 fn said_when(began: UnixTime) {

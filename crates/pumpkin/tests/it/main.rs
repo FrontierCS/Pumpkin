@@ -690,11 +690,18 @@ fn masked_members(ran: &str, ids: &str, members: usize) -> String {
         // A line under a run's starts 25 columns further in, where its id would end.
         let indent = line.len() - line.trim_start().len();
         let row = line.trim_start().starts_with(ids).then_some(indent);
-        if let Some(at) = row.or_else(|| (indent > 25).then(|| indent - 25)) {
+        // From where a row's time is 37 columns on. That is a row's indent past its members'
+        // column. Under a row, it is a line's indent less its blank id, which follows the members'.
+        let start = row
+            .map(|at| at + members)
+            .or_else(|| (indent > 25).then(|| indent - 25));
+        if let Some(at) = start {
             // `ls` writes a row as its id in 24 columns, a space, its state in 11, a space and
-            // its time in 7: the time starts 37 columns in, after the members' column if any.
-            let at = at + members + 37;
-            line.replace_range(at..at + 7, "    <t>");
+            // its time in 7: the time starts 37 columns in. A job's line under its run's has none.
+            let at = at + 37;
+            if !line[at..at + 7].trim().is_empty() {
+                line.replace_range(at..at + 7, "    <t>");
+            }
         }
         for (from, to) in [(" answered ", " ago"), ("ends by ", " UTC")] {
             if let Some(at) = line.rfind(from)
