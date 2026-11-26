@@ -172,7 +172,6 @@ pub(crate) struct Sim {
     impostor: Option<&'static str>,
     // The companion at whose set-up `main`'s session ends.
     ends_main: Option<&'static str>,
-    // Whether it publishes the assets that its sandboxes hold.
     publishes_assets: bool,
 }
 
@@ -677,7 +676,6 @@ impl Sim {
         self.state().companions.clone()
     }
 
-    /// What each create was given of each asset.
     pub(crate) fn held_assets(&self) -> Vec<String> {
         self.state().assets.clone()
     }

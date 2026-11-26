@@ -1627,8 +1627,7 @@ dials_from = "203.0.113.7"
 classes.a100 = { gpu = "A100-80GB", gpu_model = "NVIDIA A100-SXM4-80GB", cpu_millis = 8000, memory_bytes = 85899345920, startup_seconds = 1800 }
 "#;
 
-// A role's assets reach its sandboxes read-only, from the workspace's cache, fetched from Hugging
-// Face. Each write there fails with `EROFS`, and a fresh sandbox finds the files unchanged.
+// `examples/assets` holds every fact it checks on Docker.
 #[test]
 #[ignore = "needs Docker and GitHub: run cargo xtask live docker"]
 fn holds_assets_read_only() {
@@ -1640,9 +1639,6 @@ fn holds_assets_read_only() {
     fs::hard_link(sandboxd(), scratch.0.join(".pumpkin/bin/sandboxd")).unwrap();
     let context = docker_context();
     scratch.write("pumpkin.toml", &machine(&context));
-    let home = test_home(&scratch, &context);
-    let temp = scratch.0.join("tmp");
-    fs::create_dir(&temp).unwrap();
     let args = [
         "run",
         "examples/assets/task.star",
@@ -1650,22 +1646,19 @@ fn holds_assets_read_only() {
         "--config",
         "pumpkin.toml",
     ];
-    let mut run = at_home(&scratch, &home, &temp, &args);
+    let mut run = scratch.pumpkin(&args);
     let invoked = invocation(&run);
     let rootful = !engine(&scratch, &context).report().security.rootless;
     let output = with_room(&mut run);
-    let cache = scratch.0.join(".pumpkin/assets");
     let lines = [
         report(invoked, &output, &scratch.0, rootful),
-        format!(".pumpkin/assets holds: {}", held(&cache)),
+        format!(".pumpkin holds: {}", held(&scratch.0.join(".pumpkin"))),
     ];
-    // So that the scratch directory can be removed.
-    fs::set_permissions(home.join(".docker"), Permissions::from_mode(0o755)).unwrap();
     let shown = lines
         .join("\n")
         .replace(scratch.0.to_str().unwrap(), "<scratch>");
     expect![[r#"
-        $ env --unset=DOCKER_CONFIG TMPDIR=<scratch>/tmp env --unset=XDG_CACHE_HOME env --unset=XDG_CONFIG_HOME env --unset=XDG_DATA_HOME pumpkin run examples/assets/task.star --wait --config pumpkin.toml
+        $ pumpkin run examples/assets/task.star --wait --config pumpkin.toml
         exit status: Some(0)
         pumpkin: run <id> records into <scratch>/.pumpkin/runs/<id>
         pumpkin: run <id> started
@@ -1695,7 +1688,7 @@ fn holds_assets_read_only() {
         lease 0's sandbox, leases/0/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
         lease 1's sandbox, leases/1/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
         outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_exited","status":{"code":0}}}],"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"busy_ns":"<ns>","charged_ns":"<ns>","class":"container","count":4,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":4},{"name":"of","value":4},{"name":"pinned","value":true},{"name":"read_only","value":true},{"name":"refused","value":true},{"name":"unchanged","value":true},{"name":"unexpected","value":{}}]}}}
-        .pumpkin/assets holds: .6ce84a757aa294faf6f92e1e6ffec9916a3d70bb60c53f32e4f56295f2f239d7.lock, 6ce84a757aa294faf6f92e1e6ffec9916a3d70bb60c53f32e4f56295f2f239d7"#]].assert_eq(&shown);
+        .pumpkin holds: assets, bin, docker, runs"#]].assert_eq(&shown);
 }
 
 /// Writes `examples/hello` into `scratch`, with the marker of its root, and with `label` on its

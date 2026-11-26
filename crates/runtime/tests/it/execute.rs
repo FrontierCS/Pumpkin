@@ -4881,9 +4881,18 @@ fn names_mains_end_before_a_companions_failure() {
 #[test]
 fn companions_where_sandboxes_dial() {
     let sim = Sim::new().offering_companions();
-    let ir = serde_json::from_value(companions_workflow(&["exit", "0"])).unwrap();
+    expect![[r#"
+        fits: provider `simulated`'s class `sim` holds companions, and its sandboxes don't listen: expected only a provider whose sandboxes listen to offer companions
+        prepared: the same; records: []"#]]
+    .assert_eq(&unprepared(&sim, companions_workflow(&["exit", "0"])));
+}
+
+/// Why `runtime::fits` refuses `ir` on `sim`, and how `Run::prepare` refuses it, with the records
+/// that it left.
+fn unprepared(sim: &Sim, ir: Value) -> String {
+    let ir = serde_json::from_value(ir).unwrap();
     let placed = placed(&ir, sim.ready()).unwrap();
-    let on = providers_of(&placed, |_| &sim);
+    let on = providers_of(&placed, |_| sim);
     let fits = runtime::fits(&placed, &on).unwrap_err();
     let runs = TestDir::new();
     let servings = StandIn::servings(None, placed.workflow(), runs.path());
@@ -4891,19 +4900,20 @@ fn companions_where_sandboxes_dial() {
     let (models, recorded) = kept(&placed, &servings, &prices);
     let prepared = Run::prepare(&System, placed, on, runs.path(), id, models, recorded);
     let Err(prepared) = prepared else {
-        panic!("a run whose companions no sandbox holds is prepared")
+        panic!("a run that `fits` refuses is prepared")
     };
     let records = files(runs.path());
-    expect![[r#"
-        fits: provider `simulated`'s class `sim` holds companions, and its sandboxes don't listen: expected only a provider whose sandboxes listen to offer companions
-        prepared: the same; records: []"#]]
-    .assert_eq(&format!(
+    format!(
         "fits: {fits}\nprepared: {}; records: {records:?}",
-        if prepared == fits { "the same" } else { &prepared }
-    ));
+        if prepared == fits {
+            "the same"
+        } else {
+            &prepared
+        }
+    )
 }
 
-/// `file`, a path, its bytes and their SHA-256, as a file of an asset from `base`.
+/// `file` as a file of an asset at `base`.
 fn asset_file(base: &str, file: (&str, &[u8], &str)) -> Value {
     let (path, bytes, sha256) = file;
     let (url, sha256) = (format!("{base}/{path}"), format!("sha256:{sha256}"));
@@ -4964,33 +4974,18 @@ fn holds_each_roles_assets() {
         {"actions":[],"at_ns":"0","event":{"digest":"sha256:eeb0cd7d8c9d9d34ac22ea13505d7249a4f9f8408c491c32a4c2d2d300bf2efa","fetched":true,"kind":"asset_published","provider":"simulated","took_ns":"<ns>"},"seq":2}"#]].assert_eq(&shown.join("\n"));
 }
 
-// Only a provider that publishes assets is given any. So a provider whose class holds them where it
-// publishes none is refused before any image is built, and no run on it is prepared.
+// A provider whose class holds assets where it publishes none is refused before any image is
+// built, and no run on it is prepared.
 #[test]
 fn assets_where_none_are_published() {
     let sim = Sim::new().offering_assets();
     let mut ir = workflow(&["exit", "0"]);
     let b = json!([asset_file("https://example.com", B)]);
     ir["roles"][1]["assets"] = json!([{ "path": "/opt/b", "files": b }]);
-    let ir = serde_json::from_value(ir).unwrap();
-    let placed = placed(&ir, sim.ready()).unwrap();
-    let on = providers_of(&placed, |_| &sim);
-    let fits = runtime::fits(&placed, &on).unwrap_err();
-    let runs = TestDir::new();
-    let servings = StandIn::servings(None, placed.workflow(), runs.path());
-    let (prices, id) = (prices(), new_id(SystemTime::now()).unwrap());
-    let (models, recorded) = kept(&placed, &servings, &prices);
-    let prepared = Run::prepare(&System, placed, on, runs.path(), id, models, recorded);
-    let Err(prepared) = prepared else {
-        panic!("a run whose assets no provider publishes is prepared")
-    };
-    let records = files(runs.path());
     expect![[r#"
         fits: provider `simulated`'s class `sim` holds assets, and the provider publishes none: expected only a provider that publishes assets to offer a class that holds them
-        prepared: the same; records: []"#]].assert_eq(&format!(
-        "fits: {fits}\nprepared: {}; records: {records:?}",
-        if prepared == fits { "the same" } else { &prepared }
-    ));
+        prepared: the same; records: []"#]]
+    .assert_eq(&unprepared(&sim, ir));
 }
 
 #[test]

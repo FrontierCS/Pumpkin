@@ -1,20 +1,17 @@
 //! Files of an asset, each its path, its bytes and their SHA-256, as `sha256sum` prints it.
 
-/// `{}\n`, as a model's configuration.
 pub const CONFIG: (&str, &[u8], &str) = (
     "config.json",
     b"{}\n",
     "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
 );
 
-/// `1\n`, as a shard of a model's weights.
 pub const SHARD: (&str, &[u8], &str) = (
     "shards/1.bin",
     b"1\n",
     "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
 );
 
-/// `b\n`, as the one file of another asset.
 pub const B: (&str, &[u8], &str) = (
     "b",
     b"b\n",

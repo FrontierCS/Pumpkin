@@ -718,8 +718,7 @@ fn volume(sandbox: &Started) -> String {
     name
 }
 
-// A container's empty tmpfs at `/tmp` would hide an asset there, so the provider refuses one as
-// the run is placed. An asset below `/tmp` is mounted in that tmpfs.
+// The provider refuses an asset at `/tmp`, and not one below it.
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn assets_at_tmp() {

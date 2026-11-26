@@ -17,7 +17,7 @@ use serde_json::json;
 use test_support::asset::{B, CONFIG, SHARD};
 use test_support::{TestDir, edge, http};
 
-/// Any digest: the runtime computes it, and the cache only names an entry by it.
+/// Any digest, as the cache only names an entry by it.
 const DIGEST: &str = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 
 /// Serves each of `files`, a path and its bytes, at `/<path>`, one connection at a time, each
@@ -116,8 +116,8 @@ fn listed(base: &Path, dir: &Path, lines: &mut Vec<String>) {
     }
 }
 
-// The first publish of a digest fetches its files into an entry, and a later one finds them there.
-// Only the cache's owner reaches them. No mode keeps a sandbox from writing them: its mount does.
+// The first publish of a digest fetches its files, read-only, into an entry that only the
+// cache's owner reaches. A later publish finds them there.
 #[test]
 fn fetches_each_digest_once() {
     let dir = TestDir::new();
@@ -177,8 +177,7 @@ fn refuses_what_isnt_pinned() {
     );
 }
 
-// Two fetches of a digest at once fetch its files once. The second begins while the first holds
-// the digest's lock and waits on its server.
+// Two fetches of a digest at once fetch its files once.
 #[test]
 fn fetches_at_once() {
     let dir = TestDir::new();

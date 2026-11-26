@@ -1541,7 +1541,7 @@ fn asset_values() {
             at_url("https://user:secret@example.com/a"),
             at_url("https://example.com/a b"),
             at_url("https:///a"),
-            at_url(&format!("https://example.com/{}", "a".repeat(8000))),
+            at_url(&format!("https://example.com/{}", "a".repeat(7981))),
         ],
         &expect![[r#"
             parsed
@@ -1558,7 +1558,7 @@ fn asset_values() {
             `https://user:secret@example.com/a` names a user: give an `https://` URL with a host, no user, no whitespace and at most 8000 bytes
             `https://example.com/a b` holds whitespace or a control character: give an `https://` URL with a host, no user, no whitespace and at most 8000 bytes
             `https:///a` names no host: give an `https://` URL with a host, no user, no whitespace and at most 8000 bytes
-            `https://example.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa…` is 8020 bytes long: give an `https://` URL with a host, no user, no whitespace and at most 8000 bytes"#]],
+            `https://example.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa…` is 8001 bytes long: give an `https://` URL with a host, no user, no whitespace and at most 8000 bytes"#]],
     );
 }
 
