@@ -1490,9 +1490,9 @@ fn job_functions() {
         .unwrap()
         .push(again);
     let mut resident = twice.clone();
-    resident["roles"][4]["runtime"] = json!({"target": {"lifetime": "work", "cwd": "/"}});
+    resident["roles"][4]["runtime"] = json!({"target": {"lifetime": "work_phase", "cwd": "/"}});
     let mut resident_grants = target_holding();
-    resident_grants["roles"][4]["runtime"]["target"]["lifetime"] = json!("work");
+    resident_grants["roles"][4]["runtime"]["target"]["lifetime"] = json!("work_phase");
     let mut resident_final = resident.clone();
     resident_final["final"]["target"] = json!("verifier");
     let mut uncalled = calling();
@@ -1550,7 +1550,7 @@ fn job_functions() {
               --> final.target
             error: `final_judge` is a target that no job function or final call names: name it from one
               --> roles[2]
-            error: model egress requires a call-lifetime target
+            error: model egress requires a `per_call` target
               --> roles[4].runtime.target.egress"#]],
     );
 }

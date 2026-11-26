@@ -233,14 +233,14 @@ pub struct RunnerRuntime {
 #[serde(rename_all = "snake_case")]
 pub enum TargetLifetime {
     /// Each call owns its sandbox until its body ends.
-    Call,
+    PerCall,
     /// All work-phase calls use one sandbox, one complete body at a time, which keeps the files
     /// each body leaves, a failed one's too. A call while another's body runs, or while that
     /// body's runner is being deleted, is refused as busy, and isn't charged. Once the sandbox's
     /// session has ended, each later call is refused, and the agents work on. Once the work phase's
     /// calls have ended, the run collects the sandbox's output and deletes it, before the final
     /// call.
-    Work,
+    WorkPhase,
 }
 
 /// How a target runs each command a call's body sends, as the role's user: as a [`Command`] would
@@ -259,7 +259,7 @@ pub struct TargetRuntime {
     /// The target's routes out, open while a call's body runs; absent, it has none.
     #[serde(default, skip_serializing_if = "Egress::is_empty")]
     pub egress: Egress,
-    /// The body's session grants, with fresh quotas per call. A call-lifetime sandbox's
+    /// The body's session grants, with fresh quotas per call. A `per_call` sandbox's
     /// commands may also use them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sessions: Vec<NamedSession>,

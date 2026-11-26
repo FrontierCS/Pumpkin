@@ -70,7 +70,7 @@ impl Workflow {
     /// Targets whose sandbox spans the work phase, in declaration order.
     pub fn work_targets(&self) -> impl Iterator<Item = TargetId> {
         self.targets.iter().filter_map(|(role, target)| {
-            (target.lifetime == TargetLifetime::Work).then_some(TargetId(*role))
+            (target.lifetime == TargetLifetime::WorkPhase).then_some(TargetId(*role))
         })
     }
 

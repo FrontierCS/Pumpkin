@@ -225,7 +225,7 @@ pub enum Event {
 /// What the core asks the runtime to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
-    /// Starts the work-lifetime targets and agents. Releasing the agents' commands produces
+    /// Starts the `work_phase` targets and agents. Releasing the agents' commands produces
     /// [`Event::WorkStarted`]. Each agent reports its own exit or failure.
     StartAgents,
     /// Answers op `op`.

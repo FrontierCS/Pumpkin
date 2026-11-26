@@ -257,6 +257,6 @@ export function inspectLane(lane, inspector, nearest, data, callList, failureOf)
       h("dd", {}, count(answers.count, "ans") + (answers.failed ? ", " + answers.failed.toLocaleString("en-US") + " failed" : "")),
     ),
     work.length ? h("ul", {}, work) : null,
-    lane.lifetime === "work" ? callList : null,
+    lane.lifetime === "work_phase" ? callList : null,
   );
 }

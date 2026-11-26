@@ -76,7 +76,7 @@ impl Roles {
             shared: roles
                 .iter()
                 .enumerate()
-                .filter(|(_, role)| matches!(&role.runtime, ir::Runtime::Target(target) if target.lifetime == Some(ir::TargetLifetime::Work)))
+                .filter(|(_, role)| matches!(&role.runtime, ir::Runtime::Target(target) if target.lifetime == Some(ir::TargetLifetime::WorkPhase)))
                 .map(|(index, role)| (role.name.to_string(), index))
                 .collect(),
             grants: grants.collect(),
@@ -180,8 +180,9 @@ pub(crate) fn ir_in(dir: &Path) -> Result<Option<ir::Workflow>, ReadError> {
     Ok(Some(ir))
 }
 
-/// `bytes` read as an IR whose roles declare a `shared` runtime, which a record may hold: each
-/// reads as a work-lifetime target. `None` if none does, or the result isn't an IR. Only record
+/// `bytes` read as an IR in an older form, which a record may hold. A role's `shared` runtime
+/// reads as a `work_phase` target. A target's `lifetime` of `call` or `work` reads as `per_call`
+/// or `work_phase`. `None` if no role holds an older form, or the result isn't an IR. Only record
 /// readers accept it.
 fn legacy_ir(bytes: &[u8]) -> Option<ir::Workflow> {
     let mut ir: Value = serde_json::from_slice(bytes).ok()?;
@@ -193,8 +194,19 @@ fn legacy_ir(bytes: &[u8]) -> Option<ir::Workflow> {
         {
             let target = shared.as_object_mut()?;
             ir::Command::deserialize(target.remove("command")?).ok()?;
-            target.insert("lifetime".to_owned(), Value::from("work"));
+            target.insert("lifetime".to_owned(), Value::from("work_phase"));
             runtime.insert("target".to_owned(), shared);
+            converted = true;
+        }
+        let lifetime = runtime
+            .get_mut("target")
+            .and_then(|target| target.get_mut("lifetime"));
+        if let Some(lifetime) = lifetime {
+            *lifetime = Value::from(match lifetime.as_str() {
+                Some("call") => "per_call",
+                Some("work") => "work_phase",
+                _ => continue,
+            });
             converted = true;
         }
     }

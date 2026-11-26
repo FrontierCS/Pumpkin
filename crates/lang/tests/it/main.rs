@@ -529,6 +529,24 @@ workflow(
     );
     check(
         r#"
+#- //bad/lifetime/task.star
+load("//lib/parts.star", "AGENT", "FINAL_TARGET", "FINAL")
+
+workflow(
+    name = "neutral/lifetime",
+    roles = [AGENT, FINAL_TARGET | {"runtime": {"target": {"lifetime": "work", "cwd": "/"}}}],
+    final = FINAL,
+    deadline_seconds = 3600,
+)
+"#,
+        &expect![[r#"
+            bad/lifetime/task.star:5:72: `work` is no kind of `lifetime`: expected one of `per_call`, `work_phase`
+                5 |     roles = [AGENT, FINAL_TARGET | {"runtime": {"target": {"lifetime": "work", "cwd": "/"}}}],
+                  |                                                                        ^^^^^^
+                the IR's /roles/1/runtime/target/lifetime"#]],
+    );
+    check(
+        r#"
 #- //bad/zero/task.star
 load("//lib/parts.star", "AGENT", "FINAL_TARGET", "FINAL")
 

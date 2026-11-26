@@ -4,7 +4,7 @@
 //! command that a body runs has its output in a directory of its own, `log/<c>` for its `c`th, as
 //! a lease's command ([`command_dir`]), collected into the job's directory of the record once it
 //! exits, or at the call's end if the call is cut short while it runs. Fresh targets are frozen
-//! and collected as the body ends. A work-lifetime sandbox stays available until work ends.
+//! and collected as the body ends. A `work_phase` sandbox stays available until work ends.
 
 use core::num::NonZeroU64;
 use std::collections::BTreeMap;
@@ -214,7 +214,7 @@ pub(crate) fn evaluate<H: Host>(
     session: &mut Session<H::Clock>,
     stdin: &mut Stdin,
 ) -> Ended {
-    let resident = call.target.lifetime == TargetLifetime::Work;
+    let resident = call.target.lifetime == TargetLifetime::WorkPhase;
     if !resident && child.stopped() {
         return Ended::Stopped;
     }
@@ -588,7 +588,7 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
         let command = self.runs_count;
         let dir = self.output_dir(command);
         self.runs_count += 1;
-        let put = if target.lifetime == TargetLifetime::Work {
+        let put = if target.lifetime == TargetLifetime::WorkPhase {
             self.session.put(&pumpkin_dir().join(&dir), [], by)
         } else {
             self.session
@@ -634,7 +634,7 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
 
     fn output_dir(&self, command: u64) -> RelativePath {
         let dir = command_dir(command);
-        if self.call.target.lifetime == TargetLifetime::Work {
+        if self.call.target.lifetime == TargetLifetime::WorkPhase {
             const { RelativePath::from_static("jobs") }
                 .join(&RelativePath::from(self.call.job.0))
                 .join(&dir)

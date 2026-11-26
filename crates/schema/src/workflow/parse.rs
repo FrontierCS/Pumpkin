@@ -222,11 +222,11 @@ impl<'ir> Parser<'ir> {
             egress,
             sessions,
         } = target;
-        let lifetime = lifetime.unwrap_or(ir::TargetLifetime::Call);
-        if lifetime == ir::TargetLifetime::Work && !egress.is_empty() {
+        let lifetime = lifetime.unwrap_or(ir::TargetLifetime::PerCall);
+        if lifetime == ir::TargetLifetime::WorkPhase && !egress.is_empty() {
             self.errors.report(
                 at.token("egress"),
-                "model egress requires a call-lifetime target",
+                "model egress requires a `per_call` target",
             );
         }
         self.hold(at, TargetId(role), sessions);
@@ -294,7 +294,7 @@ impl<'ir> Parser<'ir> {
             .called
             .iter()
             .find(|(target, agent, _)| *target == target_id && *agent == holder)
-            .filter(|_| self.targets[&target_id.0].lifetime == ir::TargetLifetime::Call);
+            .filter(|_| self.targets[&target_id.0].lifetime == ir::TargetLifetime::PerCall);
         let shared = match first {
             Some((_, _, first)) => Err(self.errors.report(
                 target_at,
@@ -537,7 +537,7 @@ impl<'ir> Parser<'ir> {
     fn final_target(&mut self, target: &Name) -> Result<TargetId, Reported> {
         let at = JsonPointer::root().token("final").token("target");
         let id = self.call_target(&at, target, "the final call's target")?;
-        if self.targets[&id.0].lifetime == ir::TargetLifetime::Work {
+        if self.targets[&id.0].lifetime == ir::TargetLifetime::WorkPhase {
             return Err(self.errors.report(
                 at,
                 format!("`{target}` is a shared work sandbox: give the final call a fresh target"),

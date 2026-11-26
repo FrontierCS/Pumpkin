@@ -34,7 +34,7 @@ def team(agents, train_image, judge_image):
                 "user": JUDGE_USER,
                 "needs": {"cpu_millis": 500, "memory_bytes": 256 * MiB},
                 "runtime": {"target": {
-                    "lifetime": "call",
+                    "lifetime": "per_call",
                     "cwd": "/pumpkin/home",
                     "sessions": [{
                         "name": "native_train",
@@ -60,7 +60,7 @@ def team(agents, train_image, judge_image):
                 "image": judge_image,
                 "user": JUDGE_USER,
                 "needs": JUDGE_NEEDS,
-                "runtime": {"target": {"lifetime": "call", "cwd": "/pumpkin/home"}},
+                "runtime": {"target": {"lifetime": "per_call", "cwd": "/pumpkin/home"}},
             },
         ],
         final = {"target": "judge", "body": final, "payload_max_bytes": 256 * KiB, "timeout_seconds": 9200},

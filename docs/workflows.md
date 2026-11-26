@@ -18,11 +18,11 @@ The run places the role by those needs ([providers](providers.md#placing-a-run))
   `deadline_seconds` sets that deadline. The agents share the deadline, and each ends on its own.
   An agent holds `grants`, the functions that it may call. It also holds `egress`, its model
   route ([models](models.md)).
-- A **target** runs the commands that a call's body sends. With the `call` lifetime, which is the
-  default, each call gets a fresh sandbox that ends with the call. With the `work` lifetime, one
-  sandbox serves every call of the work phase. It serves one whole body at a time. A work
-  target's commands make no ops and no model requests. A process there can outlive its call, so
-  nothing could tell its requests apart by job.
+- A **target** runs the commands that a call's body sends. With the `per_call` lifetime, which is
+  the default, each call gets a fresh sandbox that ends with the call. With the `work_phase`
+  lifetime, one sandbox serves every call of the work phase. It serves one whole body at a time.
+  A work target's commands make no ops and no model requests. A process there can outlive its
+  call, so nothing could tell its requests apart by job.
 - A **runner** is a sandbox that a session leases. The lease's holder drives it. A runner holds no
   egress and no grants.
 
