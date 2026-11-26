@@ -18,7 +18,7 @@ use schema::workflow::Workflow;
 
 use crate::problem::{Fault, Finding, Problem, Problems, Sources, list};
 use crate::value::{ImageId, Span, Value};
-use crate::{Args, Label};
+use crate::{Args, Label, SourceMap};
 
 // What `pumpkin`'s functions have recorded of an evaluation so far.
 pub(crate) struct Planned<'a> {
@@ -203,7 +203,8 @@ impl Plan {
 
     /// Checks each image's recipe with `recipes`, which gives the problems it finds (such as a
     /// recipe that is no file), sorted, given the recipe and the names of its contexts; and gives
-    /// the workflow, its images standing as IDs of their own, which no build gave.
+    /// the workflow, its images standing as IDs of their own, which no build gave, with where its
+    /// source wrote each of its values. A build leaves each value where it was written.
     ///
     /// # Errors
     ///
@@ -212,7 +213,7 @@ impl Plan {
     pub fn check(
         &self,
         mut recipes: impl FnMut(&Recipe, &[&str]) -> Vec<String>,
-    ) -> Result<Workflow, Problems> {
+    ) -> Result<(Workflow, SourceMap), Problems> {
         let mut problems = Vec::new();
         for Declaration { image, place } in &self.images {
             let Image { recipe, contexts } = image;
@@ -255,8 +256,10 @@ impl Plan {
                 ),
             })
             .collect();
-        let workflow = self.workflow(&images);
-        workflow.map_err(|problems| Problems::new(self.sources, problems))
+        match self.workflow(&images) {
+            Ok((workflow, _)) => Ok(workflow),
+            Err(problems) => Err(Problems::new(self.sources, problems)),
+        }
     }
 
     // Each image, by its index, built through `step`, which is given images to build and gives the
@@ -319,13 +322,16 @@ impl Plan {
         Err(Problems::new(self.sources.clone(), problems))
     }
 
-    fn workflow(&self, images: &[ir::Image]) -> Result<Workflow, Vec<Problem>> {
+    fn workflow(&self, images: &[ir::Image]) -> Result<(Workflow, SourceMap), Vec<Problem>> {
         let fields = &self.workflow.fields;
-        let ir = crate::ir::workflow(fields, images, &self.sources)?;
-        Workflow::parse(&ir).map_err(|errors| {
-            let faults = crate::ir::locate(fields, errors.as_slice());
-            faults.into_iter().map(Problem::At).collect()
-        })
+        let (ir, map) = crate::ir::workflow(fields, images, &self.sources)?;
+        match Workflow::parse(&ir) {
+            Ok(workflow) => Ok((workflow, map)),
+            Err(errors) => {
+                let faults = crate::ir::locate(&map, errors.as_slice());
+                Err(faults.into_iter().map(Problem::At).collect())
+            }
+        }
     }
 }
 

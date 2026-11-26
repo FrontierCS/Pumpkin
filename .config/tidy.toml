@@ -44,7 +44,7 @@
 "crates/lang/src/eval/body.rs" = 5
 "crates/lang/src/eval/call.rs" = 3
 "crates/lang/src/eval/operators.rs" = 7
-"crates/lang/src/ir.rs" = 7
+"crates/lang/src/ir.rs" = 6
 "crates/lang/src/json.rs" = 8
 "crates/lang/src/lib.rs" = 16
 "crates/lang/src/plan.rs" = 10

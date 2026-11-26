@@ -13,6 +13,7 @@
 mod body;
 mod conformance;
 mod fixtures;
+mod placing;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::num::NonZeroUsize;

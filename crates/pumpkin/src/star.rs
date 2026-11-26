@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::{fmt, fs, io, iter, thread};
 
 use engine::{BuildContext, Building, Built, Engine, Started};
-use lang::{Args, Declared, Label, Loader, Plan, Problems, Recipe};
+use lang::{Args, Declared, Label, Loader, Plan, Problems, Recipe, SourceMap};
 use recipe::Given;
 use schema::ir::Image;
 use schema::workflow::Workflow;
@@ -471,6 +471,7 @@ pub(crate) struct Task<'r> {
     root: &'r mut Root,
     plan: Plan,
     workflow: Workflow,
+    source_map: SourceMap,
     /// What the evaluation read, from which each of the workflow's bodies is evaluated.
     sources: Sources,
 }
@@ -480,22 +481,29 @@ impl Task<'_> {
         &self.workflow
     }
 
+    /// Where the task's source wrote each value of its workflow's IR.
+    pub(crate) fn source_map(&self) -> &SourceMap {
+        &self.source_map
+    }
+
     /// Builds the task's images on `engine`, each build as `admission` admits it, and gives the
-    /// workflow with its images built, the tag of each, and the sources of its bodies.
+    /// workflow with its images built, the tag of each, the sources of its bodies, and where the
+    /// source wrote each value of the workflow's IR.
     pub(crate) fn build(
         self,
         engine: &Engine,
         admission: &mut (dyn Admission + Send),
-    ) -> Result<(Workflow, Tags, Sources), Problems> {
+    ) -> Result<(Workflow, Tags, Sources, SourceMap), Problems> {
         let Self {
             root,
             plan,
             workflow: _,
+            source_map,
             sources,
         } = self;
         let mut builds = Builds::new(admission);
         let built = plan.build(jobs(), |ready| builds.step(&*root, engine, ready))?;
-        Ok((built, builds.tags, sources))
+        Ok((built, builds.tags, sources, source_map))
     }
 }
 
@@ -589,15 +597,17 @@ pub(crate) fn checked<T: Send>(
             Err(problems) => return Ok(Err(problems)),
         };
         let sources = keeping.kept();
-        let workflow = match plan.check(|recipe, contexts| root.recipe(recipe, contexts)) {
-            Ok(workflow) => workflow,
-            Err(problems) => return Ok(Err(problems)),
-        };
+        let (workflow, source_map) =
+            match plan.check(|recipe, contexts| root.recipe(recipe, contexts)) {
+                Ok(checked) => checked,
+                Err(problems) => return Ok(Err(problems)),
+            };
         match bodies::check(&workflow, sources, args) {
             Ok(sources) => then(Task {
                 root: &mut root,
                 plan,
                 workflow,
+                source_map,
                 sources,
             }),
             Err(problems) => Ok(Err(problems)),

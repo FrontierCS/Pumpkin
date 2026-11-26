@@ -41,6 +41,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 pub use eval::body::{Body, BodyKind, Host, Run, Target};
+pub use ir::SourceMap;
 pub use plan::{Declared, Plan, Recipe};
 pub use problem::{Finding, Problems};
 pub use schema::ir::{Label, Root};

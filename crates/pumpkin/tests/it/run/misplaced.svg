@@ -22,7 +22,7 @@
   <text xml:space="preserve" class="container fg">
     <tspan x="10px" y="28px"><tspan>pumpkin: </tspan><tspan class="fg-red bold">error:</tspan><tspan> </tspan><tspan class="bold">role `agent` fits no class of sandbox</tspan>
 </tspan>
-    <tspan x="10px" y="46px"><tspan>  </tspan><tspan class="dimmed">--&gt;</tspan><tspan> misfit/task.star: roles[0].needs: 8 CPUs, 32.0 GiB, 1 × `NVIDIA H100 80GB HBM3`</tspan>
+    <tspan x="10px" y="46px"><tspan>  </tspan><tspan class="dimmed">--&gt;</tspan><tspan> misfit/task.star:9:57: roles[0].needs: 8 CPUs, 32.0 GiB, 1 × `NVIDIA H100 80GB HBM3`</tspan>
 </tspan>
     <tspan x="10px" y="64px"><tspan>  </tspan><tspan class="dimmed">=</tspan><tspan> `a100/a100`: 1 × `NVIDIA A100-SXM4-80GB`</tspan>
 </tspan>
@@ -36,7 +36,7 @@
 </tspan>
     <tspan x="10px" y="154px"><tspan>pumpkin: </tspan><tspan class="fg-red bold">error:</tspan><tspan> </tspan><tspan class="bold">role `trainer` fits no class of sandbox</tspan>
 </tspan>
-    <tspan x="10px" y="172px"><tspan>  </tspan><tspan class="dimmed">--&gt;</tspan><tspan> misfit/task.star: roles[1].needs: 64 CPUs, 2.0 GiB</tspan>
+    <tspan x="10px" y="172px"><tspan>  </tspan><tspan class="dimmed">--&gt;</tspan><tspan> misfit/task.star:9:869: roles[1].needs: 64 CPUs, 2.0 GiB</tspan>
 </tspan>
     <tspan x="10px" y="190px"><tspan>  </tspan><tspan class="dimmed">=</tspan><tspan> `a100/a100`: 8 CPUs, 1 × `NVIDIA A100-SXM4-80GB` (only for roles that need it)</tspan>
 </tspan>

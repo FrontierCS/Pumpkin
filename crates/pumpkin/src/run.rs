@@ -13,6 +13,7 @@ use docker::Docker;
 use ec2::Ec2;
 use engine::Engine;
 use gateway::{Dialer, Listener};
+use lang::SourceMap;
 use modal::Modal;
 use provider::{Meeting, Provider, RunTag};
 use runtime::{Budgets, ModelRoutes, Record, Recorded, Run, System, TokenPrices};
@@ -299,15 +300,15 @@ fn prepared<'e>(
         .context(config.display())?;
     let engine = &*engine.insert(crate::engine(context, reader)?);
     let here = Offered::Here { entry, config };
-    let reached = reached(task.workflow(), providers, engine, &here)?;
-    let (workflow, _, sources) = match task.build(engine, &mut ()) {
+    let reached = reached(task.workflow(), task.source_map(), providers, engine, &here)?;
+    let (workflow, _, sources, source_map) = match task.build(engine, &mut ()) {
         Ok(built) => built,
         Err(problems) => return Ok(Err(problems)),
     };
     // Only `Workflow::place` makes a `Placed`, so the workflow with its images built is placed
     // again, on the providers reached. A build changes no role's needs, so each role is placed
     // where it was.
-    let (placed, placed_on) = place(workflow, reached, Connected::classes, &here)?;
+    let (placed, placed_on) = place(workflow, &source_map, reached, Connected::classes, &here)?;
     Ok(Ok(Prepared {
         placed,
         placed_on,
@@ -326,6 +327,7 @@ fn prepared<'e>(
 /// end passes.
 fn reached<'e>(
     workflow: &Workflow,
+    source_map: &SourceMap,
     providers: config::Providers<config::Kind>,
     engine: &'e Engine,
     offered: &Offered<'_>,
@@ -338,7 +340,13 @@ fn reached<'e>(
             Ok((name, offer))
         })
         .collect::<Result<_, String>>()?;
-    let (_, placed_on) = place(workflow.clone(), offers, Offer::classes, offered)?;
+    let (_, placed_on) = place(
+        workflow.clone(),
+        source_map,
+        offers,
+        Offer::classes,
+        offered,
+    )?;
     // Each provider that a role is placed on is reached here, so that one that can't be reached is
     // refused before any image is built. A provider that no role is placed on is never reached.
     let reached = (placed_on.into_iter())
@@ -347,7 +355,13 @@ fn reached<'e>(
             Ok((name, connected))
         })
         .collect::<Result<_, String>>()?;
-    let (placed, placed_on) = place(workflow.clone(), reached, Connected::classes, offered)?;
+    let (placed, placed_on) = place(
+        workflow.clone(),
+        source_map,
+        reached,
+        Connected::classes,
+        offered,
+    )?;
     let fits = runtime::fits(&placed, &placed_on.as_ref().map(Connected::provider));
     fits.map_err(|error| match offered {
         Offered::Here { config, .. } => format!("{}: {error}", config.display()),
@@ -442,11 +456,12 @@ impl<'e> Connected<'e> {
 /// [`misplaced`] does.
 fn place<P>(
     workflow: Workflow,
+    source_map: &SourceMap,
     providers: BTreeMap<Name, P>,
     classes: impl Fn(&P) -> &BTreeMap<Name, Class>,
     offered: &Offered<'_>,
 ) -> Result<(Placed, ByProvider<P>), String> {
-    (workflow.place(providers, classes)).map_err(|errors| misplaced(errors, offered))
+    (workflow.place(providers, classes)).map_err(|errors| misplaced(errors, source_map, offered))
 }
 
 /// Who offers the sandboxes of a run that a refusal of it names.
@@ -454,21 +469,16 @@ enum Offered<'a> {
     /// The providers of the configuration at `config`, to the operator of the task whose entry is
     /// at `entry`.
     Here { entry: &'a Path, config: &'a Path },
-    /// A controller, to its member, by the name that the member's configuration gives it, for
-    /// the task whose entry is at `entry`.
-    Controller {
-        name: &'a controller::Name,
-        entry: &'a Path,
-    },
+    /// A controller, to its member, by the name that the member's configuration gives it.
+    Controller { name: &'a controller::Name },
 }
 
-/// Says each of `errors`, a placement's, at the task's entry, then how many there are, as
-/// `offered` has it. The errors are styled where the standard error is. Returns where to read how
-/// a class is offered.
-fn misplaced(errors: ParseErrors, offered: &Offered<'_>) -> String {
+/// Says each of `errors`, a placement's, where `source_map` places it, then how many there are,
+/// as `offered` has it. The errors are styled where the standard error is. Returns where to read
+/// how a class is offered.
+fn misplaced(errors: ParseErrors, source_map: &SourceMap, offered: &Offered<'_>) -> String {
     let count = errors.as_slice().len();
-    let (Offered::Here { entry, .. } | Offered::Controller { entry, .. }) = offered;
-    let errors = errors.in_source(|_| entry.display().to_string());
+    let errors = errors.in_source(|at| source_map.place(at));
     let paint = Paint(paint::styled(&io::stderr()));
     for error in errors.as_slice() {
         say(paint.error(error));
@@ -479,7 +489,7 @@ fn misplaced(errors: ParseErrors, offered: &Offered<'_>) -> String {
             entry.display(),
             config.display()
         ),
-        Offered::Controller { name, .. } => format!(
+        Offered::Controller { name } => format!(
             "controller `{name}`: placing the workflow's roles in the classes of sandbox that it \
              offers has"
         ),
@@ -490,10 +500,10 @@ fn misplaced(errors: ParseErrors, offered: &Offered<'_>) -> String {
 
 /// Fails as [`reached`] does, to the member of the controller that they name `controller`, if
 /// the roles of `workflow` never fit the providers of the configuration at `config`, which it
-/// reaches on `engine`. The task's entry is at `entry`.
+/// reaches on `engine`. Each misfit is where `source_map` places it.
 pub(crate) fn never_fits_controller(
     workflow: &Workflow,
-    entry: &Path,
+    source_map: &SourceMap,
     config: &Path,
     engine: &Engine,
     controller: &controller::Name,
@@ -504,11 +514,8 @@ pub(crate) fn never_fits_controller(
         gateway: _,
         upstreams: _,
     } = config::read(config)?;
-    let offered = Offered::Controller {
-        name: controller,
-        entry,
-    };
-    reached(workflow, providers, engine, &offered)?;
+    let offered = Offered::Controller { name: controller };
+    reached(workflow, source_map, providers, engine, &offered)?;
     Ok(())
 }
 

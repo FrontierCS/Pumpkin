@@ -14,6 +14,9 @@
 //! An error is at the value read when it happened, even where the value's own type refuses it
 //! once read, as a name's does; for an unknown field or kind, it is at the key, and for a
 //! missing field, at the dict. Its note is the place in the IR, as a JSON Pointer.
+//!
+//! The read notes the span of each value it reads at the value's place in the IR, which makes the
+//! workflow's [`SourceMap`].
 
 use alloc::borrow::ToOwned;
 use alloc::collections::BTreeMap;
@@ -35,14 +38,14 @@ use crate::problem::{Fault, Sources, list};
 use crate::syntax::Type;
 use crate::value::{Entry, Function, Key, Kind, Span, Value, escape, quote};
 
-/// The IR's workflow that `fields`, the dict of the keyword arguments of `workflow()`, gives. An
-/// image in it is the ID at its place in `images`. A fault is at the value that is wrong, and
-/// notes where in the IR it is.
+/// The IR's workflow that `fields`, the dict of the keyword arguments of `workflow()`, gives, and
+/// where `sources` wrote each of its values. An image in it is the ID at its place in `images`. A
+/// fault is at the value that is wrong, and notes where in the IR it is.
 pub(crate) fn workflow(
     fields: &Value,
     images: &[ir::Image],
     sources: &Sources,
-) -> Result<ir::Workflow, Fault> {
+) -> Result<(ir::Workflow, SourceMap), Fault> {
     // The fields of `ir::Workflow` that a workflow's writer gives.
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -53,10 +56,13 @@ pub(crate) fn workflow(
         #[serde(rename = "final")]
         final_call: ir::Final,
     }
+    let mut spans = BTreeMap::new();
     let de = De {
         value: fields,
+        pointer: JsonPointer::root(),
         images,
         sources,
+        spans: &mut spans,
     };
     let Fields {
         name,
@@ -77,20 +83,58 @@ pub(crate) fn workflow(
         let message = message.read(&tokens);
         Fault::new(at.unwrap_or(fields.span), message).note(place(&pointer), None)
     })?;
-    Ok(ir::Workflow {
+    let workflow = ir::Workflow {
         ir_version: ir::IrVersion::V1,
         name,
         deadline_seconds,
         roles,
         final_call,
-    })
+    };
+    let map = SourceMap {
+        sources: sources.clone(),
+        whole: fields.span,
+        spans,
+    };
+    Ok((workflow, map))
 }
 
-/// The faults of `errors`, which `schema` gives for the IR that `fields` made, each at the span of
-/// the value its pointer reaches, or of the deepest one that exists, when the value lacks what
-/// the pointer names. Errors that say the same at one span make one fault. It notes each of their
-/// pointers, with what the IR holds there, then each why and each help.
-pub(crate) fn locate(fields: &Value, errors: &[ParseError]) -> Vec<Fault> {
+/// Where a task's source wrote each value of its workflow's IR, by the value's place in the IR.
+/// It stays beside the IR, which holds no place in the source.
+#[derive(Debug)]
+pub struct SourceMap {
+    sources: Sources,
+    /// The span of the whole IR: the `workflow()` call's.
+    whole: Span,
+    /// The span of each value below the whole IR.
+    spans: BTreeMap<JsonPointer, Span>,
+}
+
+impl SourceMap {
+    /// Where the source wrote the value at `pointer` in the IR, as `<file>:<line>:<column>`, read
+    /// as [`Problems`](crate::Problems) reads a place. A pointer past what the source wrote, such
+    /// as to a field left to its default, is at the deepest value on its way.
+    pub fn place(&self, pointer: &JsonPointer) -> String {
+        self.sources.place(self.span(pointer))
+    }
+
+    fn span(&self, pointer: &JsonPointer) -> Span {
+        let mut reached = JsonPointer::root();
+        let mut span = self.whole;
+        for token in pointer.tokens() {
+            reached = reached.token(token);
+            match self.spans.get(&reached) {
+                Some(below) => span = *below,
+                None => break,
+            }
+        }
+        span
+    }
+}
+
+/// The faults of `errors`, which `schema` gives for the IR whose values `map` places, each at the
+/// span that `map` gives its pointer. Errors that say the same at one span make one fault. It
+/// notes each of their pointers, with what the IR holds there, then each why and each help.
+pub(crate) fn locate(map: &SourceMap, errors: &[ParseError]) -> Vec<Fault> {
     let mut located: Vec<(Span, &ParseError, Vec<String>)> = Vec::new();
     for error in errors {
         // The evaluation finds the place in the source itself, from the pointer.
@@ -101,23 +145,19 @@ pub(crate) fn locate(fields: &Value, errors: &[ParseError]) -> Vec<Fault> {
             why,
             help,
         } = error;
-        let mut tokens = at.tokens();
-        let mut reached = fields;
-        while let Some(child) = tokens.next().and_then(|token| child(reached, &token)) {
-            reached = child;
-        }
+        let span = map.span(at);
         let place = match label {
             Some(label) => format!("{}: {label}", place(at)),
             None => place(at),
         };
-        let same = |(span, said, _): &&mut (Span, &ParseError, Vec<String>)| {
-            *span == reached.span
+        let same = |(said_at, said, _): &&mut (Span, &ParseError, Vec<String>)| {
+            *said_at == span
                 && (&said.message, &said.label, &said.why, &said.help)
                     == (message, label, why, help)
         };
         match located.iter_mut().find(same) {
             Some((_, _, places)) => places.push(place),
-            None => located.push((reached.span, error, Vec::from([place]))),
+            None => located.push((span, error, Vec::from([place]))),
         }
     }
     (located.into_iter())
@@ -130,25 +170,6 @@ pub(crate) fn locate(fields: &Value, errors: &[ParseError]) -> Vec<Fault> {
             })
         })
         .collect()
-}
-
-fn child<'v>(value: &'v Value, token: &str) -> Option<&'v Value> {
-    match &value.kind {
-        Kind::Dict(entries) => (entries.iter())
-            .find(|entry| matches!(&entry.key, Key::Str(key) if **key == *token))
-            .map(|entry| &entry.value),
-        Kind::List(items) | Kind::Tuple(items) => items.get(token.parse::<usize>().ok()?),
-        Kind::None
-        | Kind::Bool(_)
-        | Kind::Int(_)
-        | Kind::Float(_)
-        | Kind::Str(_)
-        | Kind::Function(_)
-        | Kind::Builtin(_)
-        | Kind::Image(_)
-        | Kind::Module(_)
-        | Kind::Hosted(_) => None,
-    }
 }
 
 fn place(pointer: &JsonPointer) -> String {
@@ -344,16 +365,28 @@ fn words(expected: &dyn de::Expected) -> String {
 /// A [`Value`] that `serde` reads as the IR's JSON would be read: an image is its ID, a string,
 /// and a function that a `def` makes is its body, `{"file": …, "def": …}`, its file's label in
 /// `sources`.
-#[derive(Clone, Copy)]
-struct De<'v> {
+struct De<'v, 'm> {
     value: &'v Value,
+    /// Where `value` is in the IR.
+    pointer: JsonPointer,
     images: &'v [ir::Image],
     sources: &'v Sources,
+    /// The span of each value read so far, at its place in the IR.
+    spans: &'m mut BTreeMap<JsonPointer, Span>,
 }
 
-impl<'v> De<'v> {
-    fn of(self, value: &'v Value) -> Self {
-        Self { value, ..self }
+impl<'v> De<'v, '_> {
+    /// `value`, the value at `token` of this one, which is read next, noting its span.
+    fn of(&mut self, token: impl fmt::Display, value: &'v Value) -> De<'v, '_> {
+        let pointer = self.pointer.token(token);
+        self.spans.insert(pointer.clone(), value.span);
+        De {
+            value,
+            pointer,
+            images: self.images,
+            sources: self.sources,
+            spans: self.spans,
+        }
     }
 
     // The body that `function` is, `visitor`'s map: its file's label, its name, and, if the type
@@ -410,7 +443,7 @@ macro_rules! forward {
     };
 }
 
-impl<'de> de::Deserializer<'de> for De<'_> {
+impl<'de> de::Deserializer<'de> for De<'_, '_> {
     type Error = Error;
 
     fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
@@ -571,7 +604,11 @@ impl<'de> de::Deserializer<'de> for De<'_> {
     }
 }
 
-fn seq<'de, V: Visitor<'de>>(de: De<'_>, items: &[Value], visitor: V) -> Result<V::Value, Error> {
+fn seq<'de, V: Visitor<'de>>(
+    de: De<'_, '_>,
+    items: &[Value],
+    visitor: V,
+) -> Result<V::Value, Error> {
     let mut access = Seq(de, items.iter().enumerate());
     let value = visitor.visit_seq(&mut access)?;
     let left = access.1.len();
@@ -586,9 +623,12 @@ fn seq<'de, V: Visitor<'de>>(de: De<'_>, items: &[Value], visitor: V) -> Result<
     Ok(value)
 }
 
-struct Seq<'v>(De<'v>, core::iter::Enumerate<core::slice::Iter<'v, Value>>);
+struct Seq<'v, 'm>(
+    De<'v, 'm>,
+    core::iter::Enumerate<core::slice::Iter<'v, Value>>,
+);
 
-impl<'de> SeqAccess<'de> for &mut Seq<'_> {
+impl<'de> SeqAccess<'de> for &mut Seq<'_, '_> {
     type Error = Error;
 
     fn next_element_seed<T: DeserializeSeed<'de>>(
@@ -598,7 +638,7 @@ impl<'de> SeqAccess<'de> for &mut Seq<'_> {
         let Some((index, item)) = self.1.next() else {
             return Ok(None);
         };
-        let element = seed.deserialize(self.0.of(item));
+        let element = seed.deserialize(self.0.of(index, item));
         element
             .map(Some)
             .map_err(|error| error.at(item.span, Token::Index(index)))
@@ -609,15 +649,15 @@ impl<'de> SeqAccess<'de> for &mut Seq<'_> {
     }
 }
 
-struct Map<'v> {
-    de: De<'v>,
+struct Map<'v, 'm> {
+    de: De<'v, 'm>,
     entries: core::slice::Iter<'v, Entry>,
     /// The entry whose key the visitor has read, the field's name, and whose value it reads next.
     entry: Option<(&'v str, &'v Entry)>,
 }
 
-impl<'v> Map<'v> {
-    fn new(de: De<'v>, entries: &'v [Entry]) -> Self {
+impl<'v, 'm> Map<'v, 'm> {
+    fn new(de: De<'v, 'm>, entries: &'v [Entry]) -> Self {
         Self {
             de,
             entries: entries.iter(),
@@ -626,7 +666,7 @@ impl<'v> Map<'v> {
     }
 }
 
-impl<'de> MapAccess<'de> for Map<'_> {
+impl<'de> MapAccess<'de> for Map<'_, '_> {
     type Error = Error;
 
     fn next_key_seed<K: DeserializeSeed<'de>>(
@@ -649,7 +689,7 @@ impl<'de> MapAccess<'de> for Map<'_> {
                  ask for a value only after its key"
             )
         };
-        let value = seed.deserialize(self.de.of(&entry.value));
+        let value = seed.deserialize(self.de.of(key, &entry.value));
         value.map_err(|error| error.at(entry.value.span, Token::Key(String::from(key))))
     }
 
@@ -718,13 +758,13 @@ impl<'de> VariantAccess<'de> for Named<'_> {
 }
 
 /// A kind that the key of a one-key dict names, and the value that the dict gives it.
-struct Variant<'v> {
-    de: De<'v>,
+struct Variant<'v, 'm> {
+    de: De<'v, 'm>,
     kind: &'v str,
     entry: &'v Entry,
 }
 
-impl<'de> EnumAccess<'de> for Variant<'_> {
+impl<'de> EnumAccess<'de> for Variant<'_, '_> {
     type Error = Error;
     type Variant = Self;
 
@@ -735,34 +775,38 @@ impl<'de> EnumAccess<'de> for Variant<'_> {
     }
 }
 
-impl<'v> Variant<'v> {
+impl<'v> Variant<'v, '_> {
     fn below(&self, error: Error) -> Error {
         error.at(self.entry.value.span, Token::Key(String::from(self.kind)))
     }
 
-    fn value(&self) -> De<'v> {
-        self.de.of(&self.entry.value)
+    fn value(&mut self) -> De<'v, '_> {
+        self.de.of(self.kind, &self.entry.value)
     }
 }
 
-impl<'de> VariantAccess<'de> for Variant<'_> {
+impl<'de> VariantAccess<'de> for Variant<'_, '_> {
     type Error = Error;
 
-    fn unit_variant(self) -> Result<(), Error> {
+    fn unit_variant(mut self) -> Result<(), Error> {
         <()>::deserialize(self.value()).map_err(|error| self.below(error))
     }
 
-    fn newtype_variant_seed<T: DeserializeSeed<'de>>(self, seed: T) -> Result<T::Value, Error> {
+    fn newtype_variant_seed<T: DeserializeSeed<'de>>(mut self, seed: T) -> Result<T::Value, Error> {
         seed.deserialize(self.value())
             .map_err(|error| self.below(error))
     }
 
-    fn tuple_variant<V: Visitor<'de>>(self, _len: usize, visitor: V) -> Result<V::Value, Error> {
+    fn tuple_variant<V: Visitor<'de>>(
+        mut self,
+        _len: usize,
+        visitor: V,
+    ) -> Result<V::Value, Error> {
         de::Deserializer::deserialize_seq(self.value(), visitor).map_err(|error| self.below(error))
     }
 
     fn struct_variant<V: Visitor<'de>>(
-        self,
+        mut self,
         _fields: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, Error> {

@@ -1558,25 +1558,25 @@ fn misplaced_on_docker() {
         rootful,
         &shown,
         &expect![[r#"
-        $ pumpkin run misfit/task.star --sandboxd <sandboxd> --runs runs --config pumpkin.toml
-        exit status: Some(1)
-        pumpkin: error: role `agent` fits no class of sandbox
-          --> misfit/task.star: roles[0].needs: 8 CPUs, 32.0 GiB, 1 × `NVIDIA H100 80GB HBM3`
-          = `a100/a100`: 1 × `NVIDIA A100-SXM4-80GB`
-          = `aws/agent`: no GPU
-          = `aws/judge`: 13.4 GiB, no GPU
-          = help: add a class with 1 × `NVIDIA H100 80GB HBM3`, and at least 8 CPUs and 32.0 GiB,
-                  or change the role's `gpu` to 1 × `NVIDIA A100-SXM4-80GB`, which `a100/a100` has
-        pumpkin: error: role `trainer` fits no class of sandbox
-          --> misfit/task.star: roles[1].needs: 64 CPUs, 2.0 GiB
-          = `a100/a100`: 8 CPUs, 1 × `NVIDIA A100-SXM4-80GB` (only for roles that need it)
-          = `aws/agent`: 32 CPUs
-          = `aws/judge`: 8 CPUs
-          = help: add a class with at least 64 CPUs and 2.0 GiB,
-                  or lower the role's `cpu_millis` to 32000, which `aws/agent` offers
-        pumpkin: misfit/task.star: placing the workflow's roles in the classes that pumpkin.toml's providers offer has 2 problems
-        pumpkin: to read how a configuration offers a class: pumpkin help config
-        pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <sandboxd> <scratch>/misfit/task.star"#]],
+            $ pumpkin run misfit/task.star --sandboxd <sandboxd> --runs runs --config pumpkin.toml
+            exit status: Some(1)
+            pumpkin: error: role `agent` fits no class of sandbox
+              --> misfit/task.star:9:57: roles[0].needs: 8 CPUs, 32.0 GiB, 1 × `NVIDIA H100 80GB HBM3`
+              = `a100/a100`: 1 × `NVIDIA A100-SXM4-80GB`
+              = `aws/agent`: no GPU
+              = `aws/judge`: 13.4 GiB, no GPU
+              = help: add a class with 1 × `NVIDIA H100 80GB HBM3`, and at least 8 CPUs and 32.0 GiB,
+                      or change the role's `gpu` to 1 × `NVIDIA A100-SXM4-80GB`, which `a100/a100` has
+            pumpkin: error: role `trainer` fits no class of sandbox
+              --> misfit/task.star:9:869: roles[1].needs: 64 CPUs, 2.0 GiB
+              = `a100/a100`: 8 CPUs, 1 × `NVIDIA A100-SXM4-80GB` (only for roles that need it)
+              = `aws/agent`: 32 CPUs
+              = `aws/judge`: 8 CPUs
+              = help: add a class with at least 64 CPUs and 2.0 GiB,
+                      or lower the role's `cpu_millis` to 32000, which `aws/agent` offers
+            pumpkin: misfit/task.star: placing the workflow's roles in the classes that pumpkin.toml's providers offer has 2 problems
+            pumpkin: to read how a configuration offers a class: pumpkin help config
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <sandboxd> <scratch>/misfit/task.star"#]],
     );
     let mut styled = run();
     styled.env("CLICOLOR_FORCE", "1");
