@@ -1,10 +1,9 @@
 """A check of a runner's companions, with no model, for a provider whose classes offer them.
 
 The final call leases a runner whose sandbox holds `companions` companions beside `main`, at
-least 1, on the needs that `cpu_millis` and `memory_mib` give. On Modal, a sandbox holds one
-companion for each 32 thousandths of a CPU and 32 MiB that it needs. The defaults give 8 far
-more: at that least, 256 thousandths or 256 MiB for 8, their sandbox may not meet them all within
-its class's startup.
+least 1, on the needs that `cpu_millis` and `memory_mib` give. The defaults give 8 companions far
+more than the least needs that hold them. `docs/providers.md` says why for each provider that
+offers companions.
 
 Each container serves its own name on the sandbox's network, and says the user that its command
 runs as. Each companion fetches the names of `main` and of the companion before it, and `main`

@@ -52,9 +52,9 @@ mod images;
 mod sandboxes;
 
 /// The companions that a sandbox of any class holds, each a sidecar of Modal's.
-// Modal refuses a sidecar past one for each 32 thousandths of a CPU and 32 MiB that the sandbox
-// reserves. It counts no container of the sandbox's own, and refuses any past 250:
-// https://modal.com/docs/guide/sandbox-sidecars
+// Modal refuses a sidecar past what the sandbox reserves: its refusal says "limit is derived from
+// sandbox reservation". It counts no container of the sandbox's own. Its guide caps them at 250
+// whatever the reservation: https://modal.com/docs/guide/sandbox-sidecars
 // A sandbox reserves what its role needs (`sandboxes`), which is what placing counts by.
 const COMPANIONS: Companions = Companions::Reserved {
     cpu_millis_each: NonZeroU64::new(32).unwrap(),
