@@ -296,12 +296,17 @@ fn held(jobs: &Path, runs: &Path) -> Result<Held, String> {
 }
 
 /// The directory of every job's directory in tmpfs, `jobs`, opened to be locked: a prune locks it
-/// while it reads what the jobs hold and removes what they don't (`collect`), and a job shares the
-/// lock while it adds to what it holds (`Admission`), so that no image a job has held before it
-/// looks it up is removed while the job runs.
+/// while it reads what the jobs hold and removes the images they don't (`collect`), and a job
+/// shares the lock while it adds to what it holds (`Admission`), so that no image a job has held
+/// before it looks it up is removed while the job runs.
 fn open_jobs(jobs: &Path) -> Result<File, String> {
     File::open(jobs).context(jobs.display())
 }
+
+// The file in `jobs` whose lock a prune of the images holds to its end (`collect`), so that prunes
+// run one at a time. It isn't the jobs' lock, which a cancel, a start and a build's hold wait for,
+// as the build cache's prune can take minutes.
+const PRUNING: &str = ".pruning";
 
 /// Points `link` at this `pumpkin`, replacing what it pointed at whole, by way of `staged`, a path
 /// beside it that no other job uses.
@@ -583,15 +588,21 @@ fn engine(config: &Path) -> Result<Engine, String> {
 }
 
 /// Removes the images of `engine` that `engine::prune::evicted` picks, each last used by the newest
-/// job whose IR names it (`last_used`), sparing what the jobs that run hold (`held`), then prunes
-/// the build cache down to the same mark, all while the jobs' directory is locked (`open_jobs`),
-/// and only if the volume is full once it is, so a prune that waited for another's lock removes
-/// only what that one left.
+/// job whose IR names it (`last_used`), sparing what the jobs that run hold (`held`), while the
+/// jobs' directory is locked (`open_jobs`). Then it prunes the build cache down to the same mark.
+/// It holds `PRUNING` throughout, and prunes only if the volume is full once it holds both locks.
+/// So a prune that waited for another removes only what that one left.
 fn collect(home: &Path, engine: &Engine, jobs: &Path) -> Result<(), String> {
     let runs = PathBuf::from(crate::default_runs()?);
     let last_used = last_used(home, &runs)?;
-    // Before the lock, which the jobs' builds wait for: an image made since is in no list, and one
-    // held since is in what is read under it.
+    let path = jobs.join(PRUNING);
+    let pruning = (OpenOptions::new().write(true).create(true).truncate(false))
+        .mode(0o600)
+        .open(&path)
+        .context(path.display())?;
+    pruning.lock().context(path.display())?;
+    // Before the jobs' lock, which the jobs' builds wait for: an image made since is in no list,
+    // and one held since is in what is read under it.
     let images = engine.images()?;
     let locked = open_jobs(jobs)?;
     locked.lock().context(jobs_named(jobs))?;
@@ -607,6 +618,7 @@ fn collect(home: &Path, engine: &Engine, jobs: &Path) -> Result<(), String> {
     // holds can change, and the pick is made again of what they are now.
     let evicted = engine::prune::evicted(disk, engine.inspected(&picked)?, last_used, &held);
     engine.remove_images(&evicted)?;
+    drop(locked);
     say(format_args!(
         "the volume is more than {HIGH_PERCENT}% used: the prune removed {}, least recently used \
          first",
