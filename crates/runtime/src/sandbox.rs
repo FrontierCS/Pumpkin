@@ -39,7 +39,7 @@ use super::{Clock, Host, Input, Stopped, interruption, log, record};
 
 mod meets;
 
-pub(super) use meets::Sessions;
+pub(super) use meets::{Listening, Sessions, listening};
 use meets::{Meets, Registrations, WithCompanions};
 
 /// The most entries, files and directories, that the host collects from a sandbox in one tree.
@@ -351,16 +351,17 @@ pub(super) struct Started<C> {
 
 impl<'p> Published<'p> {
     /// Publishes `sandboxd` on each provider that hosts a role, and each role's image there, once
-    /// however many roles name it. Then it publishes the images of each leased runner's
-    /// companions, and makes the run's sockets directory in `record`, which must not exist yet. A
-    /// provider that is private meets the gateway at `private`, which then must be some; one whose
-    /// sandboxes listen, through `dialer`.
+    /// however many roles name it. Then it publishes the images of each runner's companions on
+    /// the provider that `listening` gives it. Last, it makes the run's sockets directory in
+    /// `record`, which must not exist yet. A provider that is private meets the gateway at
+    /// `private`, which then must be some; one whose sandboxes listen, through `dialer`.
     ///
     /// Stops as interrupted before each publish once a signal has come, as a publish may take
     /// minutes.
     pub(super) fn create(
         providers: &ByProvider<&'p dyn Provider>,
         placed: &'p Placed,
+        listening: &Listening<'p>,
         sandboxd: &Path,
         private: Option<&'p Listener>,
         dialer: &'p Dialer,
@@ -411,7 +412,7 @@ impl<'p> Published<'p> {
                 }
             }
         })?;
-        let companions = meets::publish_companions(placed, &providers)?;
+        let companions = meets::publish_companions(placed, &providers, listening, dialer)?;
         // In the record, so that they go where it goes: `record::create` made it, and checked the
         // path to it, so that no other user may rename entries in it, or above it, as
         // `Sockets::create` needs.

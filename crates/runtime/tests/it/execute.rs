@@ -4871,22 +4871,31 @@ fn created_without_a_relay() {
     expect!["met []; failed at 0ns: the runner's sandbox didn't start: sandbox sim-2: its create gave no relay, though it was given 2 companions: expected the endpoint where its relay listens"].assert_eq(&start_failed(&SimHost::new(), &sim, &failing()));
 }
 
-// Only a sandbox that listens holds companions, so a runner that declares them where sandboxes
-// dial is refused before any sandbox starts.
+// Only a sandbox that listens holds companions. So a provider whose class holds them where its
+// sandboxes dial is refused before any image is built, and no run on it is prepared.
 #[test]
 fn companions_where_sandboxes_dial() {
-    let shown = executed(
-        &SimHost::new(),
-        "companions-where-sandboxes-dial",
-        &[(PROVIDER, &Sim::new().offering_companions())],
-        &companions_workflow(&["exit", "0"]),
-        SANDBOXD,
-        &[Also::Listing],
-    );
+    let sim = Sim::new().offering_companions();
+    let ir = serde_json::from_value(companions_workflow(&["exit", "0"])).unwrap();
+    let placed = placed(&ir, sim.ready()).unwrap();
+    let on = providers_of(&placed, |_| &sim);
+    let fits = runtime::fits(&placed, &on).unwrap_err();
+    let runs = TestDir::new();
+    let servings = StandIn::servings(None, placed.workflow(), runs.path());
+    let (prices, id) = (prices(), new_id(SystemTime::now()).unwrap());
+    let (models, recorded) = kept(&placed, &servings, &prices);
+    let prepared = Run::prepare(&System, placed, on, runs.path(), id, models, recorded);
+    let Err(prepared) = prepared else {
+        panic!("a run whose companions no sandbox holds is prepared")
+    };
+    let records = files(runs.path());
     expect![[r#"
-        failed: role `gpu_runner` declares companions, and the sandboxes of provider `simulated` hold none, as they don't listen: declare none, or run it on a provider whose sandboxes listen
-        record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
-        log.jsonl:"#]].assert_eq(&shown);
+        fits: provider `simulated`'s class `sim` holds companions, and its sandboxes don't listen: expected only a provider whose sandboxes listen to offer companions
+        prepared: the same; records: []"#]]
+    .assert_eq(&format!(
+        "fits: {fits}\nprepared: {}; records: {records:?}",
+        if prepared == fits { "the same" } else { &prepared }
+    ));
 }
 
 #[test]

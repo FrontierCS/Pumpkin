@@ -6,7 +6,7 @@
 //! on a thread of its own, which ends before the start returns.
 
 use std::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::time::Duration;
@@ -19,7 +19,7 @@ use provider::{
 };
 use schema::ir::{Companion, CompanionName, Container, Image, Name};
 use schema::sandbox::{OpPayloadLimit, PrivateDial, SocketDial};
-use schema::workflow::{ByProvider, Placed, RunnerId};
+use schema::workflow::{ByProvider, Placed, Placement, RunnerId};
 use stdx::time::Clock as _;
 use stdx::{Context, Deadline};
 
@@ -155,45 +155,68 @@ impl WithCompanions<'_> {
     }
 }
 
-/// Publishes the images of each leased runner's companions, a runner's in one batch, on the
-/// provider that the runner is placed on. Returns each runner that declares companions, with them.
+/// Each runner that declares companions, with the provider that it is placed on, whose sandboxes
+/// listen ([`listening`]).
+pub(crate) struct Listening<'p>(BTreeMap<RunnerId, &'p dyn Listens>);
+
+/// Each runner of `placed` that declares companions, with its provider, of `providers`, as only a
+/// sandbox that listens holds any.
 ///
-/// Fails for a runner that declares companions where the provider's sandboxes don't listen, as
-/// only a sandbox that listens holds any. Stops as interrupted before each batch once a signal has
-/// come.
+/// Fails if such a runner is placed on a provider whose sandboxes don't listen. That is the
+/// provider's fault, as placing put the runner in one of its classes that holds companions.
+pub(crate) fn listening<'p>(
+    placed: &Placed,
+    providers: &ByProvider<&'p dyn Provider>,
+) -> Result<Listening<'p>, String> {
+    let workflow = placed.workflow();
+    let mut listening = BTreeMap::new();
+    for (_, session) in workflow.sessions() {
+        let runner = session.runner;
+        if workflow.runner(runner).companions.is_empty() {
+            continue;
+        }
+        let Placement {
+            provider: on,
+            class,
+            declared: _,
+        } = placed.placement(runner.role());
+        let provider: &'p dyn Provider = *providers.get(on);
+        let listens = match provider.meeting() {
+            provider::Meeting::Listen(listens) => listens,
+            provider::Meeting::Local(_) | provider::Meeting::Private(_) => {
+                return Err(format!(
+                    "provider `{on}`'s class `{class}` holds companions, and its sandboxes don't \
+                     listen: expected only a provider whose sandboxes listen to offer companions"
+                ));
+            }
+        };
+        listening.insert(runner, listens);
+    }
+    Ok(Listening(listening))
+}
+
+/// Publishes the images of each runner's companions, a runner's in one batch, on the provider that
+/// `listening` gives it. Returns each runner that declares companions, with them, each companion
+/// to meet the gateway through `dialer`.
+///
+/// Stops as interrupted before each batch once a signal has come.
 pub(super) fn publish_companions<'p>(
     placed: &'p Placed,
     providers: &ByProvider<Hosting<'p>>,
+    listening: &Listening<'p>,
+    dialer: &'p Dialer,
 ) -> Result<BTreeMap<RunnerId, WithCompanions<'p>>, Stopped> {
     let workflow = placed.workflow();
-    let leased: BTreeSet<RunnerId> = (workflow.sessions())
-        .map(|(_, session)| session.runner)
-        .collect();
     let mut published = BTreeMap::new();
-    for runner in leased {
+    for (&runner, &listens) in &listening.0 {
         let declared = &workflow.runner(runner).companions;
-        if declared.is_empty() {
-            continue;
-        }
         let role = &workflow.sandbox(runner.role()).name;
         let on = &placed.placement(runner.role()).provider;
-        let hosting = providers.get(on);
-        let (listens, dialer) = match hosting.meets {
-            Meets::Dials(listens, dialer) => (listens, dialer),
-            Meets::Sockets(_) | Meets::Private(..) => {
-                let refused = format!(
-                    "role `{role}` declares companions, and the sandboxes of provider `{on}` \
-                     hold none, as they don't listen: declare none, or run it on a provider \
-                     whose sandboxes listen"
-                );
-                return Err(refused.into());
-            }
-        };
         interruption::check()?;
         let images: Vec<Image> = (declared.iter())
             .map(|companion| companion.image.clone())
             .collect();
-        let references = listens.publish_companion_images(&images, &hosting.sandboxd);
+        let references = listens.publish_companion_images(&images, &providers.get(on).sandboxd);
         let references = references.context(format_args!(
             "publishing the images of role `{role}`'s companions on provider `{on}` failed"
         ))?;
