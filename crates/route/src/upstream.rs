@@ -47,6 +47,14 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 // A refusal of the key is one short JSON error. A body past this refuses none, and is relayed.
 const MAX_KEY_REFUSAL_BYTES: u64 = 16 * 1024;
 
+/// How much of an upstream's body a refusal in its place shows, as the provider's reason
+/// ([`reason`]).
+// A provider's JSON error, whose message is a sentence or two, fits. Envoy's tap keeps as much of
+// a body by default, and HAProxy as much of a URI in its logs:
+// https://github.com/envoyproxy/envoy/blob/96701cb24611b0f3aac1cc0dd8bf8589fbdf8e9e/api/envoy/config/tap/v3/common.proto#L162-L166
+// https://github.com/haproxy/haproxy/blob/6cbbecf09734aeb5fa8bb88f36f06a6f6d35e813/include/haproxy/defaults.h#L82-L84
+const MAX_REASON_BYTES: usize = 1024;
+
 /// The model provider's endpoint: an `https` URL that names no user, or an `http` URL to a
 /// loopback IP address. A port, if it names one, is a number up to 65535.
 #[derive(Clone, Debug)]
@@ -373,22 +381,30 @@ impl Upstream {
 
     /// The refusal that answers in place of the upstream's response with `status` and
     /// `headers`, if one does: a 401 or a body that refuses the key (`key_refused`), which the
-    /// upstream keeps, a 403, or a coded body.
-    fn refusal(&self, status: u16, key_refused: bool, headers: &HeaderMap) -> Option<Refusal> {
+    /// upstream keeps, a 403, or a coded body. It is made from the provider's reason ([`reason`]).
+    fn refusal(
+        &self,
+        status: u16,
+        key_refused: bool,
+        headers: &HeaderMap,
+    ) -> Option<fn(&str) -> Refusal> {
         // Passed on, either would be a status that a harness tries again until its deadline. A
         // refusal of the key refuses the deployment's key, which every later request carries; a
         // 403 may turn on what the request asked for, which the agent chose, so it ends no route.
         if status == 401 || key_refused {
             let _ = self.refused.set(());
-            Some(Refusal::key_refused())
+            // Its reason may repeat part of the key, which no sandbox may reach.
+            Some(|_| Refusal::key_refused())
         } else if status == 403 {
-            Some(Refusal::forbidden())
+            Some(Refusal::forbidden)
         } else if coded(headers) {
             // The request accepts no coding, and the harness decodes none: a coded body would
             // reach it as bytes it can't read, whether `content-encoding` stayed behind or not.
-            let message = "the model provider coded its answer, though the request asked for it \
-                           uncoded: try again";
-            Some(refusal(Status::BadGateway, message.to_owned()))
+            Some(|_| {
+                let message = "the model provider coded its answer, though the request asked for \
+                               it uncoded: try again";
+                refusal(Status::BadGateway, message.to_owned())
+            })
         } else {
             None
         }
@@ -612,11 +628,12 @@ fn refuse(
     refusal.answer(api, request, by)
 }
 
-/// Answers `client`'s request with `refusal` in place of the upstream's response with the status
+/// Answers `client`'s request with the refusal in place of the upstream's response with the status
 /// and request id `upstream`, once `body`, the upstream's, is kept as it came, so that the record
-/// says what the provider answered, and `answered` is told.
+/// says what the provider answered, and `answered` is told. `refusal` makes the refusal from the
+/// provider's reason in `body` ([`reason`]).
 fn replaced(
-    refusal: Refusal,
+    refusal: fn(&str) -> Refusal,
     (status, request_id): (u16, Option<String>),
     closed: &Closed<'_>,
     body: &mut impl Read,
@@ -625,12 +642,45 @@ fn replaced(
 ) -> io::Result<()> {
     let Client { request, by, keep } = client;
     let mut buffer = vec![0; frame::MAX_BODY_BYTES];
+    let (mut opening, mut cut) = (Vec::new(), false);
     // A body that breaks off, or is given up on, is kept as far as it came.
     while let Ok(read @ 1..) = body.read(&mut buffer) {
         keep.response(&buffer[..read]);
+        let room = MAX_REASON_BYTES - opening.len();
+        opening.extend_from_slice(&buffer[..read.min(room)]);
+        cut |= read > room;
     }
+    let refusal = refusal(&reason(&opening, cut));
     answered(refusal.answered(closed, Some(status), request_id));
     refusal.answer(closed.route().api(), request, by)
+}
+
+/// `opening`, the opening of an upstream's body, as the text of a reason that a refusal shows.
+/// Each run of whitespace becomes one space, with none at either end. Each other control
+/// character, and each byte that is no UTF-8, is escaped as Rust escapes it. The text ends with
+/// `…` if the body went on (`cut`).
+// A provider's JSON error may be spread over lines. A body may hold bytes that are no text, such
+// as a terminal's escape sequence. nginx's and HAProxy's logs escape such bytes too. They escape
+// all but printable ASCII, though: here a message in another script stays as written.
+// https://github.com/nginx/nginx/blob/656597b6e248868d56ed25559846ab5c58f8f3ac/src/http/modules/ngx_http_log_module.c#L991-L1048
+// https://github.com/haproxy/haproxy/blob/6cbbecf09734aeb5fa8bb88f36f06a6f6d35e813/src/log.c#L2067-L2081
+fn reason(opening: &[u8], cut: bool) -> String {
+    let mut text = String::new();
+    for chunk in opening.utf8_chunks() {
+        for character in chunk.valid().chars() {
+            if character.is_control() && !character.is_whitespace() {
+                text.extend(character.escape_default());
+            } else {
+                text.push(character);
+            }
+        }
+        text.extend(chunk.invalid().escape_ascii().map(char::from));
+    }
+    let mut reason = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if cut {
+        reason.push('…');
+    }
+    reason
 }
 
 /// Whether `body`, a response's with `status`, refuses the key by `refuses_key`, which judges a

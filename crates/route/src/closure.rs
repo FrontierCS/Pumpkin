@@ -549,11 +549,20 @@ impl Refusal {
         refusal(Status::BadRequest, message)
     }
 
-    pub(crate) fn forbidden() -> Self {
+    /// The refusal of a request that the model provider refused with a 403, which names
+    /// `reason`, the provider's, unless it is empty.
+    pub(crate) fn forbidden(reason: &str) -> Self {
+        let reason = if reason.is_empty() {
+            String::new()
+        } else {
+            format!(" ({reason})")
+        };
         // A 400, so that the harness ends its turn rather than try the same request again.
-        let message = "the model provider refused the request, with a 403: send only requests \
-                       that it allows";
-        refusal(Status::BadRequest, message.to_owned())
+        let message = format!(
+            "the model provider refused the request, with a 403{reason}: send only requests that \
+             it allows"
+        );
+        refusal(Status::BadRequest, message)
     }
 
     /// How [`Refusal::answer`] answers its client, in place of the upstream's response to `closed`
