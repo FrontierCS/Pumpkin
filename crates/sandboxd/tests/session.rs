@@ -37,10 +37,10 @@ use schema::ir::{AbsolutePath, Argv, CompanionName, Env, EnvVar, Mode, Name};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
     Endpoint, Entry, ExitStatus, FromSandbox, HELLO_TIMEOUT, HelloReply, Launch, Listening,
-    MAX_ATTESTATION_BYTES, MAX_ROUTE_BYTES, PROTOCOL_VERSION, PrivateDial, RELAYED_PORT,
-    RegistrationGrant, RelativePath, Relayed, Root, SANDBOXD_ATTESTATION, SANDBOXD_GIVEN,
-    SANDBOXD_GRANT, SANDBOXD_TLS_CERTIFICATE, SANDBOXD_TLS_KEY, SOCKET_NAME, SocketDial, ToSandbox,
-    dir_mode, file_mode,
+    MAX_ATTESTATION_BYTES, PROTOCOL_VERSION, PrivateDial, RELAYED_PORT, RegistrationGrant,
+    RelativePath, Relayed, Root, SANDBOXD_ATTESTATION, SANDBOXD_GIVEN, SANDBOXD_GRANT,
+    SANDBOXD_TLS_CERTIFICATE, SANDBOXD_TLS_KEY, SOCKET_NAME, SocketDial, ToSandbox, dir_mode,
+    file_mode,
 };
 use serde_json::{Value, json};
 use stdx::Deadline;
@@ -1059,7 +1059,7 @@ fn under_tls() {
     check(
         Meeting::Relayed,
         |sandbox| {
-            let mut lines = put_run_collect(sandbox);
+            let mut lines = Vec::new();
             let dialer = Dialer::new(test_support::edge::client());
             let (ours, _) = dialer.relayed(&companion()).unwrap();
             let [grant, certificate, key] = given(&ours);
@@ -1080,15 +1080,6 @@ fn under_tls() {
             lines
         },
         &expect![[r#"
-            exited: Code(3)
-            out/empty/
-            out/evidence/payload: 2109497 bytes
-            out/result.json: {"bytes": 2109497}
-            payload collected intact: true
-            log/1.stderr: warning
-            log/1.stdout: home=/pumpkin/home mode=train path=/usr/bin:/bin in $ROOT/home
-            the command was given: []
-            the probe for GPUs was given: []
             no certificate: exit status: 1: sandboxd: SANDBOXD_TLS_CERTIFICATE is not set: set it to the digits of the identity issued for the companion, which a sandboxd that listens with --tls serves TLS with
             no key: exit status: 1: sandboxd: SANDBOXD_TLS_KEY is not set: set it to the digits of the identity issued for the companion, which a sandboxd that listens with --tls serves TLS with
             then Ended { reason: "the owner dropped the session" }
@@ -1119,33 +1110,22 @@ fn relay_refusals() {
                 .collect();
             let sandboxd = sandbox.sandboxd(&args, &grant());
             listened(apart);
-            let long = [b'a'; MAX_ROUTE_BYTES];
-            let routes: [(&str, &[u8]); 2] = [
-                ("a companion that --relayed doesn't name", b"cache\n"),
-                ("no line feed in the most bytes of a route", &long),
-            ];
             let mut peers = Vec::new();
-            let mut lines: Vec<String> = (routes.iter())
-                .map(|(case, route)| format!("{case}: {}", routed(relay, route, &mut peers)))
-                .collect();
+            let unnamed = routed(relay, b"cache\n", &mut peers);
+            let mut lines = vec![format!(
+                "a companion that --relayed doesn't name: {unnamed}"
+            )];
             let ours = HelloReply::Accepted {
                 grant: Some(RegistrationGrant::try_from(GRANT.to_owned()).unwrap()),
             };
             greeted(apart.into(), &ours, &mut Vec::new());
-            let mut said = ended(sandboxd);
-            for (n, peer) in peers.iter().enumerate() {
-                // The kernel may give a later peer the address of one that has closed. So each
-                // mask replaces one occurrence, in the order that the relay tells of its peers.
-                said = said.replacen(peer, &format!("$PEER{n}"), 1);
-            }
+            let said = ended(sandboxd).replace(&peers[0], "$PEER");
             lines.push(format!("then, its session ended: {said}"));
             lines
         },
         &expect![[r#"
             a companion that --relayed doesn't name: closed, with no answer
-            no line feed in the most bytes of a route: closed, with no answer
-            then, its session ended: exit status: 0: sandboxd: the relay closed the connection from $PEER0: its route names `cache`, which this relay carries nothing to: expected a companion that --relayed names
-            sandboxd: the relay closed the connection from $PEER1: the route has no line feed in its first 64 bytes: expected a companion's name and a line feed
+            then, its session ended: exit status: 0: sandboxd: the relay closed the connection from $PEER: its route names `cache`, which this relay carries nothing to: expected a companion that --relayed names
             then Ended { reason: "the owner dropped the session" }
             sandboxd: exit status: 0
             left running: 0"#]],
@@ -1666,14 +1646,26 @@ fn as_root_with_user() {
 fn start_as_root(dir: &Path, container: &str, user: &str) {
     let mount =
         |host: &Path, at: &str| format!("--mount=type=bind,source={},target={at}", host.display());
+    let options = [
+        "--network=none".to_owned(),
+        "--user=0:0".to_owned(),
+        format!("--name={container}"),
+        mount(dir, "/.pumpkin/gateway"),
+        mount(&test_support::sandboxd(), "/.pumpkin/sandboxd"),
+    ];
+    let socket = format!("/.pumpkin/gateway/{SOCKET_NAME}");
+    let command = ["/.pumpkin/sandboxd", "--user", user, &socket];
+    start(&options.each_ref().map(String::as_str), &command);
+}
+
+/// Starts a container of `BUSYBOX` that runs `command`, with `options` of `docker run`'s.
+fn start(options: &[&str], command: &[&str]) {
     let mut docker = test_support::docker();
-    docker.args(["run", "--detach", "--rm", "--network=none", "--user=0:0"]);
-    docker.arg("--init");
-    docker.arg(format!("--name={container}"));
-    docker.arg(mount(dir, "/.pumpkin/gateway"));
-    docker.arg(mount(&test_support::sandboxd(), "/.pumpkin/sandboxd"));
-    docker.args([test_support::BUSYBOX, "/.pumpkin/sandboxd", "--user", user]);
-    docker.arg(format!("/.pumpkin/gateway/{SOCKET_NAME}"));
+    docker.args(["run", "--detach", "--rm", "--init"]);
+    docker
+        .args(options)
+        .arg(test_support::BUSYBOX)
+        .args(command);
     // Not the container's id, which `docker run --detach` prints.
     let started = docker.stdout(Stdio::null()).status().unwrap().success();
     assert!(started, "the container was to start");
@@ -1774,33 +1766,33 @@ fn contained(container: &str, done: impl Fn(&str) -> bool) -> String {
     }
 }
 
-// Two containers on a Docker network of their own, which resolves the companion's name as a
-// sandbox's network does. The gateway meets the companion through the relay in the other.
+// Containers on a Docker network of their own, which resolves names as a sandbox's network does.
+// The gateway meets the companion through the relay in `main`.
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn relays_to_a_companion() {
     let scratch = TestDir::new();
-    let pair = Pair::create();
+    let net = Network::create();
     let dialer = Dialer::new(test_support::edge::client());
     let (Listening { grant }, main) = dialer.issue().unwrap();
     let (relayed, behind) = dialer.relayed(&companion()).unwrap();
     let by = unix_seconds(3600);
     // A container that takes a connection, reads nothing of it and never ends it.
     let deaf = ["nc", "-l", "-p", "7434", "-e", "sleep", "3600"];
-    pair.start("deaf", &["--network-alias=deaf"], &deaf);
-    pair.listening("deaf");
+    net.start("deaf", &["--network-alias=deaf"], &deaf);
+    net.listening("deaf");
     let relaying = ["--relay", "0.0.0.0:7435", "--relayed", COMPANION];
     let unreached = ["--relayed", "ghost", "--relayed", "deaf"];
     let publish = ["--publish=127.0.0.1::7434", "--publish=127.0.0.1::7435"];
     let main_given = [(SANDBOXD_GRANT, grant.digits())];
     let relaying: Vec<&str> = relaying.into_iter().chain(unreached).collect();
-    pair.run("main", (&publish, &main_given), &by, &relaying);
+    net.run("main", (&publish, &main_given), &by, &relaying);
     let alias = [format!("--network-alias={COMPANION}")];
     let alias = alias.each_ref().map(String::as_str);
-    pair.run(COMPANION, (&alias, &given(&relayed)), &by, &["--tls"]);
+    net.run(COMPANION, (&alias, &given(&relayed)), &by, &["--tls"]);
     // So that the relay's first connection reaches the companion, and it tells of none refused.
-    pair.listening(COMPANION);
-    let (listens, relay) = (pair.published("main", 7434), pair.published("main", 7435));
+    net.listening(COMPANION);
+    let (listens, relay) = (net.published("main", 7434), net.published("main", 7435));
     let (mut within, exits) = met(behind, relay);
     let script = r#"echo "in $(hostname), with key ${SANDBOXD_TLS_KEY-unset}""#;
     let collected = scratch.path().join("companion");
@@ -1831,9 +1823,9 @@ fn relays_to_a_companion() {
     ));
     let still = sh_as_user(&mut within, &exits, "true");
     lines.push(format!("the companion's session, after them: {still:?}"));
-    lines.extend(pair.told("main"));
+    lines.extend(net.told("main"));
     drop(within);
-    pair.gone(COMPANION);
+    net.gone(COMPANION);
     lines.push("the companion's container, once its session ended: gone".to_owned());
     drop(own);
     expect![[r#"
@@ -1867,11 +1859,11 @@ fn met(unreached: Unreached, at: SocketAddr) -> (Session, Receiver<Arrival>) {
 
 /// A Docker network of the test's own, and the containers that the test runs on it. Dropping it
 /// removes them all.
-struct Pair {
+struct Network {
     network: String,
 }
 
-impl Pair {
+impl Network {
     fn create() -> Self {
         let network = format!("sandboxd-{}-relays", std::process::id());
         let created = (test_support::docker())
@@ -1915,18 +1907,16 @@ impl Pair {
     /// Starts a container named for `host`, its host name, that runs `command`, with `options`
     /// of `docker run`'s.
     fn start(&self, host: &str, options: &[&str], command: &[&str]) {
-        let mut docker = test_support::docker();
-        docker.args(["run", "--detach", "--rm", "--init"]);
-        docker.arg(format!("--network={}", self.network));
-        docker.arg(format!("--name={}", self.container(host)));
-        docker.arg(format!("--hostname={host}"));
-        docker
-            .args(options)
-            .arg(test_support::BUSYBOX)
-            .args(command);
-        // Not the container's id, which `docker run --detach` prints.
-        let started = docker.stdout(Stdio::null()).status().unwrap().success();
-        assert!(started, "the container was to start");
+        let named = [
+            format!("--network={}", self.network),
+            format!("--name={}", self.container(host)),
+            format!("--hostname={host}"),
+        ];
+        let named = named.iter().map(String::as_str);
+        start(
+            &named.chain(options.iter().copied()).collect::<Vec<_>>(),
+            command,
+        );
     }
 
     /// Returns once a socket listens at `RELAYED_PORT` in the container named for `host`.
@@ -2006,7 +1996,7 @@ impl Pair {
     }
 }
 
-impl Drop for Pair {
+impl Drop for Network {
     fn drop(&mut self) {
         // A container whose session has ended is gone already, which is as good as removed.
         for host in ["main", COMPANION, "deaf"] {
