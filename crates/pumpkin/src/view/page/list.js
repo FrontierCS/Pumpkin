@@ -7,20 +7,21 @@ import { returnedView } from "./returned.js";
 
 /**
  * @typedef {{ runs: Array<ListedRun | Unlisted>, next: string | null }} Runs
- * @typedef {object} ListedRun a run as `ls` lists it
+ * @typedef {object} ListedRun a run as `ls --json` gives it
  * @property {string} id
- * @property {string} [member] the member whose job the run is, on a controller whose job names one
- * @property {boolean} live
+ * @property {string | null} member the member whose job the run is, on a controller whose job names one
+ * @property {string | null} task
  * @property {string} state "unread" for a run that another build made, whose page this build can't draw, and "waiting", "building" or "unstarted" for a job whose run has no record
- * @property {boolean} has_result
- * @property {string} time
- * @property {string} bound
- * @property {string} usd
- * @property {string} rest
+ * @property {Step | null} phase what a live run, or a job yet to start one, is doing
+ * @property {number | null} ran_seconds
+ * @property {{ usd: number | null, partial: boolean } | null} spent
+ * @property {{ name: string, value: unknown }[] | null} result
+ * @property {string | null} note
  * @property {number | null} requests
  * @property {Tokens | null} tokens
  * @property {string} [started_over] what the view found of the run's log when it last read it again from its start
  * @property {undefined} [error]
+ * @typedef {{ name: string, seconds: number | null, bound_seconds: number | null, doing: string }} Step
  * @typedef {{ id: string, error: string }} Unlisted a run whose record can't be read
  * @typedef {{ input: number | null, output: number | null, cached: number | null }} Tokens
  */
@@ -45,15 +46,32 @@ const UNOPENED = new Set(["unread", "waiting", "building", "unstarted"]);
 // After the run's id, when some run names its member.
 const MEMBER = ["Member", ""];
 
-// A run's `rest`, as `ls` writes it, in two: its task, a word before the first ": ", and what
-// follows it; a `rest` that begins with no such word, as a sentence does, is all the second.
-/** @param {string} rest @returns {[string, string]} */
-function taskOf(rest) {
-  const at = rest.indexOf(": ");
-  const task = at < 0 ? rest : rest.slice(0, at);
-  if (task === "-" || /\s/.test(task)) return ["", rest];
-  return [task, at < 0 ? "" : rest.slice(at + 2)];
+// The states of a run that is live, or of a job yet to start one.
+const LIVE = new Set(["waiting", "building", "running"]);
+
+// A span as `ls` shows it in its time column: `42s`, `3m07s` or `2h05m`; `-` for one the record
+// doesn't give.
+/** @param {number | null} seconds */
+function columnSpan(seconds) {
+  if (seconds === null) return "-";
+  const [hours, minutes, secs] = [Math.floor(seconds / 3600), Math.floor((seconds % 3600) / 60), seconds % 60];
+  /** @param {number} n */
+  const pad = (n) => String(n).padStart(2, "0");
+  if (hours) return hours + "h" + pad(minutes) + "m";
+  return minutes ? minutes + "m" + pad(secs) + "s" : secs + "s";
 }
+
+// A bound as `ls` shows it: `of ` and its span without a trailing `00s` or `00m`, as `of 30m`.
+/** @param {number | null} seconds */
+function bound(seconds) {
+  if (seconds === null) return "";
+  const span = columnSpan(seconds);
+  return "of " + (span.endsWith("00s") || span.endsWith("00m") ? span.slice(0, -3) : span);
+}
+
+// A cost as `ls` shows it: in dollars to the cent, with a `+` where a part of it has no price.
+/** @param {ListedRun["spent"]} spent */
+const spentShown = (spent) => (spent === null || spent.usd === null ? "-" : "$" + spent.usd.toFixed(2) + (spent.partial ? "+" : ""));
 
 // A cell's class: `none` added for a count of nothing or one unknown, which the style fades.
 /** @param {string} cls @param {string} text */
@@ -129,23 +147,29 @@ export async function runsView() {
     const noLog = "Unknown: the run's log says nothing of its model requests yet";
     const noTokens = "Unknown: no response reported its tokens";
     const counted = (/** @type {number | null | undefined} */ n) => (n === null || n === undefined ? (tokens === null ? noLog : noTokens) : null);
-    const [task, said] = taskOf(listed.rest);
+    const task = listed.task ?? "";
+    const phase = listed.phase;
+    const said = phase ? phase.doing : (listed.note ?? "");
+    const time = columnSpan(phase ? phase.seconds : listed.ran_seconds);
+    const bounded = phase ? bound(phase.bound_seconds) : "-";
+    const usd = spentShown(listed.spent);
+    const toned = { live: LIVE.has(listed.state), state: listed.state, has_result: listed.result !== null };
     // A count alone: its unit is its column's head.
     const number = (/** @type {number | null | undefined} */ n) => count(n, "").trimEnd();
     return /** @type {Cell[]} */ ([
-      { cls: "state", title: null, text: sentence(listed.state), mark: "mark " + tone(listed) },
+      { cls: "state", title: null, text: sentence(phase ? phase.name : listed.state), mark: "mark " + tone(toned) },
       { cls: "task", title: task || null, text: task },
       { cls: "id", title: null, text: listed.id },
       ...(membered ? [{ cls: "", title: null, text: listed.member ?? "-" }] : []),
-      { cls: "num", title: null, text: listed.time },
-      { cls: faded("mono", listed.bound), title: null, text: listed.bound },
-      { cls: faded("num", listed.usd), title: null, text: listed.usd },
+      { cls: "num", title: null, text: time },
+      { cls: faded("mono", bounded), title: null, text: bounded },
+      { cls: faded("num", usd), title: null, text: usd },
       { cls: faded("num", number(listed.requests)), title: listed.requests === null ? noLog : null, text: number(listed.requests) },
       { cls: faded("num", number(tokens && tokens.input)), title: counted(tokens && tokens.input), text: number(tokens && tokens.input) },
       { cls: faded("num", number(tokens && tokens.output)), title: counted(tokens && tokens.output), text: number(tokens && tokens.output) },
       // A run with a result says so, in a word that opens the result under its row; any other run
       // says what it is doing, or how it ended.
-      listed.has_result ? { cls: "rest toggle", title: "Show or hide what the run returned", text: (opened.has(listed.id) ? "▾" : "▸") + " Result" } : { cls: "rest", title: said || null, text: said },
+      listed.result !== null ? { cls: "rest toggle", title: "Show or hide what the run returned", text: (opened.has(listed.id) ? "▾" : "▸") + " Result" } : { cls: "rest", title: said || null, text: said },
     ]);
   };
   // Sets `value` as `node`'s attribute `name`, null removing it, only where it differs.
@@ -166,7 +190,7 @@ export async function runsView() {
     tr.onclick = (event) => (event.target instanceof Element && event.target.closest("td.toggle") ? toggle(run.id) : opens(run) && open(run.id));
     const listed = opens(run) ? /** @type {ListedRun} */ (run) : null;
     attr(tr, "class", (listed ? "link" : "unread") + (index === state.cursor ? " on" : ""));
-    attr(tr, "title", listed ? (listed.live ? "Live: open it to follow it" : "Open this run") : null);
+    attr(tr, "title", listed ? (LIVE.has(listed.state) ? "Live: open it to follow it" : "Open this run") : null);
     want.forEach((cell, at) => {
       const td = /** @type {HTMLElement} */ (tr.children[at]);
       attr(td, "class", cell.cls || null);
@@ -181,7 +205,7 @@ export async function runsView() {
   const draw = () => {
     const runs = [...state.first, ...state.older];
     if (!runs.length) return show(h("p", { class: "empty" }, "No runs here yet."));
-    const members = runs.some((run) => run.error === undefined && run.member !== undefined);
+    const members = runs.some((run) => run.error === undefined && run.member !== null);
     if (members !== membered) {
       membered = members;
       head.replaceChildren(...columns().map(([name, cls]) => h("th", { class: cls }, name)));
@@ -250,6 +274,6 @@ export async function runsView() {
     state.first = page.runs;
     if (!state.older.length) state.next = page.next;
     draw();
-    return page.runs.some((run) => run.error === undefined && run.live) ? POLL_MS : null;
+    return page.runs.some((run) => run.error === undefined && LIVE.has(run.state)) ? POLL_MS : null;
   });
 }

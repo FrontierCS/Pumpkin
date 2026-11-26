@@ -210,6 +210,8 @@ pub(crate) enum Boot {
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ListRequest {
     pub(crate) prefixes: Vec<String>,
+    /// Whether to list each run, not only those that are live or ended within the last day.
+    pub(crate) all: bool,
     pub(crate) controller: crate::controller::Name,
 }
 

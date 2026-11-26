@@ -199,6 +199,17 @@ pub(super) const NOTES: &[Notes] = &[
                 about: "List the runs recorded in `runs`",
                 ..ALONE
             },
+            Example {
+                line: "pumpkin ls --all",
+                about: "List every run, however long ago it ended",
+                ..ALONE
+            },
+            Example {
+                line: "pumpkin ls --json",
+                after: " | jq '.runs[] | {id, state, result}'",
+                about: "Give each run of the last day's state and whole result",
+                ..ALONE
+            },
         ],
         statuses: &[],
         more: "The phases and states: \

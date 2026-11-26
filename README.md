@@ -75,7 +75,10 @@ $ .pumpkin/bin/pumpkin run examples/hello/task.star
 $ .pumpkin/bin/pumpkin wait 234c
 pumpkin: run 20261116-195228-234cd166 finished with a result (score=6 lines=1), ...
 $ .pumpkin/bin/pumpkin ls
-20261116-195228-234cd166 finished         2s  -               -  examples/hello: score=6 lines=1
+ended
+  20261116-195228-234cd166  examples/hello  finished      2s  -  score=6 lines=1
+
+1 run in the last day: 1 finished
 $ .pumpkin/bin/pumpkin view
 ```
 

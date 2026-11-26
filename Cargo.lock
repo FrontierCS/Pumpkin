@@ -580,6 +580,7 @@ name = "pumpkin"
 version = "0.0.0"
 dependencies = [
  "anstream",
+ "anstyle",
  "anstyle-svg",
  "aws",
  "clap",

@@ -675,33 +675,48 @@ fn alive(pid: i64) -> bool {
     fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| !stat.contains(") Z "))
 }
 
-/// The listing `ran` with each time that moves between runs replaced by `<t>`.
-///
-/// A row is a line that starts with `ids`.
-fn masked(ran: &str, ids: &str) -> String {
-    masked_members(ran, ids, 0)
-}
-
-// As `masked`, of a listing whose rows hold a members' column `members` wide, its padding
-// included, after the id.
-fn masked_members(ran: &str, ids: &str, members: usize) -> String {
+/// The listing `ran` with each time that moves between runs replaced by `<t>`. Those are the time
+/// of each live run's phase and of each of its steps. Then how long ago a model request was
+/// answered, and how long one has been in flight.
+fn masked(ran: &str) -> String {
+    let span = |word: &str| {
+        let digits = word.trim_end_matches(|c: char| c.is_ascii_digit() || "hms".contains(c));
+        digits.is_empty()
+            && word.starts_with(|c: char| c.is_ascii_digit())
+            && word.ends_with(['h', 'm', 's'])
+    };
+    let mut in_live = false;
     let lines = ran.lines().map(|line| {
         let mut line = line.to_owned();
-        // A line under a run's starts 25 columns further in, where its id would end.
-        let indent = line.len() - line.trim_start().len();
-        let row = line.trim_start().starts_with(ids).then_some(indent);
-        if let Some(at) = row.or_else(|| (indent > 25).then(|| indent - 25)) {
-            // `ls` writes a row as its id in 24 columns, a space, its state in 11, a space and
-            // its time in 7: the time starts 37 columns in, after the members' column if any.
-            let at = at + members + 37;
-            line.replace_range(at..at + 7, "    <t>");
-        }
-        for (from, to) in [(" answered ", " ago"), ("ends by ", " UTC")] {
-            if let Some(at) = line.rfind(from)
-                && let Some(end) = line[at..].find(to)
-            {
-                line.replace_range(at + from.len()..at + end, "<t>");
+        match anstream::adapter::strip_str(&line).to_string().trim() {
+            "live" => in_live = true,
+            ended if ended.is_empty() || ended.starts_with("ended") => in_live = false,
+            _ if in_live => {
+                // The time column, 6 wide and right-aligned, is the first span that isn't a
+                // bound.
+                let words = line
+                    .match_indices(|c: char| !c.is_whitespace())
+                    .map(|(at, _)| at);
+                let starts: Vec<usize> = words
+                    .filter(|&at| at == 0 || line[..at].ends_with(char::is_whitespace))
+                    .collect();
+                let time = starts.iter().enumerate().find_map(|(index, &at)| {
+                    let word = line[at..].split_whitespace().next()?;
+                    let after_of = index > 0 && line[starts[index - 1]..].starts_with("of ");
+                    (span(word) && !after_of).then_some((at, at + word.len()))
+                });
+                // A time longer than its column pushes the rest of its line on, as a fixture's id
+                // from long ago does. So it is masked as one that fits.
+                if let Some((start, end)) = time {
+                    line.replace_range(start.min(end.saturating_sub(6))..end, "   <t>");
+                }
             }
+            _ => {}
+        }
+        if let Some(at) = line.rfind(" answered ")
+            && let Some(end) = line[at..].find(" ago")
+        {
+            line.replace_range(at + " answered ".len()..at + end, "<t>");
         }
         if let Some(at) = line.find(" in flight")
             && let Some(span) = line[at..].find("for ")

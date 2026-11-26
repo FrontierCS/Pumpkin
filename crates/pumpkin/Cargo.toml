@@ -30,11 +30,12 @@ schema = { path = "../schema" }
 stdx = { path = "../stdx" }
 tls = { path = "../tls" }
 anstream.workspace = true
+anstyle.workspace = true
 clap.workspace = true
 jiff.workspace = true
 libc.workspace = true
 miniz_oxide.workspace = true
-rustix = { workspace = true, features = ["event", "fs", "param", "process", "stdio", "thread", "time"] }
+rustix = { workspace = true, features = ["event", "fs", "param", "process", "stdio", "termios", "thread", "time"] }
 serde.workspace = true
 serde_ignored.workspace = true
 serde_json.workspace = true

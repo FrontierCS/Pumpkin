@@ -303,11 +303,12 @@ fn health(home: &Path) -> Result<Health, String> {
 fn listed(home: &Path, request: ListRequest) -> Result<Listed, String> {
     let ListRequest {
         prefixes,
+        all,
         controller,
     } = request;
     let (prefixes, at) = (&prefixes[..], &next::At::Controller(controller));
     let now = crate::unix_now();
-    let since = progress::listed_since(prefixes, now);
+    let since = progress::listed_since(prefixes, all, now);
     let runs = home.join(crate::job::runs());
     let (mut listing, mut unlisted) = crate::listed_in(&runs, prefixes, since, now, at)?;
     unstarted(home, prefixes, since, now, at, &mut listing)?;

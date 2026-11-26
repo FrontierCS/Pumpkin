@@ -44,7 +44,7 @@ use stdx::Context;
 use self::asked::{Asked, START, allowed, asked};
 use self::failure::Failures;
 use self::http::{Method, Request, Response, Sent};
-use self::json::{listed_json, live_row, record_json, run_json, tokens_json};
+use self::json::{listed_json, live_row, record_json, run_json};
 use self::talk::Talk;
 use crate::cli::Exit;
 use crate::controller::{Unviewed, Viewing};
@@ -651,13 +651,8 @@ impl View {
     /// another build made the record; else `error`.
     fn unread_row(&self, id: &str, error: ReadError) -> Result<JsonRow, String> {
         let listed = Listed::unread(&self.runs.join(id), error)?;
-        let mut row = listed_json(
-            id,
-            &progress::Row::of(id, &listed, crate::unix_now(), &self.at),
-        );
-        row["requests"] = Value::Null;
-        row["tokens"] = Value::Null;
-        Ok(self.membered(id, row)?.into())
+        let row = progress::Row::of(id, &listed, crate::unix_now(), &self.at);
+        Ok(listed_json(&self.membered(row)?, None).into())
     }
 
     /// The row of job `id`, whose run has no record, as `ls` lists it, or `None` if no job is `id`.
@@ -670,21 +665,14 @@ impl View {
             return Ok(None);
         }
         let listed = crate::serve::job_listed(id)?;
-        let mut row = listed_json(
-            id,
-            &progress::Row::of(id, &listed, crate::unix_now(), &self.at),
-        );
-        row["requests"] = Value::Null;
-        row["tokens"] = Value::Null;
-        Ok(Some(self.membered(id, row)?.into()))
+        let row = progress::Row::of(id, &listed, crate::unix_now(), &self.at);
+        Ok(Some(listed_json(&self.membered(row)?, None).into()))
     }
 
-    /// `row`, of run `id`, with the run's member, if a job started the run.
-    fn membered(&self, id: &str, mut row: Value) -> Result<Value, String> {
-        if let Some(jobs) = &self.jobs
-            && let Some(member) = crate::job::run_member(&jobs.join(id))?
-        {
-            row["member"] = json!(member);
+    /// `row` with its run's member, if a job started the run.
+    fn membered(&self, mut row: progress::Row) -> Result<progress::Row, String> {
+        if let Some(jobs) = &self.jobs {
+            row.member = crate::job::run_member(&jobs.join(&row.id))?;
         }
         Ok(row)
     }
@@ -716,8 +704,9 @@ impl View {
         match &held.ending {
             None => {
                 let row = live_row(held, &at);
-                let row = self.membered(id, row).map_err(ReadError::Failed)?;
-                Ok(Some(row.into()))
+                let started_over = held.started_over.clone();
+                let row = self.membered(row).map_err(ReadError::Failed)?;
+                Ok(Some(listed_json(&row, started_over.as_deref()).into()))
             }
             Some(ending) => {
                 let ending = ending.clone();
@@ -731,39 +720,18 @@ impl View {
         let at = self.at.clone();
         let now = crate::unix_now();
         let lost = ending == Ending::Lost;
-        let json = if let Some(used) = record.used()? {
-            let listed = Listed::of(&record, record.task()?, Some(ending), None);
-            let mut row = listed_json(
-                record.id(),
-                &progress::Row::of(record.id(), &listed, now, &at),
-            );
-            row["time"] = json!(progress::column_span(used.ran));
-            row["usd"] = json!(
-                used.usd
-                    .map_or("-".to_owned(), |usd| { progress::usd(usd, used.partial) })
-            );
-            row["requests"] = json!(used.model_requests);
-            row["tokens"] = tokens_json(&used.tokens, used.model_requests);
-            row
-        } else {
-            // A lost run, or a reap's record of one, says what it used only in its log.
-            let progress = record.progress()?.progress;
-            let model = progress.as_ref().map(|progress| progress.model.clone());
-            let listed = Listed::of(&record, record.task()?, Some(ending), progress);
-            let mut row = listed_json(
-                record.id(),
-                &progress::Row::of(record.id(), &listed, now, &at),
-            );
-            row["requests"] = json!(model.as_ref().map(|model| model.requests));
-            row["tokens"] = json!(
-                model
-                    .as_ref()
-                    .map(|model| tokens_json(&model.tokens, model.requests))
-            );
-            row
+        let used = record.used()?;
+        // A lost run, or a reap's record of one, says what it used only in its log, which a row
+        // reads only then.
+        let progress = match used {
+            Some(_) => None,
+            None => record.progress()?.progress,
         };
+        let listed = Listed::of(&record, record.task()?, Some(ending), progress, used);
+        let row = progress::Row::of(record.id(), &listed, now, &at);
         let id = record.id().to_owned();
-        let json = JsonRow::from(self.membered(&id, json).map_err(ReadError::Failed)?);
+        let row = self.membered(row).map_err(ReadError::Failed)?;
+        let json = JsonRow::from(listed_json(&row, None));
         let row = Row {
             record,
             lost,

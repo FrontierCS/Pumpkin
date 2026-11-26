@@ -1,31 +1,30 @@
 //! The words that say what a run is doing or did, made of the `Progress` that `runtime` reads of
 //! its record: the rows of `ls`, a run's summary and the milestones that following it says.
 //!
-//! `view` says of a run what these say, so the page and `ls` never differ. The words for what a
-//! run cost are in [`cost`].
+//! `view` says of a run what these say, so the page and `ls` never differ. A listing's rows are
+//! in [`row`], and its lines in [`lines`](mod@lines). The words for what a run cost are in
+//! [`cost`].
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
 use std::time::Duration;
 
-use members::Member;
 use provider::UnixTime;
 use runtime::{
     CallOf, CallSpan, CallerName, Ending, LeaseSpan, Place, Progress, ReadError, Readout, Record,
-    Sandbox, Writer,
+    Sandbox, Used, Writer,
 };
 use schema::ir::Name;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-
-use crate::next;
 
 mod agent;
 mod child;
 mod clip;
 pub(crate) mod cost;
 pub(crate) mod driver;
+mod lines;
 mod model;
 mod row;
 
@@ -35,24 +34,20 @@ pub(crate) use child::{called, leased};
 use clip::Clip;
 pub(crate) use clip::clipped;
 pub(crate) use cost::usd;
+pub(crate) use lines::{Layout, Scope, bound, json, lines, time};
 pub(crate) use model::median;
 use model::model;
-pub(crate) use row::Row;
-use row::{Spent, Stage};
-
-/// How long a phase may go on past its bound before `ls` says that it is a bug: the core acts at
-/// the bound, and its act is logged at once, but the run's log is read over a connection and
-/// clocks differ by seconds.
-const PAST_BOUND_SLACK: Duration = Duration::from_mins(1);
+pub(crate) use row::{Row, Spent, Step, Tokens};
 
 /// How long after a run ended `ls` lists it without a prefix that names it: what is live, and
 /// how the runs of the last day ended, are what a person asks it for.
 const LISTED_FOR: Duration = Duration::from_hours(24);
 
-/// The time before which an ended run isn't listed: none, if `prefixes` name runs.
-pub(crate) fn listed_since(prefixes: &[String], now: UnixTime) -> Option<UnixTime> {
+/// The time before which an ended run isn't listed: none, if `prefixes` name runs or `every` asks
+/// for each run.
+pub(crate) fn listed_since(prefixes: &[String], every: bool, now: UnixTime) -> Option<UnixTime> {
     let since = || UnixTime::after_epoch(now.since_epoch().saturating_sub(LISTED_FOR));
-    prefixes.is_empty().then(since)
+    (prefixes.is_empty() && !every).then(since)
 }
 
 /// The runs that `ls` lists, by id.
@@ -75,7 +70,7 @@ pub(crate) struct Unlisted {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Entry {
     Row(Box<Row>),
-    /// A run that ended before `listed_since`, which `ls` names in a line, not a row.
+    /// A run that ended before `listed_since`, which `ls` counts, but doesn't read.
     Older,
 }
 
@@ -116,6 +111,7 @@ pub(crate) struct Run {
     task: Option<String>,
     ending: Option<Ending>,
     progress: Option<Progress>,
+    used: Option<Used>,
     asked: Option<Duration>,
 }
 
@@ -135,23 +131,28 @@ impl Listed {
         }
     }
 
+    /// The run of `record`, with what its record says: its workflow's name, how it ended, what
+    /// its log says, and what its driver recorded that it used, at its end.
     pub(crate) fn of(
         record: &Record,
         task: Option<String>,
         ending: Option<Ending>,
         progress: Option<Progress>,
+        used: Option<Used>,
     ) -> Self {
         Self::Run(Box::new(Run {
             task,
             ending,
             progress,
+            used,
             asked: runtime::minted(record.id()),
         }))
     }
 }
 
 /// What a run is doing or how it ended, by name, and in the order that the totals list them.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum State {
     Waiting,
     Building,
@@ -178,85 +179,19 @@ impl State {
             Self::Unread => "unread",
         }
     }
-}
 
-/// The lines of `ls` of `listing`, its runs by id, so oldest first, and so the live ones, which
-/// started last, nearest the line of totals that follows them, each live run with a line for
-/// each of its calls and leases that hasn't ended, and a column of each run's member if one
-/// names one. The totals line ends with the command that lists the runs left out, unless there
-/// are none, naming where `at` says.
-pub(crate) fn lines(listing: &Listing, at: &next::At) -> String {
-    let mut lines = String::new();
-    let mut totals = Totals::default();
-    let mut older = Vec::new();
-    let members = listing.runs.values().filter_map(Entry::row);
-    let members = members.filter_map(|row| row.member.as_ref());
-    // A machine's own runs name no member, and read as they did before members.
-    let member_width = members.map(|member| member.to_string().len()).max();
-    for (id, entry) in &listing.runs {
-        let row = match entry {
-            Entry::Row(row) => row,
-            Entry::Older => {
-                older.push(id.as_str());
-                continue;
-            }
-        };
-        totals.add(row);
-        let Some(width) = member_width else {
-            lines.push_str(&line(id, &row.cells));
-            lines.push('\n');
-            lines.push_str(row.under());
-            continue;
-        };
-        let member = row
-            .member
-            .as_ref()
-            .map_or("-".to_owned(), Member::to_string);
-        lines.push_str(&line(&format!("{id} {member:<width$}"), &row.cells));
-        lines.push('\n');
-        for under in row.under().lines() {
-            let _ = writeln!(lines, "{:width$} {under}", "");
+    /// Whether a run in this state is live, or its job is yet to start it.
+    pub(crate) fn live(self) -> bool {
+        match self {
+            Self::Waiting | Self::Building | Self::Running => true,
+            Self::Finished
+            | Self::Failed
+            | Self::Interrupted
+            | Self::Lost
+            | Self::Unstarted
+            | Self::Unread => false,
         }
     }
-    let mut parts = Vec::new();
-    let rows = !totals.states.is_empty();
-    if rows {
-        parts.push(totals.line());
-    }
-    if !older.is_empty() {
-        if !rows {
-            parts.push("no run is live, or ended within a day".to_owned());
-        }
-        let (are, them) = match older.len() {
-            1 => ("isn't", "it"),
-            _ => ("aren't", "them"),
-        };
-        parts.push(format!(
-            "{} that ended over a day ago {are} listed: to list {them}: {}",
-            crate::counted(older.len(), "run"),
-            next::of_run("ls", at, &prefixes(&older).join(" "))
-        ));
-    }
-    if !parts.is_empty() {
-        lines.push_str(&parts.join("; "));
-        lines.push('\n');
-    }
-    lines
-}
-
-/// The prefixes that name `ids`: the characters of their days, the first eight of an id, that all
-/// share, or else each day.
-fn prefixes(ids: &[&str]) -> Vec<String> {
-    let days: BTreeSet<&str> = ids.iter().map(|id| id.get(..8).unwrap_or(id)).collect();
-    let mut common = days.first().copied().unwrap_or_default();
-    for day in &days {
-        let shared = common.chars().zip(day.chars()).take_while(|(a, b)| a == b);
-        common = &common[..shared.map(|(c, _)| c.len_utf8()).sum::<usize>()];
-    }
-    if common.is_empty() {
-        return days.into_iter().map(str::to_owned).collect();
-    }
-    vec![common.to_owned()]
 }
 
 pub(crate) fn unread(unread: &[runtime::Unread]) -> Option<String> {
@@ -266,223 +201,6 @@ pub(crate) fn unread(unread: &[runtime::Unread]) -> Option<String> {
         crate::counted(unread.len(), "part"),
         crate::escaped(&first.to_string())
     ))
-}
-
-#[derive(Default)]
-struct Totals {
-    states: BTreeMap<State, usize>,
-    without_result: usize,
-    ends_unix_seconds: Option<u64>,
-    usd: Option<f64>,
-    unpriced: bool,
-    unreported: u64,
-}
-
-impl Totals {
-    fn add(&mut self, row: &Row) {
-        let Row {
-            cells: _,
-            stage,
-            spent,
-            member: _,
-            unread: _,
-        } = row;
-        *self.states.entry(stage.state()).or_default() += 1;
-        match stage {
-            Stage::Running {
-                ends_unix_seconds,
-                under: _,
-            } => self.ends_unix_seconds = self.ends_unix_seconds.max(Some(*ends_unix_seconds)),
-            Stage::Finished { result: false } => self.without_result += 1,
-            Stage::Finished { result: true }
-            | Stage::Waiting
-            | Stage::Building
-            | Stage::Unstarted
-            | Stage::Failed
-            | Stage::Interrupted
-            | Stage::Lost
-            | Stage::Unread
-            | Stage::Publishing => {}
-        }
-        match spent {
-            Spent::Unread => {}
-            Spent::Unpriced => self.unpriced = true,
-            Spent::Priced {
-                usd,
-                partly_unpriced,
-                unreported_responses,
-            } => {
-                *self.usd.get_or_insert(0.0) += usd;
-                self.unpriced |= partly_unpriced;
-                self.unreported += unreported_responses;
-            }
-        }
-    }
-
-    fn line(&self) -> String {
-        let runs = crate::counted(self.states.values().sum::<usize>(), "run");
-        let mut states = Vec::new();
-        for (state, count) in &self.states {
-            let mut shown = format!("{count} {}", state.name());
-            if *state == State::Finished && self.without_result > 0 {
-                let _ = write!(shown, " ({} without a result)", self.without_result);
-            }
-            states.push(shown);
-        }
-        let mut line = format!("{runs}: {}", states.join(", "));
-        if let Some(usd) = self.usd {
-            let _ = write!(line, "; ${usd:.2} so far");
-            line.push_str(&cost::more(
-                self.unpriced.then_some("without a price"),
-                self.unreported,
-            ));
-        }
-        if let Some(ends) = self.ends_unix_seconds {
-            let ends = crate::utc(Duration::from_secs(ends)).strftime("%H:%M");
-            let _ = write!(line, "; every live run ends by {ends} UTC");
-        }
-        line
-    }
-}
-
-fn line(id: &str, cells: &Columns) -> String {
-    let Columns {
-        state,
-        time,
-        bound,
-        usd,
-        rest,
-    } = cells;
-    format!("{id} {state:<11} {time:>7}  {bound:<9} {usd:>7}  {rest}")
-}
-
-/// The cells of a run's row in `ls`.
-#[derive(Serialize, Deserialize)]
-pub(crate) struct Columns {
-    pub(crate) state: String,
-    pub(crate) time: String,
-    pub(crate) bound: String,
-    pub(crate) usd: String,
-    pub(crate) rest: String,
-}
-
-fn column(state: &str, time: &str, bound: &str, usd: &str, rest: &str) -> Columns {
-    Columns {
-        state: state.to_owned(),
-        time: time.to_owned(),
-        bound: bound.to_owned(),
-        usd: usd.to_owned(),
-        rest: rest.to_owned(),
-    }
-}
-
-fn columns(id: &str, listed: &Listed, state: State, now: UnixTime, named: &next::At) -> Columns {
-    let state = state.name();
-    let since = |asked: &Option<Duration>| {
-        asked.map(|asked| column_span(now.since_epoch().saturating_sub(asked)))
-    };
-    let job = |detail: &str| {
-        let age = since(&runtime::minted(id));
-        column(state, age.as_deref().unwrap_or("-"), "", "-", detail)
-    };
-    let run = match listed {
-        Listed::Waiting { waiting_since } => {
-            let waited = span(now.since(*waiting_since));
-            return job(&format!("waiting {waited} for a build slot"));
-        }
-        Listed::Building { held_since } => {
-            return match held_since {
-                Some(since) => job(&format!(
-                    "holding a build slot for {}",
-                    span(now.since(*since))
-                )),
-                None => job("-"),
-            };
-        }
-        Listed::Unstarted => {
-            let why = format!(
-                "-: its job ended before the run started: to see why: {}",
-                next::of_run("wait", named, id)
-            );
-            return column(state, "-", "", "-", &why);
-        }
-        Listed::Unread(unread) => {
-            let made = match unread {
-                Unread::Build(build) => format!("made by pumpkin {build}"),
-                Unread::Older => "made by an older pumpkin".to_owned(),
-            };
-            return column(state, "-", "", "-", &made);
-        }
-        Listed::Run(run) => run,
-    };
-    let task = run.task.as_deref().unwrap_or("-");
-    let usd = match run.progress.as_ref().and_then(Progress::cost) {
-        None => "-".to_owned(),
-        Some(cost) => usd(cost.usd(), cost.partial()),
-    };
-    let Some(ending) = &run.ending else {
-        let Some(progress) = &run.progress else {
-            return column(
-                "publishing",
-                since(&run.asked).as_deref().unwrap_or("-"),
-                "",
-                &usd,
-                task,
-            );
-        };
-        let at = now.since(progress.started);
-        let cancel = next::of_run("cancel", named, id);
-        let (name, time, bound, doing) = shown(phase(progress, at), at, &cancel);
-        return column(&name, &time, &bound, &usd, &format!("{task}: {doing}"));
-    };
-    let ran =
-        (run.progress.as_ref()).map(|progress| column_span(progress.end.unwrap_or(progress.last)));
-    let rest = match ending {
-        Ending::Returned { values } if !values.is_empty() => {
-            format!("{task}: {}", shown_values(values))
-        }
-        Ending::Returned { .. } | Ending::NoResult(_) | Ending::Stopped(_) | Ending::Lost => {
-            task.to_owned()
-        }
-    };
-    column(state, ran.as_deref().unwrap_or("-"), "-", &usd, &rest)
-}
-
-/// The lines under a live run that has begun its log, each ending in a newline: one for each of
-/// its calls and leases that hasn't ended.
-fn under(id: &str, progress: &Progress, now: UnixTime, named: &next::At) -> String {
-    let mut lines = String::new();
-    let at = now.since(progress.started);
-    let cancel = next::of_run("cancel", named, id);
-    for child in children(progress, at) {
-        let (name, time, bound, doing) = shown(child, at, &cancel);
-        let _ = writeln!(
-            lines,
-            "{:24} {name:<11} {time:>7}  {bound:<9} {:>7}  {doing}",
-            "", ""
-        );
-    }
-    lines
-}
-
-fn shown(phase: Phase, at: Duration, cancel: &str) -> (String, String, String, String) {
-    let Phase {
-        name,
-        since,
-        bound,
-        mut doing,
-    } = phase;
-    let bound = bound.map(|bound| {
-        if at > bound.saturating_add(PAST_BOUND_SLACK) {
-            let _ = write!(
-                doing,
-                "; it is past its bound, which is a bug: to stop it: {cancel}"
-            );
-        }
-        format!("of {}", span(bound.saturating_sub(since)))
-    });
-    let time = column_span(at.saturating_sub(since));
-    (name, time, bound.unwrap_or_default(), doing)
 }
 
 /// A step of a live run. `since` and `bound` are times since the run started.
@@ -733,13 +451,7 @@ pub(crate) fn shown_values(values: &[(Name, Value)]) -> String {
         let space = if index == 0 { "" } else { " " };
         // A write fails once the words pass the bound, so a long value is never copied whole.
         let written = match value.as_f64() {
-            Some(number) => {
-                let decimals = if number.abs() >= 1.0 { 2 } else { 4 };
-                let number = format!("{number:.decimals$}");
-                let number = number.trim_end_matches('0').trim_end_matches('.');
-                let number = if number == "-0" { "0" } else { number };
-                write!(shown, "{space}{name}={number}")
-            }
+            Some(number) => write!(shown, "{space}{name}={}", number_shown(number)),
             None => write!(shown, "{space}{name}={value}"),
         };
         if written.is_err() {
@@ -747,6 +459,14 @@ pub(crate) fn shown_values(values: &[(Name, Value)]) -> String {
         }
     }
     shown.text()
+}
+
+/// `number` with two decimals, four if it is below one, and no trailing zero.
+fn number_shown(number: f64) -> String {
+    let decimals = if number.abs() >= 1.0 { 2 } else { 4 };
+    let number = format!("{number:.decimals$}");
+    let number = number.trim_end_matches('0').trim_end_matches('.');
+    if number == "-0" { "0" } else { number }.to_owned()
 }
 
 /// How a call that failed for `reason` ended, in words: `failed: ` and the reason, escaped onto
