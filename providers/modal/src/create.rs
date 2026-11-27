@@ -137,7 +137,6 @@ fn binary(bytes: impl Into<u128>) -> String {
 // which then refuses each later mount in the sandbox as "not a directory".
 const MODAL_FILES: &str = "/__modal";
 
-/// Fails if `path` is `MODAL_FILES` or below it, saying to hold the asset outside it.
 pub(crate) fn asset_held(path: &AssetPath) -> Result<(), String> {
     let rest = path.as_str().strip_prefix(MODAL_FILES);
     if rest.is_some_and(|rest| rest.is_empty() || rest.starts_with('/')) {
@@ -357,22 +356,19 @@ const STALL_TIMEOUT: Duration = Duration::from_secs(30);
 // https://github.com/modal-labs/modal-client/blob/e8a24c8e304766d1b3b6905f297e3f43d08e1d93/py/modal/sandbox/_sandbox.py#L863-L870
 pub(crate) const SNAPSHOT_TIMEOUT: Duration = Duration::from_mins(10);
 
-/// The CPU and memory of a fill's sandbox, chosen with room for `FETCH`'s 8 fetches and their
-/// hashes. Its files go to the mounted image, so memory doesn't cap an asset's size.
+/// The CPU and memory of a fill's sandbox, with room for the fetches that `FETCH` runs at once,
+/// and their hashes. Its files go to the mounted image, so memory doesn't cap an asset's size.
 const FILL_CPU_MILLIS: u64 = 4000;
 const FILL_MEMORY_MIB: u64 = 4096;
 
-/// Where a fill's sandbox mounts an empty image, which it fetches into and then snapshots.
 const FILL_DIR: &str = "/fill";
 
-/// The Python of the image of Modal's that a fill's sandbox runs, `debian_slim`, for `FETCH`.
 const FILL_PYTHON: &str = "3.12";
 
 /// The program of a fill's fetch, which `python3` runs with the directory, the fetch's bound and
 /// each read's bound, in seconds. It takes the files as JSON on its standard input. It exits 0 once
-/// each file is in the directory with its size and SHA-256. Each file is then 0444, and each
-/// directory beneath the given one is 0555. Otherwise it prints why the first file in the input's
-/// order failed, and exits 1.
+/// each file is in the directory with its size and SHA-256, and all beneath it is read-only.
+/// Otherwise it prints why the first file in the input's order failed, and exits 1.
 // It follows at most 40 redirects, as Bazel's downloader does, and only those to `https`:
 // https://github.com/bazelbuild/bazel/blob/06deebfb5b73f848de5a0ea0e00fcfaa26788d1f/src/main/java/com/google/devtools/build/lib/bazel/repository/downloader/HttpConnector.java#L56
 const FETCH: &str = r#"

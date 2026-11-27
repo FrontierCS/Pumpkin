@@ -1,15 +1,10 @@
 //! The assets that the provider's sandboxes hold. Each is an image of Modal's that a fill made. A
-//! fill is the helper's call that makes such an image. Its sandbox mounts an empty image at a
-//! directory, fetches an asset's files there and checks each file's size and SHA-256. The helper
-//! then snapshots that directory as the image. Each sandbox of a role that holds the asset mounts
-//! that image.
+//! fill's sandbox fetches an asset's files, checks each one's size and SHA-256, and snapshots them.
 //!
-//! The machine records the image's id by the digest and by how the fill made it ([`Fills`]). A
-//! later publish returns the recorded id while Modal still holds the image. Nothing on Modal names
-//! the image, though a name would let machines share a fill. Anyone with the workspace's token
-//! could point such a name at an image of other files, and no create checks the files it mounts.
-//! So each machine fills its own. A publish holds its record's lock while it finds or fills the
-//! image. So a machine fills a digest once, however many runs publish it at once.
+//! Each machine fills its own images, rather than sharing one by a name on Modal. Anyone with the
+//! workspace's token could point such a name at an image of other files, and no create checks the
+//! files it mounts. The machine records each image's id ([`Fills`]), and reuses it while Modal
+//! holds the image. It fills a digest once, however many runs publish it at once.
 
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io;
@@ -27,18 +22,17 @@ use crate::create::{self, FETCH_TIMEOUT, Filled, Filling, SNAPSHOT_TIMEOUT};
 use crate::helper::{ASK_TIMEOUT, Request};
 use crate::images::ImageId;
 
-/// How long Modal lets a fill's sandbox run. It adds one `ASK_TIMEOUT` to the fetch's and the
-/// snapshot's bounds, for the sandbox's start, its empty image's mount and Python's start.
+/// How long Modal lets a fill's sandbox run. One `ASK_TIMEOUT` covers its steps besides the fetch
+/// and the snapshot.
 const FILL_TIMEOUT: Duration = FETCH_TIMEOUT
     .saturating_add(SNAPSHOT_TIMEOUT)
     .saturating_add(ASK_TIMEOUT);
 
-/// How long the helper's `fill` may run before it is killed. It adds one `ASK_TIMEOUT` to
-/// `FILL_TIMEOUT`, for the helper's start, the App's lookup and the sandbox's end.
+/// How long the helper's `fill` may run before it is killed. One `ASK_TIMEOUT` covers its steps
+/// outside the sandbox's run.
 const CALL_TIMEOUT: Duration = FILL_TIMEOUT.saturating_add(ASK_TIMEOUT);
 
-/// The ids of the images that this machine's fills made, each in a file named by its digest and by
-/// how the fill made it. Only the machine's user reaches their directory.
+/// The ids of the images that this machine's fills made. Only the machine's user reaches them.
 #[derive(Debug)]
 pub(crate) struct Fills {
     dir: PathBuf,
@@ -51,19 +45,18 @@ impl Fills {
         }
     }
 
-    /// The record of the fill of `digest` that `how` makes, once no other process of the machine
+    /// The record of the fill of `digest` that `how` makes, once no other publish on the machine
     /// holds it.
-    // The record's name holds a SHA-256 of `how` too, so a publish fills again once `how` changes.
-    // Bazel likewise counts a fetched repository out of date once its rule's fingerprint differs
-    // from the one in its marker file:
+    // The record's name holds `how` too, so a publish fills again once `how` changes. Bazel
+    // likewise counts a fetched repository out of date once its rule's fingerprint differs from the
+    // one in its marker file:
     // https://github.com/bazelbuild/bazel/blob/06deebfb5b73f848de5a0ea0e00fcfaa26788d1f/src/main/java/com/google/devtools/build/lib/rules/repository/RepositoryDelegatorFunction.java#L563-L588
     // https://github.com/bazelbuild/bazel/blob/06deebfb5b73f848de5a0ea0e00fcfaa26788d1f/src/main/java/com/google/devtools/build/lib/rules/repository/RepositoryDelegatorFunction.java#L622-L627
     // The wait for the lock has no bound, as Go's module cache waits for its lock:
     // https://github.com/golang/go/blob/46b62495e1bf4d56e0313320772ae588d9119aed/src/cmd/go/internal/modfetch/fetch.go#L183
     // https://github.com/golang/go/blob/46b62495e1bf4d56e0313320772ae588d9119aed/src/cmd/go/internal/modfetch/cache.go#L149-L158
-    // The lock is an exclusive `flock` on the `.lock` file. The kernel releases it when its
-    // holder's process ends, however it ends. Each holder's publish ends within a `held` call and a
-    // fill.
+    // A holder lets go within a `held` call and a fill. The kernel releases its `flock` once its
+    // process ends, however it ends.
     fn lock(&self, digest: &AssetDigest, how: &Filling) -> Result<Record<'_>, String> {
         let how = serde_json::to_vec(how)
             .map_err(|error| format!("writing a fill's request as JSON failed: {error}"))?;
@@ -92,13 +85,11 @@ impl Fills {
 struct Record<'f> {
     dir: &'f Path,
     name: String,
-    // Held by owning it, and let go as it drops.
     _lock: File,
 }
 
 impl Record<'_> {
-    /// The id that the fill recorded, if any. A record whose text is no image id counts as none,
-    /// and the publish fills again.
+    /// The id that the fill recorded, if any. A record whose text is no image id counts as none.
     fn image(&self) -> Result<Option<ImageId>, String> {
         let path = self.dir.join(&self.name);
         match fs::read_to_string(&path) {
@@ -108,9 +99,8 @@ impl Record<'_> {
         }
     }
 
-    /// Records `image` as the fill's, in place of any earlier one. If the process dies, the rename
-    /// leaves the one or the other whole. Nothing syncs the record to disk, so a machine's crash
-    /// can leave it empty or missing, and [`image`](Self::image) then counts it as none.
+    // If the process dies, the rename leaves the earlier id or this one whole. Nothing syncs the
+    // record, so a machine's crash can leave it empty or missing, which `image` counts as none.
     fn record(&self, image: &ImageId) -> Result<(), String> {
         let part = self.dir.join(format!(".{}.part", self.name));
         fs::write(&part, image.as_str()).context(part.display())?;
@@ -120,16 +110,14 @@ impl Record<'_> {
 }
 
 impl Assets for Modal<'_> {
-    // This refuses only `/__modal` and below. A path where the role's image has a file passes, as
-    // this isn't given the image, and fails at the create's mount instead.
+    // A path where the role's image has a file passes, as this isn't given the image. The create's
+    // mount refuses it.
     fn holds(&self, path: &AssetPath) -> Result<(), String> {
         create::asset_held(path)
     }
 
-    /// Publishes `files` as [`Assets::publish_asset`] asks. The reference is the id of the image
-    /// that each create mounts. It first waits for any other publish of `digest` on the machine,
-    /// which ends within its fill's bound. A fill that fails keeps nothing, so a later publish
-    /// fills the image anew.
+    /// Publishes `files` as [`Assets::publish_asset`] asks, once any other publish of `digest` on
+    /// the machine has ended. A fill that fails keeps nothing.
     fn publish_asset(
         &self,
         run: &RunTag,

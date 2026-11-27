@@ -47,13 +47,10 @@ CONSOLE_ENTRIES = 20
 # What begins the line of a sandbox's console that this helper adds.
 CONSOLE_PREFIX = "pumpkin-modal:"
 
-# The most bytes of a fill's files, as JSON, that one write to its fetch's standard input holds.
-# The SDK buffers an exec's standard input up to 16 MiB:
+# Any size up to 16 MiB would do. The SDK buffers an exec's standard input up to 16 MiB, and
+# refuses a write past that until a drain sends what it holds:
 # https://github.com/modal-labs/modal-client/blob/e8a24c8e304766d1b3b6905f297e3f43d08e1d93/py/modal/io_streams.py#L633-L636
-# It refuses a write past that until a drain sends what it holds:
 # https://github.com/modal-labs/modal-client/blob/e8a24c8e304766d1b3b6905f297e3f43d08e1d93/py/modal/io_streams.py#L746-L754
-# Each chunk is drained before the next, and one chunk stays below that limit, so no write is
-# refused. Any size up to 16 MiB would do.
 STDIN_CHUNK = 1 << 20
 
 
@@ -135,8 +132,8 @@ def unchanged(sandboxd: dict) -> None:
 
 
 def fill(modal, request: dict) -> dict:
-    """Returns the ID of an image of the request's `files`, made as the crate's `create::Fill`
-    says, or fails with what its `fetch` printed. It ends its sandbox before it returns."""
+    """Returns the ID of an image of the request's `files`, or fails with what its `fetch` printed.
+    It ends its sandbox before it returns."""
     app = modal.App.lookup(APP, create_if_missing=True)
     cpu = cores(request["cpu_millis"])
     sandbox = modal.Sandbox.create(
@@ -177,8 +174,7 @@ def fill(modal, request: dict) -> dict:
 
 
 def held(modal, request: dict) -> bool:
-    """Whether Modal holds the request's `image`, by its ID: false once the image is deleted. A
-    fill's image never expires, as `create::fill` asks for its snapshot with no TTL."""
+    """Whether Modal holds the request's `image`: false once it is deleted."""
     app = modal.App.lookup(APP, create_if_missing=True)
     try:
         modal.Image.from_id(request["image"]).build(app)
@@ -250,9 +246,8 @@ def create(modal, request: dict) -> dict:
 
 
 def mount(modal, sandbox, assets: list[dict]) -> None:
-    """Mounts each of `assets` in `sandbox`'s own container, in order: the image whose ID is its
-    `image`, at its `path`. If one isn't mounted, this ends the sandbox, and then raises why, by
-    the asset's path."""
+    """Mounts each of `assets` in `sandbox`'s own container. If one isn't mounted, this ends the
+    sandbox, and then raises why."""
     for asset in assets:
         try:
             sandbox.mount_image(asset["path"], modal.Image.from_id(asset["image"]))

@@ -229,11 +229,9 @@ impl From<SandboxClass> for ClassTable {
 /// it imports images from, and the operator's Docker engine, which holds them until they are
 /// pushed there.
 ///
-/// Each call but an asset's publish returns within a bound, as its helper's call is killed if it
-/// hasn't ended in time (`helper`). A create's ends at the create's deadline ([`Create::by`]), and
-/// a delete's 10 min after it starts, which waits for each sandbox to finish. Any other call ends
-/// at the bound the helper's module says. `aws` and `docker` are bounded as [`aws::Bound::Call`]
-/// and [`engine::Engine`] bound them.
+/// Each call but an asset's publish returns within a bound, a create's at the create's deadline
+/// ([`Create::by`]). A delete waits for each sandbox to finish. `aws` and `docker` are bounded as
+/// [`aws::Bound::Call`] and [`engine::Engine`] bound them.
 #[derive(Debug)]
 pub struct Modal<'e> {
     reached: Reached,

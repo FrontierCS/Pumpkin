@@ -43,7 +43,6 @@ impl From<ImageId> for AssetRef {
     }
 }
 
-/// The id in Modal of the image that holds an asset's files, as its reference holds it.
 pub(crate) fn asset_image(asset: &AssetRef) -> Result<&str, String> {
     match ImageId::try_from(asset.as_str().to_owned()) {
         Ok(_) => Ok(asset.as_str()),

@@ -1,6 +1,5 @@
-//! What the Modal provider decides without Modal. That is the references of a batch of images
-//! (`images`), the memory and companions that a sandbox holds, and where it holds an asset
-//! (`create`). This binary compiles both modules itself, as the crate keeps them private.
+//! What the Modal provider decides without Modal. This binary compiles the modules that it tests
+//! itself, as the crate keeps them private.
 
 #![expect(
     clippy::unwrap_used,
@@ -139,15 +138,12 @@ fn batches() {
     );
 }
 
-/// Whether Modal holds an asset at `path`, or why not.
 fn holding(path: &str) -> String {
     let path = AssetPath::try_from(path.to_owned()).unwrap();
     let held = create::asset_held(&path).map_or_else(|refused| refused, |()| "held".into());
     format!("{path}: {held}")
 }
 
-// Modal refuses an asset in `/__modal` or below, and holds one at a path that only starts with
-// its name.
 #[test]
 fn assets_held() {
     check(

@@ -51,10 +51,8 @@ pub(crate) fn unphased(lines: &[Value], assets: bool) -> Vec<String> {
 }
 
 /// What is wrong with `line`, a create on Modal in the run log, if anything. Its phases are to be
-/// those that the helper times, in order, each within the create. They hold [`ASSETS`] if its
-/// sandbox holds `assets`, and [`COMPANIONS`] last if it holds `companions`. One begins after the
-/// create did, as the helper's interpreter starts first, unless the helper's clock and this one
-/// differ.
+/// those that the helper times, in order, each within the create. One begins after the create
+/// did, as the helper's interpreter starts first, unless the helper's clock and this one differ.
 fn create_unphased(line: &Value, assets: bool, companions: bool) -> Option<String> {
     let event = &line["event"];
     let wrong = |what: &str| {
@@ -166,7 +164,6 @@ pub(crate) fn uncompanioned(values: &[Value]) -> Vec<String> {
 }
 
 /// What is wrong in `values`, a run's result that counts the facts that hold as `score`, of `of`.
-/// That is a `score` other than `of`, a `score` or `of` that isn't a whole number, or an `of` of 0.
 pub(crate) fn unscored(values: &[Value]) -> Vec<String> {
     let value = |name: &str| {
         (values.iter())

@@ -99,11 +99,9 @@ pub(crate) fn docker() -> Result<()> {
 /// Runs `examples/smoke` at `HEAD` on `provider` through the controller, and fails unless every
 /// probe passed, every sandbox was deleted and nothing of the run is left on the provider. On
 /// Modal, it then runs `examples/companions` and `examples/assets` likewise. Each of those fails
-/// too unless each fact that its result names holds. The assets run also fails unless its log
-/// records a publish of an asset and an `assets` phase in each create. It first runs
-/// `pumpkin-admin check` on the controller's deployment, and fails if that finds a problem. With
-/// `lost`, it loses a smoke run instead, and checks that its sandboxes end by themselves and that a
-/// reap removes the rest.
+/// too unless each fact that its result names holds. It first runs `pumpkin-admin check` on the
+/// controller's deployment, and fails if that finds a problem. With `lost`, it loses a smoke run
+/// instead, and checks that its sandboxes end by themselves and that a reap removes the rest.
 /// `again` names the command that repeats it.
 pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> Result<()> {
     let again = match provider {
@@ -717,9 +715,8 @@ fn companioned(record: &Path) -> Vec<String> {
     failed
 }
 
-/// What is wrong in the record of a run of `examples/assets` at `record`. That is what [`checked`]
-/// finds, and a fact that its result says doesn't hold. It is also a log that shows no publish of
-/// its asset, or a create on Modal without its mount. It prints the result and each publish.
+/// What is wrong in the record of a run of `examples/assets` at `record`. It prints the result and
+/// each publish.
 fn mounted(record: &Path) -> Vec<String> {
     let mut failed = checked(record, |values| {
         let shown: Vec<String> = (values.iter())
