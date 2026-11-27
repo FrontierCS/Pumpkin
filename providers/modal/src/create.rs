@@ -14,7 +14,7 @@ use provider::{
 };
 use schema::ir::User;
 use schema::sandbox::{
-    Endpoint, Listening, RELAYED_PORT, Relayed, SANDBOXCTL_PATH, SANDBOXD_GRANT, SANDBOXD_PATH,
+    Endpoint, LISTEN_PORT, Listening, Relayed, SANDBOXCTL_PATH, SANDBOXD_GRANT, SANDBOXD_PATH,
     SANDBOXD_TLS_CERTIFICATE, SANDBOXD_TLS_KEY,
 };
 use serde::{Deserialize, Serialize};
@@ -24,15 +24,9 @@ use crate::images::imported;
 /// The bytes in a MiB, the unit in which Modal gives a sandbox memory.
 const MIB: u64 = 1024 * 1024;
 
-/// The port at which `main`'s `sandboxd` listens for the gateway, behind a tunnel.
-// IANA's registry assigns none of 7432 to 7436, so no registered service claims it:
-// https://www.iana.org/assignments/service-names-port-numbers
-const MAIN_PORT: u16 = 7434;
-
 /// The port at which `main`'s `sandboxd` relays to the sandbox's companions, behind a tunnel of
 /// its own.
-// IANA's registry assigns none of 7432 to 7436, so no registered service claims it:
-// https://www.iana.org/assignments/service-names-port-numbers
+// The port after `LISTEN_PORT`, which IANA's registry leaves unassigned too.
 const RELAY_PORT: u16 = 7435;
 
 /// What a published `sandboxd`'s reference holds between its path and its digest.
@@ -237,7 +231,7 @@ pub(crate) fn request<'a>(
     let ListenDials { main, companions } = dials;
     let Listening { grant } = main;
     let mut at = vec![SANDBOXD_PATH];
-    let mut args = listening(MAIN_PORT, *by, role.user);
+    let mut args = listening(*by, role.user);
     if *ops {
         at.push(SANDBOXCTL_PATH);
         args.push("--ops".to_owned());
@@ -245,7 +239,7 @@ pub(crate) fn request<'a>(
     if *model {
         args.push("--model".to_owned());
     }
-    let mut ports = vec![MAIN_PORT];
+    let mut ports = vec![LISTEN_PORT];
     // `sandboxd` refuses a relay that carries to no companion, so a sandbox without any has none.
     if !companions.is_empty() {
         args.extend(["--relay".to_owned(), format!("0.0.0.0:{RELAY_PORT}")]);
@@ -283,7 +277,7 @@ fn sidecar(companion: &CompanionDial, by: UnixTime) -> Result<Sidecar<'_>, Strin
         user,
         relayed: Relayed { grant, identity },
     } = companion;
-    let mut args = listening(RELAYED_PORT, by, *user);
+    let mut args = listening(by, *user);
     args.push("--tls".to_owned());
     let env = BTreeMap::from([
         (SANDBOXD_GRANT, grant.digits()),
@@ -297,15 +291,15 @@ fn sidecar(companion: &CompanionDial, by: UnixTime) -> Result<Sidecar<'_>, Strin
     })
 }
 
-/// The command of a `sandboxd` that becomes `user` as it starts. It listens at `port`, at every
-/// address of its container, until `by`.
+/// The command of a `sandboxd` that becomes `user` as it starts. It listens at `LISTEN_PORT`, at
+/// every address of its container, until `by`.
 // Modal starts it as root, behind its own first process, `dumb-init`.
-fn listening(port: u16, by: UnixTime, user: User) -> Vec<String> {
+fn listening(by: UnixTime, user: User) -> Vec<String> {
     let User { uid, gid } = user;
     let by = by.since_epoch().as_secs();
     let args = [
         SANDBOXD_PATH.to_owned(),
-        format!("0.0.0.0:{port}"),
+        format!("0.0.0.0:{LISTEN_PORT}"),
         "--listen".to_owned(),
         "--by".to_owned(),
         by.to_string(),

@@ -36,8 +36,8 @@ use schema::frame::MAX_BODY_BYTES;
 use schema::ir::{AbsolutePath, Argv, CompanionName, Env, EnvVar, Mode, Name};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
-    Endpoint, Entry, ExitStatus, FromSandbox, HELLO_TIMEOUT, HelloReply, Launch, Listening,
-    MAX_ATTESTATION_BYTES, PROTOCOL_VERSION, PrivateDial, RELAYED_PORT, RegistrationGrant,
+    Endpoint, Entry, ExitStatus, FromSandbox, HELLO_TIMEOUT, HelloReply, LISTEN_PORT, Launch,
+    Listening, MAX_ATTESTATION_BYTES, PROTOCOL_VERSION, PrivateDial, RegistrationGrant,
     RelativePath, Relayed, Root, SANDBOXD_ATTESTATION, SANDBOXD_GIVEN, SANDBOXD_GRANT,
     SANDBOXD_TLS_CERTIFICATE, SANDBOXD_TLS_KEY, SOCKET_NAME, SocketDial, ToSandbox, dir_mode,
     file_mode,
@@ -1895,7 +1895,7 @@ impl Network {
             .chain(["--user=0:0".to_owned(), mount])
             .collect();
         let options: Vec<&str> = options.iter().map(String::as_str).collect();
-        let at = format!("0.0.0.0:{RELAYED_PORT}");
+        let at = format!("0.0.0.0:{LISTEN_PORT}");
         let listening = ["/.pumpkin/sandboxd", &at, "--listen", "--by", by];
         let command: Vec<&str> = (listening.into_iter())
             .chain(["--user", "1234:1235"])
@@ -1919,7 +1919,7 @@ impl Network {
         );
     }
 
-    /// Returns once a socket listens at `RELAYED_PORT` in the container named for `host`.
+    /// Returns once a socket listens at `LISTEN_PORT` in the container named for `host`.
     fn listening(&self, host: &str) {
         let by = Deadline::after(HUNG);
         loop {
@@ -1928,7 +1928,7 @@ impl Network {
                 .output()
                 .unwrap();
             let listed = String::from_utf8(listed.stdout).unwrap();
-            if listed.contains(&format!(":{RELAYED_PORT} ")) {
+            if listed.contains(&format!(":{LISTEN_PORT} ")) {
                 return;
             }
             assert!(

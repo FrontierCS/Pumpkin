@@ -2,7 +2,7 @@
 //! ([`schema::sandbox::Relayed`]).
 //!
 //! A connection first says its [route](schema::sandbox::route), a companion's name. The relay
-//! then connects to that companion by its name, at [`RELAYED_PORT`], and carries bytes both ways
+//! then connects to that companion by its name, at [`LISTEN_PORT`], and carries bytes both ways
 //! until either connection ends, which ends both. It says on standard error why it closed a
 //! connection.
 //!
@@ -21,7 +21,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use schema::ir::CompanionName;
-use schema::sandbox::{HELLO_TIMEOUT, RELAYED_PORT, read_route};
+use schema::sandbox::{HELLO_TIMEOUT, LISTEN_PORT, read_route};
 use stdx::{Context, Deadline};
 
 use crate::session::TOLD_PEERS_COUNT;
@@ -138,7 +138,7 @@ fn routed(gateway: &TcpStream) -> Result<CompanionName, String> {
 /// ends. Both have ended, both ways, once it returns. Fails if it carried nothing.
 fn carry(gateway: &TcpStream, companion: &CompanionName) -> Result<(), String> {
     let reached = reach(companion).context(format_args!(
-        "companion `{companion}` wasn't reached at {companion}:{RELAYED_PORT}"
+        "companion `{companion}` wasn't reached at {companion}:{LISTEN_PORT}"
     ))?;
     thread::scope(|scope| {
         let back = thread::Builder::new().name("relayed-back".to_owned());
@@ -155,7 +155,7 @@ fn carry(gateway: &TcpStream, companion: &CompanionName) -> Result<(), String> {
 /// `CONNECT_TIMEOUT` in all.
 fn reach(companion: &CompanionName) -> Result<TcpStream, String> {
     // The resolver's own timeouts and attempts (`resolv.conf(5)`) bound the lookup.
-    let addresses = (companion.as_str(), RELAYED_PORT).to_socket_addrs();
+    let addresses = (companion.as_str(), LISTEN_PORT).to_socket_addrs();
     let addresses = addresses.context("its name didn't resolve")?;
     let by = Deadline::after(CONNECT_TIMEOUT);
     let mut failed = "its name resolved to no address".to_owned();
