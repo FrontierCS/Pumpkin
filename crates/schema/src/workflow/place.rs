@@ -118,7 +118,6 @@ fn smallest<'p>(
         let refused = misfit::refusal(name, needs, &at.token("needs"), &misfits);
         return Err(errors.add(refused));
     }
-    // Some class fits its needs.
     if !fitting.iter().any(accompanies) {
         let change = "change its needs to fit a class that offers them";
         return Err(errors.add(unheld("class that fits its needs", change)));
@@ -134,8 +133,6 @@ fn smallest<'p>(
     Err(errors.add(assets_unheld(sandbox, classes, change)))
 }
 
-/// The error that `sandbox`'s role declares assets that no class holds. `classes` says which
-/// classes, such as "class that fits its needs". The help is to declare none, or `change`.
 fn assets_unheld(sandbox: &Sandbox, classes: &str, change: &str) -> ParseError {
     let Sandbox {
         name, assets, at, ..

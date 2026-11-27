@@ -454,7 +454,6 @@ fn check_asset_path(path: &str) -> Result<(), String> {
     }
 }
 
-/// The most bytes that an [`HttpsUrl`] holds.
 // The least that RFC 9110 asks every sender and recipient to take:
 // https://www.rfc-editor.org/rfc/rfc9110.html#section-4.1
 const MAX_URL_BYTES: usize = 8000;

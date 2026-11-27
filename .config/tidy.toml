@@ -10,7 +10,7 @@
 [words]
 "ARCHITECTURE.md" = 2809
 "deploy/aws/README.md" = 2110
-"docs/glossary.md" = 1717
+"docs/glossary.md" = 1704
 "docs/language.md" = 1534
 
 # The Markdown documents, and the Rust files by their comments, with sentences to split: those

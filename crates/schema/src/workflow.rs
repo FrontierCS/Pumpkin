@@ -254,8 +254,7 @@ impl From<UsdPerHour> for f64 {
 /// What a class of sandbox offers the roles of its sandboxes, as its provider states it.
 ///
 /// It is the most CPU and memory that a role may need, its GPUs, and its CPU's flags and model,
-/// which a role's [needs](crate::ir::Needs) are matched against. It is also whether its sandboxes
-/// hold a runner's companions, and a role's assets ([`Workflow::place`]).
+/// which a role's [needs](crate::ir::Needs) are matched against ([`Workflow::place`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Offers {
     /// In thousandths of a CPU.

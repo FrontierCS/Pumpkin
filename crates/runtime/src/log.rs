@@ -80,8 +80,7 @@ pub(super) struct Log<'h, H: Host> {
 }
 
 impl<'h, H: Host> Log<'h, H> {
-    /// The log of the run whose record is `dir`, which tells each of `published` once it tells the
-    /// start.
+    /// `published` waits for [`start`](Self::start), as `run_started` is the log's first line.
     pub(super) fn create(
         host: &'h H,
         clock: H::Clock,
@@ -464,7 +463,6 @@ impl<'h, H: Host> Log<'h, H> {
     }
 }
 
-/// A publish of an asset's files before the run started.
 pub(super) struct AssetPublished {
     pub(super) provider: Name,
     pub(super) digest: AssetDigest,

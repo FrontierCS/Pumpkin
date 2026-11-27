@@ -38,7 +38,6 @@ pub struct AssetFile {
     pub sha256: Sha256Digest,
 }
 
-/// The most files that an asset holds.
 // The same number as `runtime`'s `ENTRIES`, the most files and directories that the host
 // collects from a sandbox in one tree.
 const MAX_ASSET_FILES: usize = 100_000;

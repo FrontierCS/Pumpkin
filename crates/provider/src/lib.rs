@@ -114,7 +114,7 @@ pub trait Listens: Creator<ListenDials, Listened> {
 }
 
 /// What a provider whose sandboxes hold assets ([`Create::assets`]) gives from
-/// [`Provider::assets`]: where its sandboxes hold one, and the publish of each asset's files.
+/// [`Provider::assets`].
 pub trait Assets: Sync {
     /// Fails if this provider's sandboxes can't hold an asset at `path`, saying why and where they
     /// could hold it. It reserves nothing.
@@ -122,9 +122,9 @@ pub trait Assets: Sync {
 
     /// Publishes `files`, whose digest is `digest`, so that this provider's sandboxes can hold
     /// them. It keeps them only if the bytes at each file's URL have the file's size and SHA-256.
-    /// Otherwise it fails, naming the first file that didn't. It then keeps none of the files, so
-    /// a later publish of `digest` fetches them all again. A sandbox that it makes to fetch them
-    /// carries `run`'s tag, so that `run`'s [`list`](Sweep::list) finds one left behind.
+    /// Otherwise it fails, naming the first file that didn't. It then keeps none of the files. A
+    /// sandbox that it makes to fetch them carries `run`'s tag, so that `run`'s
+    /// [`list`](Sweep::list) finds one left behind.
     fn publish_asset(
         &self,
         run: &RunTag,

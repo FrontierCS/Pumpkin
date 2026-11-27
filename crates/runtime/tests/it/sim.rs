@@ -173,7 +173,6 @@ pub(crate) struct Sim {
     // The companion at whose set-up `main`'s session ends.
     ends_main: Option<&'static str>,
     publishes_assets: bool,
-    // The path where its sandboxes hold no asset.
     unheld: Option<&'static str>,
 }
 
@@ -249,7 +248,6 @@ struct State {
     reserved: Vec<Reserved>,
     /// What each create was given of each companion, by the sandbox's id.
     companions: Vec<String>,
-    /// What each create was given of each asset, by the sandbox's name.
     assets: Vec<String>,
     /// The record of the run whose sandboxes these are, once `Sim::records` names it.
     record: Option<PathBuf>,
@@ -581,8 +579,7 @@ impl Sim {
     }
 
     #[must_use]
-    /// Makes each class hold assets, though the provider publishes none unless it is also
-    /// [`holding_assets`](Self::holding_assets).
+    /// Makes each class hold assets, though the provider publishes none.
     pub(crate) fn offering_assets(mut self) -> Self {
         for class in self.ready.classes.values_mut() {
             class.offers.assets = true;
@@ -591,7 +588,6 @@ impl Sim {
     }
 
     #[must_use]
-    /// Makes each class hold assets, which the provider publishes, keeping none of their files.
     pub(crate) fn holding_assets(self) -> Self {
         Self {
             publishes_assets: true,
@@ -600,8 +596,6 @@ impl Sim {
     }
 
     #[must_use]
-    /// Makes each class hold assets, as [`holding_assets`](Self::holding_assets) does, but none at
-    /// `path`.
     pub(crate) fn holding_no_asset_at(self, path: &'static str) -> Self {
         Self {
             unheld: Some(path),
@@ -917,8 +911,6 @@ impl Provider for Sim {
     }
 }
 
-/// The simulated CPUs that a run of `phases` holds: the most of any phase, as a phase starts only
-/// once the one before has ended.
 fn needed(phases: &[Vec<Role>]) -> u64 {
     let needs = |phase: &Vec<Role>| -> u64 {
         (phase.iter())
@@ -928,6 +920,7 @@ fn needed(phases: &[Vec<Role>]) -> u64 {
             })
             .sum()
     };
+    // A phase starts only once the one before has ended, so the run holds the most of any.
     phases.iter().map(needs).max().unwrap_or(0)
 }
 
@@ -959,7 +952,6 @@ impl Assets for Sim {
 }
 
 impl Sim {
-    // Notes each asset that `create` holds, each of which it published.
     fn held(&self, create: &Create) -> Result<(), String> {
         for HeldAsset { path, reference } in &create.assets {
             let reference = self.own("the asset", reference.as_str())?;

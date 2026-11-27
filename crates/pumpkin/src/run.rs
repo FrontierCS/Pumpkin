@@ -486,9 +486,6 @@ enum Offered<'a> {
     Controller { name: &'a controller::Name },
 }
 
-/// Says each of `errors`, a placement's, where `source_map` places it. Then it says how many
-/// there are, naming the entry and configuration, or the controller, that `offered` gives.
-/// Returns where to read how a class is offered.
 fn misplaced(errors: ParseErrors, source_map: &SourceMap, offered: &Offered<'_>) -> String {
     let count = errors.as_slice().len();
     say_each(errors, source_map);
@@ -507,9 +504,6 @@ fn misplaced(errors: ParseErrors, source_map: &SourceMap, offered: &Offered<'_>)
     "to read how a configuration offers a class: pumpkin help config".to_owned()
 }
 
-/// Says each of `errors`, the refusals of [`runtime::fits`], where `source_map` places it.
-/// Returns the line that counts them, which names the entry and configuration, or the
-/// controller, that `offered` gives.
 fn unfit(errors: ParseErrors, source_map: &SourceMap, offered: &Offered<'_>) -> String {
     let count = errors.as_slice().len();
     say_each(errors, source_map);
@@ -526,8 +520,6 @@ fn unfit(errors: ParseErrors, source_map: &SourceMap, offered: &Offered<'_>) -> 
     closing_problems(format_args!("{has}"), count)
 }
 
-/// Says each of `errors` where `source_map` places it. It styles them if what goes to the
-/// standard error is styled ([`paint::styled`]).
 fn say_each(errors: ParseErrors, source_map: &SourceMap) {
     let errors = errors.in_source(|at| source_map.place(at));
     let paint = Paint(paint::styled(&io::stderr()));

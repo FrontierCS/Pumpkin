@@ -1486,7 +1486,6 @@ fn agent_files() {
     );
 }
 
-/// A file of an asset at `path`, whose SHA-256's digits all are `digit`.
 fn asset_file(path: &str, digit: char) -> Value {
     json!({
         "path": path, "url": format!("https://example.com/{digit}"), "size": 963,
@@ -1494,7 +1493,6 @@ fn asset_file(path: &str, digit: char) -> Value {
     })
 }
 
-/// [`workflow`] with its target `trainer` holding `files` at `path`.
 fn holding(path: &str, files: Value) -> Value {
     let mut asset = json!({ "path": path });
     asset["files"] = files;
@@ -1909,7 +1907,6 @@ fn placed_companions() {
     );
 }
 
-/// Role `role` of `ir` placed on `offered`: where it is placed, or why it can't be.
 struct Holding {
     ir: Value,
     role: usize,
@@ -1933,7 +1930,6 @@ impl Case for Holding {
     }
 }
 
-/// `offered`, with each of `classes`, by its provider's name and its own, holding assets.
 fn holding_assets(
     mut offered: BTreeMap<ir::Name, BTreeMap<ir::Name, Class>>,
     classes: &[(&str, &str)],

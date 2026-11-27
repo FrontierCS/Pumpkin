@@ -21,9 +21,6 @@ use test_support::{TestDir, edge, http};
 /// Any digest, as the cache only names an entry by it.
 const DIGEST: &str = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 
-/// Serves each of `files`, a path and its bytes, at `/<path>`, one connection at a time, each
-/// once `gate` lets it if one is given. It tells `asked` of each request first, if given.
-/// Returns its port on the loopback.
 fn serving(
     files: Vec<(&'static str, &'static [u8])>,
     asked: Option<Sender<()>>,
@@ -46,8 +43,6 @@ fn serving(
     })
 }
 
-/// The files of an asset, each a path, the SHA-256 that it pins and its size, at the stand-in on
-/// `port`.
 fn files(port: u16, pinned: &[(&str, &str, u64)]) -> AssetFiles {
     let files = (pinned.iter()).map(|(path, sha256, size)| {
         json!({
@@ -62,8 +57,6 @@ fn digest() -> AssetDigest {
     AssetDigest::from(Sha256Digest::try_from(DIGEST.to_owned()).unwrap())
 }
 
-/// What a publish of `files` into the cache at `dir` gave: whether it fetched them, and where it
-/// keeps them, or why it failed.
 fn published(dir: &Path, files: &AssetFiles) -> String {
     let cache = AssetCache::trusting(dir, &edge::root());
     let run = RunTag::try_from("run-1".to_owned()).unwrap();
@@ -78,8 +71,6 @@ fn published(dir: &Path, files: &AssetFiles) -> String {
     }
 }
 
-/// Checks against `expect` each of `outcomes`, then what the cache at `dir` holds, each with its
-/// mode. The digest and each of `masked` are masked.
 fn check(dir: &Path, outcomes: &[String], masked: &[(&str, &str)], expect: &Expect) {
     let mut lines = outcomes.to_vec();
     lines.push("the cache holds:".to_owned());
@@ -93,7 +84,6 @@ fn check(dir: &Path, outcomes: &[String], masked: &[(&str, &str)], expect: &Expe
     expect.assert_eq(&shown);
 }
 
-/// Each entry below `dir`, sorted, by its path from `base`, with its mode, and a file's bytes.
 fn listed(base: &Path, dir: &Path, lines: &mut Vec<String>) {
     let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o7777;
     if dir == base {

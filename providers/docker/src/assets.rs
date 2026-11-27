@@ -1,6 +1,3 @@
-//! The files of the assets that the provider's sandboxes hold, in a cache on the machine
-//! ([`AssetCache`]).
-
 use std::collections::BTreeSet;
 use std::fs::{self, DirBuilder, File, OpenOptions, Permissions};
 use std::io::{self, Read as _, Write};
@@ -15,30 +12,25 @@ use sha2::{Digest as _, Sha256};
 use stdx::{Context as _, Deadline};
 use ureq::tls::{Certificate, RootCerts, TlsConfig};
 
-// Name resolution and the connect, its TLS handshake included, each get this long. So each
-// connection may take 60 s to set up. A redirect's connection gets fresh budgets:
-// https://github.com/algesten/ureq/blob/33ca9d35e97b6a10e767fb0fa3139f01d315e89c/src/lib.rs#L101-L104
 // Cargo gives a download's connect 30 s, which in libcurl covers name resolution too:
 // https://github.com/rust-lang/cargo/blob/ecb9851afd3095e988daaa35a48bc7f3cb748e04/src/cargo/util/network/http.rs#L202-L226
 // https://github.com/curl/curl/blob/b1ef0e1a01c0bb6ee5367bd9c186a603bde3615a/docs/libcurl/opts/CURLOPT_CONNECTTIMEOUT.md?plain=1#L30-L34
+// A redirect's connection gets fresh budgets:
+// https://github.com/algesten/ureq/blob/33ca9d35e97b6a10e767fb0fa3139f01d315e89c/src/lib.rs#L101-L104
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
-// The longest that one read of a response may wait. Cargo waits as long on a download below 10
-// bytes a second, at the lines above. A server that sends a byte now and then passes this bound,
-// and `FETCH_TIMEOUT` ends its fetch.
+// Cargo waits as long on a download below 10 bytes a second, at the lines above.
 const STALL_TIMEOUT: Duration = Duration::from_secs(30);
 
-// It bounds the fetch of all of an asset's files together. It is sized only to end the fetch of a
-// server that trickles, as the engine's `PUSH_TIMEOUT` ends a push that hangs. At 10 MiB a
-// second, it admits 70 GiB.
+// It is sized only to end the fetch of a server that trickles, as the engine's `PUSH_TIMEOUT` ends
+// a push that hangs. At 10 MiB a second, it admits 70 GiB.
 const FETCH_TIMEOUT: Duration = Duration::from_hours(2);
 
 // As many as Bazel's downloader follows:
 // https://github.com/bazelbuild/bazel/blob/06deebfb5b73f848de5a0ea0e00fcfaa26788d1f/src/main/java/com/google/devtools/build/lib/bazel/repository/downloader/HttpConnector.java#L56
 const MAX_REDIRECTS: u32 = 40;
 
-/// The cache, on the machine, of the files of the assets that the provider's sandboxes hold, and
-/// the HTTPS client that fetches them.
+/// The cache, on the machine, of the files of the assets that the provider's sandboxes hold.
 ///
 /// Processes may share the cache's directory. A digest's files are fetched once, however many
 /// publishes of it run, at once or later. A publish that succeeds returns a directory that holds
@@ -84,8 +76,6 @@ impl AssetCache {
         }
     }
 
-    /// Fetches `file` into `staging`, at its path, by `by`, and fails unless its URL gives exactly
-    /// its size and its SHA-256.
     fn fetch(&self, staging: &Path, file: &AssetFile, by: Deadline) -> Result<(), String> {
         let AssetFile {
             path,
@@ -215,8 +205,8 @@ impl Assets for AssetCache {
             let below = Path::new(file.path.as_str()).ancestors().skip(1);
             dirs.extend(below.map(|dir| staging.dir.join(dir)));
         }
-        // Each directory turns read-only, as each file does, and is synced before the rename. So a
-        // crash after the rename leaves no file out of the entry. The loop's order doesn't matter.
+        // Synced before the rename, so that a crash after it leaves no file out of the entry. The
+        // loop's order doesn't matter.
         for dir in &dirs {
             let read_only = fs::set_permissions(dir, Permissions::from_mode(0o555));
             read_only.context(dir.display())?;
@@ -238,8 +228,8 @@ impl Assets for AssetCache {
     }
 }
 
-/// A fetch's directory, and the digest's lock. It removes the directory as it drops, unless the
-/// fetch renamed it, and only then releases the lock.
+/// A fetch's directory and the digest's lock. It removes the directory before it releases the
+/// lock, as only the lock's holder may write the directory.
 struct Staging {
     dir: PathBuf,
     _lock: File,
@@ -267,13 +257,11 @@ fn remove(root: &Path) -> io::Result<()> {
     fs::remove_dir_all(root)
 }
 
-/// Syncs the directory at `dir`, so that the entries made or renamed in it survive a crash.
 fn sync(dir: &Path) -> Result<(), String> {
     let synced = File::open(dir).and_then(|dir| dir.sync_all());
     synced.context(format_args!("syncing {}", dir.display()))
 }
 
-/// A writer that hashes what it writes `to`.
 struct Hashed<'f> {
     to: &'f mut File,
     sha256: Sha256,

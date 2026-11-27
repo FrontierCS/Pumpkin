@@ -15,14 +15,9 @@ use crate::{Stopped, interruption};
 
 pub(super) type Held = BTreeMap<RoleId, Vec<HeldAsset>>;
 
-/// Each role that declares assets, with the provider that it is placed on, which publishes them
-/// ([`holding`]).
+/// Each role that declares assets, with the [`Assets`] of the provider that it is placed on.
 pub(crate) struct Holding<'p>(BTreeMap<RoleId, &'p dyn Assets>);
 
-/// The [`Holding`] of `placed` on `providers`.
-///
-/// Fails if a role that declares assets is placed on a provider that publishes none. That is the
-/// provider's fault, as placing put the role in one of its classes that holds assets.
 pub(crate) fn holding<'p>(
     placed: &Placed,
     providers: &ByProvider<&'p dyn Provider>,
@@ -38,6 +33,7 @@ pub(crate) fn holding<'p>(
             declared: _,
         } = placed.placement(role);
         let provider: &'p dyn Provider = *providers.get(on);
+        // Placing put the role in a class that holds assets, so the provider is at fault.
         let Some(assets) = provider.assets() else {
             return Err(format!(
                 "provider `{on}`'s class `{class}` holds assets, and the provider publishes none: \
@@ -49,8 +45,6 @@ pub(crate) fn holding<'p>(
     Ok(Holding(holding))
 }
 
-/// An error for each asset of a role in `holding` whose provider can't hold it at its path. The
-/// error is at that path in the IR, and gives the provider's reason.
 pub(crate) fn unheld(placed: &Placed, holding: &Holding<'_>) -> Vec<ParseError> {
     let workflow = placed.workflow();
     let mut unheld = Vec::new();
@@ -80,9 +74,6 @@ pub(crate) fn unheld(placed: &Placed, holding: &Holding<'_>) -> Vec<ParseError> 
     unheld
 }
 
-/// Publishes the files of each asset of each role that `holding` gives, on the role's provider
-/// there, for `run`. It publishes each digest once on each provider. Returns the assets that
-/// those roles' sandboxes hold, by the role, and each publish.
 pub(super) fn publish(
     run: &RunTag,
     placed: &Placed,

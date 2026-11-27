@@ -4887,8 +4887,6 @@ fn companions_where_sandboxes_dial() {
     .assert_eq(&unprepared(&sim, companions_workflow(&["exit", "0"])));
 }
 
-/// Why `runtime::fits` refuses `ir` on `sim`, and how `Run::prepare` refuses it, with the records
-/// that it left.
 fn unprepared(sim: &Sim, ir: Value) -> String {
     let ir = serde_json::from_value(ir).unwrap();
     let placed = placed(&ir, sim.ready()).unwrap();

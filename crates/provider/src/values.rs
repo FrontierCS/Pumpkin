@@ -183,7 +183,6 @@ impl fmt::Display for AssetDigest {
     }
 }
 
-/// What [`Assets::publish_asset`](crate::Assets::publish_asset) made of an asset's files.
 #[derive(Debug)]
 pub struct PublishedAsset {
     pub reference: AssetRef,
@@ -208,8 +207,6 @@ impl From<String> for AssetRef {
     }
 }
 
-/// An asset that a sandbox holds at `path`, of the files that its provider published as
-/// `reference` ([`Create::assets`]).
 #[derive(Clone, Debug)]
 pub struct HeldAsset {
     pub path: AssetPath,

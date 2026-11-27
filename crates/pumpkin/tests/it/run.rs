@@ -1698,8 +1698,6 @@ fn write_hello(scratch: &Scratch, label: &str) {
     write_example(scratch, "hello", &files, label);
 }
 
-/// Writes `files` of `examples/<example>` into `scratch`, with the marker of the examples' root and
-/// their `submit.star`, and with `label` on the image of its `Dockerfile`.
 fn write_example(scratch: &Scratch, example: &str, files: &[&str], label: &str) {
     let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
     let own = files.iter().map(|file| format!("{example}/{file}"));

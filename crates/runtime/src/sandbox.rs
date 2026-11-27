@@ -160,8 +160,6 @@ fn provider_role(workflow: &Workflow, role: RoleId, instances: NonZeroU32) -> Ro
     }
 }
 
-/// The provider of each role whose sandboxes must listen, for a runner's companions, or hold
-/// assets, as [`capable`] finds it. Only some providers' sandboxes can.
 pub(super) struct Capable<'p> {
     listening: Listening<'p>,
     holding: Holding<'p>,
@@ -170,12 +168,8 @@ pub(super) struct Capable<'p> {
 /// Refuses the workflow if `placed` could never run on `providers`, whatever other runs use. It
 /// reserves nothing. `providers` has each provider that `placed` names.
 ///
-/// The inner error lists each refusal at its place in the IR. One kind is an asset at a path
-/// where its provider's sandboxes hold none, at the asset's path. The other is a provider that
-/// could never hold its roles at once, at `/roles`, saying why as [`Provider::fits`] does.
-///
-/// The outer error is a provider whose class offers companions or assets that the provider can't
-/// give. It is also a role whose grants need over `u32::MAX` sandboxes at once.
+/// The inner error lists each refusal at its place in the IR. The outer error is a refusal with no
+/// place in the IR, such as a provider whose class offers what the provider can't give.
 // A request that no resources could ever satisfy is refused as it is made, as Slurm fails a job
 // whose request has a fundamental flaw:
 // https://github.com/SchedMD/slurm/blob/4e8cf4192ade61024f04a1d466d4f97456d178bf/src/slurmctld/job_mgr.c#L5588-L5599
@@ -203,7 +197,6 @@ pub fn fits(
     Ok(ParseErrors::check(refused))
 }
 
-/// What [`listening`] and [`holding`] find of `placed`, on `providers`. Fails as either does.
 pub(super) fn capable<'p>(
     placed: &Placed,
     providers: &ByProvider<&'p dyn Provider>,
@@ -412,13 +405,6 @@ pub(super) struct Started<C> {
 }
 
 impl<'p> Published<'p> {
-    /// Publishes `sandboxd` on each provider that hosts a role, then each role's assets and image,
-    /// and the images of each runner's companions, for `run`. It publishes each once on its
-    /// role's provider, however many roles name it, through what `capable` found there for assets
-    /// and companions. Last, it makes the run's sockets directory in `record`, which must not exist
-    /// yet. A private provider meets the gateway at `private`, which then must be some, and one
-    /// whose sandboxes listen, through `dialer`. It returns each publish of assets too.
-    ///
     /// Stops as interrupted before each publish once a signal has come, as one may take minutes.
     pub(super) fn create(
         run: &RunTag,

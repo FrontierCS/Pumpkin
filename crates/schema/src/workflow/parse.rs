@@ -136,8 +136,6 @@ impl<'ir> Parser<'ir> {
         }
     }
 
-    /// Reports each of `assets`, those of the role at `role`, that is at, below or above an earlier
-    /// one's path.
     fn assets(&mut self, role: &JsonPointer, assets: &[ir::Asset]) {
         let at = |index: usize| role.token("assets").token(index);
         for (index, ir::Asset { path, files: _ }) in assets.iter().enumerate() {
