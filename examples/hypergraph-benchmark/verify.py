@@ -13,7 +13,7 @@ from pathlib import Path
 
 # So that importing the judge's module writes no bytecode into the judge image's context.
 sys.dont_write_bytecode = True
-from judge.receipts import check_receipt, check_timing  # noqa: E402
+from judge.receipts import check_receipt, check_timing
 
 ROOT = Path(__file__).resolve().parent
 SELECTOR = ROOT / "judge/eval.json"

@@ -80,7 +80,9 @@ def gateway(sandbox, words):
 def frame(message, body=b""):
     """A frame of the sandbox protocol: a message's length and its JSON, then a body's."""
     encoded = json.dumps(message).encode()
-    return struct.pack(">I", len(encoded)) + encoded + struct.pack(">I", len(body)) + body
+    return (
+        struct.pack(">I", len(encoded)) + encoded + struct.pack(">I", len(body)) + body
+    )
 
 
 def exactly(connection, size):
@@ -109,7 +111,9 @@ def forged(sandbox, words):
     if words is None:
         line(sandbox, check, False, "no sandboxd process found")
     elif "--listen" in words or words[0].startswith("/"):
-        line(sandbox, check, True, "no address that several sandboxes share to say it at")
+        line(
+            sandbox, check, True, "no address that several sandboxes share to say it at"
+        )
     else:
         host, _, port = words[0].rpartition(":")
         # An identity document that AWS never signed.

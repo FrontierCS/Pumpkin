@@ -112,7 +112,9 @@ def imported(modal, request: dict) -> list[str]:
         try:
             image.build(app)
         except modal.exception.Error as error:
-            raise Refused(f"image {reference}: {type(error).__name__}: {error}") from error
+            raise Refused(
+                f"image {reference}: {type(error).__name__}: {error}"
+            ) from error
         return image.object_id
 
     with ThreadPoolExecutor(AT_ONCE) as pool:
@@ -162,7 +164,9 @@ def fill(modal, request: dict) -> dict:
                 f"{status}: {said}"
             )
         image = sandbox.snapshot_directory(
-            request["at"], timeout=request["snapshot_seconds"], ttl=request["ttl_seconds"]
+            request["at"],
+            timeout=request["snapshot_seconds"],
+            ttl=request["ttl_seconds"],
         )
     finally:
         try:
@@ -239,7 +243,8 @@ def create(modal, request: dict) -> dict:
     return {
         "id": sandbox.object_id,
         "tunnels": [
-            {"host": tunnels[port].host, "port": tunnels[port].port} for port in request["ports"]
+            {"host": tunnels[port].host, "port": tunnels[port].port}
+            for port in request["ports"]
         ],
         "phases": phases,
     }
@@ -253,7 +258,7 @@ def mount(modal, sandbox, assets: list[dict]) -> None:
             sandbox.mount_image(asset["path"], modal.Image.from_id(asset["image"]))
         # Whatever fails, as the SDK lets through errors of its transport that aren't its own, and
         # the sandbox is to be ended before any is reported.
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001
             why = f"{type(error).__name__}: {error}"
             break
     else:
@@ -288,7 +293,7 @@ def accompany(modal, sandbox, sidecars: list[dict]) -> None:
             )
         # Whatever fails, as the SDK lets through errors of its transport that aren't its own, and
         # the sandbox is to be ended before any is reported.
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001
             return f"{type(error).__name__}: {error}"
         return None
 
@@ -321,7 +326,9 @@ def timed(phases: list[dict], name: str):
     nanoseconds."""
     began = time.monotonic_ns()
     yield
-    phases.append({"name": name, "began_ns": began, "took_ns": time.monotonic_ns() - began})
+    phases.append(
+        {"name": name, "began_ns": began, "took_ns": time.monotonic_ns() - began}
+    )
 
 
 def cores(millis: int) -> float:
@@ -332,7 +339,10 @@ def cores(millis: int) -> float:
 
 
 def ids(modal, app, run: str) -> list[str]:
-    return [box.object_id for box in modal.Sandbox.list(app_id=app.app_id, tags={RUN_TAG: run})]
+    return [
+        box.object_id
+        for box in modal.Sandbox.list(app_id=app.app_id, tags={RUN_TAG: run})
+    ]
 
 
 def listed(modal, request: dict) -> list[dict]:
@@ -345,7 +355,9 @@ def listed(modal, request: dict) -> list[dict]:
         # A create or an import makes Pumpkin's App, so before one there are no sandboxes.
         return []
     sandboxes = modal.Sandbox.list(app_id=app.app_id, tags={RUN_TAG: run})
-    return [{"id": box.object_id, "ended": box.returncode is not None} for box in sandboxes]
+    return [
+        {"id": box.object_id, "ended": box.returncode is not None} for box in sandboxes
+    ]
 
 
 def owned(modal, run: str, id: str):
@@ -391,13 +403,18 @@ def console(modal, request: dict) -> str:
     line `pumpkin-modal: sandbox <id> exited with status <N>` instead."""
     sandbox = owned(modal, request["run"], request["id"])
     if sandbox is None:
-        raise Refused(f"Modal holds no sandbox {request['id']}: expected one of the run's")
+        raise Refused(
+            f"Modal holds no sandbox {request['id']}: expected one of the run's"
+        )
     text = "".join(entry.message for entry in sandbox.logs.tail(CONSOLE_ENTRIES))
     # A sandbox that the kernel's OOM killer ends prints nothing of why: only its status, 137,
     # says how it ended. The same holds of a sidecar.
     status = sandbox.poll()
     if status is None:
-        lines = [f"sidecar {name} exited with status {code}" for name, code in exited(sandbox)]
+        lines = [
+            f"sidecar {name} exited with status {code}"
+            for name, code in exited(sandbox)
+        ]
     else:
         lines = [f"sandbox {sandbox.object_id} exited with status {status}"]
     if not lines:
@@ -411,13 +428,15 @@ def exited(sandbox) -> list[tuple[str, int]]:
     """Each sidecar of `sandbox`, which runs, that has ended, by its name, with its exit status."""
     try:
         every = sandbox._experimental_sidecars.list(include_terminated=True)
-        running = {sidecar.object_id for sidecar in sandbox._experimental_sidecars.list()}
+        running = {
+            sidecar.object_id for sidecar in sandbox._experimental_sidecars.list()
+        }
         ended = [sidecar for sidecar in every if sidecar.object_id not in running]
         # An ended sidecar's status came with the list, so its poll asks Modal nothing.
         return [(sidecar.name, sidecar.poll()) for sidecar in ended]
     # Whatever fails, as the console is for diagnostics alone, and the log's end is still worth
     # giving. A sandbox that ends meanwhile fails these calls.
-    except Exception:
+    except Exception:  # noqa: BLE001
         return []
 
 
