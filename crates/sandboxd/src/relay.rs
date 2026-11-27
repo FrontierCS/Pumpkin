@@ -36,10 +36,6 @@ const ROUTE_TIMEOUT: Duration = HELLO_TIMEOUT;
 // for the network alone too.
 const CONNECT_TIMEOUT: Duration = HELLO_TIMEOUT;
 
-// As many as a `sandboxd` that listens tells of (`TOLD_PEERS_COUNT`). Any container of the
-// sandbox may reach the relay, as often as it likes.
-const TOLD_COUNT: usize = TOLD_PEERS_COUNT;
-
 /// Listens at `address`, and from then on relays each connection there to the companion that
 /// its route names, one of `relayed`. It relays as long as the process lasts.
 pub(crate) fn serve(address: SocketAddr, relayed: Vec<CompanionName>) -> Result<(), String> {
@@ -192,23 +188,25 @@ fn copy(mut from: &TcpStream, mut to: &TcpStream) {
 }
 
 /// How many closed connections the relay has told of. The thread that takes connections and
-/// those that carry them share it, so that they tell of `TOLD_COUNT` between them.
+/// those that carry them share it, so that they tell of `TOLD_PEERS_COUNT` between them.
 #[derive(Default)]
 struct Told(AtomicUsize);
 
 impl Told {
     /// Says on standard error `why` the relay closed the connection from `peer`, for the first
-    /// `TOLD_COUNT` of them.
+    /// `TOLD_PEERS_COUNT` of them.
     fn tell(&self, peer: SocketAddr, why: &str) {
         let told = self.0.fetch_add(1, Ordering::Relaxed).saturating_add(1);
-        if told <= TOLD_COUNT {
+        // As many as a `sandboxd` that listens tells of. Any container of the sandbox may reach
+        // the relay, as often as it likes.
+        if told <= TOLD_PEERS_COUNT {
             let line = format_args!("sandboxd: the relay closed the connection from {peer}: {why}");
             print_line(io::stderr(), line);
         }
-        if told == TOLD_COUNT {
+        if told == TOLD_PEERS_COUNT {
             let line = format_args!(
                 "sandboxd: telling of no more connections that the relay closes, having told of \
-                 {TOLD_COUNT}"
+                 {TOLD_PEERS_COUNT}"
             );
             print_line(io::stderr(), line);
         }
