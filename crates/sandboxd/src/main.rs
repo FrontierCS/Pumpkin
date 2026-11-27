@@ -48,6 +48,7 @@ use crate::session::Gateway;
 /// three times that no start that the gateway would complete.
 const UNCLAIMED_SLACK: Duration = HELLO_TIMEOUT.saturating_mul(4);
 
+mod accept;
 mod commands;
 mod ctl;
 mod files;

@@ -25,7 +25,6 @@ use std::path::Path;
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
-use std::time::Duration;
 
 use schema::frame::{self, MAX_BODY_BYTES};
 use schema::sandbox::op::{OpCall, OpReply};
@@ -33,7 +32,7 @@ use schema::sandbox::{CONTROL_SOCKET, FromSandbox, MAX_OP_PAYLOAD_BYTES};
 use stdx::{Context, unpoisoned};
 
 use crate::session::Sender;
-use crate::sys;
+use crate::{accept, sys};
 
 #[derive(Clone, Default)]
 /// The op in flight and the callers' turns, which the threads that carry ops and the session,
@@ -113,20 +112,18 @@ impl Ops {
         Ok(())
     }
 
-    fn accept(&self, listener: &UnixListener, sender: &Sender) {
-        for connection in listener.incoming() {
-            let Ok(connection) = connection else {
-                // Out of descriptors, say: wait for callers to finish rather than spin.
-                thread::sleep(Duration::from_millis(10));
-                continue;
-            };
-            let (ops, sender) = (self.clone(), sender.clone());
-            let _ = thread::Builder::new()
-                // A thread per caller, which blocks while the caller waits its turn and its op's
-                // reply. A caller that can't get a thread sees its connection close.
-                .name("op".to_owned())
-                .spawn(move || ops.carry(connection, &sender));
-        }
+    fn accept(&self, listener: &UnixListener, sender: &Sender) -> ! {
+        accept::each(
+            || listener.accept(),
+            |(connection, _)| {
+                let (ops, sender) = (self.clone(), sender.clone());
+                let _ = thread::Builder::new()
+                    // A thread per caller, which blocks while the caller waits its turn and its
+                    // op's reply. A caller that can't get a thread sees its connection close.
+                    .name("op".to_owned())
+                    .spawn(move || ops.carry(connection, &sender));
+            },
+        )
     }
 
     /// Hands the gateway's reply to op `op` to the caller waiting for it. An op that is not in

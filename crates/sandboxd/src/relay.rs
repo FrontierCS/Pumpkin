@@ -24,9 +24,9 @@ use schema::ir::CompanionName;
 use schema::sandbox::{HELLO_TIMEOUT, RELAYED_PORT, read_route};
 use stdx::{Context, Deadline};
 
-use crate::print_line;
 use crate::session::TOLD_PEERS_COUNT;
 use crate::until::Until;
+use crate::{accept, print_line};
 
 // A route is the first that its connection says, as a hello is, so it waits for the network
 // alone.
@@ -39,11 +39,6 @@ const CONNECT_TIMEOUT: Duration = HELLO_TIMEOUT;
 // As many as a `sandboxd` that listens tells of (`TOLD_PEERS_COUNT`). Any container of the
 // sandbox may reach the relay, as often as it likes.
 const TOLD_COUNT: usize = TOLD_PEERS_COUNT;
-
-// How long the relay waits before it takes a connection again, once taking one has failed. It
-// fails while the process has no descriptor to spare. `sandboxd`'s listeners for ops and model
-// requests wait as long for the same failure.
-const RETAKE: Duration = Duration::from_millis(10);
 
 /// Listens at `address`, and from then on relays each connection there to the companion that
 /// its route names, one of `relayed`. It relays as long as the process lasts.
@@ -70,16 +65,14 @@ struct Relay {
 
 impl Relay {
     fn take(&mut self, listener: &TcpListener) -> ! {
-        loop {
-            match listener.accept() {
-                Ok((gateway, peer)) => match self.routed(&gateway) {
-                    Ok(companion) => self.carry(gateway, peer, &companion),
-                    // Told before `gateway` drops, which closes it.
-                    Err(why) => self.told.tell(peer, &why),
-                },
-                Err(_) => thread::sleep(RETAKE),
-            }
-        }
+        accept::each(
+            || listener.accept(),
+            |(gateway, peer)| match self.routed(&gateway) {
+                Ok(companion) => self.carry(gateway, peer, &companion),
+                // Told before `gateway` drops, which closes it.
+                Err(why) => self.told.tell(peer, &why),
+            },
+        )
     }
 
     /// The companion that the route of `gateway` names, if the relay is to carry the connection
