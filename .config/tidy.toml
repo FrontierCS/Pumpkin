@@ -10,7 +10,7 @@
 [words]
 "ARCHITECTURE.md" = 2809
 "deploy/aws/README.md" = 2110
-"docs/glossary.md" = 1667
+"docs/glossary.md" = 1665
 "docs/language.md" = 1534
 
 # The Markdown documents, and the Rust files by their comments, with sentences to split: those
@@ -246,7 +246,7 @@
 "deploy/docker/README.md" = 3
 "docs/language.md" = 11
 "docs/models.md" = 13
-"docs/providers.md" = 19
+"docs/providers.md" = 18
 "docs/record.md" = 11
 "docs/workflows.md" = 1
 "examples/hypergraph-benchmark/README.md" = 3

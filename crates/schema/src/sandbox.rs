@@ -550,7 +550,9 @@ impl fmt::Debug for TlsIdentity {
 
 /// The TCP port at which the `sandboxd` of a companion behind its sandbox's relay listens
 /// ([`Relayed`]). The relay connects to the companion by its name, at this port.
-// One port for every companion, as each container of a sandbox has an address of its own.
+// One port for every companion, as each container of a sandbox has an address of its own. IANA's
+// registry assigns none of 7432 to 7436, so no registered service claims it:
+// https://www.iana.org/assignments/service-names-port-numbers
 pub const RELAYED_PORT: u16 = 7434;
 
 /// The most bytes of a [`route`]: the longest name of a companion, and a line feed.

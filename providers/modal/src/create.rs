@@ -25,10 +25,14 @@ use crate::images::imported;
 const MIB: u64 = 1024 * 1024;
 
 /// The port at which `main`'s `sandboxd` listens for the gateway, behind a tunnel.
+// IANA's registry assigns none of 7432 to 7436, so no registered service claims it:
+// https://www.iana.org/assignments/service-names-port-numbers
 const MAIN_PORT: u16 = 7434;
 
 /// The port at which `main`'s `sandboxd` relays to the sandbox's companions, behind a tunnel of
 /// its own.
+// IANA's registry assigns none of 7432 to 7436, so no registered service claims it:
+// https://www.iana.org/assignments/service-names-port-numbers
 const RELAY_PORT: u16 = 7435;
 
 /// What a published `sandboxd`'s reference holds between its path and its digest.

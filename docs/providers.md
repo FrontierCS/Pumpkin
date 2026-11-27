@@ -7,7 +7,7 @@ configuration and keys. This page says what each is, what it needs, and where ea
 `pumpkin help config` holds every key of the machine's configuration, and
 [`deploy/aws`](../deploy/aws/README.md) the AWS side.
 
-![On the operator's machine, pumpkin builds images on the Docker engine, where the Docker provider's containers also run. A machine with a controller sends its runs over ssh to the controller. The controller is an EC2 instance or a privileged container on a Docker host. An EC2 controller builds the images on its own engine and pushes them to ECR. It launches EC2 instances that pull the images, and creates Modal sandboxes, which Modal imports from the same repositories. A Docker controller builds the images on an engine inside its own container, never on the host's. The Docker provider's containers also run on that engine.](figures/providers.svg)
+![On the operator's machine, pumpkin builds images on the Docker engine, which also runs the Docker provider's containers. A machine with a controller sends it its runs over ssh. An EC2 controller pushes its images to ECR, launches EC2 instances that pull them, and creates Modal sandboxes, from images that Modal imports. A Modal sandbox may hold companions as Modal's sidecars. A Docker controller, a privileged container, builds and runs on an engine of its own, never the host's.](figures/providers.svg)
 
 ## Placing a run
 
@@ -48,24 +48,27 @@ signing key for each region that AWS lists, and refuses a region it holds none f
 
 Its sandboxes are sandboxes in a Modal workspace, under gVisor, that run images which Modal
 imports from the envelope's ECR repositories with a role that it assumes by its own identity, so
-no AWS credential of the operator's reaches Modal. A sandbox opens no connection but DNS to
-Modal's resolver; the driver dials it through Modal's TLS tunnel, which takes connections only
-from the configuration's `dials_from` address. A class names its GPU as Modal does, such as `A100-80GB`, and Modal ends each sandbox at
-its hard end.
+no AWS credential of the operator's reaches Modal. A sandbox's containers connect only to one
+another and to Modal's resolver. It answers for public names, so code in any container can send
+data out in DNS queries. The driver dials each sandbox through Modal's TLS tunnel, which takes
+connections from `dials_from` alone. Modal ends each sandbox at its hard end.
 
-Only a Modal class holds a runner's [`companions`](../crates/schema/src/ir.rs), each as a sidecar
-of Modal's. A sandbox that holds as many as its needs allow may not meet them all within its
-class's startup.
+Its classes hold a runner's [companions](glossary.md#companion), each as a
+[sidecar of Modal's](https://modal.com/docs/guide/sandbox-sidecars), which has no GPU. A sandbox
+at the least needs that hold its companions may not [meet](glossary.md#meeting) the gateway
+within its class's `startup_seconds`.
 
-Each container has its own files, processes, address and loopback, and reaches the others by name.
-Over their network, every caller arrives from one address. Modal's resolver answers for public
-names, so data can leave inside DNS queries. Memory is one pool: running out of it can end a
-companion alone, or the whole sandbox. A status of 137 doesn't prove it: Modal gives it to a
-container that it ends.
+Each container has its own files, processes, address and loopback. Any can connect to the others,
+by the name `main` or a companion's `name`. A service sees every such caller at one address. So a
+task authenticates its services, starting each with a secret before the agent's code runs. It
+binds each to `0.0.0.0`, and polls each until it answers.
 
-So a task authenticates its services, handing each its secret before the agent's code runs. It binds
-each to every address, waits for each to be ready, and sizes the runner's `needs`. Code in `main`
-can end the relay that carries each companion's session, and so fail the lease.
+The containers share the sandbox's memory, so one that exhausts it can end a companion alone or
+the whole sandbox. Code in `main` can end the [relay](glossary.md#relay) that carries each
+companion's session, and so fail the [lease](glossary.md#lease).
+
+Pumpkin's `sandboxd` listens on port 7434 in each container, and on 7435 in `main` if the runner
+has companions. A task's own services take other ports.
 
 ## The controller
 
