@@ -41,10 +41,11 @@ pub enum Durable {
 
 /// A run's clock, whose origin is the run's start: the core takes its time with each event.
 ///
-/// Each of the run's threads reads it through a clone of its own.
+/// Each of the run's threads reads it through a clone.
 // 'static, as the agent's session's reader, a thread that outlives the run's borrows, stamps each
-// of the agent's arrivals with a clone.
-pub trait Clock: stdx::time::Clock + Send + 'static {
+// of the agent's arrivals with a clone. Sync, as a session's threads share the clone that stamps
+// its end.
+pub trait Clock: stdx::time::Clock + Send + Sync + 'static {
     type Inbox<T: Send + 'static>: Inbox<T> + Send;
 
     /// An empty inbox, whose waits this clock times.

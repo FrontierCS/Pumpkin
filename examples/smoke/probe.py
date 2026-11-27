@@ -19,7 +19,7 @@ NAME = "example.com"
 TIMEOUT_SECONDS = 5
 # The sandbox protocol's version, `schema::sandbox::PROTOCOL_VERSION`, so that the gateway reads the
 # attestation rather than refuse the hello for its version.
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 4
 
 
 def line(sandbox, check, ok, seen):

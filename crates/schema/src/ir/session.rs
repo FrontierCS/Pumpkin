@@ -31,8 +31,8 @@ pub struct NamedSession {
 #[serde(deny_unknown_fields)]
 pub struct Session {
     /// The runner role that each lease starts afresh. Distinct agents may lease the same runner
-    /// role. A target's session names a runner no other session names, and an agent's runner
-    /// has an image no target has.
+    /// role. A target's session names a runner no other session names. An agent's runner, and
+    /// each of its [companions](super::RunnerRuntime::companions), has an image no target has.
     pub runner: Name,
     /// The most leases open at once, each until its runner is gone.
     pub instances: NonZeroU32,

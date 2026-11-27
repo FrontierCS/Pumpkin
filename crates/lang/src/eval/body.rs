@@ -23,7 +23,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::num::NonZeroU64;
 
-use schema::ir::{self, AbsolutePath, Argv};
+use schema::ir::{self, AbsolutePath, Argv, Container};
 use schema::sandbox::op::RunnerOutput;
 
 use super::call::refusal_inside;
@@ -79,29 +79,33 @@ pub trait Target {
     /// Waits for a fresh runner to be ready and returns a lease number unique within this call.
     fn runner_open(&mut self, grant: &ir::Name) -> Result<u64, String>;
 
-    /// Copies the target's directory to a new directory on its runner.
+    /// Copies the target's directory to a new directory in `container` of its runner.
     fn runner_put(
         &mut self,
         grant: &ir::Name,
         lease: u64,
+        container: Container,
         tree: AbsolutePath,
         to: AbsolutePath,
     ) -> Result<(), String>;
 
-    /// Copies the runner's file or tree into a new directory on the target.
+    /// Copies the file or tree of `container` of the runner into a new directory on the target.
     fn runner_get(
         &mut self,
         grant: &ir::Name,
         lease: u64,
+        container: Container,
         from: AbsolutePath,
         to: AbsolutePath,
     ) -> Result<(), String>;
 
-    /// Waits for a started command's exit or timeout and both recorded output streams.
+    /// Runs a command in `container` of the runner, and waits for its exit or timeout and both
+    /// recorded output streams.
     fn runner_run(
         &mut self,
         grant: &ir::Name,
         lease: u64,
+        container: Container,
         argv: Argv,
         timeout_seconds: Option<NonZeroU64>,
     ) -> Result<RunnerOutput, String>;
@@ -667,17 +671,15 @@ fn capture(target: &mut dyn Target, name: &Name, call: &Call<'_>) -> Result<valu
     let argv = given[0]
         .as_ref()
         .ok_or_else(|| Fault::new(call.at, "`capture` needs argv: give it a list of strings"))?;
-    let argv = command_argv(name, argv.span, argv)?;
+    let argv = command_argv(name, argv.0, &argv.1)?;
     let stdin = match given[1].as_ref() {
         None => None,
-        Some(value) => match value.kind {
+        Some((at, value)) => match value.kind {
             value::Kind::None => None,
             value::Kind::Hosted(Hosted::Payload(slot)) => Some(slot),
             _ => {
-                return Err(Fault::new(
-                    value.span,
-                    "`capture` takes a payload or None as stdin",
-                ));
+                let refused = Fault::new(*at, "`capture` takes a payload or None as stdin");
+                return Err(origin(refused, "the argument", value));
             }
         },
     };

@@ -15,7 +15,7 @@ use std::{fs, io};
 
 use decision::{Event, JobId, PayloadRef};
 use gateway::{Process, Put, Session};
-use schema::ir::{self, AbsolutePath, Argv, Name, TargetLifetime};
+use schema::ir::{self, AbsolutePath, Argv, Container, Name, TargetLifetime};
 use schema::sandbox::op::{
     CommandEnd, CommandStatus, Last, LeaseStatusReply, RunnerOutput, SessionOp, TransferEnd,
     TransferStatus,
@@ -104,29 +104,33 @@ pub trait Target {
     /// Waits for a fresh runner to be ready and returns a lease number unique within this call.
     fn runner_open(&mut self, grant: &Name) -> Result<u64, String>;
 
-    /// Copies the target's directory to a new directory on its runner.
+    /// Copies the target's directory to a new directory in `container` of its runner.
     fn runner_put(
         &mut self,
         grant: &Name,
         lease: u64,
+        container: Container,
         tree: AbsolutePath,
         to: AbsolutePath,
     ) -> Result<(), String>;
 
-    /// Copies the runner's file or tree into a new directory on the target.
+    /// Copies the file or tree of `container` of the runner into a new directory on the target.
     fn runner_get(
         &mut self,
         grant: &Name,
         lease: u64,
+        container: Container,
         from: AbsolutePath,
         to: AbsolutePath,
     ) -> Result<(), String>;
 
-    /// Waits for a started command's exit or timeout and both recorded output streams.
+    /// Runs a command in `container` of the runner, and waits for its exit or timeout and both
+    /// recorded output streams.
     fn runner_run(
         &mut self,
         grant: &Name,
         lease: u64,
+        container: Container,
         argv: Argv,
         timeout_seconds: Option<NonZeroU64>,
     ) -> Result<RunnerOutput, String>;
@@ -504,7 +508,7 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
         }
         self.stdin.clear(self.session, (&self.child.clock, until))?;
         match self.session.ended() {
-            Some(reason) => Err(format!("the shared role's session ended: {reason}")),
+            Some((reason, _)) => Err(format!("the shared role's session ended: {reason}")),
             None => Ok(()),
         }
     }
@@ -657,11 +661,13 @@ impl<H: Host> Target for OnTarget<'_, '_, '_, H> {
         &mut self,
         grant: &Name,
         lease: u64,
+        container: Container,
         tree: AbsolutePath,
         to: AbsolutePath,
     ) -> Result<(), String> {
         let op = SessionOp::Put {
             lease,
+            container,
             tree,
             to,
             replace: false,
@@ -673,21 +679,30 @@ impl<H: Host> Target for OnTarget<'_, '_, '_, H> {
         &mut self,
         grant: &Name,
         lease: u64,
+        container: Container,
         from: AbsolutePath,
         to: AbsolutePath,
     ) -> Result<(), String> {
-        self.runner_copy(grant, SessionOp::Get { lease, from, to })
+        let op = SessionOp::Get {
+            lease,
+            container,
+            from,
+            to,
+        };
+        self.runner_copy(grant, op)
     }
 
     fn runner_run(
         &mut self,
         grant: &Name,
         lease: u64,
+        container: Container,
         argv: Argv,
         timeout_seconds: Option<NonZeroU64>,
     ) -> Result<RunnerOutput, String> {
         let op = SessionOp::Run {
             lease,
+            container,
             argv,
             timeout_seconds,
         };

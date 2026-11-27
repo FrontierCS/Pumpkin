@@ -14,8 +14,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::ir::{
-    AbsolutePath, Command, CpuFlag, CpuModel, Dir, Env, File, Gpu, Image, JsonPointer, ModelRoute,
-    Name, Needs, TargetLifetime, User, WorkflowName,
+    AbsolutePath, Command, Companion, CpuFlag, CpuModel, Dir, Env, File, Gpu, Image, JsonPointer,
+    ModelRoute, Name, Needs, TargetLifetime, User, WorkflowName,
 };
 use crate::sandbox::OpPayloadLimit;
 
@@ -254,8 +254,8 @@ impl From<UsdPerHour> for f64 {
 /// What a class of sandbox offers the roles of its sandboxes, as its provider states it.
 ///
 /// It is the most CPU and memory that a role may need, its GPUs, and its CPU's flags and model,
-/// which a role's [needs](crate::ir::Needs) are matched against
-/// ([`Workflow::place`]).
+/// which a role's [needs](crate::ir::Needs) are matched against, and whether its sandboxes hold a
+/// runner's companions ([`Workflow::place`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Offers {
     /// In thousandths of a CPU.
@@ -266,6 +266,9 @@ pub struct Offers {
     pub cpu_features: BTreeSet<CpuFlag>,
     /// None if the provider states no model.
     pub cpu_model: Option<CpuModel>,
+    /// Whether each sandbox holds a runner's companions beside its own container
+    /// ([`ir::RunnerRuntime::companions`](crate::ir::RunnerRuntime::companions)).
+    pub companions: bool,
 }
 
 /// A value for each provider that a [`Placed`] workflow places a role on: what its placing gave
@@ -413,6 +416,44 @@ pub struct Target {
 pub struct Runner {
     pub cwd: AbsolutePath,
     pub env: Env,
+    /// Each named once among them, as parsing checks.
+    companions: Vec<Companion>,
+}
+
+impl Runner {
+    /// Each of its companions, by its id, in the order declared.
+    pub fn companions(&self) -> impl ExactSizeIterator<Item = (CompanionId, &Companion)> {
+        let companions = self.companions.iter().enumerate();
+        companions.map(|(index, companion)| (CompanionId(index), companion))
+    }
+
+    /// Its companion `id`, one of its own.
+    pub fn companion(&self, id: CompanionId) -> &Companion {
+        &self.companions[id.0]
+    }
+}
+
+/// One of a runner's companions, by its place among those that the runner declares. It is valid
+/// only for the runner that issued it ([`Runner::companions`]).
+// A typed index into what its runner declares, as rust-analyzer's `la_arena::Idx` is into its
+// arena:
+// https://github.com/rust-lang/rust-analyzer/blob/b74e96f509baf0be70281c55f14cb18fefbc6b22/lib/la-arena/src/lib.rs#L44-L48
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompanionId(usize);
+
+impl CompanionId {
+    /// The companion's index in its runner's declaration order.
+    pub fn index(self) -> usize {
+        self.0
+    }
+}
+
+/// One of the containers of a runner's sandboxes, which an op names by its
+/// [`Container`](crate::ir::Container): `main`, or one of the runner's companions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContainerId {
+    Main,
+    Companion(CompanionId),
 }
 
 /// A job function of the agent's; see [`ir::JobFunction`](crate::ir::JobFunction).

@@ -3,13 +3,14 @@
 
 # The source files over `FILE_CAP` lines.
 [long_files]
-"crates/gateway/src/lib.rs" = 1210
+"crates/gateway/src/lib.rs" = 1209
 "crates/runtime/src/record.rs" = 1201
 
 # The Markdown documents over `WORD_CAP` words, as `wc -w` counts them.
 [words]
 "ARCHITECTURE.md" = 2787
 "deploy/aws/README.md" = 2110
+"docs/glossary.md" = 1667
 "docs/language.md" = 1534
 
 # The Markdown documents, and the Rust files by their comments, with sentences to split: those
@@ -35,7 +36,8 @@
 "crates/engine/tests/it/prune.rs" = 2
 "crates/gateway/src/bound.rs" = 1
 "crates/gateway/src/lib.rs" = 24
-"crates/gateway/src/meeting.rs" = 30
+"crates/gateway/src/meeting.rs" = 25
+"crates/gateway/src/meeting/dial.rs" = 5
 "crates/gateway/src/trees.rs" = 5
 "crates/gateway/tests/it.rs" = 15
 "crates/lang/src/builtins.rs" = 4
@@ -185,7 +187,7 @@
 "crates/runtime/src/record/writer.rs" = 1
 "crates/runtime/src/relay.rs" = 2
 "crates/runtime/src/routes.rs" = 3
-"crates/runtime/src/sandbox.rs" = 12
+"crates/runtime/src/sandbox.rs" = 11
 "crates/runtime/src/sources.rs" = 1
 "crates/runtime/src/start.rs" = 2
 "crates/runtime/tests/it/body.rs" = 1
@@ -296,4 +298,8 @@
 # `docs/glossary.md` defines, and the paths where the word is right: each a file, or a directory
 # as a path that ends in `/` (`xtask/src/tidy/retired.rs`).
 [retired]
-pod = { use = "sandbox", except = ["crates/engine/src/prune.rs"] }
+pod = { use = "sandbox", except = [
+    "crates/decision/src/ops.rs",
+    "crates/engine/src/prune.rs",
+    "crates/schema/src/ir/container.rs",
+] }

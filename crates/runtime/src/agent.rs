@@ -48,10 +48,11 @@ impl<C: Clock> Agent<C> {
         let id = agent.id;
         let ops = Some(op_payload_limit(sandboxes.workflow(), id));
         let stamp = clock.clone();
-        let wrap = move |arrival| Input::Agent(id, stamp.now(), arrival);
+        // The agent's sandbox holds `main` alone.
+        let wrap = move |_, arrival| Input::Agent(id, stamp.now(), arrival);
         let which = Which::Agent(id);
         let mut sandbox = sandboxes.start(which, ops, (clock, by), hard_end, inbox, wrap)?;
-        let launch = put(&mut sandbox.session, agent, by).map(|stdin| Launch {
+        let launch = put(&mut sandbox.sessions.main, agent, by).map(|stdin| Launch {
             stdin,
             ..launch(&agent.command)
         });
@@ -97,21 +98,21 @@ impl<C: Clock> Agent<C> {
     }
 
     pub(super) fn reply(&mut self, op: IncomingOp, reply: OpReply, by: Duration) -> io::Result<()> {
-        self.sandbox.session.reply(op, reply, by)
+        self.sandbox.sessions.main.reply(op, reply, by)
     }
 
     pub(super) fn trees(&self) -> Trees {
-        self.sandbox.session.trees()
+        self.sandbox.sessions.main.trees()
     }
 
     pub(super) fn refuse(&mut self, refused: RefusedOp, by: Duration) -> io::Result<()> {
-        self.sandbox.session.refuse(refused, by)
+        self.sandbox.sessions.main.refuse(refused, by)
     }
 
     /// Freezes the sandbox, then collects its [`out_dir()`] and [`log_dir()`] into `dir`, all by
     /// `by`. Returns what failed, if anything.
     fn freeze_and_collect(&mut self, dir: &Path, by: Duration) -> Vec<String> {
-        let session = &mut self.sandbox.session;
+        let session = &mut self.sandbox.sessions.main;
         let mut failures = Vec::new();
         if let Err(error) = session.freeze(by) {
             failures.push(format!("freezing the agent's sandbox failed: {error}"));
@@ -364,7 +365,8 @@ impl<C: Clock> Worker<C> {
         let start = launch.and_then(|launch| {
             let (process, send) = agent
                 .sandbox
-                .session
+                .sessions
+                .main
                 .prepare_start(by)
                 .context("reserving the agent's command")?;
             agent.process = Some(process);

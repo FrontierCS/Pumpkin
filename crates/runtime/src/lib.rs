@@ -74,7 +74,7 @@ pub use record::{
     writer,
 };
 use record::{Lock, Payloads};
-use sandbox::{Capacity, Published, Sandboxes};
+use sandbox::{Capacity, Listening, Published, Sandboxes, listening};
 
 // The longest the loop waits on its inbox before it looks for a signal: a stop that comes this
 // late goes unnoticed by the person who asked for it, and the loop wakes for it at most 20 times a
@@ -100,6 +100,7 @@ pub struct Recorded<'a> {
 // whose request has a fundamental flaw:
 // https://github.com/SchedMD/slurm/blob/4e8cf4192ade61024f04a1d466d4f97456d178bf/src/slurmctld/job_mgr.c#L5588-L5599
 pub fn fits(placed: &Placed, providers: &ByProvider<&dyn Provider>) -> Result<(), String> {
+    listening(placed, providers)?;
     let capacity = Capacity::of(placed.workflow())?;
     placed.by_provider(|name| {
         let phases = capacity.phases(placed, name);
@@ -121,6 +122,7 @@ pub struct Run<'r, H> {
     host: &'r H,
     placed: Placed,
     providers: ByProvider<&'r dyn Provider>,
+    listening: Listening<'r>,
     routes: ByRole<Vec<Serving>>,
     budgets: Budgets,
     prices: &'r BTreeMap<ModelName, TokenPrices>,
@@ -155,6 +157,7 @@ impl<'r, H: Host> Run<'r, H> {
         } = recorded;
         let ModelRoutes { servings, budgets } = models;
         let routes = model::routes(placed.workflow(), servings)?;
+        let listening = listening(&placed, &providers)?;
         let capacity = Capacity::of(placed.workflow())?;
         let reserved = placed.by_provider(|name| {
             let phases = capacity.phases(&placed, name);
@@ -168,6 +171,7 @@ impl<'r, H: Host> Run<'r, H> {
             host,
             placed,
             providers,
+            listening,
             routes,
             budgets,
             prices,
@@ -239,6 +243,7 @@ impl<'r, H: Host> Run<'r, H> {
         let published = Published::create(
             &self.providers,
             &self.placed,
+            &self.listening,
             sandboxd,
             private,
             dialer,
@@ -771,11 +776,13 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 Action::RunCommand {
                     lease,
                     command,
+                    container,
                     argv,
                     timeout,
                 } => {
                     let run = lease::Run {
                         command,
+                        container,
                         argv,
                         timeout,
                         required_output: self.waiting.contains_key(&lease),
@@ -786,12 +793,14 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                     lease,
                     holder,
                     transfer: number,
+                    container,
                     direction,
                     max_bytes,
                 } => {
                     let holder = self.holder_trees(lease, holder);
                     let transfer = lease::Transfer {
                         number,
+                        container,
                         direction,
                         max_bytes,
                         holder,

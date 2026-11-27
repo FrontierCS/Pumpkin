@@ -9,7 +9,7 @@ use std::time::Duration;
 use decision::{CallResult, Event, JobId};
 use gateway::Arrival;
 use schema::sandbox::{log_dir, out_dir};
-use schema::workflow::TargetId;
+use schema::workflow::{ContainerId, TargetId};
 use stdx::Context;
 use stdx::time::Clock as _;
 
@@ -74,7 +74,7 @@ impl<'r, H: Host> Resident<'r, H> {
             Arrival::Ended { reason } => format!("the shared role's session ended: {reason}"),
             arrival @ Arrival::Exited { .. } => {
                 if let Some((_, sender)) = &self.active {
-                    let _ = sender.send(Message::Session(at, arrival));
+                    let _ = sender.send(Message::Session(ContainerId::Main, at, arrival));
                 }
                 return None;
             }
@@ -92,12 +92,10 @@ impl<'r, H: Host> Resident<'r, H> {
             return None;
         }
         if let Some((_, sender)) = &self.active {
-            let _ = sender.send(Message::Session(
-                at,
-                Arrival::Ended {
-                    reason: reason.clone(),
-                },
-            ));
+            let ended = Arrival::Ended {
+                reason: reason.clone(),
+            };
+            let _ = sender.send(Message::Session(ContainerId::Main, at, ended));
         }
         self.failed = Some(reason.clone());
         Some(Event::SharedFailed { target, reason })
@@ -108,12 +106,10 @@ impl<'r, H: Host> Resident<'r, H> {
         self.orders.take();
         if let Some((_, sender)) = &self.active {
             // The driver can stop forwarding command exits while the body awaits a killed client.
-            let _ = sender.send(Message::Session(
-                at,
-                Arrival::Ended {
-                    reason: "the work phase ended".to_owned(),
-                },
-            ));
+            let ended = Arrival::Ended {
+                reason: "the work phase ended".to_owned(),
+            };
+            let _ = sender.send(Message::Session(ContainerId::Main, at, ended));
         }
     }
 }
@@ -142,7 +138,8 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 .name(which.name().to_string())
                 .stack_size(bodies.stack_bytes())
                 .spawn_scoped(scope, move || {
-                    let arrivals = move |arrival| Input::Shared(target, observed.now(), arrival);
+                    // A target's sandbox holds `main` alone.
+                    let arrivals = move |_, arrival| Input::Shared(target, observed.now(), arrival);
                     let by = (&clock, by);
                     let started =
                         sandboxes.start(which, None, by, hard_end, inbox.clone(), arrivals);
@@ -192,9 +189,13 @@ fn serve<H: Host>(
     let mut stdin = crate::body::Stdin::default();
     for (call, mut child) in orders {
         let end = match sandbox.as_deref_mut() {
-            Some(started) => {
-                job::evaluate(call, bodies, &mut child, &mut started.session, &mut stdin)
-            }
+            Some(started) => job::evaluate(
+                call,
+                bodies,
+                &mut child,
+                &mut started.sessions.main,
+                &mut stdin,
+            ),
             None => End::Call(call.job, Err("the shared sandbox never started".to_owned())),
         };
         // The shared sandbox outlives the call, which holds none of its own.
@@ -212,11 +213,11 @@ fn tear_down<H: Host>(
     let note = |text| {
         let _ = inbox.send(Input::Logged(Entry::Note(text)));
     };
-    if let Err(error) = sandbox.session.freeze(by) {
+    if let Err(error) = sandbox.sessions.main.freeze(by) {
         note(format!("freezing the shared sandbox failed: {error}"));
     }
     for part in [out_dir(), log_dir()] {
-        if let Err(error) = collect(&mut sandbox.session, &part, dir, by) {
+        if let Err(error) = collect(&mut sandbox.sessions.main, &part, dir, by) {
             note(format!(
                 "the shared sandbox's {part} is incomplete: {error}"
             ));

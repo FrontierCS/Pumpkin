@@ -24,7 +24,9 @@ The run places the role by those needs ([providers](providers.md#placing-a-run))
   A work target's commands make no ops and no model requests. A process there can outlive its
   call, so nothing could tell its requests apart by job.
 - A **runner** is a sandbox that a session leases. The lease's holder drives it. A runner holds no
-  egress and no grants.
+  egress and no grants. A runner may declare [`companions`](../crates/schema/src/ir.rs):
+  containers beside its own in each of its sandboxes. Placing refuses such a runner, as no
+  provider's class offers companions.
 
 Every sandbox has `/pumpkin`, which holds Pumpkin's own files. The `schema` crate's
 [`sandbox`](../crates/schema/src/sandbox.rs) module lays them out:
@@ -49,14 +51,17 @@ holder calls it by name. The run checks each call against the grant before anyth
   for its `finalize_grace_seconds`, with its ops refused. The run applies the changes once the body returns, all of them
   or none.
 - A **session** leases runners. Its holder opens a lease, runs commands and copies trees in it one
-  at a time, then closes the lease. A target's body holds the target's sessions, and each call gets
-  them afresh. A call target's commands hold them too.
+  at a time across all its runner's containers, then closes the lease. Work that must overlap
+  starts detached, from a command of its own. Pumpkin neither times such work nor reports its exit.
+  A lease's end collects only the output of the command that still runs, and `main`'s `out`. A
+  target's body holds the target's sessions, and each call gets them afresh. A call target's
+  commands hold them too.
 
 The parts name each other by role. An agent may name a call target in at most one of its job
 functions. Other agents may name the same target too. The final call's target is a call target
 that no job function names. A target's session names a runner that no other session names. An
-agent's runner has an image that no target has, so the agent never runs what a target's image
-holds. Another part names each target and each runner.
+agent's runner, and each of its companions, has an image that no target has, so the agent never
+runs what a target's image holds. Another part names each target and each runner.
 
 ## The final call
 
@@ -89,15 +94,16 @@ body that was checked as the run started. A body's parameters, in order:
 | `target.get(path)` | returns the text of the file at `path` |
 | `target.caller()` | returns the calling agent's role, in a job's body |
 | `target.with_runner(session, callback, ...)` | opens a lease of the target's session, calls `callback(runner, ...)`, closes the lease even if the callback fails, and returns what the callback returned once the runner is deleted |
-| `runner.put(tree, to)` | copies the target's tree to a new path in the runner |
-| `runner.get(from, to)` | copies the runner's file or tree into a new directory on the target, where a file keeps its name |
-| `runner.run(argv, timeout_seconds = seconds)` | runs `argv` in the runner, and returns a [`RunnerOutput`](../crates/schema/src/sandbox/op.rs) |
+| `runner.put(tree, to, container = name)` | copies the target's tree to a new path in the runner |
+| `runner.get(from, to, container = name)` | copies the runner's file or tree into a new directory on the target, where a file keeps its name |
+| `runner.run(argv, timeout_seconds = seconds, container = name)` | runs `argv` in the runner, and returns a [`RunnerOutput`](../crates/schema/src/sandbox/op.rs) |
 | `run.set_submission(payload)`, `run.end_work()` | propose a now function's changes, as above |
 
 `get` and `capture` return at most 1 MiB of UTF-8 text. A runner handle works only in its
-callback. Any of these fails the body: a refused op, a failed copy, a command that doesn't start
-or whose output isn't collected whole, or a lease that runs out. A runner that can't be deleted
-fails the run.
+callback. Its `put`, `get` and `run` act on the runner's container that `container` names: `main`,
+its own, by default, or one of its companions. Any of these fails the body: a refused op, a failed
+copy, a command that doesn't start or whose output isn't collected whole, or a lease that runs
+out. A runner that can't be deleted fails the run.
 
 A body returns a dict of at most 1 MiB of JSON. Its keys are names, and JSON can hold its values.
 The body fails if its evaluation fails, as on `fail()` or a `get` of a missing file. It also fails
@@ -108,7 +114,8 @@ if it returns anything else. The record keeps why it failed. The caller hears on
 An agent and a call target's commands make ops with `sandboxctl`, which comes first on `PATH`.
 `sandboxctl --help` gives each command's arguments and exit statuses. The `schema` crate's
 [`sandbox::op`](../crates/schema/src/sandbox/op.rs) module gives each reply's fields.
-`sandboxctl ops` lists the role's grants with their `help`, limits and parameters.
+`sandboxctl ops` lists the role's grants with their `help`, limits and parameters, and a session's
+with the companions of its runner.
 `sandboxctl ops --text` prints their usage for a shell.
 
 ![One job function's call, end to end: in the agent's sandbox, sandboxctl call sends the payload over the session; the driver's core checks it against the grant and answers with the job's number; the runtime starts a fresh sandbox of the target and evaluates the body, from the sources the record keeps, whose put, run and get drive the target; the target ends, and the dict the body returned goes to the agent's sandboxctl status and to the record.](figures/call.svg)

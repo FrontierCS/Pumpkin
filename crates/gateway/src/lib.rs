@@ -29,12 +29,13 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use std::{fmt, fs};
 
 use bound::{Bound, Until, passed};
+use ended::Ended;
 pub use meeting::{Dialer, GatewayAddress, Listener, Registration, Sockets, Unattested, Unreached};
 pub use op::Op;
 pub use process::Process;
@@ -49,6 +50,7 @@ use schema::sandbox::{
 use stdx::time::Clock;
 
 mod bound;
+mod ended;
 mod meeting;
 mod op;
 mod process;
@@ -85,8 +87,8 @@ struct Shared {
     // Held for a whole frame, so that the frames of different threads don't interleave.
     writer: Mutex<()>,
     routes: Mutex<Routes>,
-    // Why the session ended, recorded once, under the routes' lock, which `end` explains.
-    ended: OnceLock<String>,
+    // Why and when the session ended, recorded under the routes' lock, which `end` explains.
+    ended: Ended,
 }
 
 #[derive(Debug)]
@@ -269,7 +271,10 @@ impl<C: Clock> Session<C> {
         limit: Option<OpPayloadLimit>,
         takes_models: bool,
         send: Box<dyn Fn(Arrival) + Send>,
-    ) -> io::Result<Self> {
+    ) -> io::Result<Self>
+    where
+        C: Send + Sync + 'static,
+    {
         let shared = Arc::new(Shared {
             connection: stream,
             writer: Mutex::new(()),
@@ -279,7 +284,7 @@ impl<C: Clock> Session<C> {
                 op: None,
                 models: BTreeSet::new(),
             }),
-            ended: OnceLock::new(),
+            ended: Ended::new(clock.clone()),
         });
         let id = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
         let assembler = Assembler {
@@ -301,12 +306,6 @@ impl<C: Clock> Session<C> {
             gpus,
             clock,
         })
-    }
-
-    /// Why the session has closed, including a failure already seen by a request whose
-    /// [`Arrival::Ended`] is still on its way to the owner.
-    pub fn ended(&self) -> Option<&str> {
-        self.shared.ended.get().map(String::as_str)
     }
 
     /// The GPUs that the sandbox's `sandboxd` saw as it started, each by its model as `nvidia-smi`
@@ -722,7 +721,7 @@ impl Shared {
         // connection already closed is fine. The reason is set under the lock too, so that no
         // route opens after the routes are cleared. A reason already set is the session's.
         let _ = self.connection.shutdown();
-        let recorded = self.ended.get_or_init(|| reason);
+        let recorded = self.ended.record(reason);
         routes.open.clear();
         recorded
     }
@@ -730,7 +729,7 @@ impl Shared {
     fn ended(&self) -> io::Error {
         // Sending the reason as each channel's last message would need room in queues that may be
         // full.
-        let Some(reason) = self.ended.get() else {
+        let Some((reason, _)) = self.ended.get() else {
             unreachable!(
                 "the session ended without a reason, though every way to learn that it ended \
                  follows the reason's recording: `end` records it before it closes the routes, \
@@ -738,7 +737,7 @@ impl Shared {
                  receives from them; and the rest call `end` or check the reason first"
             )
         };
-        io::Error::new(io::ErrorKind::ConnectionAborted, reason.clone())
+        io::Error::new(io::ErrorKind::ConnectionAborted, reason)
     }
 }
 

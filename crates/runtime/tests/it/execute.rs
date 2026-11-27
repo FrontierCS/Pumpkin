@@ -20,8 +20,8 @@ use decision::{Outcome, lasts};
 use expect_test::{Expect, expect};
 use gateway::Dialer;
 use provider::{
-    Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation,
-    Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
+    Console, Create, Created, Creator, ImageRef, Listed, ListenDials, Listened, Listens, Meeting,
+    Provider, Ready, Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
 use route::Serving;
 use runtime::{
@@ -139,7 +139,13 @@ impl Provider for Interrupting<'_> {
     }
 
     fn meeting(&self) -> Meeting<'_> {
-        Meeting::Local(self)
+        match self.sim.meeting() {
+            Meeting::Local(_) => Meeting::Local(self),
+            Meeting::Listen(_) => Meeting::Listen(self),
+            Meeting::Private(_) => {
+                panic!("the simulated provider's sandboxes dial no private address")
+            }
+        }
     }
 
     fn console(&self, run: &RunTag, id: &SandboxId) -> Result<Console, String> {
@@ -149,10 +155,37 @@ impl Provider for Interrupting<'_> {
 
 impl Creator<SocketDial> for Interrupting<'_> {
     fn create(&self, create: &Create, dial: SocketDial) -> Result<Created, String> {
+        self.created(create, || self.sim.create(create, dial))
+    }
+}
+
+impl Creator<ListenDials, Listened> for Interrupting<'_> {
+    fn create(&self, create: &Create, dials: ListenDials) -> Result<Listened, String> {
+        self.created(create, || self.sim.create(create, dials))
+    }
+}
+
+impl Listens for Interrupting<'_> {
+    fn publish_companion_images(
+        &self,
+        images: &[Image],
+        sandboxd: &SandboxdRef,
+    ) -> Result<Vec<ImageRef>, String> {
+        self.sim.publish_companion_images(images, sandboxd)
+    }
+}
+
+impl Interrupting<'_> {
+    // The simulated provider's `create`, after which the signal comes if `at` names it.
+    fn created<C>(
+        &self,
+        create: &Create,
+        sim: impl FnOnce() -> Result<C, String>,
+    ) -> Result<C, String> {
         if create.name.as_str().starts_with("shared-") {
             assert!(!create.ops && !create.model);
         }
-        let created = self.sim.create(create, dial);
+        let created = sim();
         if let Some(At::Created(name)) = self.at
             && create.name.as_str() == name
         {
@@ -259,6 +292,16 @@ fn check(
     expect.assert_eq(&executed(host, name, providers, ir, sandboxd, &[]));
 }
 
+// What `case` shows on the simulated provider, which shows the same where its sandboxes listen.
+fn listening_too(case: impl Fn(Sim) -> String) -> String {
+    let (dialing, listening) = (case(Sim::new()), case(Sim::new().listening()));
+    assert_eq!(
+        listening, dialing,
+        "where sandboxes listen, against where they dial"
+    );
+    dialing
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Also {
     Interrupted(At),
@@ -274,6 +317,8 @@ enum Also {
     HardEnds,
     /// Each sandbox's `sandbox_created` and `sandbox_met`, which the log otherwise drops.
     Starts,
+    /// The meetings of the named sandbox's containers, each with when it was observed.
+    Met(&'static str),
     /// A part of the records that nothing orders among the others, which the log shows apart
     /// from them, sorted.
     Racing(&'static str),
@@ -293,6 +338,7 @@ fn interruption(also: &[Also]) -> Option<At> {
         | Also::Reaped
         | Also::HardEnds
         | Also::Starts
+        | Also::Met(_)
         | Also::Racing(_)
         | Also::File(_) => None,
     })
@@ -356,6 +402,7 @@ fn executed_ir<H: Shown>(
     if also.contains(&Also::Polls) {
         lines.splice(1..1, polls(&log));
     }
+    lines.extend(also.iter().flat_map(|also| met(&log, also)));
     lines.push("log.jsonl:".to_owned());
     let (log, start, last) = logged(log, &started, H::SCRIPTED, also);
     lines.extend(log);
@@ -1237,7 +1284,8 @@ fn logged(
         // A sandbox's start, which `in_order` checks, is dropped too, as its place depends on
         // timing.
         let event = &logged["event"]["kind"];
-        if (event == "sandbox_created" || event == "sandbox_met") && !also.contains(&Also::Starts) {
+        let starts = ["sandbox_created", "sandbox_met", "container_met"];
+        if starts.iter().any(|kind| event == kind) && !also.contains(&Also::Starts) {
             continue;
         }
         let kind = &logged["event"]["request"]["kind"];
@@ -1305,6 +1353,24 @@ fn logged(
     (numbered_apart(records, also), start, last)
 }
 
+// They are each `container_met` and the `sandbox_met`, in the log's order, with when each was
+// observed.
+fn met(log: &[Value], also: &Also) -> Vec<String> {
+    let Also::Met(sandbox) = also else {
+        return Vec::new();
+    };
+    let met = log.iter().filter_map(|logged| {
+        let event = &logged["event"];
+        let met = event["kind"] == "container_met" || event["kind"] == "sandbox_met";
+        let observed = Duration::from_nanos(nanos(&logged["observed_ns"])?);
+        (met && event["sandbox"] == *sandbox)
+            .then(|| format!("  {event}, observed at {observed:?}"))
+    });
+    let mut lines = vec![format!("the meetings of {sandbox}'s containers:")];
+    lines.extend(met);
+    lines
+}
+
 // The records numbered in order, then those of a racing kind, sorted, with no place.
 fn numbered_apart(records: Vec<Value>, also: &[Also]) -> Vec<String> {
     let races = |logged: &Value| {
@@ -1342,6 +1408,8 @@ fn polls(log: &[Value]) -> Vec<String> {
 fn in_order(log: &[Value]) -> Option<Duration> {
     let time = |ns: &Value| Duration::from_nanos(nanos(ns).unwrap());
     let (mut last, mut started, mut created) = (None, BTreeMap::new(), BTreeMap::new());
+    // When the last container of each sandbox to meet did.
+    let mut containers = BTreeMap::new();
     for (seq, logged) in log.iter().enumerate() {
         assert_eq!(logged["seq"], json!(seq), "{logged}");
         let at = Some(time(&logged["at_ns"]));
@@ -1374,10 +1442,23 @@ fn in_order(log: &[Value]) -> Option<Duration> {
                 let once = created.insert(event["sandbox"].as_str(), observed);
                 assert!(once.is_none(), "{logged}: its sandbox was created before");
             }
+            Some("container_met") => {
+                let created = created.get(&event["sandbox"].as_str());
+                let met = created.is_some_and(|created| *created <= observed);
+                assert!(met, "{logged}: no create of its sandbox came before");
+                let before = containers.insert(event["sandbox"].as_str(), observed);
+                assert!(
+                    before <= Some(observed),
+                    "{logged}: a container met after it"
+                );
+            }
             Some("sandbox_met") => {
                 let created = created.get(&event["sandbox"].as_str());
                 let met = created.is_some_and(|created| *created <= observed);
                 assert!(met, "{logged}: no create of its sandbox came before");
+                // A sandbox that holds companions met as the last of its containers did.
+                let last = containers.get(&event["sandbox"].as_str());
+                assert!(last.is_none_or(|last| *last == observed), "{logged}");
             }
             Some("sandbox_deleted") if event["sandbox"].is_string() => {
                 let known = created.contains_key(&event["sandbox"].as_str());
@@ -1624,14 +1705,16 @@ fn stalls() {
 fn unstarted() {
     let ir = workflow(&["exit", "0"]);
     let on = |name, sandboxd| {
-        let looked = |record, id| Synced::Holding(record, id);
-        let host = SimHost::new()
-            .moving_after_read(looked(AGENT_SANDBOX, "sim-1"), Duration::from_secs(1))
-            .moving_after_read(
-                looked("jobs/0/.sandbox.json.partial", "sim-2"),
-                Duration::from_secs(2),
-            );
-        executed(&host, name, &[(PROVIDER, &Sim::new())], &ir, sandboxd, &[])
+        listening_too(|sim| {
+            let looked = |record, id| Synced::Holding(record, id);
+            let host = SimHost::new()
+                .moving_after_read(looked(AGENT_SANDBOX, "sim-1"), Duration::from_secs(1))
+                .moving_after_read(
+                    looked("jobs/0/.sandbox.json.partial", "sim-2"),
+                    Duration::from_secs(2),
+                );
+            executed(&host, name, &[(PROVIDER, &sim)], &ir, sandboxd, &[])
+        })
     };
     let (listed, left_out) = (on("unstarted", MUTE), on("unstarted-left-out", VANISHING));
     assert_eq!(
@@ -2802,22 +2885,26 @@ fn refusal_held_by_a_slow_sync() {
 // agent's create begins at 0, and the final call's target's at the agent's exit, at 4 s.
 #[test]
 fn start_times() {
-    let agent = Synced::Holding(AGENT_SANDBOX, "sim-1");
     let target = || Synced::Holding("jobs/0/.sandbox.json.partial", "sim-2");
-    // The loop logs the agent's create only once the agent is set up. The target's record waits
-    // for its create's line, so that the loop logs it before the clock moves.
-    let host = SimHost::new()
-        .moving_after_read(agent, Duration::from_secs(4))
-        .moving_after_read(target(), Duration::from_secs(8))
-        .held_sync(target(), r#""sandbox":"job-0""#);
-    let shown = executed(
-        &host,
-        "start-times",
-        &[(PROVIDER, &Sim::new().taking(Duration::from_secs(1)))],
-        &ops_workflow(&["ops", "exit"], 30),
-        SANDBOXD,
-        &[Also::Starts],
-    );
+    let shown = listening_too(|sim| {
+        // The loop logs the agent's create only once the agent is set up. The target's record
+        // waits for its create's line, so that the loop logs it before the clock moves.
+        let host = SimHost::new()
+            .moving_after_read(
+                Synced::Holding(AGENT_SANDBOX, "sim-1"),
+                Duration::from_secs(4),
+            )
+            .moving_after_read(target(), Duration::from_secs(8))
+            .held_sync(target(), r#""sandbox":"job-0""#);
+        executed(
+            &host,
+            "start-times",
+            &[(PROVIDER, &sim.taking(Duration::from_secs(1)))],
+            &ops_workflow(&["ops", "exit"], 30),
+            SANDBOXD,
+            &[Also::Starts],
+        )
+    });
     let starts = (shown.lines())
         .filter(|line| line.contains("sandbox_created") || line.contains("sandbox_met"));
     expect![[r#"
@@ -4460,6 +4547,355 @@ fn hard_ends() {
         job-1's hard end: 300 s after the run's start
         lease-3's hard end: 54 s after the run's start"#]]
     .assert_eq(&hard_ends.join("\n"));
+}
+
+// A runner whose session ends as its lease starts fails the lease, as one whose session ends
+// later does. The lease's first look at its inbox, past the agents' start, waits for that end.
+#[test]
+fn fails_as_its_session_ended_before_it_was_ready() {
+    let argv = [
+        "ops",
+        "sleep 1",
+        "gpu.open",
+        "await_lease gpu 0 failed",
+        "call submit 6 finalize=true",
+    ];
+    let shown = executed(
+        &SimHost::new().awaiting(Duration::from_secs(1)),
+        "fails-as-its-session-ended-before-it-was-ready",
+        &[(PROVIDER, &Sim::new().ending_once_set_up("lease-0", "main"))],
+        &lease_workflow(&argv, 30, RUNNER),
+        SANDBOXD,
+        &[],
+    );
+    expect!["failed at 1s: the runner's session ended: the sandbox ended the session"]
+        .assert_eq(&lease_failed(&shown));
+}
+
+/// When and why lease 0 failed, as `shown` says, once its sandbox was deleted.
+fn lease_failed(shown: &str) -> String {
+    let logged: Vec<Value> = (shown.lines())
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let first =
+        |found: &dyn Fn(&Value) -> bool| (logged.iter()).position(|line| found(&line["event"]));
+    let failed = first(&|event| event["kind"] == "lease_failed").unwrap();
+    let deleted =
+        first(&|event| event["kind"] == "sandbox_deleted" && event["sandbox"] == "lease-0");
+    assert!(
+        deleted.is_some_and(|deleted| deleted < failed),
+        "lease 0's sandbox was to be deleted before the lease failed: {shown}"
+    );
+    let failed = &logged[failed];
+    let at = Duration::from_nanos(nanos(&failed["at_ns"]).unwrap());
+    format!(
+        "failed at {at:?}: {}",
+        failed["event"]["reason"].as_str().unwrap()
+    )
+}
+
+/// [`lease_workflow`]'s, whose runner declares the companions `scheduler` and `swe-0`.
+fn companions_workflow(argv: &[&str]) -> Value {
+    let mut ir = lease_workflow(argv, 30, RUNNER);
+    // As many as `serves_each_container` makes.
+    ir["roles"][0]["runtime"]["agent"]["grants"][1]["session"]["commands"] = json!(7);
+    let companion = |name: &str, image: &str, id: u32, cwd: &str, env: &str| {
+        json!({
+            "name": name, "image": image, "user": { "uid": id, "gid": id },
+            "cwd": cwd, "env": [env],
+        })
+    };
+    let runner = ir["roles"].as_array_mut().unwrap().last_mut().unwrap();
+    runner["runtime"]["runner"]["companions"] = json!([
+        companion("scheduler", SCHEDULER, 2001, "/srv", "ROLE=scheduler"),
+        companion("swe-0", SWE, 2002, "/testbed", "INSTANCE=0"),
+    ]);
+    ir
+}
+
+const SCHEDULER: &str = "sha256:5555555555555555555555555555555555555555555555555555555555555555";
+const SWE: &str = "sha256:6666666666666666666666666666666666666666666666666666666666666666";
+
+/// A simulated provider whose sandboxes listen, and hold companions.
+fn accompanied() -> Sim {
+    Sim::new().listening().offering_companions()
+}
+
+/// `shown`, with the port of each endpoint on this host hidden, and TLS's own words for a
+/// certificate that it refuses.
+fn unported(shown: &str) -> String {
+    let mut hidden = String::new();
+    let mut rest = shown;
+    while let Some(at) = rest.find("localhost:") {
+        let (before, after) = rest.split_at(at + "localhost:".len());
+        hidden.push_str(before);
+        hidden.push_str("$PORT");
+        rest = after.trim_start_matches(|c: char| c.is_ascii_digit());
+    }
+    hidden.push_str(rest);
+    let failed = "the TLS handshake failed: ";
+    match (hidden.find(failed), hidden.find(": expected TLS 1.3")) {
+        (Some(from), Some(to)) => {
+            let from = from + failed.len();
+            format!("{}<why>{}", &hidden[..from], &hidden[to..])
+        }
+        _ => hidden,
+    }
+}
+
+/// What `shown` says of the run's leases: each line that names one, down to the log's last
+/// record, and all that follows it.
+fn leased(shown: &str) -> String {
+    let after = shown.find("\nits last record came").unwrap_or(shown.len());
+    let (logged, files) = shown.split_at(after);
+    let leased = logged.lines().filter(|line| line.contains("lease"));
+    let after = |line: &&str| !line.is_empty() && !line.starts_with("its last record came");
+    let files = files.lines().filter(after);
+    leased.chain(files).collect::<Vec<_>>().join("\n")
+}
+
+// Each container of a runner's sandbox meets the gateway while the others do. Here each says its
+// hello once the one before it has met, in another order than the declared one.
+#[test]
+fn meets_every_container_at_once() {
+    let argv = [
+        "ops",
+        "gpu.open",
+        "await_lease gpu 0 ready",
+        "gpu.close 0",
+        "await_lease gpu 0 closed",
+        "call submit 6 finalize=true",
+    ];
+    let turns = &[("swe-0", 1), ("main", 2), ("scheduler", 3)];
+    let sim = accompanied().meeting_in_turn(turns);
+    let shown = executed(
+        &SimHost::new(),
+        "meets-every-container-at-once",
+        &[(PROVIDER, &sim)],
+        &companions_workflow(&argv),
+        SANDBOXD,
+        &[Also::Met("lease-0")],
+    );
+    let met = shown
+        .lines()
+        .filter(|line| line.contains("_met\"") || line.contains("meetings"));
+    let held = sim.companions().into_iter();
+    expect![[r#"
+        sim-2 holds `scheduler`, of image sha256:5555555555555555555555555555555555555555555555555555555555555555, as 2001:2001
+        sim-2 holds `swe-0`, of image sha256:6666666666666666666666666666666666666666666666666666666666666666, as 2002:2002
+        the meetings of lease-0's containers:
+          {"container":"swe-0","kind":"container_met","sandbox":"lease-0"}, observed at 1s
+          {"container":"main","kind":"container_met","sandbox":"lease-0"}, observed at 2s
+          {"container":"scheduler","kind":"container_met","sandbox":"lease-0"}, observed at 3s
+          {"kind":"sandbox_met","sandbox":"lease-0"}, observed at 3s"#]].assert_eq(&held.chain(met.map(str::to_owned)).collect::<Vec<_>>().join("\n"));
+}
+
+// A command or a copy reaches the container that it names, and no other. A command starts in its
+// container's directory, with its container's environment.
+#[test]
+fn serves_each_container() {
+    let argv = [
+        "ops",
+        "gpu.open",
+        "await_lease gpu 0 ready",
+        "gpu.put 0:scheduler /workspace/.codex /work/in",
+        "await_transfer gpu 0 moved",
+        "gpu.run 0:scheduler - list /work/in",
+        "await_lease gpu 0 ready",
+        "gpu.run 0 - list /work/in",
+        "await_lease gpu 0 ready",
+        "gpu.run 0:swe-0 - where",
+        "await_lease gpu 0 ready",
+        "gpu.run 0 - where",
+        "await_lease gpu 0 ready",
+        "gpu.get 0:scheduler /work/in /pumpkin/out/scheduler",
+        "await_transfer gpu 0 moved",
+        "gpu.get 0:swe-0 /work/in /pumpkin/out/swe-0",
+        "await_transfer gpu 0 moved",
+        "gpu.close 0",
+        "await_lease gpu 0 closed",
+        "call submit 6 finalize=true",
+    ];
+    let outputs = [
+        "leases/0/log/1/command.stdout",
+        "leases/0/log/2/command.stdout",
+        "leases/0/log/3/command.stdout",
+        "leases/0/log/4/command.stdout",
+    ];
+    let also = iter::once(Also::Listing).chain(outputs.map(Also::File));
+    let shown = executed(
+        &SimHost::new(),
+        "serves-each-container",
+        &[(PROVIDER, &accompanied())],
+        &companions_workflow(&argv),
+        SANDBOXD,
+        &also.collect::<Vec<_>>(),
+    );
+    let shown = leased(&shown);
+    let effects: Vec<&str> = shown
+        .lines()
+        .filter(|line| !line.starts_with('{'))
+        .collect();
+    expect![[r#"
+        record: agents/agent/log/collected, agents/agent/out/collected, agents/agent/out/scheduler/collected, agents/agent/out/scheduler/config.toml, agents/agent/out/swe-0/collected, agents/agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/got/1/result.json, jobs/0/log/0/collected, jobs/0/out/collected, jobs/0/out/result.json, jobs/0/sandbox.json, leases/0/log/1/collected, leases/0/log/1/command.stdout, leases/0/log/2/collected, leases/0/log/2/command.stdout, leases/0/log/3/collected, leases/0/log/3/command.stdout, leases/0/log/4/collected, leases/0/log/4/command.stdout, leases/0/out/collected, leases/0/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+        leases/0/log/1/command.stdout:
+        0644 collected: collected
+        0600 config.toml: model = "gpt-6-astra"
+        leases/0/log/2/command.stdout:
+        leases/0/log/3/command.stdout:
+        /testbed ["HOME=/pumpkin/home","INSTANCE=0"]
+        leases/0/log/4/command.stdout:
+        /work ["HOME=/pumpkin/home","CUDA=1"]"#]].assert_eq(&effects.join("\n"));
+}
+
+// The end of a companion's session fails the lease, by the companion's name. What `main` holds is
+// still collected.
+#[test]
+fn fails_as_a_companions_session_ends() {
+    let argv = [
+        "ops",
+        "gpu.open",
+        "await_lease gpu 0 ready",
+        "gpu.run 0:scheduler - crash",
+        "await_lease gpu 0 failed",
+        "call submit 6 finalize=true",
+    ];
+    let shown = executed(
+        &SimHost::new(),
+        "fails-as-a-companions-session-ends",
+        &[(PROVIDER, &accompanied())],
+        &companions_workflow(&argv),
+        SANDBOXD,
+        &[Also::Listing],
+    );
+    let shown = leased(&shown);
+    let listed = shown.lines().filter(|line| line.starts_with("record:"));
+    let noted = shown.lines().filter(|line| line.contains(r#""note":"#));
+    let failed = lease_failed(&shown);
+    let shown: Vec<&str> = listed.chain(noted).chain([failed.as_str()]).collect();
+    expect![[r#"
+        record: agents/agent/log/collected, agents/agent/out/collected, agents/agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/got/1/result.json, jobs/0/log/0/collected, jobs/0/out/collected, jobs/0/out/result.json, jobs/0/sandbox.json, leases/0/log/, leases/0/out/collected, leases/0/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
+        {"at_ns":"0","note":"lease 0's log/0 is incomplete: freezing the runner's `scheduler` failed: the sandbox ended the session","seq":6}
+        failed at 0ns: the session of the runner's companion `scheduler` ended: the sandbox ended the session"#]].assert_eq(&shown.join("\n"));
+}
+
+/// What comes of lease 0's start on `sim`, by `host`'s clock, for `ir`'s agent, which awaits its
+/// failure. That is each container that met first, with when, then when and why the lease failed.
+fn start_failed(host: &SimHost, sim: &Sim, ir: &Value) -> String {
+    let also = [Also::Met("lease-0")];
+    let shown = unported(&executed(
+        host,
+        "start-failed",
+        &[(PROVIDER, sim)],
+        ir,
+        SANDBOXD,
+        &also,
+    ));
+    let met = (shown.lines()).filter_map(|line| {
+        let (event, at) = line.trim_start().split_once(", observed at ")?;
+        let event: Value = serde_json::from_str(event).ok()?;
+        Some(format!("{} at {at}", event["container"].as_str()?))
+    });
+    format!(
+        "met {:?}; {}",
+        met.collect::<Vec<_>>(),
+        lease_failed(&shown)
+    )
+}
+
+/// [`companions_workflow`], whose agent awaits its lease's failure.
+fn failing() -> Value {
+    let argv = [
+        "ops",
+        "gpu.open",
+        "await_lease gpu 0 failed",
+        "call submit 6 finalize=true",
+    ];
+    companions_workflow(&argv)
+}
+
+// A companion that the gateway can't trust fails its sandbox's start at once, by its name. `main`
+// had met, and `scheduler` never says hello: the failure ends its wait, and the sandbox is deleted.
+#[test]
+fn untrusted_companion_fails_the_start() {
+    let sim = accompanied()
+        .meeting_in_turn(&[("main", 1), ("swe-0", 2)])
+        .impostor("swe-0");
+    expect![[r#"met ["main at 1s"]; failed at 2s: the runner's sandbox didn't start: sandbox sim-2: its container `swe-0`: the gateway can't trust companion `swe-0` behind the relay at localhost:$PORT: the TLS handshake failed: <why>: expected TLS 1.3 from `swe-0`, with a certificate trusted for it"#]].assert_eq(&start_failed(&SimHost::new(), &sim, &failing()));
+}
+
+// A sandbox whose `main` ends before it meets fails its start by `main`'s name. That failure ends
+// the waits of its companions, neither of which says hello.
+#[test]
+fn main_that_ended_stops_its_companions() {
+    let mut ir = failing();
+    let runner = ir["roles"].as_array_mut().unwrap().last_mut().unwrap();
+    runner["image"] = json!(sim::image(MUTE).as_str());
+    // The clock passes the wait between two looks at the provider's list.
+    let looked = Synced::Holding("leases/0/.sandbox.json.partial", "sim-2");
+    let host = SimHost::new().moving_after_read(looked, Duration::from_secs(1));
+    let sim = accompanied().meeting_in_turn(&[]);
+    expect!["met []; failed at 1s: the runner's sandbox didn't start: sandbox sim-2: its container `main`: it ended before it met the gateway: expected its `sandboxd` to run until it connects; its console ends: sandboxd: a simulated one, which never dials"].assert_eq(&start_failed(&host, &sim, &ir));
+}
+
+// What ends while a companion still waits fails the start at once, short of its deadline. Here the
+// provider lists the sandbox as ended once `scheduler` and `main` have met.
+#[test]
+fn fails_as_its_sandbox_ends_while_a_companion_waits() {
+    let turns = &[("scheduler", 0), ("main", 0), (sim::ENDS, 1)];
+    let sim = accompanied().meeting_in_turn(turns);
+    expect![[r#"met ["main at 0ns", "scheduler at 0ns"]; failed at 1s: the runner's sandbox didn't start: sandbox sim-2: it ended before its companions met the gateway: expected it to run until each of them connects"#]].assert_eq(&start_failed(&SimHost::new(), &sim, &failing()));
+}
+
+// The session of a container that has met ends while `swe-0` waits: `main`'s, then a companion's.
+#[test]
+fn fails_as_a_met_session_ends_while_a_companion_waits() {
+    let ended = |container| {
+        let sim = accompanied()
+            .meeting_in_turn(&[("scheduler", 0), ("main", 0)])
+            .ending_once_set_up("lease-0", container);
+        start_failed(&SimHost::new(), &sim, &failing())
+    };
+    expect![[r#"
+        met ["main at 0ns", "scheduler at 0ns"]; failed at 0ns: the runner's sandbox didn't start: sandbox sim-2: its container `main`: its session ended: the sandbox ended the session
+        met ["main at 0ns", "scheduler at 0ns"]; failed at 0ns: the runner's sandbox didn't start: sandbox sim-2: its container `scheduler`: its session ended: the sandbox ended the session"#]].assert_eq(&format!("{}\n{}", ended("main"), ended("scheduler")));
+}
+
+// `main`'s session ends while `scheduler` is between its hello and its set-up. The set-up then
+// fails, and the list finds the sandbox ended, both later. The start names `main`'s end.
+#[test]
+fn names_mains_end_before_a_companions_failure() {
+    let sim = accompanied()
+        .meeting_in_turn(&[("main", 0), ("scheduler", 0)])
+        .ending_main_at_set_up("scheduler");
+    expect![[r#"met ["main at 0ns", "scheduler at 0ns"]; failed at 2s: the runner's sandbox didn't start: sandbox sim-2: its container `main`: its session ended: the sandbox broke the protocol: it sent `done` on stream 4294967295 out of turn: expected nothing on a stream no request has opened"#]].assert_eq(&start_failed(&SimHost::new(), &sim, &failing()));
+}
+
+// Only a sandbox that listens holds companions. So a provider whose class holds them where its
+// sandboxes dial is refused before any image is built, and no run on it is prepared.
+#[test]
+fn companions_where_sandboxes_dial() {
+    let sim = Sim::new().offering_companions();
+    let ir = serde_json::from_value(companions_workflow(&["exit", "0"])).unwrap();
+    let placed = placed(&ir, sim.ready()).unwrap();
+    let on = providers_of(&placed, |_| &sim);
+    let fits = runtime::fits(&placed, &on).unwrap_err();
+    let runs = TestDir::new();
+    let servings = StandIn::servings(None, placed.workflow(), runs.path());
+    let (prices, id) = (prices(), new_id(SystemTime::now()).unwrap());
+    let (models, recorded) = kept(&placed, &servings, &prices);
+    let prepared = Run::prepare(&System, placed, on, runs.path(), id, models, recorded);
+    let Err(prepared) = prepared else {
+        panic!("a run whose companions no sandbox holds is prepared")
+    };
+    let records = files(runs.path());
+    expect![[r#"
+        fits: provider `simulated`'s class `sim` holds companions, and its sandboxes don't listen: expected only a provider whose sandboxes listen to offer companions
+        prepared: the same; records: []"#]]
+    .assert_eq(&format!(
+        "fits: {fits}\nprepared: {}; records: {records:?}",
+        if prepared == fits { "the same" } else { &prepared }
+    ));
 }
 
 #[test]

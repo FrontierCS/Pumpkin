@@ -29,11 +29,10 @@ use std::path::Path;
 use aws::{Cli, Region, Repository, RepositoryName, RoleArn};
 use engine::{Platform, Pusher};
 use provider::{
-    Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation,
-    Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
+    Console, Create, Creator, ImageRef, Listed, ListenDials, Listened, Listens, Meeting, Provider,
+    Ready, Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
 use schema::ir::{self, GpuModel, Image, Name};
-use schema::sandbox::{Endpoint, Listening};
 use schema::workflow::{Class, Offers, UsdPerHour};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -192,6 +191,7 @@ impl TryFrom<ClassTable> for SandboxClass {
             gpu: offered,
             cpu_features: BTreeSet::new(),
             cpu_model: None,
+            companions: false,
         };
         let class = Class {
             offers,
@@ -210,13 +210,15 @@ impl From<SandboxClass> for ClassTable {
             startup_seconds,
             usd_per_hour,
         } = class;
-        // Its GPU's count is `gpu`'s, and a class of the settings names no CPU's flags or model.
+        // Its GPU's count is `gpu`'s, and a class of the settings names no CPU's flags, CPU model
+        // or companions.
         let Offers {
             cpu_millis,
             memory_bytes,
             gpu: offered,
             cpu_features: _,
             cpu_model: _,
+            companions: _,
         } = offers;
         Self {
             gpu,
@@ -396,8 +398,34 @@ impl Provider for Modal<'_> {
     }
 }
 
-impl Creator<Listening, (Created, Endpoint)> for Modal<'_> {
-    fn create(&self, create: &Create, dial: Listening) -> Result<(Created, Endpoint), String> {
-        self.create_sandbox(create, &dial)
+impl Creator<ListenDials, Listened> for Modal<'_> {
+    fn create(&self, create: &Create, dials: ListenDials) -> Result<Listened, String> {
+        let ListenDials { main, companions } = dials;
+        assert!(
+            companions.is_empty(),
+            "Modal was asked for a sandbox that holds companions, though its classes offer none \
+             (`Offers::companions`), and placing puts a runner that declares any on none of them"
+        );
+        let (created, main) = self.create_sandbox(create, &main)?;
+        Ok(Listened {
+            created,
+            main,
+            relay: None,
+        })
+    }
+}
+
+impl Listens for Modal<'_> {
+    // Its classes hold no companions.
+    fn publish_companion_images(
+        &self,
+        images: &[Image],
+        _: &SandboxdRef,
+    ) -> Result<Vec<ImageRef>, String> {
+        Err(format!(
+            "a Modal sandbox holds no companions, so none of these {} images is published: \
+             declare the companions on a runner whose class offers them (`Offers::companions`)",
+            images.len()
+        ))
     }
 }

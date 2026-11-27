@@ -13,8 +13,8 @@ use schema::sandbox::RESULT_MAX_BYTES;
 use serde_json::{Value, json};
 
 use super::{
-    Prices, Scratch, Step, asked, check, cut, days_ago, lease_places, lock_driver, logged, payload,
-    poll, returned, whole_log, write_record, write_run,
+    Prices, Scratch, Step, asked, check, cut, days_ago, in_companion, lease_places, lock_driver,
+    logged, payload, poll, returned, whole_log, write_record, write_run,
 };
 
 /// A `pumpkin view` process that listens on loopback, and is killed when dropped.
@@ -1237,6 +1237,66 @@ fn shows_a_sandboxs_start() {
 }
 
 #[test]
+fn shows_when_a_sandboxs_containers_met() {
+    let scratch = Scratch::new();
+    let id = "20261110-175500-00000015";
+    let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    let opened = |lease: u64| {
+        let lease =
+            json!({ "kind": "start_lease", "lease": lease, "holder": "agent-0", "grant": "cpu" });
+        logged(30, json!({ "kind": "tick" }), json!([lease]))
+    };
+    let stamp = |observed_ms: u64, event: Value| {
+        let mut line = logged(90, event, json!([]));
+        line["observed_ns"] = json!((observed_ms * 1_000_000).to_string());
+        line
+    };
+    let created = |lease: &str| json!({ "kind": "sandbox_created", "sandbox": lease, "began_ns": "30500000000" });
+    let met = |lease: &str, container: &str| json!({ "kind": "container_met", "sandbox": lease, "container": container });
+    // Lease 2's eight containers meet 100 ms apart. `auth`, declared last, meets second.
+    let declared = ["web", "db", "queue", "cache", "mail", "search", "auth"];
+    let mut log = vec![opened(2), opened(3), stamp(31_000, created("lease-2"))];
+    log.extend(
+        (["main", "auth"].iter().chain(&declared[..6]).zip(1..))
+            .map(|(container, tenths)| stamp(31_000 + 100 * tenths, met("lease-2", container))),
+    );
+    log.push(stamp(
+        31_800,
+        json!({ "kind": "sandbox_met", "sandbox": "lease-2" }),
+    ));
+    log.push(stamp(31_000, created("lease-3")));
+    log.push(stamp(32_000, met("lease-3", "db")));
+    log.push(stamp(33_000, met("lease-3", "auth")));
+    let dir = write_run(&scratch, id, since, &log, None, &lease_places(Prices::Both));
+    let mut ir = super::lease_task();
+    let image = format!("sha256:{}", "1".repeat(64));
+    let companions: Vec<Value> = (declared.iter())
+        .map(|name| json!({ "name": name, "image": image, "user": { "uid": 1000, "gid": 1000 }, "cwd": "/work" }))
+        .collect();
+    ir["roles"][4]["runtime"]["runner"]["companions"] = json!(companions);
+    fs::write(dir.join("ir.json"), ir.to_string()).unwrap();
+    let served = Served::start(&scratch);
+    let polled = served.get(&format!("/api/runs/{id}/since?log=0"));
+    let said = (polled["run"]["lanes"].as_array().unwrap().iter())
+        .filter(|lane| lane["kind"] == "runner")
+        .map(|lane| {
+            format!(
+                "{}: {}",
+                lane["lane"], lane["sandbox"]["start"]["containers"]
+            )
+        });
+    check(
+        &scratch,
+        said.map(Step::Ran),
+        false,
+        &[],
+        &expect![[r#"
+            "lease 2": {"first":31.1,"held":8,"met":8,"more_unmet":0,"slowest":[{"met":31.8,"name":"search"},{"met":31.7,"name":"mail"},{"met":31.6,"name":"cache"},{"met":31.5,"name":"queue"},{"met":31.4,"name":"db"}],"unmet":[]}
+            "lease 3": {"first":32.0,"held":8,"met":2,"more_unmet":1,"slowest":[{"met":33.0,"name":"auth"},{"met":32.0,"name":"db"}],"unmet":["main","web","queue","cache","mail"]}"#]],
+    );
+}
+
+#[test]
 #[expect(clippy::too_many_lines, reason = "most of it is the three runs' logs")]
 fn states_failures() {
     let scratch = Scratch::new();
@@ -1613,6 +1673,40 @@ fn answers_past_a_connection_that_sends_nothing() {
         &expect![[r#"
             past a spare and a closed connection: HTTP/1.1 200 OK
             the spare's, sent after: HTTP/1.1 200 OK"#]],
+    );
+}
+
+// A lease's work in a companion names it in the lease's lane.
+#[test]
+fn names_a_leases_containers() {
+    let scratch = Scratch::new();
+    let id = SERVED_ENDED;
+    let log = in_companion(whole_log());
+    let places = lease_places(Prices::Both);
+    write_run(
+        &scratch,
+        id,
+        asked(id, 30),
+        &log,
+        Some(returned(49.36)),
+        &places,
+    );
+    let served = Served::start(&scratch);
+    let run = served.get(&format!("/api/runs/{id}"));
+    let lanes = run["lanes"].as_array().unwrap().iter();
+    let work = lanes
+        .filter(|lane| lane["kind"] == "runner")
+        .map(|lane| format!("{}: {}", lane["lane"], lane["work"]));
+    check(
+        &scratch,
+        [Step::Ran(work.collect::<Vec<_>>().join("\n"))],
+        false,
+        &[],
+        &expect![[r#"
+            "lease 0": [{"end":null,"from":56.0,"kind":"put","label":"/pumpkin/in/payload → /work/in in scheduler","to":null},{"end":{"exited":{"code":0}},"from":58.0,"kind":"command","label":"sh -c set -e\nprint 7","to":62.0}]
+            "lease 1": [{"end":{"exited":{"code":0}},"from":130.0,"kind":"command","label":"nvidia-smi","to":132.0}]
+            "lease 2": [{"end":"timed_out","from":151.0,"kind":"command","label":"sleep 60","to":181.0}]
+            "lease 3": [{"end":{"exited":{"code":0}},"from":506.0,"kind":"command","label":"true in scheduler","to":507.0}]"#]],
     );
 }
 
@@ -3339,7 +3433,7 @@ fn times_a_callers_ops() {
             16,
             "agent-0",
             9,
-            json!({ "kind": "lease_get", "lease": 2 }),
+            json!({ "kind": "lease_get", "lease": 2, "container": "swe-000" }),
             json!([reply(9, json!({ "kind": "lease", "lease": 2 })),
             { "kind": "transfer", "lease": 2, "transfer": 1 }]),
         ),
@@ -3377,7 +3471,7 @@ fn times_a_callers_ops() {
             end_ns="12000000000" failed=true kind="lease_run" name="lease 2" op=6 result="timed_out" start_ns="9000000000"
             failed=false kind="call" name="train" op=7 start_ns="13000000000"
             end_ns="15000000000" failed=true kind="call" name="train" op=8 result="failed: the sandbox was lost" start_ns="14000000000"
-            end_ns="17000000000" failed=false kind="lease_get" name="lease 2" op=9 result="moved 96 bytes, 2 entries" start_ns="16000000000"
+            end_ns="17000000000" failed=false kind="lease_get" name="lease 2 in swe-000" op=9 result="moved 96 bytes, 2 entries" start_ns="16000000000"
             end_ns="18000000000" failed=false kind="now" name="final" op=10 result="returned" start_ns="18000000000"
             caller: "agent-0"
 

@@ -93,6 +93,7 @@ impl<'e> Docker<'e> {
             // A class that states its CPU's model is offered only to roles that need that model,
             // and the engine has this one class, which every role is to fit.
             cpu_model: None,
+            companions: false,
         };
         Ok(Self {
             engine,
@@ -263,6 +264,8 @@ fn create_args(create: &Create, dial: &SocketDial, cpus: &Cpus) -> Result<Vec<St
         resources,
         // The ledger holds a share for each instance, and `instance` names the one to take.
         instances: _,
+        // Its class holds no companions.
+        companions: _,
     } = role;
     let sandboxd = Path::new(sandboxd.as_str());
     let mut args = vec![

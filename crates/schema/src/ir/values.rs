@@ -44,6 +44,8 @@ macro_rules! checked_string {
     };
 }
 
+pub(super) use checked_string;
+
 checked_string!(
     /// The name of a role or grant, a provider, a class of sandbox, or a sandbox within its
     /// run: 1 to 64 characters from a-z, 0-9, `_` and `-`, starting with a letter.
@@ -257,6 +259,21 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
     (bytes.iter())
         .flat_map(|byte| [byte >> 4, byte & 0xf])
         .map(|nibble| char::from(DIGITS[usize::from(nibble)]))
+        .collect()
+}
+
+/// The bytes that `digits` writes as [`hex`] does, or none if it doesn't write bytes so.
+pub(crate) fn unhex(digits: &str) -> Option<Vec<u8>> {
+    let value = |digit: u8| match digit {
+        b'0'..=b'9' => Some(digit - b'0'),
+        b'a'..=b'f' => Some(digit - b'a' + 10),
+        _ => None,
+    };
+    let (pairs, []) = digits.as_bytes().as_chunks() else {
+        return None;
+    };
+    (pairs.iter())
+        .map(|&[high, low]| Some((value(high)? << 4) | value(low)?))
         .collect()
 }
 

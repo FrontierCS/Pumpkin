@@ -152,7 +152,8 @@ impl<const P: usize, const R: usize, const O: usize> Params<P, R, O> {
             .chain(&self.optional)
             .copied()
             .collect();
-        let mut given = place(name, &params, P, call)?.into_iter();
+        let given = place(name, &params, P, call)?.into_iter();
+        let mut given = given.map(|argument| argument.map(|(_, value)| value));
         let mut missing = Vec::new();
         // A missing argument stands as `None` until the refusal below, which names every one.
         let mut take = |param: &'static str| {

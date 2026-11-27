@@ -19,8 +19,9 @@ use schema::sandbox::op::{
 };
 use schema::sandbox::{
     Endpoint, ExitStatus, Hello, HelloReply, MAX_ATTESTATION_BYTES, MAX_OP_PAYLOAD_BYTES,
-    MAX_TRANSFER_BYTES, RegistrationGrant, RelativePath, ToSandbox, command_env, command_stderr,
-    command_stdin, command_stdout, pumpkin_dir, pumpkin_subdirs, read_hello,
+    MAX_ROUTE_BYTES, MAX_TRANSFER_BYTES, RegistrationGrant, RelativePath, TlsIdentity, ToSandbox,
+    command_env, command_stderr, command_stdin, command_stdout, pumpkin_dir, pumpkin_subdirs,
+    read_hello, read_route, route,
 };
 use schema::workflow::{Class, Offers, Part, Placement, UsdPerHour, Workflow};
 use schema::{ec2_boot, frame, ir};
@@ -163,21 +164,27 @@ impl Case for Styled {
 
 /// The classes that two providers offer, as an EC2 envelope and a Modal workspace might: on
 /// `aws`, `judge`, `agent` and `judge_memory`, the last two alike, `judge_60`, and `ice_lake`,
-/// which states its CPU's model; and on `gpus`, `h100` and `h100_4`, with GPUs.
+/// which states its CPU's model; and on `gpus`, `h100` and `h100_4`, with GPUs and companions.
 fn offered() -> BTreeMap<ir::Name, BTreeMap<ir::Name, Class>> {
     let name = valid::<ir::Name>;
     let flags = |flags: &[&str]| flags.iter().map(|flag| valid(flag)).collect();
-    let h100 = |count| {
-        let model = valid("NVIDIA H100 80GB HBM3");
-        let count = NonZeroU32::new(count).unwrap();
-        Some(ir::Gpu { count, model })
-    };
     let offers = |cpus: u64, memory_gib: u64| Offers {
         cpu_millis: NonZeroU64::new(cpus * 1000).unwrap(),
         memory_bytes: NonZeroU64::new(memory_gib << 30).unwrap(),
         gpu: None,
         cpu_features: flags(&["avx2", "sse4_2"]),
         cpu_model: None,
+        companions: false,
+    };
+    let h100 = |count, cpus, memory_gib| {
+        let model = valid("NVIDIA H100 80GB HBM3");
+        let count = NonZeroU32::new(count).unwrap();
+        Offers {
+            gpu: Some(ir::Gpu { count, model }),
+            cpu_features: BTreeSet::new(),
+            companions: true,
+            ..offers(cpus, memory_gib)
+        }
     };
     let class = |provider: &str, class: &str, offers, startup_seconds| {
         let declared = Class {
@@ -207,26 +214,8 @@ fn offered() -> BTreeMap<ir::Name, BTreeMap<ir::Name, Class>> {
             60,
         ),
         class("aws", "ice_lake", ice_lake, 60),
-        class(
-            "gpus",
-            "h100",
-            Offers {
-                gpu: h100(1),
-                cpu_features: BTreeSet::new(),
-                ..offers(8, 64)
-            },
-            600,
-        ),
-        class(
-            "gpus",
-            "h100_4",
-            Offers {
-                gpu: h100(4),
-                cpu_features: BTreeSet::new(),
-                ..offers(32, 256)
-            },
-            600,
-        ),
+        class("gpus", "h100", h100(1, 8, 64), 600),
+        class("gpus", "h100_4", h100(4, 32, 256), 600),
     ];
     let mut offered: BTreeMap<_, BTreeMap<_, _>> = BTreeMap::new();
     for (provider, class, declared) in classes {
@@ -651,6 +640,47 @@ fn op_replies() {
     );
 }
 
+/// An op's call as JSON, which reads as the call shown and writes back as itself, or fails to read.
+struct Call(String);
+
+impl Case for Call {
+    fn outcome(self) -> String {
+        match serde_json::from_str::<op::OpCall>(&self.0) {
+            Err(error) => error.to_string(),
+            Ok(call) => match serde_json::to_string(&call).unwrap() {
+                json if json == self.0 => format!("{call:?}"),
+                json => format!("{call:?}, written back as {json}"),
+            },
+        }
+    }
+}
+
+// An op on `main` is written without its container.
+#[test]
+fn lease_op_containers() {
+    let op = |op: &str| {
+        Call(format!(
+            r#"{{"kind":"session","grant":"gpu","op":{{{op}}}}}"#
+        ))
+    };
+    let run = r#""argv":["true"],"timeout_seconds":null"#;
+    check(
+        [
+            op(&format!(r#""kind":"run","lease":0,{run}"#)),
+            op(&format!(
+                r#""kind":"run","lease":0,"container":"main",{run}"#
+            )),
+            op(&format!(
+                r#""kind":"run","lease":0,"container":"scheduler",{run}"#
+            )),
+        ],
+        &expect![[r#"
+            Session { grant: Name("gpu"), op: Run { lease: 0, container: Main, argv: Argv { program: "true", args: [] }, timeout_seconds: None } }
+            Session { grant: Name("gpu"), op: Run { lease: 0, container: Main, argv: Argv { program: "true", args: [] }, timeout_seconds: None } }, written back as {"kind":"session","grant":"gpu","op":{"kind":"run","lease":0,"argv":["true"],"timeout_seconds":null}}
+            Session { grant: Name("gpu"), op: Run { lease: 0, container: Companion(CompanionName("scheduler")), argv: Argv { program: "true", args: [] }, timeout_seconds: None } }"#]],
+    );
+}
+
 /// An output's end, as a lease's status gives it ([`op::output_tail`]): how many characters it
 /// keeps, and how many bytes they take as JSON writes them.
 struct Tail(&'static str, Vec<u8>);
@@ -746,18 +776,18 @@ fn lease_status_bound() {
 fn hellos_and_frames() {
     check(
         [
-            HelloJson(r#"{"version":3}"#),
-            HelloJson(r#"{"version":2,"grant":"00112233445566778899aabbccddeeff"}"#),
+            HelloJson(r#"{"version":4}"#),
             HelloJson(r#"{"version":3,"grant":"00112233445566778899aabbccddeeff"}"#),
-            HelloJson(r#"{"version":3,"gpus":["NVIDIA A100-SXM4-80GB","NVIDIA H100 80GB HBM3"]}"#),
-            HelloJson(r#"{"version":3,"gpus":["NVIDIA A100\u0000"]}"#),
+            HelloJson(r#"{"version":4,"grant":"00112233445566778899aabbccddeeff"}"#),
+            HelloJson(r#"{"version":4,"gpus":["NVIDIA A100-SXM4-80GB","NVIDIA H100 80GB HBM3"]}"#),
+            HelloJson(r#"{"version":4,"gpus":["NVIDIA A100\u0000"]}"#),
         ],
         &expect![[r#"
             Hello { gpus: None }
-            sandboxd speaks sandbox protocol 2: expected 3, which this gateway speaks, as a sandboxd built from the same Pumpkin does
-            the hello isn't of sandbox protocol 3's form: unknown field `grant`, expected `version` or `gpus`
+            sandboxd speaks sandbox protocol 3: expected 4, which this gateway speaks, as a sandboxd built from the same Pumpkin does
+            the hello isn't of sandbox protocol 4's form: unknown field `grant`, expected `version` or `gpus`
             Hello { gpus: Some([GpuModel("NVIDIA A100-SXM4-80GB"), GpuModel("NVIDIA H100 80GB HBM3")]) }
-            the hello isn't of sandbox protocol 3's form: `NVIDIA A100\0` is not a GPU's model: use one as `nvidia-smi` names it, such as `NVIDIA H100 80GB HBM3`"#]],
+            the hello isn't of sandbox protocol 4's form: `NVIDIA A100\0` is not a GPU's model: use one as `nvidia-smi` names it, such as `NVIDIA H100 80GB HBM3`"#]],
     );
     check(
         [
@@ -798,16 +828,16 @@ fn hellos_and_frames() {
 fn hello_bodies_and_answers() {
     check(
         [
-            HelloFrame(r#"{"version":3}"#, 0),
-            HelloFrame(r#"{"version":3}"#, MAX_ATTESTATION_BYTES),
+            HelloFrame(r#"{"version":4}"#, 0),
+            HelloFrame(r#"{"version":4}"#, MAX_ATTESTATION_BYTES),
+            HelloFrame(r#"{"version":4}"#, MAX_ATTESTATION_BYTES + 1),
             HelloFrame(r#"{"version":3}"#, MAX_ATTESTATION_BYTES + 1),
-            HelloFrame(r#"{"version":2}"#, MAX_ATTESTATION_BYTES + 1),
         ],
         &expect![[r#"
-            {"version":3} and 0 bytes: Hello { gpus: None }, None of None bytes
-            {"version":3} and 4096 bytes: Hello { gpus: None }, Some(Attestation(..)) of Some(4096) bytes
-            {"version":3} and 4097 bytes: InvalidData: the hello's body is 4097 bytes: a hello's holds at most 4096
-            {"version":2} and 4097 bytes: InvalidData: sandboxd speaks sandbox protocol 2: expected 3, which this gateway speaks, as a sandboxd built from the same Pumpkin does"#]],
+            {"version":4} and 0 bytes: Hello { gpus: None }, None of None bytes
+            {"version":4} and 4096 bytes: Hello { gpus: None }, Some(Attestation(..)) of Some(4096) bytes
+            {"version":4} and 4097 bytes: InvalidData: the hello's body is 4097 bytes: a hello's holds at most 4096
+            {"version":3} and 4097 bytes: InvalidData: sandboxd speaks sandbox protocol 3: expected 4, which this gateway speaks, as a sandboxd built from the same Pumpkin does"#]],
     );
     check(
         [
@@ -821,6 +851,85 @@ fn hello_bodies_and_answers() {
             the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
             the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
             the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox"#]],
+    );
+}
+
+/// What a peer sent a relay first, and what reading its route gives and leaves unread.
+struct Routed(Vec<u8>);
+
+impl Case for Routed {
+    fn outcome(self) -> String {
+        let mut unread = &*self.0;
+        let read = match read_route(&mut unread) {
+            Ok(companion) => format!("a route to `{companion}`"),
+            Err(error) => format!("{:?}: {error}", error.kind()),
+        };
+        let (sent, unread) = (self.0.len(), unread.len());
+        format!("{sent} bytes: {read}, with {unread} left unread")
+    }
+}
+
+#[test]
+fn routes() {
+    let longest = format!("a{}", "-0".repeat(31));
+    let sent = |companion: &str| {
+        let mut sent = route(&valid(companion)).into_bytes();
+        sent.extend(b"what follows");
+        Routed(sent)
+    };
+    check(
+        [
+            sent("db"),
+            sent(&longest),
+            Routed(b"db".to_vec()),
+            Routed(vec![b'a'; MAX_ROUTE_BYTES + 36]),
+            Routed(b"main\nwhat follows".to_vec()),
+            Routed(b"d\xffb\n".to_vec()),
+        ],
+        &expect![[r#"
+            15 bytes: a route to `db`, with 12 left unread
+            76 bytes: a route to `a-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0`, with 12 left unread
+            2 bytes: UnexpectedEof: the connection ended before its route's line feed: expected a companion's name and a line feed, with 0 left unread
+            100 bytes: InvalidData: the route has no line feed in its first 64 bytes: expected a companion's name and a line feed, with 36 left unread
+            17 bytes: InvalidData: the route names no companion: `main` names the runner's own container: give the companion another name, with 12 left unread
+            4 bytes: InvalidData: the route names no companion: `d�b` is not a companion's name: use 1 to 63 characters from a-z, 0-9 and `-`, starting with a letter and ending with a letter or a digit, with 0 left unread"#]],
+    );
+}
+
+/// A TLS identity's digits, as its two variables hold them, and what reading them gives.
+struct Identity(&'static str, &'static str);
+
+impl Case for Identity {
+    fn outcome(self) -> String {
+        let Self(certificate, key) = self;
+        match TlsIdentity::from_digits(certificate, key) {
+            Ok(identity) => {
+                let (certificate_bytes, key_bytes) = (identity.certificate(), identity.key());
+                let written = (identity.certificate_digits(), identity.key_digits());
+                let alike = written == (certificate.to_owned(), key.to_owned());
+                format!(
+                    "{identity:?} of {} and {} bytes, written back alike: {alike}",
+                    certificate_bytes.len(),
+                    key_bytes.len()
+                )
+            }
+            Err(error) => error,
+        }
+    }
+}
+
+#[test]
+fn tls_identities() {
+    check(
+        [
+            Identity("3082", "00ff10"),
+            Identity("3082", "00ff1"),
+            Identity("30 82", "00ff10"),
+        ],
+        &expect![[r#"
+            TlsIdentity(..) of 2 and 3 bytes, written back alike: true
+            SANDBOXD_TLS_KEY isn't an even number of lowercase hexadecimal digits: set it to the digits of the identity issued for the companion
+            SANDBOXD_TLS_CERTIFICATE isn't an even number of lowercase hexadecimal digits: set it to the digits of the identity issued for the companion"#]],
     );
 }
 
@@ -996,6 +1105,57 @@ fn grant_help() {
 
         {"task":42}
     "#]],
+    );
+}
+
+/// A workflow whose agent leases the runner `gpu`. It shows the session's entry in the agent's ops
+/// reply, then the lines of its guide about the session.
+struct Leasing(Value);
+
+impl Case for Leasing {
+    fn outcome(self) -> String {
+        let workflow = Workflow::parse(&serde_json::from_value(self.0).unwrap()).unwrap();
+        let role = workflow.agents().next().unwrap().id.role();
+        let remaining = |_, _: &_| LeaseRemaining {
+            instances: 2,
+            instance_seconds: 900,
+            cumulative_seconds: None,
+            commands: None,
+        };
+        let ops = workflow.ops(role, 0, remaining);
+        let session = (ops.grants.iter())
+            .find(|grant| matches!(grant, op::Grant::Session(_)))
+            .unwrap();
+        let guide = ops.guide();
+        let about = |line: &&str| line.contains("gpu.") || line.starts_with("Containers");
+        let lines: Vec<&str> = guide.lines().filter(about).collect();
+        format!("{}\n{}", json!(session), lines.join("\n"))
+    }
+}
+
+// An agent learns its runner's companions from its ops reply and its guide, which name none for a
+// runner without companions.
+#[test]
+fn session_containers() {
+    let two = json!([companion("scheduler", '4'), companion("swe-000", '5')]);
+    check(
+        [Leasing(leasing()), Leasing(accompanied(two))],
+        &expect![[r#"
+            {"commands":32,"cumulative_seconds":1200,"instance_seconds":900,"instances":2,"kind":"session","name":"gpu","remaining":{"commands":null,"cumulative_seconds":null,"instance_seconds":900,"instances":2},"transfer_bytes":1048576}
+            sandboxctl call gpu.open [--seconds SECONDS]
+            sandboxctl call gpu.run LEASE [--timeout SECONDS] -- COMMAND [ARG ...]
+            sandboxctl call gpu.put LEASE LOCAL REMOTE [--replace]
+            sandboxctl call gpu.get LEASE REMOTE LOCAL
+            sandboxctl call gpu.status LEASE
+            sandboxctl call gpu.close LEASE
+            {"commands":32,"companions":["scheduler","swe-000"],"cumulative_seconds":1200,"instance_seconds":900,"instances":2,"kind":"session","name":"gpu","remaining":{"commands":null,"cumulative_seconds":null,"instance_seconds":900,"instances":2},"transfer_bytes":1048576}
+            sandboxctl call gpu.open [--seconds SECONDS]
+            sandboxctl call gpu.run LEASE [--container NAME] [--timeout SECONDS] -- COMMAND [ARG ...]
+            sandboxctl call gpu.put LEASE LOCAL REMOTE [--container NAME] [--replace]
+            sandboxctl call gpu.get LEASE REMOTE LOCAL [--container NAME]
+            sandboxctl call gpu.status LEASE
+            sandboxctl call gpu.close LEASE
+            Containers: main (the default), scheduler, swe-000. One command or transfer runs at a time across them."#]],
     );
 }
 
@@ -1232,6 +1392,51 @@ fn needs_values() {
     );
 }
 
+/// A name for a runner's companion, which it is, or why it isn't.
+struct CompanionNamed(String);
+
+impl Case for CompanionNamed {
+    fn outcome(self) -> String {
+        match ir::CompanionName::try_from(self.0) {
+            Ok(name) => format!("`{name}` names a companion"),
+            Err(error) => error,
+        }
+    }
+}
+
+#[test]
+fn companion_names() {
+    let longest = format!("a{}", "-0".repeat(31));
+    let names = [
+        "a",
+        "swe-000-candidate",
+        &longest,
+        &format!("{longest}0"),
+        "",
+        "0scheduler",
+        "scheduler-",
+        "Scheduler",
+        "swe_000",
+        "main",
+        "localhost",
+    ];
+    check(
+        names.map(|name| CompanionNamed(name.to_owned())),
+        &expect![[r#"
+            `a` names a companion
+            `swe-000-candidate` names a companion
+            `a-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0` names a companion
+            `a-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-0-00` is not a companion's name: use 1 to 63 characters from a-z, 0-9 and `-`, starting with a letter and ending with a letter or a digit
+            `` is not a companion's name: use 1 to 63 characters from a-z, 0-9 and `-`, starting with a letter and ending with a letter or a digit
+            `0scheduler` is not a companion's name: use 1 to 63 characters from a-z, 0-9 and `-`, starting with a letter and ending with a letter or a digit
+            `scheduler-` is not a companion's name: use 1 to 63 characters from a-z, 0-9 and `-`, starting with a letter and ending with a letter or a digit
+            `Scheduler` is not a companion's name: use 1 to 63 characters from a-z, 0-9 and `-`, starting with a letter and ending with a letter or a digit
+            `swe_000` is not a companion's name: use 1 to 63 characters from a-z, 0-9 and `-`, starting with a letter and ending with a letter or a digit
+            `main` names the runner's own container: give the companion another name
+            `localhost` names each container's own loopback address, so no other container reaches the companion by it: give the companion another name"#]],
+    );
+}
+
 #[test]
 fn agent_files() {
     let agent = "/roles/0/runtime/agent";
@@ -1429,6 +1634,171 @@ fn broken_leases() {
             error: `gpu`'s `transfer_bytes` is 1073741825, over the transfer limit of 1073741824: give at most that
               --> roles[0].runtime.agent.grants[1].session.transfer_bytes
             parsed"#]],
+    );
+}
+
+/// [`leasing`]'s workflow, its runner `gpu` with `companions`.
+fn accompanied(companions: Value) -> Value {
+    let mut ir = leasing();
+    ir["roles"][3]["runtime"]["runner"]["companions"] = companions;
+    ir
+}
+
+/// A companion named `name`, of the image whose digest repeats `digit`.
+fn companion(name: &str, digit: char) -> Value {
+    json!({
+        "name": name, "image": format!("sha256:{}", digit.to_string().repeat(64)),
+        "user": { "uid": 65532, "gid": 65532 }, "cwd": "/testbed", "env": ["PORT=8001"],
+    })
+}
+
+#[test]
+fn companions() {
+    let two = json!([
+        companion("scheduler", '4'),
+        companion("swe-000-candidate", '5')
+    ]);
+    let mut commanded = companion("scheduler", '4');
+    commanded["command"] = json!(["serve"]);
+    let mut target_leased = target_leasing();
+    target_leased["roles"][4]["runtime"]["runner"]["companions"] = json!([companion("judge", '2')]);
+    check(
+        [
+            accompanied(two.clone()),
+            accompanied(json!([
+                companion("scheduler", '4'),
+                companion("scheduler", '5')
+            ])),
+            accompanied(json!([commanded])),
+            accompanied(json!([
+                companion("scheduler", '4'),
+                companion("scorer", '2'),
+                companion("judge", '2')
+            ])),
+            target_leased,
+        ],
+        &expect![[r#"
+            parsed
+            error: `scheduler` also names /roles/3/runtime/runner/companions/0: give each a unique name
+              --> roles[3].runtime.runner.companions[1].name
+            unknown field `command`, expected one of `name`, `image`, `user`, `cwd`, `env`
+            error: `gpu`'s companion `scorer` runs target `trainer`'s image, sha256:2222222222222222222222222222222222222222222222222222222222222222: give the companion an image no target has
+              --> roles[0].runtime.agent.grants[1].session.runner
+            error: `gpu`'s companion `judge` runs target `trainer`'s image, sha256:2222222222222222222222222222222222222222222222222222222222222222: give the companion an image no target has
+              --> roles[0].runtime.agent.grants[1].session.runner
+            parsed"#]],
+    );
+}
+
+/// [`accompanied`]'s runner with so many companions and the needs given, placed on the classes
+/// offered. It shows where the runner is placed, or why it can't be.
+struct Accompanying {
+    needs: Value,
+    companions: usize,
+    offered: BTreeMap<ir::Name, BTreeMap<ir::Name, Class>>,
+}
+
+impl Case for Accompanying {
+    fn outcome(self) -> String {
+        let companions = (0..self.companions).map(|index| companion(&format!("c{index}"), '4'));
+        let mut ir = accompanied(companions.collect());
+        ir["roles"][3]["needs"] = self.needs.clone();
+        let ir = serde_json::from_value::<ir::Workflow>(ir).unwrap();
+        let placed = Workflow::parse(&ir)
+            .unwrap()
+            .place(self.offered, |classes| classes);
+        let at = match placed {
+            Ok((placed, _)) => {
+                let (runner, _) = placed.workflow().roles().nth(3).unwrap();
+                let placement = placed.placement(runner);
+                format!("`{}` `{}`", placement.provider, placement.class)
+            }
+            Err(errors) => errors.to_string(),
+        };
+        format!("{} with {}: {at}", self.needs, self.companions)
+    }
+}
+
+/// [`offered`], and on `modal`, `cpu`: a class without GPUs, of 1 CPU and more memory than
+/// `aws`'s smallest, that holds companions.
+fn with_cpu() -> BTreeMap<ir::Name, BTreeMap<ir::Name, Class>> {
+    let mut offered = offered();
+    let mut cpu = offered[&valid::<ir::Name>("gpus")][&valid::<ir::Name>("h100")].clone();
+    cpu.offers.gpu = None;
+    cpu.offers.cpu_millis = NonZeroU64::new(1000).unwrap();
+    offered.insert(valid("modal"), BTreeMap::from([(valid("cpu"), cpu)]));
+    offered
+}
+
+/// [`offered`], with no class that offers companions.
+fn unoffered() -> BTreeMap<ir::Name, BTreeMap<ir::Name, Class>> {
+    let mut offered = offered();
+    for class in offered.values_mut().flat_map(BTreeMap::values_mut) {
+        class.offers.companions = false;
+    }
+    offered
+}
+
+#[test]
+fn placed_companions() {
+    let needs = |cpu_millis: u64, memory_mib: u64, gpus: u32| {
+        let mut needs = json!({ "cpu_millis": cpu_millis, "memory_bytes": memory_mib << 20 });
+        if gpus > 0 {
+            needs["gpu"] = json!({ "count": gpus, "model": "NVIDIA H100 80GB HBM3" });
+        }
+        needs
+    };
+    let on = |needs: Value, companions: usize| Accompanying {
+        needs,
+        companions,
+        offered: offered(),
+    };
+    let on_cpu = |needs: Value, companions: usize| Accompanying {
+        offered: with_cpu(),
+        ..on(needs, companions)
+    };
+    let on_unoffered = |needs: Value, companions: usize| Accompanying {
+        offered: unoffered(),
+        ..on(needs, companions)
+    };
+    check(
+        [
+            on(needs(500, 1024, 1), 15),
+            on(needs(500, 1024, 0), 1),
+            on_cpu(needs(500, 1024, 0), 1),
+            on_unoffered(needs(500, 1024, 1), 1),
+            Accompanying {
+                offered: BTreeMap::new(),
+                ..on(needs(500, 1024, 1), 1)
+            },
+        ],
+        &expect![[r#"
+            {"cpu_millis":500,"gpu":{"count":1,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":1073741824} with 15: `gpus` `h100`
+            {"cpu_millis":500,"memory_bytes":1073741824} with 1: error: role `gpu` declares companions, and no class that fits its needs offers them
+              --> roles[3].runtime.runner.companions: 1 companion
+              = help: declare none,
+                      or change its needs to fit a class that offers them
+            {"cpu_millis":500,"memory_bytes":1073741824} with 1: `modal` `cpu`
+            {"cpu_millis":500,"gpu":{"count":1,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":1073741824} with 1: error: role `gpu` declares companions, and no class of sandbox offers them
+              --> roles[3].runtime.runner.companions: 1 companion
+              = help: declare none,
+                      or run it where a class offers them
+            {"cpu_millis":500,"gpu":{"count":1,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":1073741824} with 1: error: role `agent` fits no class of sandbox
+              --> roles[0].needs: 8 CPUs, 32.0 GiB
+              = no class is offered
+              = help: add a class with at least 8 CPUs and 32.0 GiB
+            error: role `trainer` fits no class of sandbox
+              --> roles[1].needs: 8 CPUs, 2.0 GiB
+              = no class is offered
+              = help: add a class with at least 8 CPUs and 2.0 GiB
+            error: role `final_judge` fits no class of sandbox
+              --> roles[2].needs: 8 CPUs, 2.0 GiB
+              = no class is offered
+              = help: add a class with at least 8 CPUs and 2.0 GiB
+            error: role `gpu` fits no class of sandbox
+              --> roles[3].needs: 0.5 CPUs, 1.0 GiB, 1 × `NVIDIA H100 80GB HBM3`
+              = no class is offered
+              = help: add a class with 1 × `NVIDIA H100 80GB HBM3`, and at least 0.5 CPUs and 1.0 GiB"#]],
     );
 }
 

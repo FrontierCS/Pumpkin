@@ -25,7 +25,9 @@ use core::time::Duration;
 use schema::ir::{AbsolutePath, ArgumentValue, Argv, Name, Sha256Digest};
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::{CommandEnd, OpReply, SessionOp, TransferEnd};
-use schema::workflow::{AgentId, JobFunctionId, Placed, SessionId, TargetId, Workflow};
+use schema::workflow::{
+    AgentId, ContainerId, JobFunctionId, Placed, SessionId, TargetId, Workflow,
+};
 
 mod call;
 mod jobs;
@@ -273,22 +275,28 @@ pub enum Action {
         start_by: Duration,
         life: Duration,
     },
-    /// Runs `argv` as lease `lease`'s `command`th command, killing it once it has run for
-    /// `timeout`, from its start, if given; without one, it runs until the lease is closed.
+    /// Runs `argv` as lease `lease`'s `command`th command, in `container` of its runner, killing
+    /// it once it has run for `timeout`, from its start, if given; without one, it runs until the
+    /// lease is closed.
     RunCommand {
         lease: LeaseId,
         command: u64,
+        /// One that the lease's runner holds.
+        container: ContainerId,
         argv: Argv,
         timeout: Option<Duration>,
     },
-    /// Copies a tree between the sandbox of the lease's holder, `holder`, and lease `lease`'s
-    /// runner, as `direction` says, as the lease's `transfer`th command or transfer, failing once
-    /// its files hold more than `max_bytes`. The runtime reports [`Event::TransferEnded`] once it
-    /// has ended, which [`Action::CloseLease`] makes come early, cut short.
+    /// Copies a tree between the sandbox of the lease's holder, `holder`, and `container` of lease
+    /// `lease`'s runner, as `direction` says, as the lease's `transfer`th command or transfer,
+    /// failing once its files hold more than `max_bytes`. The runtime reports
+    /// [`Event::TransferEnded`] once it has ended, which [`Action::CloseLease`] makes come early,
+    /// cut short.
     Transfer {
         lease: LeaseId,
         holder: Caller,
         transfer: u64,
+        /// One that the lease's runner holds.
+        container: ContainerId,
         direction: Direction,
         max_bytes: NonZeroU64,
     },

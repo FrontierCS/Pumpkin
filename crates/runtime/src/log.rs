@@ -36,7 +36,7 @@ use decision::{
 use gateway::RefusedOp;
 use provider::{Phase, UnixTime};
 use route::{Answer, Bar, Usage};
-use schema::ir::{AbsolutePath, Api, Argv, GpuModel, Name};
+use schema::ir::{AbsolutePath, Api, Argv, Container, GpuModel, Name};
 use schema::sandbox::op::{CommandEnd, OpReply, SessionOp};
 use schema::workflow::{AgentId, TargetId, Workflow};
 use serde::Deserialize;
@@ -323,6 +323,15 @@ impl<'h, H: Host> Log<'h, H> {
                 json!({ "kind": "sandbox_met", "sandbox": sandbox }),
                 &[],
             ),
+            Entry::ContainerMet {
+                sandbox,
+                container,
+                at,
+            } => self.observed(
+                at,
+                json!({ "kind": "container_met", "sandbox": sandbox, "container": container }),
+                &[],
+            ),
             Entry::Gpus(sandbox, gpus) => {
                 self.told(json!({ "kind": "sandbox_gpus", "sandbox": sandbox, "gpus": gpus }))
             }
@@ -453,9 +462,18 @@ pub(super) enum Entry {
         phases: Vec<Phase>,
         at: Duration,
     },
-    /// A sandbox's session that met the gateway, as `sandbox_met`, observed as it met.
+    /// A sandbox whose every container met the gateway, as `sandbox_met`, observed as the last
+    /// of them met.
     Met {
         sandbox: Name,
+        at: Duration,
+    },
+    /// A container that met the gateway, in a sandbox that holds companions, as `container_met`,
+    /// observed as it met. It is a kind of its own, as a reader that knows only `sandbox_met`
+    /// would take a container's meeting for its sandbox's.
+    ContainerMet {
+        sandbox: Name,
+        container: Container,
         at: Duration,
     },
     /// The GPUs that a sandbox's `sandboxd` saw as it started, as `sandbox_gpus`: the sandbox's
@@ -712,35 +730,51 @@ fn session_json(grant: &Name, op: &SessionOp) -> Value {
         }),
         SessionOp::Run {
             lease,
+            container,
             argv,
             timeout_seconds,
-        } => json!({
-            "kind": "lease_run",
-            "grant": grant,
-            "lease": lease,
-            "argv": argv,
-            "timeout_seconds": timeout_seconds,
-        }),
+        } => in_container(
+            json!({
+                "kind": "lease_run",
+                "grant": grant,
+                "lease": lease,
+                "argv": argv,
+                "timeout_seconds": timeout_seconds,
+            }),
+            container,
+        ),
         SessionOp::Put {
             lease,
+            container,
             tree,
             to,
             replace,
-        } => json!({
-            "kind": "lease_put",
-            "grant": grant,
-            "lease": lease,
-            "tree": tree,
-            "to": to,
-            "replace": replace,
-        }),
-        SessionOp::Get { lease, from, to } => json!({
-            "kind": "lease_get",
-            "grant": grant,
-            "lease": lease,
-            "from": from,
-            "to": to,
-        }),
+        } => in_container(
+            json!({
+                "kind": "lease_put",
+                "grant": grant,
+                "lease": lease,
+                "tree": tree,
+                "to": to,
+                "replace": replace,
+            }),
+            container,
+        ),
+        SessionOp::Get {
+            lease,
+            container,
+            from,
+            to,
+        } => in_container(
+            json!({
+                "kind": "lease_get",
+                "grant": grant,
+                "lease": lease,
+                "from": from,
+                "to": to,
+            }),
+            container,
+        ),
         SessionOp::Status { lease } => {
             json!({ "kind": "lease_status", "grant": grant, "lease": lease })
         }
@@ -748,6 +782,16 @@ fn session_json(grant: &Name, op: &SessionOp) -> Value {
             json!({ "kind": "lease_close", "grant": grant, "lease": lease })
         }
     }
+}
+
+/// `request`, a lease's command or copy, with its `container`, which it leaves out for `main`, as
+/// the op does ([`SessionOp::Run`]).
+fn in_container(mut request: Value, container: &Container) -> Value {
+    match container {
+        Container::Main => {}
+        Container::Companion(name) => request["container"] = json!(name),
+    }
+    request
 }
 
 #[expect(clippy::too_many_lines, reason = "one arm per action")]
@@ -812,6 +856,8 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
         Action::RunCommand {
             lease,
             command,
+            // The op's request holds them.
+            container: _,
             argv: _,
             timeout,
         } => json!({
@@ -824,6 +870,8 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
             lease,
             holder: _,
             transfer,
+            // The op's request holds it.
+            container: _,
             direction,
             max_bytes,
         } => {

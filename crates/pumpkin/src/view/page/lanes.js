@@ -185,6 +185,7 @@ function startBar(lane, start, end, where, scale) {
       ...phases.map((phase) => /** @type {[string, string]} */ (["· " + phase.name, phaseSaid(phase)])),
       more_phases ? ["· …", morePhasesSaid(more_phases)] : null,
       ["Meeting", lasted(meeting - created) + (open && met === null ? rest : "")],
+      ...containersSaid(start, started !== null || gone !== null),
       met === null ? null : ["Setting up", lasted(until - met) + (open ? rest : "")],
       started === null ? null : ["Started", clock(started)],
       [started === null && gone !== null ? "Never started" : "Starting", lasted(until - asked)],
@@ -198,6 +199,22 @@ function startBar(lane, start, end, where, scale) {
 /** @param {SandboxStart["phases"][number]} phase */
 function phaseSaid(phase) {
   return lasted(phase.to - phase.from) + " from " + clock(phase.from);
+}
+
+// The meetings of a start's containers, as the card and the inspector both say them: each time
+// since the create returned. `over` says whether the start has ended.
+/** @param {SandboxStart} start @param {boolean} over @returns {Array<[string, string] | null>} */
+function containersSaid(start, over) {
+  if (!start.containers) return [];
+  const { held, met, first, slowest, unmet, more_unmet } = start.containers;
+  const since = (/** @type {number} */ at) => lasted(at - start.created);
+  return [
+    ["Containers", (held === null ? met : met + " of " + held) + " met"],
+    first === null ? null : ["· first met", since(first)],
+    // A container's name and time keep to one line.
+    slowest.length ? ["· slowest", slowest.map((container) => (container.name + " " + since(container.met)).replaceAll(" ", "\u00a0")).join(", ")] : null,
+    unmet.length ? [over ? "· never met" : "· not met yet", unmet.join(", ") + (more_unmet ? " and " + more_unmet + " more" : "")] : null,
+  ];
 }
 
 // The phases of a start that the reply leaves out, as the card and the inspector both say them.
@@ -245,6 +262,7 @@ export function inspectLane(lane, inspector, nearest, data, callList, failureOf)
             at(start.created, ", " + lasted(start.created - start.began) + " after the create began"),
             h("dt", {}, "Met"),
             start.met === null ? at(null) : at(start.met, ", " + lasted(start.met - start.created) + " after it was created"),
+            ...containersSaid(start, started !== null || gone !== null).flatMap((row) => (row ? [h("dt", {}, row[0]), h("dd", {}, row[1])] : [])),
           ]
         : null,
       h("dt", {}, "Started"),

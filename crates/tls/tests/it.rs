@@ -288,3 +288,80 @@ fn refused_peers() {
         ]],
     );
 }
+
+/// Runs `client`'s TLS for the server `name` within the TLS of the edge at `port`. Returns what
+/// `scenario` says of its stream, or why it has none.
+fn within(
+    (client, name): (&Client, &str),
+    port: u16,
+    scenario: impl FnOnce(&Stream) -> String,
+) -> String {
+    let tcp = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let outer = edge::client().connect(tcp, edge::NAME, Deadline::after(HUNG));
+    match client.connect_within(outer.unwrap(), name, Deadline::after(HUNG)) {
+        Ok(stream) => scenario(&stream),
+        Err(error) => format!("{:?}: {error}", error.kind()),
+    }
+}
+
+/// Reads `expected`'s length from `stream`, and says what came, or why none did.
+fn read(mut stream: &Stream, expected: &str) -> String {
+    let mut bytes = vec![0; expected.len()];
+    match stream.read_exact(&mut bytes) {
+        Ok(()) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(error) => format!("{:?}: {error}", error.kind()),
+    }
+}
+
+#[test]
+fn within_another_connection() {
+    let (heard, server_heard) = mpsc::channel();
+    // The server within answers, then says what the client sent before it closed.
+    let answering = edge::front_of(move |stream| {
+        let Ok(secured) = edge::other_server().accept(stream, Deadline::after(HUNG)) else {
+            return;
+        };
+        (&secured).write_all(b"from within").unwrap();
+        let mut sent = String::new();
+        let read = (&secured).read_to_string(&mut sent).map(|_| sent);
+        heard.send(read.map_err(|error| error.kind())).unwrap();
+    });
+    // It closes once the handshake's first bytes have come, so the client has sent them.
+    let closing = edge::front_of(|mut stream| drop(stream.read(&mut [0])));
+    // It cuts its TCP connection, below its TLS, once the client has what it sent.
+    let cutting = edge::front_of(|stream| {
+        let tcp = stream.try_clone().unwrap();
+        let secured = edge::other_server().accept(stream, Deadline::after(HUNG));
+        let secured = secured.unwrap();
+        (&secured).write_all(b"first").unwrap();
+        (&secured).read_exact(&mut [0]).unwrap();
+        tcp.shutdown(Shutdown::Both).unwrap();
+    });
+    let named = (&edge::client(), edge::OTHER_NAME);
+    let unopened = |_: &Stream| unreachable!("the handshake was to fail");
+    let lines = [
+        ("a server that the client trusts, by its name", {
+            within(named, answering, |stream| {
+                let read = read(stream, "from within");
+                (&mut &*stream).write_all(b"to within").unwrap();
+                stream.shutdown().unwrap();
+                format!("{read}; the server read {:?}", server_heard.recv().unwrap())
+            })
+        }),
+        ("a far end that closes in the handshake", {
+            within(named, closing, unopened)
+        }),
+        ("a far end cut short once the stream is open", {
+            within(named, cutting, |stream| {
+                let first = read(stream, "first");
+                (&mut &*stream).write_all(b"k").unwrap();
+                format!("{first}; then {}", read(stream, "more"))
+            })
+        }),
+    ];
+    let lines = lines.map(|(case, outcome)| format!("{case}: {outcome}"));
+    expect![[r#"
+        a server that the client trusts, by its name: from within; the server read Ok("to within")
+        a far end that closes in the handshake: UnexpectedEof: the TLS handshake failed: unexpected end of file: expected TLS 1.3 from `companion`, with a certificate trusted for it
+        a far end cut short once the stream is open: first; then UnexpectedEof: the connection that carries this one ended without TLS's close_notify, as a connection cut short does: expected the peer to close it with one"#]].assert_eq(&lines.join("\n"));
+}

@@ -19,6 +19,7 @@ use std::num::{NonZeroU32, NonZeroU64};
 use serde::{Deserialize, Serialize};
 
 pub mod argument;
+pub(crate) mod container;
 mod final_call;
 mod grant;
 mod job;
@@ -28,6 +29,7 @@ mod session;
 pub(crate) mod values;
 
 pub use argument::{Argument, ArgumentType, ArgumentValue};
+pub use container::{CompanionName, Container};
 pub use final_call::{Final, FinalBody};
 pub use grant::{Body, Function, Grant};
 pub use job::JobFunction;
@@ -221,6 +223,31 @@ pub struct File {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunnerRuntime {
+    /// The directory each command starts in.
+    pub cwd: AbsolutePath,
+    /// Variables added to each command's environment, as [`Command::env`]'s are.
+    #[serde(default, skip_serializing_if = "Env::is_empty")]
+    pub env: Env,
+    /// The containers that each of the runner's sandboxes holds beside its own, each named once
+    /// among them. They share the sandbox's [`Needs`] and its lifetime. The runner is placed only
+    /// in a class that holds companions
+    /// ([`Offers::companions`](crate::workflow::Offers::companions)). It is refused, before any
+    /// image is built, if they are more than its provider's sandbox holds for its needs. Absent,
+    /// none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub companions: Vec<Companion>,
+}
+
+/// A container beside a runner's own in each of its sandboxes ([`RunnerRuntime::companions`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Companion {
+    pub name: CompanionName,
+    /// An image no target has, if an agent leases the runner, as for the runner's own
+    /// ([`Session::runner`]).
+    pub image: Image,
+    /// The user the companion's commands run as.
+    pub user: User,
     /// The directory each command starts in.
     pub cwd: AbsolutePath,
     /// Variables added to each command's environment, as [`Command::env`]'s are.

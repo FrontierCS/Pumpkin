@@ -9,7 +9,7 @@ use std::collections::btree_map::Entry;
 use std::error::Error;
 use std::fmt::{self, Write as _};
 
-use crate::ir::{JsonPointer, Name};
+use crate::ir::JsonPointer;
 
 /// A rule an IR breaks: what is wrong, where, why, and each change that would fix it.
 ///
@@ -206,12 +206,12 @@ impl Errors {
 
     /// Reports each of a list's `names` that an earlier one repeats. The part that holds the
     /// name at an index, as its `name`, is at `at` of that index.
-    pub(super) fn unique<'n>(
+    pub(super) fn unique<'n, N: Ord + fmt::Display + 'n>(
         &mut self,
-        names: impl IntoIterator<Item = &'n Name>,
+        names: impl IntoIterator<Item = &'n N>,
         at: impl Fn(usize) -> JsonPointer,
     ) {
-        let mut first: BTreeMap<&Name, usize> = BTreeMap::new();
+        let mut first: BTreeMap<&N, usize> = BTreeMap::new();
         for (index, name) in names.into_iter().enumerate() {
             match first.entry(name) {
                 Entry::Vacant(entry) => {

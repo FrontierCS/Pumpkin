@@ -14,7 +14,7 @@ use std::num::NonZeroU64;
 use std::time::Duration;
 
 use provider::UnixTime;
-use schema::ir::{Api, Name};
+use schema::ir::{Api, Container, Name};
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::{CommandEnd, TransferEnd};
 use serde::de::{DeserializeOwned, Deserializer, Error as _};
@@ -196,6 +196,10 @@ pub(super) enum Event {
     SandboxMet {
         sandbox: SandboxName,
     },
+    ContainerMet {
+        sandbox: SandboxName,
+        container: Container,
+    },
     SandboxGpus {
         sandbox: SandboxName,
         gpus: Vec<String>,
@@ -235,6 +239,7 @@ impl Event {
             | Self::ModelAnswered { .. }
             | Self::SandboxCreated { .. }
             | Self::SandboxMet { .. }
+            | Self::ContainerMet { .. }
             | Self::SandboxGpus { .. }
             | Self::SandboxDeleted { .. }
             | Self::Unknown => None,
@@ -268,6 +273,7 @@ impl Event {
             | Self::ModelAnswered { .. }
             | Self::SandboxCreated { .. }
             | Self::SandboxMet { .. }
+            | Self::ContainerMet { .. }
             | Self::SandboxGpus { .. }
             | Self::SandboxDeleted { .. }
             | Self::Unknown => None,
@@ -307,15 +313,21 @@ pub(super) enum Request {
     },
     LeaseRun {
         argv: Vec<String>,
+        #[serde(default)]
+        container: Container,
     },
     LeasePut {
         tree: String,
         to: String,
         replace: bool,
+        #[serde(default)]
+        container: Container,
     },
     LeaseGet {
         from: String,
         to: String,
+        #[serde(default)]
+        container: Container,
     },
     LeaseClose,
     #[serde(other)]

@@ -76,8 +76,9 @@ pub(crate) fn left_out(name: &str) -> Option<String> {
     ))
 }
 
-/// Each of `params`, in order, with the argument that `call` gives it by position or by name, or
-/// `None` where it gives none. Only the first `positional` of `params` may be given by position.
+/// Each of `params`, in order, with where `call` gives it its argument, by position or by name, and
+/// the argument. It is `None` where the call gives none. Only the first `positional` of `params`
+/// may be given by position.
 ///
 /// # Errors
 ///
@@ -88,13 +89,13 @@ pub(crate) fn place(
     params: &[&str],
     positional: usize,
     call: &Call<'_>,
-) -> Result<Vec<Option<Value>>, Fault> {
+) -> Result<Vec<Option<(Span, Value)>>, Fault> {
     if let Some((span, _)) = call.positional.get(positional) {
         return Err(surplus(function, params, positional, *span));
     }
-    let mut given: Vec<Option<Value>> = vec![None; params.len()];
-    for (place, (_, value)) in call.positional.iter().enumerate() {
-        given[place] = Some(value.clone());
+    let mut given: Vec<Option<(Span, Value)>> = vec![None; params.len()];
+    for (place, argument) in call.positional.iter().enumerate() {
+        given[place] = Some(argument.clone());
     }
     for keyword in call.keywords() {
         let Some(place) = params.iter().position(|param| *param == keyword.name) else {
@@ -119,7 +120,7 @@ pub(crate) fn place(
             );
             return Err(Fault::new(keyword.span, message));
         }
-        given[place] = Some(keyword.value.clone());
+        given[place] = Some((keyword.span, keyword.value.clone()));
     }
     Ok(given)
 }

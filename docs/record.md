@@ -12,6 +12,7 @@ it ran. This page says where to look in a record, and what the page shows.
 | how the run ended, its result's values, its usage and cost | `outcome.json` |
 | every event of the run, in order, and what the driver did about it | `log.jsonl` |
 | when each sandbox's create began and returned, the phases of it that its provider timed, and when the sandbox met the gateway | `jq -c 'select(.event.kind == "sandbox_created" or .event.kind == "sandbox_met")' log.jsonl` |
+| when each container met the gateway, in a sandbox that holds companions | `jq -c 'select(.event.kind == "container_met")' log.jsonl` |
 | the workflow as it ran, where each role was placed, and each provider's report, whose strings name the provider's account | `ir.json`, `provider.json` |
 | the text of each file the evaluation read, from which each body is evaluated | `sources/task/`, `sources/library/` |
 | what the driver said after the start, such as why a sandbox failed to start | `driver.log` |
@@ -110,7 +111,9 @@ it, and for a run shows its summary, a lane for each sandbox over time, who talk
 log, which it follows while the run is live. A sandbox's lane shows its start in parts, where the
 log timed them. They are the wait for the provider's create, the create, the wait to meet the
 gateway, and the setup. Hovering the start lists how long each took, and each phase of the create
-that the provider timed. Each caller that used a model has a trace: its requests as threads of
+that the provider timed. For a sandbox with companions, it also says how many containers met,
+when the first and the slowest did, and which never met. Each caller that used a model has a
+trace: its requests as threads of
 steps, each with what it added and the model's answer. The page's colours follow the browser's light
 or dark setting. The choice in its header overrides that, and the browser keeps it. `&scheme=light`,
 `&scheme=dark` or `&scheme=system` after the token picks one in the address.

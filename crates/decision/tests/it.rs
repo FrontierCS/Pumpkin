@@ -40,10 +40,12 @@ use decision::{
     Outcome, PayloadRef, Request, Submission, Unevaluated,
 };
 use expect_test::{Expect, expect};
-use schema::ir::{self, AbsolutePath, ArgumentValue, Argv, CpuModel, Name, Sha256Digest};
+use schema::ir::{
+    self, AbsolutePath, ArgumentValue, Argv, Container, CpuModel, Name, Sha256Digest,
+};
 use schema::sandbox::op::{CommandEnd, OpReply, REASON_BYTES, SessionOp, TransferEnd};
 use schema::sandbox::{ExitStatus, RESULT_MAX_BYTES};
-use schema::workflow::{Class, Offers, Workflow};
+use schema::workflow::{Class, ContainerId, Offers, Workflow};
 use serde_json::{Value, json};
 use test_support::workflow;
 
@@ -171,6 +173,7 @@ fn offered() -> BTreeMap<Name, BTreeMap<Name, Class>> {
             gpu: None,
             cpu_features: BTreeSet::new(),
             cpu_model,
+            companions: true,
         };
         let declared = Class {
             offers,
@@ -469,20 +472,28 @@ impl Run<'_> {
             Action::RunCommand {
                 lease,
                 command,
+                container,
                 argv,
                 timeout,
             } => format!(
-                "run command {command} of lease {}, {}, with a timeout of {timeout:?}",
+                "run command {command} of lease {}{}, {}, with a timeout of {timeout:?}",
                 lease.0,
+                in_container(*container),
                 json!(argv)
             ),
             Action::Transfer {
                 lease,
                 holder,
                 transfer,
+                container,
                 direction,
                 max_bytes,
-            } => transfer_text((*lease, *holder), *transfer, direction, *max_bytes),
+            } => transfer_text(
+                (*lease, *container, *holder),
+                *transfer,
+                direction,
+                *max_bytes,
+            ),
             Action::CloseLease { lease } => format!("close lease {}", lease.0),
             Action::TearDownShared { target } => format!(
                 "tear down shared {}",
@@ -499,6 +510,14 @@ impl Run<'_> {
     }
 }
 
+/// Where in a lease's runner an action runs, as the action says it: nothing for `main`.
+fn in_container(container: ContainerId) -> String {
+    match container {
+        ContainerId::Main => String::new(),
+        ContainerId::Companion(id) => format!(" in companion {}", id.index()),
+    }
+}
+
 /// Whose a lease is, as an action says it: nothing for the agent's.
 fn holder_text(holder: Caller) -> String {
     match holder {
@@ -508,7 +527,7 @@ fn holder_text(holder: Caller) -> String {
 }
 
 fn transfer_text(
-    (lease, holder): (LeaseId, Caller),
+    (lease, container, holder): (LeaseId, ContainerId, Caller),
     transfer: u64,
     direction: &Direction,
     max: NonZeroU64,
@@ -527,8 +546,9 @@ fn transfer_text(
         Direction::Get { from, to } => ("get", from, to),
     };
     format!(
-        "{verb} {from} to {to} as transfer {transfer} of lease {}{}, of at most {max} bytes",
+        "{verb} {from} to {to} as transfer {transfer} of lease {}{}{}, of at most {max} bytes",
         lease.0,
+        in_container(container),
         holder_text(holder)
     )
 }
@@ -583,8 +603,13 @@ fn lease_event(words: &[&str]) -> Event {
     }
 }
 
+/// The op `op` of a session, whose arguments are `words` after the first. A command or a copy in a
+/// container other than `main` names its lease as `<lease>:<container>`.
 fn session_op(op: &str, words: &[&str]) -> SessionOp {
-    let lease = || words[1].parse().unwrap();
+    let named = words.get(1).copied().unwrap_or_default();
+    let (lease, container) = named.split_once(':').unwrap_or((named, "main"));
+    let lease = || lease.parse().unwrap();
+    let container = || Container::try_from(container.to_owned()).unwrap();
     match op {
         "open" => SessionOp::Open {
             instance_seconds: words.get(1).map(|seconds| seconds.parse().unwrap()),
@@ -594,6 +619,7 @@ fn session_op(op: &str, words: &[&str]) -> SessionOp {
             let argv = argv.split(' ').map(str::to_owned).collect::<Vec<_>>();
             SessionOp::Run {
                 lease: lease(),
+                container: container(),
                 argv: Argv::try_from(argv).unwrap(),
                 timeout_seconds: timeout.parse().ok(),
             }
@@ -605,6 +631,7 @@ fn session_op(op: &str, words: &[&str]) -> SessionOp {
             if op == "put" {
                 SessionOp::Put {
                     lease: lease(),
+                    container: container(),
                     tree: from,
                     to,
                     replace: replace == "replace",
@@ -612,6 +639,7 @@ fn session_op(op: &str, words: &[&str]) -> SessionOp {
             } else {
                 SessionOp::Get {
                     lease: lease(),
+                    container: container(),
                     from,
                     to,
                 }
@@ -1939,6 +1967,7 @@ fn leases() {
         10300 gpu.run 0 - true
         11000 lease_ended 0
         11100 gpu.status 0
+        11200 gpu.get 0:scheduler /work/out /got
         ",
         &expect![[r#"
             start
@@ -1987,6 +2016,73 @@ fn leases() {
             11000 lease_ended 0
             11100 gpu.status 0
               reply to op 15: {"kind":"lease_status","lease":0,"state":"closed","elapsed_seconds":9,"busy_seconds":2,"idle_seconds":4,"failure":null,"last":{"kind":"command","command":1,"end":"timed_out","stdout":"","stderr":""},"remaining":{"instances":2,"instance_seconds":0,"cumulative_seconds":1193,"commands":1}}
+            11200 gpu.get 0:scheduler /work/out /got
+              refuse op 16: lease 0 holds no container `scheduler`: name `main`, the one container that it holds
+        "#]],
+    );
+}
+
+/// [`leasing`], its runner holding the companions that `names` names, each of an image of its own.
+fn accompanied(names: &[&str]) -> impl FnOnce(&mut Value) {
+    move |ir| {
+        leasing(ir);
+        let runner = ir["roles"].as_array().unwrap().len() - 1;
+        let companions: Vec<Value> = (names.iter().zip(4..))
+            .map(|(name, digit)| {
+                json!({
+                    "name": name,
+                    "image": format!("sha256:{}", digit.to_string().repeat(64)),
+                    "user": ir["roles"][runner]["user"],
+                    "cwd": "/work",
+                })
+            })
+            .collect();
+        ir["roles"][runner]["runtime"]["runner"]["companions"] = json!(companions);
+    }
+}
+
+// A lease runs one command or copy at a time across its containers, each in a container it holds.
+#[test]
+fn lease_containers() {
+    check(
+        accompanied(&["scheduler", "swe-000"]),
+        r"
+        0 work_started
+        2000 gpu.open
+        2100 gpu.run 0:ghost - true
+        3000 lease_ready 0
+        3100 gpu.run 0:scheduler - serve
+        3200 gpu.get 0:swe-000 /work/out /got
+        3300 command_ended 0 0 0
+        3400 gpu.get 0:swe-000 /work/out /got
+        3500 transfer_ended 0 1 moved 1 5
+        3600 gpu.run 0:scheduler 900 echo it's
+        ",
+        &expect![[r#"
+            start
+              start agents
+              (tick due at 18010000)
+            0 work_started
+              (tick due at 18000000)
+            2000 gpu.open
+              reply to op 1: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
+              open lease 0 of gpu, as instance 0, started by 18000000
+            2100 gpu.run 0:ghost - true
+              refuse op 2: lease 0 holds no container `ghost`: name `main` or one of its companions, `scheduler` or `swe-000`
+            3000 lease_ready 0
+              (tick due at 903000)
+            3100 gpu.run 0:scheduler - serve
+              reply to op 3: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":899,"cumulative_seconds":1199,"commands":2}}
+              run command 0 of lease 0 in companion 0, ["serve"], with a timeout of None
+            3200 gpu.get 0:swe-000 /work/out /got
+              refuse op 4: lease 0 runs command 0, one at a time: get a tree once `gpu.status` says it has ended
+            3300 command_ended 0 0 0
+            3400 gpu.get 0:swe-000 /work/out /got
+              reply to op 5: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":899,"cumulative_seconds":1199,"commands":1}}
+              get /work/out to /got as transfer 1 of lease 0 in companion 1, of at most 4096 bytes
+            3500 transfer_ended 0 1 moved 1 5
+            3600 gpu.run 0:scheduler 900 echo it's
+              refuse op 6: the timeout of 900 s is longer than lease 0 has left, 899 s: run it again as `sandboxctl call gpu.run 0 --container scheduler --timeout 899 -- echo 'it'\''s'`
         "#]],
     );
 }

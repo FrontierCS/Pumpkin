@@ -165,7 +165,7 @@ impl Relay {
                     child.note(format!("job {}'s op's reply failed: {error}", job.0));
                 }
             }
-            Message::Session(_, Arrival::Op(incoming)) => {
+            Message::Session(_, _, Arrival::Op(incoming)) => {
                 // A call's target holds no now function.
                 let (request, unanswered) = request(incoming, |_, _| None);
                 self.asked = Some(unanswered.into_incoming());
@@ -178,22 +178,22 @@ impl Relay {
                     trees,
                 });
             }
-            Message::Session(_, Arrival::Refused(refused)) => {
+            Message::Session(_, _, Arrival::Refused(refused)) => {
                 let message = refused.message();
                 if let Err(error) = session.refuse(refused, by) {
                     child.note(format!("job {}'s op's refusal failed: {error}", job.0));
                 }
                 child.note(format!("job {}'s op was refused: {message}", job.0));
             }
-            Message::Session(_, Arrival::Exited { process, status }) => {
+            Message::Session(_, _, Arrival::Exited { process, status }) => {
                 return Ok(Some(Arrived::Exited(process, status)));
             }
-            Message::Session(at, Arrival::Ended { reason }) => {
+            Message::Session(_, at, Arrival::Ended { reason }) => {
                 let ended = SessionEnd { at, reason };
                 self.closed = Some(ended.clone());
                 return Err(ended);
             }
-            Message::Session(_, Arrival::ModelRequest(incoming)) => {
+            Message::Session(_, _, Arrival::ModelRequest(incoming)) => {
                 let at = child.clock.now();
                 child.report(Report::Model { at, job, incoming });
             }

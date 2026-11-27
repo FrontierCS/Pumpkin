@@ -5,7 +5,8 @@ use std::fmt;
 use std::num::NonZeroU32;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use schema::ir::{Name, Resources, User};
+use schema::ir::{CompanionName, Name, Resources, User};
+use schema::sandbox::{Endpoint, Listening, Relayed};
 use schema::workflow::Class;
 use serde::Serialize;
 use serde_json::Value;
@@ -133,6 +134,10 @@ pub struct Role {
     pub resources: Resources,
     /// How many of its sandboxes a run runs at once.
     pub instances: NonZeroU32,
+    /// How many companions each of its sandboxes holds beside its own container: a runner's, as
+    /// it declares them, and none for any other role. [`fits`](crate::Provider::fits) refuses
+    /// more than its sandbox holds.
+    pub companions: usize,
 }
 
 /// What a provider's `publish_image` made of a role's image, for the role's creates to name: a
@@ -175,6 +180,41 @@ pub struct Created {
     /// The steps of the create that the provider timed, for the run's record alone. A provider
     /// that times none gives none.
     pub phases: Vec<Phase>,
+}
+
+/// What the containers of a sandbox that listens are given to meet the gateway by
+/// ([`Meeting::Listen`](crate::Meeting::Listen)).
+///
+/// The create starts a `sandboxd` in each container. `main`'s is given `main`, and each of a
+/// runner's companions, in their declared order, is given its own.
+#[derive(Debug)]
+pub struct ListenDials {
+    pub main: Listening,
+    pub companions: Vec<CompanionDial>,
+}
+
+/// A companion of a runner's sandbox that listens, as the runner declares it
+/// ([`ir::Companion`](schema::ir::Companion)) but for its `cwd` and `env`.
+///
+/// Each command there is given those as it starts. Its image is as the provider published it,
+/// and `relayed` is what its `sandboxd` is given.
+#[derive(Debug)]
+pub struct CompanionDial {
+    pub name: CompanionName,
+    pub image: ImageRef,
+    pub user: User,
+    pub relayed: Relayed,
+}
+
+/// What a create of a sandbox that listens returns: where the gateway dials `main`, and its relay.
+///
+/// The relay carries the gateway to each companion ([`Relayed`]). `relay` is some exactly when
+/// the create was given companions.
+#[derive(Debug)]
+pub struct Listened {
+    pub created: Created,
+    pub main: Endpoint,
+    pub relay: Option<Endpoint>,
 }
 
 /// A step of a create, timed by the provider's own monotonic clock.

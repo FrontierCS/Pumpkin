@@ -13,7 +13,7 @@ use std::time::Duration;
 use std::{fmt, mem};
 
 use provider::UnixTime;
-use schema::ir::Gpu;
+use schema::ir::{CompanionName, Container, Gpu};
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::{CommandEnd, TransferEnd};
 use serde_json::Value;
@@ -124,6 +124,9 @@ pub struct Sandbox {
     pub startup: Option<Duration>,
     /// The GPUs its role asks for.
     pub needs: Option<Gpu>,
+    /// The companions that it holds beside `main`, as the IR declares them for its role. `None`
+    /// if its role is no runner that the IR declares.
+    pub companions: Option<Vec<CompanionName>>,
     /// The GPUs its `sandboxd` saw, once the log says so.
     pub gpus: Option<Vec<String>>,
     /// When the core started it: 0 for the agent's.
@@ -150,8 +153,11 @@ pub struct SandboxStart {
     pub began: Duration,
     /// When its provider's create returned.
     pub created: Duration,
-    /// When its session met the gateway, once the log says so.
+    /// When the last of its containers met the gateway, once the log says so.
     pub met: Option<Duration>,
+    /// Each of its containers that met the gateway, with when, in the log's order. The log names
+    /// them only for a sandbox that holds companions.
+    pub containers: Vec<(Container, Duration)>,
     /// The steps of the create that its provider timed, in the order it gave them. They may
     /// overlap or leave gaps.
     pub phases: Vec<StartPhase>,
@@ -255,10 +261,12 @@ pub enum Closed {
 pub enum Work {
     Command {
         argv: Vec<String>,
+        container: Container,
         end: Option<CommandEnd>,
     },
     Transfer {
         direction: Direction,
+        container: Container,
         from: String,
         to: String,
         end: Option<TransferEnd>,
@@ -268,22 +276,34 @@ pub enum Work {
 impl Work {
     fn asked(request: &logged::Request) -> Option<Self> {
         match request {
-            logged::Request::LeaseRun { argv } => Some(Self::Command {
+            logged::Request::LeaseRun { argv, container } => Some(Self::Command {
                 argv: argv.clone(),
+                container: container.clone(),
                 end: None,
             }),
-            logged::Request::LeasePut { tree, to, replace } => Some(Self::Transfer {
+            logged::Request::LeasePut {
+                tree,
+                to,
+                replace,
+                container,
+            } => Some(Self::Transfer {
                 direction: if *replace {
                     Direction::Replace
                 } else {
                     Direction::Put
                 },
+                container: container.clone(),
                 from: tree.clone(),
                 to: to.clone(),
                 end: None,
             }),
-            logged::Request::LeaseGet { from, to } => Some(Self::Transfer {
+            logged::Request::LeaseGet {
+                from,
+                to,
+                container,
+            } => Some(Self::Transfer {
                 direction: Direction::Get,
+                container: container.clone(),
                 from: from.clone(),
                 to: to.clone(),
                 end: None,
@@ -417,6 +437,7 @@ fn set_place(
         place: _,
         startup: _,
         needs: _,
+        companions: _,
         gpus,
         asked: _,
         started,
@@ -704,8 +725,17 @@ impl Reading {
                         began: *began_ns,
                         created: at,
                         met: None,
+                        containers: Vec::new(),
                         phases: phases.iter().map(StartPhase::from).collect(),
                     });
+                }
+            }
+            logged::Event::ContainerMet { sandbox, container } => {
+                if let Some(start) = self
+                    .named(*sandbox)
+                    .and_then(|sandbox| sandbox.start.as_mut())
+                {
+                    start.containers.push((container.clone(), at));
                 }
             }
             logged::Event::SandboxMet { sandbox } => {

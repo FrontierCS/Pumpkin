@@ -14,43 +14,71 @@ use crate::HUNG;
 /// The name the stand-in's certificate is for.
 pub const NAME: &str = "localhost";
 
-/// The root the stand-in's certificate is issued from, valid until 2126.
+/// The name of [`other_server`]'s certificate: no edge's, and one that a companion may have.
+pub const OTHER_NAME: &str = "companion";
+
+/// The root the stand-in's certificates are issued from, valid until 2126.
 const ROOT: &str = "\
 -----BEGIN CERTIFICATE-----
-MIIBpjCCAUugAwIBAgIUTx5grUiGGmVjQ69EFZUjgmZY8HQwCgYIKoZIzj0EAwIw
-HzEdMBsGA1UEAwwUUHVtcGtpbiB0ZXN0IGVkZ2UgQ0EwIBcNMjYxMTA4MTQyNDMx
-WhgPMjEyNjEwMTUxNDI0MzFaMB8xHTAbBgNVBAMMFFB1bXBraW4gdGVzdCBlZGdl
-IENBMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfkcOZ+sn/PzDQhpvvtCVdbMT
-WMSv7u10SRLUzzUN2VHa5IZ5kxOE3UrPWRYevdlY2F4L9qSDLqDN6As0FqxDsKNj
-MGEwHQYDVR0OBBYEFDbMaVireDDygDrRmxuRrbk9tiYjMB8GA1UdIwQYMBaAFDbM
-aVireDDygDrRmxuRrbk9tiYjMA8GA1UdEwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQD
-AgIEMAoGCCqGSM49BAMCA0kAMEYCIQDyGiaxIU3zlxukAxEzhzoC1FF72tbOOYiJ
-OE4X9vsjYwIhAIo0jOTuyYjUKYSbNmkQdlSGe+918YSmcv9xEWpYHiuE
+MIIBpTCCAUugAwIBAgIUX1qVhwS8EBcyQcSj/kipoocLGNAwCgYIKoZIzj0EAwIw
+HzEdMBsGA1UEAwwUUHVtcGtpbiB0ZXN0IGVkZ2UgQ0EwIBcNMjYxMTI1MTcwODE4
+WhgPMjEyNjExMDExNzA4MThaMB8xHTAbBgNVBAMMFFB1bXBraW4gdGVzdCBlZGdl
+IENBMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY164RmC4MPXW87raiMlSOVe/
+g7HlrBnS3+zj1huexm7yyPzlly12JS+JeDLKZcyRdzSPfFmXsBMruVKJTGQfh6Nj
+MGEwHQYDVR0OBBYEFAOBRr6eg0g7mnp242fjeaJ2iR6HMB8GA1UdIwQYMBaAFAOB
+Rr6eg0g7mnp242fjeaJ2iR6HMA8GA1UdEwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQD
+AgIEMAoGCCqGSM49BAMCA0gAMEUCIHwH1IGe0DLNpA2Umzj4v6DMzCLA8WpMVpWv
+is73Kr9FAiEAyKCr5UdL5tniJpnWIuRKxcvQXOCcUJSVhao718kugyU=
 -----END CERTIFICATE-----
 ";
 
 /// The stand-in's certificate, for [`NAME`], issued from its root, in PEM.
 const CERTIFICATE: &str = "\
 -----BEGIN CERTIFICATE-----
-MIIBxTCCAWqgAwIBAgIUCn71eAhIceONCe/g/Ogz1uWYpWgwCgYIKoZIzj0EAwIw
-HzEdMBsGA1UEAwwUUHVtcGtpbiB0ZXN0IGVkZ2UgQ0EwIBcNMjYxMTA4MTQyNDMx
-WhgPMjEyNjEwMTUxNDI0MzFaMBQxEjAQBgNVBAMMCWxvY2FsaG9zdDBZMBMGByqG
-SM49AgEGCCqGSM49AwEHA0IABEVLnpRScJBelKN8pUb8+dPBr+XZk990UJZPdVKE
-yGo0Mgo1Y5eDg+2/xIPC8rP6h53Z+9ZSKfMPv8bgXc5ExyajgYwwgYkwFAYDVR0R
+MIIBxDCCAWqgAwIBAgIUfp8aIQV48VBpnvt4LAoUMw0Y88wwCgYIKoZIzj0EAwIw
+HzEdMBsGA1UEAwwUUHVtcGtpbiB0ZXN0IGVkZ2UgQ0EwIBcNMjYxMTI1MTcwODE4
+WhgPMjEyNjExMDExNzA4MThaMBQxEjAQBgNVBAMMCWxvY2FsaG9zdDBZMBMGByqG
+SM49AgEGCCqGSM49AwEHA0IABG8MzAcolZjlUATi6HCd6ciL/Dz8zNnJS0x0Ly27
+cvEdEZxlguQ7MEUTrnPrNzg0XhRewh+1c2MyJsA+F/RUPaSjgYwwgYkwFAYDVR0R
 BA0wC4IJbG9jYWxob3N0MAwGA1UdEwEB/wQCMAAwDgYDVR0PAQH/BAQDAgeAMBMG
-A1UdJQQMMAoGCCsGAQUFBwMBMB0GA1UdDgQWBBTMqRHxGqP6x6Qm2YVeYBZeJAS7
-ODAfBgNVHSMEGDAWgBQ2zGlYq3gw8oA60Zsbka25PbYmIzAKBggqhkjOPQQDAgNJ
-ADBGAiEA6pVGWMtsKAs0MgKhX2hvIr9vYCd1sRC67GvzM8n1i7wCIQDHx5XH97t2
-tQQk6V12GUkvWwBzpgli2xXKzh8+xHEaRQ==
+A1UdJQQMMAoGCCsGAQUFBwMBMB0GA1UdDgQWBBRyfvbanv0zmTVil4luAtJpLGTR
+VjAfBgNVHSMEGDAWgBQDgUa+noNIO5p6duNn43midokehzAKBggqhkjOPQQDAgNI
+ADBFAiAwUMXKhIuGFe2wVAcvCswSRSNV+xKFf6wlnw3SdwqZHQIhAMyAuU089J6N
+rI7hmyifu8g6rC4SBV2yZIjVr4p2Lpul
 -----END CERTIFICATE-----
 ";
 
 /// The private key of [`CERTIFICATE`], in PEM.
 const KEY: &str = "\
 -----BEGIN PRIVATE KEY-----
-MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgaWvrzts8xoMjdTYz
-cjGZ6zMabaAQ02wWedXBfp8F+tuhRANCAARFS56UUnCQXpSjfKVG/PnTwa/l2ZPf
-dFCWT3VShMhqNDIKNWOXg4Ptv8SDwvKz+oed2fvWUinzD7/G4F3ORMcm
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgduDj3lMErdXjX0KQ
+q4er0QMUxd6j0ukG1dEhzdZUtW+hRANCAARvDMwHKJWY5VAE4uhwnenIi/w8/MzZ
+yUtMdC8tu3LxHRGcZYLkOzBFE65z6zc4NF4UXsIftXNjMibAPhf0VD2k
+-----END PRIVATE KEY-----
+";
+
+/// A second certificate from the stand-in's root, for [`OTHER_NAME`], in PEM.
+const OTHER_CERTIFICATE: &str = "\
+-----BEGIN CERTIFICATE-----
+MIIBxDCCAWqgAwIBAgIUfp8aIQV48VBpnvt4LAoUMw0Y880wCgYIKoZIzj0EAwIw
+HzEdMBsGA1UEAwwUUHVtcGtpbiB0ZXN0IGVkZ2UgQ0EwIBcNMjYxMTI1MTcwODE5
+WhgPMjEyNjExMDExNzA4MTlaMBQxEjAQBgNVBAMMCWNvbXBhbmlvbjBZMBMGByqG
+SM49AgEGCCqGSM49AwEHA0IABIyEepkDO5hh/2SZJFddqW/SRjrDnZESSvU4U37t
+Fswenmsj9YFFA93SpNOlAfa6MF+YaYC8QsOY8qmI6q2l4vyjgYwwgYkwFAYDVR0R
+BA0wC4IJY29tcGFuaW9uMAwGA1UdEwEB/wQCMAAwDgYDVR0PAQH/BAQDAgeAMBMG
+A1UdJQQMMAoGCCsGAQUFBwMBMB0GA1UdDgQWBBTZdZV4orA0yEJ/kthdIey5339Y
+oDAfBgNVHSMEGDAWgBQDgUa+noNIO5p6duNn43midokehzAKBggqhkjOPQQDAgNI
+ADBFAiEA48UkwiJL70JL/IS+nTjUWnB32O/o7Dum8acSUGmhqCUCIBIpCRji+yBC
+x/RFv+cicgJy6gI2xSga0xCbh3CLx8jE
+-----END CERTIFICATE-----
+";
+
+/// The private key of [`OTHER_CERTIFICATE`], in PEM.
+const OTHER_KEY: &str = "\
+-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgZnz4xPPIbM8uGqDE
+n46XY08Ewklye6+D8U+oOiqYFXmhRANCAASMhHqZAzuYYf9kmSRXXalv0kY6w52R
+Ekr1OFN+7RbMHp5rI/WBRQPd0qTTpQH2ujBfmGmAvELDmPKpiOqtpeL8
 -----END PRIVATE KEY-----
 ";
 
@@ -60,8 +88,22 @@ dFCWT3VShMhqNDIKNWOXg4Ptv8SDwvKz+oed2fvWUinzD7/G4F3ORMcm
 ///
 /// Panics if the stand-in's certificates or key, constants, can't be read.
 pub fn server() -> tls::Server {
-    let certificate = CertificateDer::from_pem_slice(CERTIFICATE.as_bytes()).unwrap();
-    let key = PrivatePkcs8KeyDer::from_pem_slice(KEY.as_bytes()).unwrap();
+    shows(CERTIFICATE, KEY)
+}
+
+/// A TLS server that the stand-in's root vouches for under [`OTHER_NAME`], as a public authority
+/// may vouch for a server that is no sandbox's.
+///
+/// # Panics
+///
+/// Panics if its certificate or key, constants, can't be read.
+pub fn other_server() -> tls::Server {
+    shows(OTHER_CERTIFICATE, OTHER_KEY)
+}
+
+fn shows(certificate: &str, key: &str) -> tls::Server {
+    let certificate = CertificateDer::from_pem_slice(certificate.as_bytes()).unwrap();
+    let key = PrivatePkcs8KeyDer::from_pem_slice(key.as_bytes()).unwrap();
     tls::Server::new(&[&certificate], key.secret_pkcs8_der()).unwrap()
 }
 
@@ -89,6 +131,23 @@ pub fn front(target: SocketAddr) -> u16 {
     thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             thread::spawn(move || relay(stream, target));
+        }
+    });
+    port
+}
+
+/// Listens in front of `serve`, which gets each connection that the stand-in carries on, one at
+/// a time. Returns the port, as [`front`] does.
+///
+/// # Panics
+///
+/// Panics if it can't listen.
+pub fn front_of(mut serve: impl FnMut(TcpStream) + Send + 'static) -> u16 {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = front(listener.local_addr().unwrap());
+    thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            serve(stream);
         }
     });
     port

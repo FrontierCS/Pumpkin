@@ -86,6 +86,14 @@ import { drawLanes, inspectLane } from "./lanes.js";
  * @property {number | null} met when its session met the gateway, once the log says so
  * @property {{ name: string, from: number, to: number }[]} phases the first steps of the create that its provider timed, which may overlap or leave gaps
  * @property {number} more_phases how many more steps it timed, which the reply leaves out
+ * @property {Containers} [containers] the meetings of its containers, for a sandbox that holds companions
+ * @typedef {object} Containers the meetings of a sandbox's containers, in seconds since the run started
+ * @property {number | null} held how many containers it holds, if the IR says
+ * @property {number} met how many have met the gateway
+ * @property {number | null} first when the first met
+ * @property {{ name: string, met: number }[]} slowest the last few to meet, the last first
+ * @property {string[]} unmet the first few of those yet to meet, in declared order
+ * @property {number} more_unmet how many more are yet to meet, which the reply leaves out
  * @typedef {{ kind: string, label: string, from: number, to: number | null, end: any }} Work
  * @typedef {{ roles: Role[], grants?: Grant[], edges: Edge[] }} Talk
  * @typedef {{ from: string, to: string, kind: string }} Grant a grant of the IR: its holder and the role it reaches

@@ -89,6 +89,7 @@ impl Settings {
                 gpu: None,
                 cpu_features: class.cpu_features.clone(),
                 cpu_model: class.cpu_model.clone(),
+                companions: false,
             };
             let class = Class {
                 offers,

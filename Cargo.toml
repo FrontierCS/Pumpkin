@@ -18,6 +18,7 @@ jiff = { version = "1.0.1", default-features = false, features = ["std"] }
 libc = "0.2.191"
 mimalloc = "0.1.52"
 miniz_oxide = "0.9.1"
+rcgen = { version = "0.14.10", default-features = false, features = ["ring"] }
 ring = { version = "0.17.14", default-features = false, features = ["alloc"] }
 rustix = "1.1.6"
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }

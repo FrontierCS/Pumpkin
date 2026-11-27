@@ -25,6 +25,7 @@ use stdx::time::{Clock as _, Machine};
 
 pub mod edge;
 pub mod http;
+pub mod relayed;
 pub mod suite;
 mod test_dir;
 
@@ -83,6 +84,11 @@ pub fn files(dir: &Path) -> Vec<String> {
     }
     lines
 }
+
+/// A shell function, `ctl`, that runs `sandboxctl` with its arguments. It prints the command line
+/// and its exit status, then what it printed, indented.
+pub const CTL: &str = r#"
+    ctl() { out=$(sandboxctl "$@" 2>&1); echo "\$ sandboxctl $*: exit $?"; [ -z "$out" ] || echo "  $out"; }"#;
 
 /// A small public image, pinned by the digest of its index, that the tests' images build on.
 pub const BUSYBOX: &str =

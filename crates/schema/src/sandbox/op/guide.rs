@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use super::{Grant, OpsReply, SessionGrant};
-use crate::ir::{Argument, Name};
+use crate::ir::{Argument, CompanionName, Name};
 
 impl OpsReply {
     /// Shell instructions for the role, built only from its public ops reply.
@@ -68,21 +68,43 @@ impl OpsReply {
 
 fn session_usage(text: &mut String, session: &SessionGrant) {
     let name = &session.name;
+    // A runner without companions has `main` alone, which needs no naming.
+    let container = if session.companions.is_empty() {
+        ""
+    } else {
+        " [--container NAME]"
+    };
     let _ = writeln!(text, "sandboxctl call {name}.open [--seconds SECONDS]");
     let _ = writeln!(
         text,
-        "sandboxctl call {name}.run LEASE [--timeout SECONDS] -- COMMAND [ARG ...]"
+        "sandboxctl call {name}.run LEASE{container} [--timeout SECONDS] -- COMMAND [ARG ...]"
     );
     let _ = writeln!(
         text,
-        "sandboxctl call {name}.put LEASE LOCAL REMOTE [--replace]"
+        "sandboxctl call {name}.put LEASE LOCAL REMOTE{container} [--replace]"
     );
-    let _ = writeln!(text, "sandboxctl call {name}.get LEASE REMOTE LOCAL");
+    let _ = writeln!(
+        text,
+        "sandboxctl call {name}.get LEASE REMOTE LOCAL{container}"
+    );
     let _ = writeln!(
         text,
         "sandboxctl call {name}.status LEASE\nsandboxctl call {name}.close LEASE"
     );
     description(text, &session.help);
+    if !session.companions.is_empty() {
+        let names: Vec<&str> = session
+            .companions
+            .iter()
+            .map(CompanionName::as_str)
+            .collect();
+        let _ = writeln!(
+            text,
+            "Containers: main (the default), {}. One command or transfer runs at a time across \
+             them.",
+            names.join(", ")
+        );
+    }
     let _ = writeln!(
         text,
         "Limits: {} simultaneous leases, {} seconds per lease, {} bytes per transfer.",

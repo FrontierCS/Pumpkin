@@ -1,12 +1,14 @@
 //! The JSON that the view answers with for a run and its log: the forms of what `runtime` reads
 //! from a record and of what [`super::talk`] folds from its log.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::iter;
 use std::time::Duration;
 
 use runtime::{
     CallerName, Cost, Ending, ModelUse, Progress, Readout, Record, SandboxStart, StartPhase, Tokens,
 };
+use schema::ir::{CompanionName, Container};
 use serde_json::{Value, json};
 
 use super::failure::{self, Failures};
@@ -24,6 +26,12 @@ const LANE_TICKS: u32 = 500;
 // The card's other 11 rows and 16 phases, at 21 px a row, make a card of about 570 px, which a
 // laptop's window holds.
 const START_PHASES: usize = 16;
+
+/// How many containers a lane's start names at most in each of its lists. A runner may hold
+/// hundreds.
+// Each list wraps in one row of the start's card, which a laptop's window holds with the rest.
+// Five names of 63 characters wrap to 11 lines of it.
+const START_CONTAINERS: usize = 5;
 
 /// A log line as the page reads it: its fields, each string cut, with the byte it starts at and
 /// its `when`. A line that is no JSON object comes as `unread` text.
@@ -284,18 +292,56 @@ fn sandbox(sandbox: &runtime::Sandbox) -> Value {
         "deleted": sandbox.deleted,
     });
     if let Some(start) = &sandbox.start {
-        json["start"] = start_json(start);
+        json["start"] = start_json(start, sandbox.companions.as_deref());
     }
     json
 }
 
+/// The meetings of the containers of a sandbox that holds companions, each time in seconds since
+/// the run started. `held` is `null` if the IR doesn't say how many it holds. `slowest` gives the
+/// last to meet first, at most [`START_CONTAINERS`]. `unmet` gives the first in declared order of
+/// those yet to meet, at most as many, and how many more there are as `more_unmet`.
+fn containers_json(
+    containers: &[(Container, Duration)],
+    companions: Option<&[CompanionName]>,
+) -> Option<Value> {
+    let mut met: Vec<&(Container, Duration)> = containers.iter().collect();
+    if met.is_empty() && companions.is_none_or(<[_]>::is_empty) {
+        return None;
+    }
+    met.sort_by_key(|(_, at)| *at);
+    let slowest: Vec<Value> = (met.iter().rev().take(START_CONTAINERS))
+        .map(|(container, at)| json!({ "name": container, "met": at.as_secs_f64() }))
+        .collect();
+    let named: BTreeSet<String> = met
+        .iter()
+        .map(|(container, _)| container.to_string())
+        .collect();
+    let declared = companions.map(|companions| {
+        iter::once(Container::Main).chain(companions.iter().cloned().map(Container::Companion))
+    });
+    let unmet: Vec<Container> = (declared.into_iter().flatten())
+        .filter(|container| !named.contains(&container.to_string()))
+        .collect();
+    Some(json!({
+        "held": companions.map(|companions| 1 + companions.len()),
+        "met": met.len(),
+        "first": met.first().map(|(_, at)| at.as_secs_f64()),
+        "slowest": slowest,
+        "unmet": unmet.iter().take(START_CONTAINERS).collect::<Vec<_>>(),
+        "more_unmet": unmet.len().saturating_sub(START_CONTAINERS),
+    }))
+}
+
 /// A sandbox's start, each time in seconds since the run started. It gives each phase from its
-/// start to its end, at most [`START_PHASES`], and how many more there are as `more_phases`.
-fn start_json(start: &SandboxStart) -> Value {
+/// start to its end, at most [`START_PHASES`], and how many more there are as `more_phases`. It
+/// gives `containers` only for a sandbox that holds `companions`, or whose log says it does.
+fn start_json(start: &SandboxStart, companions: Option<&[CompanionName]>) -> Value {
     let SandboxStart {
         began,
         created,
         met,
+        containers,
         phases,
     } = start;
     let more_phases = phases.len().saturating_sub(START_PHASES);
@@ -308,13 +354,17 @@ fn start_json(start: &SandboxStart) -> Value {
             })
         })
         .collect();
-    json!({
+    let mut json = json!({
         "began": began.as_secs_f64(),
         "created": created.as_secs_f64(),
         "met": met.map(|at| at.as_secs_f64()),
         "phases": phases,
         "more_phases": more_phases,
-    })
+    });
+    if let Some(containers) = containers_json(containers, companions) {
+        json["containers"] = containers;
+    }
+    json
 }
 
 fn shared_lanes(progress: &Progress) -> impl Iterator<Item = Value> {
