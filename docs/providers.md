@@ -7,7 +7,7 @@ configuration and keys. This page says what each is, what it needs, and where ea
 `pumpkin help config` holds every key of the machine's configuration, and
 [`deploy/aws`](../deploy/aws/README.md) the AWS side.
 
-![On the operator's machine, pumpkin builds images on the Docker engine, which also runs the Docker provider's containers. A machine with a controller sends it its runs over ssh. An EC2 controller pushes its images to ECR, launches EC2 instances that pull them, and creates Modal sandboxes, from images that Modal imports. A Modal sandbox may hold companions as Modal's sidecars. A Docker controller, a privileged container, builds and runs on an engine of its own, never the host's.](figures/providers.svg)
+![On the operator's machine, pumpkin builds images on the Docker engine, which also runs the Docker provider's containers. A machine with a controller sends it its runs over ssh. An EC2 controller pushes its images to ECR, launches EC2 instances that pull them, and creates Modal sandboxes, from images that Modal imports. A Modal sandbox may hold companions as Modal's sidecars. A Docker controller, a privileged container, builds and runs on an engine of its own, never the host's. Docker mounts assets read-only from its cache, and Modal from an image filled once per digest.](figures/providers.svg)
 
 ## Placing a run
 
