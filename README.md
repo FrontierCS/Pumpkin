@@ -42,7 +42,7 @@ We built Pumpkin to provide clean abstractions so people can easily do error han
 
 Each run's sandboxes come from Docker, EC2 or Modal. Each run's driver runs on this machine, or on a team's controller, which this machine reaches over `ssh`.
 
-![On the operator's machine, pumpkin builds images on the Docker engine, which also runs the Docker provider's containers. A machine with a controller sends it its runs over ssh. An EC2 controller pushes its images to ECR, launches EC2 instances that pull them, and creates Modal sandboxes, from images that Modal imports. A Modal sandbox may hold companions. A Docker controller, a privileged container, builds and runs on an engine of its own, never the host's.](docs/figures/providers.svg)
+![On the operator's machine, pumpkin builds images on the Docker engine, which also runs the Docker provider's containers. A machine with a controller sends it its runs over ssh. An EC2 controller pushes its images to ECR, launches EC2 instances that pull them, and creates Modal sandboxes, from images that Modal imports. A Modal sandbox may hold companions. A Docker controller, a privileged container, builds and runs on an engine of its own, never the host's. Docker mounts assets read-only from its cache. On Modal, each create mounts an image of the asset's files. A Modal sandbox fetches those files into the image once for each machine that publishes the asset.](docs/figures/providers.svg)
 
 [`ARCHITECTURE.md`](ARCHITECTURE.md) maps the code. [Providers](docs/providers.md) says what each provider and the controller need.
 

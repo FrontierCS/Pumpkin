@@ -7,7 +7,7 @@ configuration and keys. This page says what each is, what it needs, and where ea
 `pumpkin help config` holds every key of the machine's configuration, and
 [`deploy/aws`](../deploy/aws/README.md) the AWS side.
 
-![On the operator's machine, pumpkin builds images on the Docker engine, which also runs the Docker provider's containers. A machine with a controller sends it its runs over ssh. An EC2 controller pushes its images to ECR, launches EC2 instances that pull them, and creates Modal sandboxes, from images that Modal imports. A Modal sandbox may hold companions as Modal's sidecars. A Docker controller, a privileged container, builds and runs on an engine of its own, never the host's.](figures/providers.svg)
+![On the operator's machine, pumpkin builds images on the Docker engine, which also runs the Docker provider's containers. A machine with a controller sends it its runs over ssh. An EC2 controller pushes its images to ECR, launches EC2 instances that pull them, and creates Modal sandboxes, from images that Modal imports. A Modal sandbox may hold companions as Modal's sidecars. A Docker controller, a privileged container, builds and runs on an engine of its own, never the host's. Docker mounts assets read-only from its cache, and Modal from an image whose files a sandbox fetched once per machine.](figures/providers.svg)
 
 ## Placing a run
 
@@ -51,7 +51,8 @@ imports from the envelope's ECR repositories with a role that it assumes by its 
 no AWS credential of the operator's reaches Modal. A sandbox's containers connect only to one
 another and to Modal's resolver. It answers for public names, so code in any container can send
 data out in DNS queries. The driver dials each sandbox through Modal's TLS tunnel, which takes
-connections from `dials_from` alone. Modal ends each sandbox at its hard end.
+connections from `dials_from` alone. Modal ends each sandbox at its hard end. Its classes hold
+assets, outside `/__modal`.
 
 Its classes hold a runner's [companions](glossary.md#companion), each as a
 [sidecar of Modal's](https://modal.com/docs/guide/sandbox-sidecars), which has no GPU. A sandbox

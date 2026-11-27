@@ -39,11 +39,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use stdx::Deadline;
 
+use crate::assets::Fills;
 use crate::create::{Sandboxd, companions_held, memory_mib};
 use crate::helper::{ASK_TIMEOUT, ConfigFile, Helper, IMPORT_TIMEOUT, Profile, Request};
 use crate::iam::ECR;
 use crate::images::Batch;
 
+mod assets;
 mod create;
 pub mod envelope;
 mod helper;
@@ -182,7 +184,7 @@ impl TryFrom<ClassTable> for SandboxClass {
             cpu_features: BTreeSet::new(),
             cpu_model: None,
             companions: true,
-            assets: false,
+            assets: true,
         };
         let class = Class {
             offers,
@@ -202,7 +204,7 @@ impl From<SandboxClass> for ClassTable {
             usd_per_hour,
         } = class;
         // Its GPU's count is `gpu`'s, a class of the settings names no CPU's flags or model, and
-        // every class holds companions and no assets.
+        // every class holds companions and assets.
         let Offers {
             cpu_millis,
             memory_bytes,
@@ -227,11 +229,9 @@ impl From<SandboxClass> for ClassTable {
 /// it imports images from, and the operator's Docker engine, which holds them until they are
 /// pushed there.
 ///
-/// Each call returns within a bound, as its helper's call is killed if it hasn't ended in time
-/// (`helper`): a create's at the create's deadline ([`Create::by`]), a delete's 10 min after it
-/// starts, which waits for each sandbox to finish, and any other at the bound the helper's module
-/// says; and `aws` and `docker` are bounded as [`aws::Bound::Call`] and [`engine::Engine`] bound
-/// them.
+/// Each call but an asset's publish returns within a bound, a create's at the create's deadline
+/// ([`Create::by`]). A delete waits for each sandbox to finish. `aws` and `docker` are bounded as
+/// [`aws::Bound::Call`] and [`engine::Engine`] bound them.
 #[derive(Debug)]
 pub struct Modal<'e> {
     reached: Reached,
@@ -242,6 +242,7 @@ pub struct Modal<'e> {
     dials_from: Ipv4Addr,
     classes: BTreeMap<Name, SandboxClass>,
     ready: Ready,
+    fills: Fills,
 }
 
 /// What the helper's `ready` returns: the name of the workspace that the profile reaches, if
@@ -255,8 +256,8 @@ struct Described {
 impl<'e> Modal<'e> {
     /// Reaches the workspace that `settings`' profile reaches, through the helper at `script`,
     /// whose lock is beside it, and the settings' repository, with `pusher`, the engine it
-    /// publishes from. It writes in `dir` what `uv` fetches. It fails if Modal's
-    /// configuration lacks the profile, or AWS describes no such repository.
+    /// publishes from. It writes in `dir` what `uv` fetches, and the ids of its assets' images. It
+    /// fails if Modal's configuration lacks the profile, or AWS describes no such repository.
     pub fn connect(
         settings: &Settings,
         script: &Path,
@@ -294,6 +295,7 @@ impl<'e> Modal<'e> {
             dials_from: *dials_from,
             classes: classes.clone(),
             ready,
+            fills: Fills::in_dir(&dir.join("assets")),
         })
     }
 
@@ -383,7 +385,7 @@ impl Provider for Modal<'_> {
     }
 
     fn assets(&self) -> Option<&dyn Assets> {
-        None
+        Some(self)
     }
 
     fn console(&self, run: &RunTag, id: &SandboxId) -> Result<Console, String> {

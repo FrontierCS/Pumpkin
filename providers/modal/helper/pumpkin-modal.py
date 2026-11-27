@@ -47,6 +47,12 @@ CONSOLE_ENTRIES = 20
 # What begins the line of a sandbox's console that this helper adds.
 CONSOLE_PREFIX = "pumpkin-modal:"
 
+# Any size up to 16 MiB would do. The SDK buffers an exec's standard input up to 16 MiB, and
+# refuses a write past that until a drain sends what it holds:
+# https://github.com/modal-labs/modal-client/blob/e8a24c8e304766d1b3b6905f297e3f43d08e1d93/py/modal/io_streams.py#L633-L636
+# https://github.com/modal-labs/modal-client/blob/e8a24c8e304766d1b3b6905f297e3f43d08e1d93/py/modal/io_streams.py#L746-L754
+STDIN_CHUNK = 1 << 20
+
 
 class Refused(Exception):
     """What a call can't do, as the answer's error: what is wrong, then what is expected."""
@@ -60,6 +66,8 @@ def main() -> None:
     calls = {
         "ready": ready,
         "import": imported,
+        "fill": fill,
+        "held": held,
         "create": create,
         "list": listed,
         "delete": delete,
@@ -123,13 +131,67 @@ def unchanged(sandboxd: dict) -> None:
         )
 
 
+def fill(modal, request: dict) -> dict:
+    """Returns the ID of an image of the request's `files`, or fails with what its `fetch` printed.
+    It ends its sandbox before it returns."""
+    app = modal.App.lookup(APP, create_if_missing=True)
+    cpu = cores(request["cpu_millis"])
+    sandbox = modal.Sandbox.create(
+        *request["args"],
+        app=app,
+        tags={RUN_TAG: request["run"]},
+        image=modal.Image.debian_slim(python_version=request["python"]),
+        cpu=cpu,
+        memory=request["memory_mib"],
+        timeout=request["timeout_seconds"],
+    )
+    try:
+        sandbox.mount_image(request["at"], modal.Image.from_scratch())
+        fetch = sandbox.exec(*request["fetch"])
+        files = json.dumps(request["files"]).encode()
+        for start in range(0, len(files), STDIN_CHUNK):
+            fetch.stdin.write(files[start : start + STDIN_CHUNK])
+            fetch.stdin.drain()
+        fetch.stdin.write_eof()
+        fetch.stdin.drain()
+        status = fetch.wait()
+        if status != 0:
+            said = fetch.stderr.read().strip()
+            raise Refused(
+                f"the fill's sandbox {sandbox.object_id} fetched the asset's files with status "
+                f"{status}: {said}"
+            )
+        image = sandbox.snapshot_directory(
+            request["at"], timeout=request["snapshot_seconds"], ttl=request["ttl_seconds"]
+        )
+    finally:
+        try:
+            end(modal, sandbox)
+        # Modal ends it at its timeout all the same, and the fill's own failure is the one to say.
+        except modal.exception.Error:
+            pass
+    return {"id": image.object_id}
+
+
+def held(modal, request: dict) -> bool:
+    """Whether Modal holds the request's `image`: false once it is deleted."""
+    app = modal.App.lookup(APP, create_if_missing=True)
+    try:
+        modal.Image.from_id(request["image"]).build(app)
+    except modal.exception.NotFoundError:
+        return False
+    return True
+
+
 def create(modal, request: dict) -> dict:
     """Creates the run's sandbox of the request's role, then its `sidecars`. Returns the sandbox's
     ID, a tunnel for each of the request's `ports` in their order, and the `phases` that it timed.
-    The phases are `lookup`, `create`, `tunnels` and `list`, then `companions` if it made any.
+    The phases are `lookup`, `create`, `tunnels` and `list`, then `assets` if it mounted any, then
+    `companions` if it made any.
 
     Each container starts with the `args` and `env` that the request gives it, which this passes
-    on as they are. `main` has the request's `sandboxd` attached at each path of its `at`.
+    on as they are. `main` has the request's `sandboxd` attached at each path of its `at`, and
+    mounts each of its `assets`, an image by its ID, at its path.
 
     Modal ends the sandbox at its `hard_end`, in seconds since the Unix epoch, if nothing ends it
     first, and its sidecars with it."""
@@ -168,6 +230,9 @@ def create(modal, request: dict) -> dict:
     with timed(phases, "list"):
         while sandbox.object_id not in ids(modal, app, run) and sandbox.poll() is None:
             time.sleep(LISTED_EVERY)
+    if request["assets"]:
+        with timed(phases, "assets"):
+            mount(modal, sandbox, request["assets"])
     if request["sidecars"]:
         with timed(phases, "companions"):
             accompany(modal, sandbox, request["sidecars"])
@@ -178,6 +243,30 @@ def create(modal, request: dict) -> dict:
         ],
         "phases": phases,
     }
+
+
+def mount(modal, sandbox, assets: list[dict]) -> None:
+    """Mounts each of `assets` in `sandbox`'s own container. If one isn't mounted, this ends the
+    sandbox, and then raises why."""
+    for asset in assets:
+        try:
+            sandbox.mount_image(asset["path"], modal.Image.from_id(asset["image"]))
+        # Whatever fails, as the SDK lets through errors of its transport that aren't its own, and
+        # the sandbox is to be ended before any is reported.
+        except Exception as error:
+            why = f"{type(error).__name__}: {error}"
+            break
+    else:
+        return
+    was = "is ended"
+    try:
+        end(modal, sandbox)
+    except modal.exception.Error as error:
+        was = f"wasn't ended ({type(error).__name__}: {error}), so the run's list finds it"
+    raise Refused(
+        f"the asset at {asset['path']} wasn't mounted in sandbox {sandbox.object_id}: {why}; the "
+        f"sandbox {was}"
+    )
 
 
 def accompany(modal, sandbox, sidecars: list[dict]) -> None:

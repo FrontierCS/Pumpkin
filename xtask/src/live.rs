@@ -98,10 +98,10 @@ pub(crate) fn docker() -> Result<()> {
 
 /// Runs `examples/smoke` at `HEAD` on `provider` through the controller, and fails unless every
 /// probe passed, every sandbox was deleted and nothing of the run is left on the provider. On
-/// Modal, it then runs `examples/companions` likewise. That fails too unless each fact that its
-/// result names holds. It first runs `pumpkin-admin check` on the controller's deployment, and
-/// fails if that finds a problem. With `lost`, it loses a smoke run instead, and checks that its
-/// sandboxes end by themselves and that a reap removes the rest.
+/// Modal, it then runs `examples/companions` and `examples/assets` likewise. Each of those fails
+/// too unless each fact that its result names holds. It first runs `pumpkin-admin check` on the
+/// controller's deployment, and fails if that finds a problem. With `lost`, it loses a smoke run
+/// instead, and checks that its sandboxes end by themselves and that a reap removes the rest.
 /// `again` names the command that repeats it.
 pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> Result<()> {
     let again = match provider {
@@ -136,7 +136,7 @@ pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> 
     let mut failed = verified(&settings, &repo, run, |record| {
         let mut failed = checked(record, |values| probed(values, gpu));
         if gpu {
-            let unphased = logged(record).map(|log| record::unphased(&log));
+            let unphased = logged(record).map(|log| record::unphased(&log, false));
             failed.extend(unphased.unwrap_or_else(|error| vec![error]));
         }
         failed
@@ -152,6 +152,16 @@ pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> 
             companioned
                 .into_iter()
                 .map(|failure| format!("companions: {failure}")),
+        );
+        let mut run = controlled(&repo, &settings.name, &["run", "--wait"]);
+        run.arg("assets/task.star");
+        eprintln!("xtask: running examples/assets at {commit} through the controller");
+        let mounted = verified(&settings, &repo, run, mounted);
+        let mounted = mounted.unwrap_or_else(|error| vec![error.to_string()]);
+        failed.extend(
+            mounted
+                .into_iter()
+                .map(|failure| format!("assets: {failure}")),
         );
     }
     if failed.is_empty() {
@@ -701,7 +711,47 @@ fn companioned(record: &Path) -> Vec<String> {
             return failed;
         }
     };
-    failed.extend(record::unphased(&log));
+    failed.extend(record::unphased(&log, false));
+    failed
+}
+
+/// What is wrong in the record of a run of `examples/assets` at `record`. It prints the result and
+/// each publish.
+fn mounted(record: &Path) -> Vec<String> {
+    let mut failed = checked(record, |values| {
+        let shown: Vec<String> = (values.iter())
+            .map(|value| {
+                format!(
+                    "{}={}",
+                    value["name"].as_str().unwrap_or_default(),
+                    value["value"]
+                )
+            })
+            .collect();
+        println!("assets: {}", shown.join(" "));
+        record::unscored(values)
+    });
+    let log = match logged(record) {
+        Ok(log) => log,
+        Err(error) => {
+            failed.push(error);
+            return failed;
+        }
+    };
+    let published = (log.iter()).filter(|line| line["event"]["kind"] == "asset_published");
+    let published: Vec<&serde_json::Value> = published.map(|line| &line["event"]).collect();
+    for event in &published {
+        let took = event["took_ns"].as_str().and_then(|ns| ns.parse().ok());
+        let took = Duration::from_nanos(took.unwrap_or_default());
+        println!(
+            "assets: published {} on {}, fetched={}, in {took:?}",
+            event["digest"], event["provider"], event["fetched"]
+        );
+    }
+    if published.is_empty() {
+        failed.push("the log records no publish of an asset".to_owned());
+    }
+    failed.extend(record::unphased(&log, true));
     failed
 }
 

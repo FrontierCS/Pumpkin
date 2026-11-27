@@ -79,6 +79,10 @@ pub(crate) enum Request<'a> {
     /// Creates a sandbox, and answers its id, its tunnels and the phases of the create that it
     /// timed.
     Create(create::Request<'a>),
+    /// Fills an image with an asset's files, and answers its id.
+    Fill(create::Fill<'a>),
+    /// Whether Modal holds the image whose id is `image`: false once it is deleted.
+    Held { image: &'a str },
     /// The sandboxes of `run` that haven't finished, each with whether it has ended.
     List { run: &'a str },
     /// Terminates each of `run`'s sandboxes that `ids` name, and answers why each that failed did.
