@@ -31,7 +31,7 @@ provider, with the provider's key.
 A run is one process, the driver, on one machine: the operator's own, or a team's controller, an
 EC2 instance or a container on a Docker host, which runs the runs a machine sends it.
 
-![The programs and machines of a run: the operator's pumpkin starts the driver on the operator's machine or on the controller; the driver's parts, the sandboxes that the providers create and the model provider that the route reaches.](docs/figures/run-machines.svg)
+![The programs and machines of a run: the operator's pumpkin starts the driver on its machine or the controller; the driver's parts, the providers' sandboxes, each container serving its own session, and the model provider the route reaches.](docs/figures/run-machines.svg)
 
 ## Entry points
 

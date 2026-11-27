@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 484" width="880" height="484" role="img" aria-labelledby="title desc">
 <title id="title">Where a run's sandboxes run, and how their images reach them</title>
-<desc id="desc">On the operator's machine, pumpkin builds images on the machine's Docker engine, where the Docker provider also runs its sandboxes as containers. A machine whose configuration names a controller sends its runs, over ssh, to the controller, which runs the same pumpkin and is an EC2 instance in the operator's AWS account or a privileged container on a Docker host. The EC2 controller builds the images on its own Docker engine, pushes them to private ECR repositories, launches EC2 instances that pull them, one sandbox each, and creates Modal sandboxes, which Modal imports from the same repositories. The Docker controller builds the images on a Docker engine of its container's own, never the host's, where the Docker provider also runs its sandboxes as containers.</desc>
+<desc id="desc">On the operator's machine, pumpkin builds images on the machine's Docker engine, where the Docker provider also runs its sandboxes as containers. A machine whose configuration names a controller sends its runs, over ssh, to the controller, which runs the same pumpkin and is an EC2 instance in the operator's AWS account or a privileged container on a Docker host. The EC2 controller builds the images on its own Docker engine, pushes them to private ECR repositories, launches EC2 instances that pull them, one sandbox each, and creates Modal sandboxes, which Modal imports from the same repositories, and whose companions run as Modal's sidecars. The Docker controller builds the images on a Docker engine of its container's own, never the host's, where the Docker provider also runs its sandboxes as containers.</desc>
 <style>
 :root{--bg:#ffffff;--ink:#1f2328;--mute:#59636e;--line:#818b98;--card:#f6f8fa;--hot:#0969da;--hot-bg:#ddf4ff}
 @media (prefers-color-scheme:dark){:root{--bg:#0d1117;--ink:#e6edf3;--mute:#9198a1;--line:#6e7681;--card:#151b23;--hot:#58a6ff;--hot-bg:#10243e}}
@@ -58,12 +58,14 @@ text{font:12.5px system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;f
 
 <rect class="zone" x="696" y="16" width="168" height="272" rx="12"/>
 <text class="zone-label" x="712" y="38">A MODAL WORKSPACE</text>
-<rect class="box" x="712" y="166" width="136" height="60" rx="8"/>
-<text class="name mid" x="780" y="190">Modal sandboxes</text><text class="note mid" x="780" y="208">under gVisor</text>
+<rect class="box" x="712" y="166" width="136" height="86" rx="8"/>
+<text class="name mid" x="780" y="190">Modal sandboxes</text><text class="note mid" x="780" y="208">under gVisor;</text>
+<text class="note mid" x="780" y="223">each companion</text>
+<text class="note mid" x="780" y="238">a Modal sidecar</text>
 <path class="arrow" d="M657 72H780V164" marker-end="url(#head)"/>
 <text class="note" x="788" y="122">creates</text>
-<path class="arrow" d="M392 227V266H760V228" marker-end="url(#head)"/>
-<text class="note mid" x="576" y="258">Modal imports the images</text>
+<path class="arrow" d="M392 227V272H760V254" marker-end="url(#head)"/>
+<text class="note mid" x="576" y="264">Modal imports the images</text>
 
 <rect class="zone" x="300" y="304" width="564" height="164" rx="12"/>
 <text class="zone-label" x="316" y="326">A DOCKER HOST, AS DEPLOY/DOCKER MAKES IT</text>
