@@ -33,7 +33,7 @@ A body names a container with `container`, as [Bodies](#bodies) shows.
 
 A role may declare [`assets`](../crates/schema/src/ir/asset.rs): pinned files that each sandbox
 holds read-only in `main`. Such a role fits only a class that holds assets, as
-[Docker's](providers.md#the-docker-provider) does.
+[Docker's](providers.md#the-docker-provider) and [Modal's](providers.md#the-modal-provider) do.
 
 Every sandbox has `/pumpkin`, which holds Pumpkin's own files. The `schema` crate's
 [`sandbox`](../crates/schema/src/sandbox.rs) module lays them out:
