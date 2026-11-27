@@ -13,10 +13,7 @@ use provider::{ImageRef, Role};
 use schema::ir::{AssetPath, Image, Name, Resources, User};
 
 #[path = "../../src/create.rs"]
-#[expect(
-    dead_code,
-    reason = "the tests call only the module's checks of a role"
-)]
+#[expect(dead_code, reason = "the tests call only the module's checks")]
 mod create;
 #[path = "../../src/images.rs"]
 #[expect(dead_code, reason = "the tests read no image's id")]
