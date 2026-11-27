@@ -8,22 +8,25 @@
 //! - `sandboxd`, read-only, as its first process, dialing its [`SocketDial`], its log's only
 //!   writer;
 //! - for a role that makes ops ([`Create::ops`]), [`sandboxctl`](SANDBOXCTL_PATH), read-only;
-//! - for a role with a model route ([`Create::model`]), `sandboxd` serving the model endpoint.
+//! - for a role with a model route ([`Create::model`]), `sandboxd` serving the model endpoint;
+//! - each of its role's assets ([`Create::assets`]), read-only, from the [`AssetCache`].
 //!
 //! On the engine, it creates only containers, labelled with their run's [`RunTag`] for
 //! [`Sweep::list`], and their anonymous volumes, and pulls no image; outside it, it writes only
-//! its runs' entries in the ledger of CPUs. It needs an engine that enforces every limit that a
-//! container has, as a rootless one does only with `cpuset` ([`engine::Security::rootless`]).
+//! its runs' entries in the ledger of CPUs, and the asset cache. It needs an engine that enforces
+//! every limit that a container has, as a rootless one does only with `cpuset`
+//! ([`engine::Security::rootless`]).
 
 use std::collections::BTreeMap;
 use std::num::NonZeroU64;
 use std::path::Path;
 use std::process::Output;
 
+pub use assets::AssetCache;
 use engine::{ContextName, Engine, REMOVE_TIMEOUT, confinement, docker, docker_to, fix_reported};
 use provider::{
-    Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation,
-    Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
+    Assets, Console, Create, Created, Creator, HeldAsset, ImageRef, Listed, Meeting, Provider,
+    Ready, Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
 use schema::ir::{Image, Name};
 use schema::sandbox::{SANDBOXCTL_PATH, SANDBOXD_PATH, SOCKET_NAME, SocketDial};
@@ -34,6 +37,7 @@ use stdx::{Context, Deadline};
 
 use crate::cpus::Cpus;
 
+mod assets;
 mod cpus;
 
 /// The name of the provider's one class of sandbox, a container on the engine's host, which
@@ -56,12 +60,13 @@ pub struct Docker<'e> {
     engine: &'e Engine,
     ready: Ready,
     cpus: Cpus,
+    assets: AssetCache,
 }
 
 impl<'e> Docker<'e> {
-    /// The provider on `engine`. Its sandboxes get the CPUs that are online. It refuses an engine
-    /// that can't enforce every container's limits.
-    pub fn connect(engine: &'e Engine) -> Result<Self, String> {
+    /// The provider on `engine`. Its sandboxes get the CPUs that are online, and the files of their
+    /// assets from `assets`. It refuses an engine that can't enforce every container's limits.
+    pub fn connect(engine: &'e Engine, assets: AssetCache) -> Result<Self, String> {
         let report = engine.report();
         let &engine::Host {
             memory_limit,
@@ -94,11 +99,13 @@ impl<'e> Docker<'e> {
             // and the engine has this one class, which every role is to fit.
             cpu_model: None,
             companions: false,
+            assets: true,
         };
         Ok(Self {
             engine,
             ready: ready(report, offers),
             cpus,
+            assets,
         })
     }
 
@@ -176,6 +183,10 @@ impl Provider for Docker<'_> {
         Meeting::Local(self)
     }
 
+    fn assets(&self) -> Option<&dyn Assets> {
+        Some(&self.assets)
+    }
+
     fn console(&self, run: &RunTag, id: &SandboxId) -> Result<Console, String> {
         let context = self.context();
         let id = id.as_str();
@@ -246,6 +257,7 @@ fn create_args(create: &Create, dial: &SocketDial, cpus: &Cpus) -> Result<Vec<St
         // The provider has one class (`CLASS`), so every container is of it.
         class: _,
         image,
+        assets,
         sandboxd,
         ops,
         model,
@@ -288,6 +300,9 @@ fn create_args(create: &Create, dial: &SocketDial, cpus: &Cpus) -> Result<Vec<St
     if *ops {
         args.push(bind_mount(sandboxd, SANDBOXCTL_PATH)?);
     }
+    for HeldAsset { path, reference } in assets {
+        args.push(bind_mount(Path::new(reference.as_str()), path.as_str())?);
+    }
     args.extend([
         format!("--entrypoint={SANDBOXD_PATH}"),
         "--".to_owned(),
@@ -305,11 +320,12 @@ fn create_args(create: &Create, dial: &SocketDial, cpus: &Cpus) -> Result<Vec<St
 
 /// A read-only `--mount` of `host`, which must exist, at `container`.
 fn bind_mount(host: &Path, container: &str) -> Result<String, String> {
-    // `--mount` reads its value as a line of CSV, so the source, which may hold commas and
-    // quotes, is a quoted field, with each quote doubled.
+    // `--mount` reads its value as a line of CSV. So the source and the target, which may hold
+    // commas and quotes, are quoted fields, with each quote doubled.
     let source = mountable(host, container)?.replace('"', "\"\"");
+    let target = container.replace('"', "\"\"");
     Ok(format!(
-        "--mount=type=bind,\"source={source}\",target={container},readonly"
+        "--mount=type=bind,\"source={source}\",\"target={target}\",readonly"
     ))
 }
 

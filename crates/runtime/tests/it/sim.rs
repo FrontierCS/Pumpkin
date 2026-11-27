@@ -43,12 +43,14 @@ use std::time::Duration;
 use std::{fs, io, iter};
 
 use provider::{
-    CompanionDial, Console, Create, Created, Creator, ImageRef, Listed, ListenDials, Listened,
-    Listens, Meeting, Phase, Provider, Ready, Reservation, Role, RunTag, SandboxId, SandboxdRef,
-    Sweep, Undeleted, UnixTime,
+    AssetDigest, AssetRef, Assets, CompanionDial, Console, Create, Created, Creator, HeldAsset,
+    ImageRef, Listed, ListenDials, Listened, Listens, Meeting, Phase, Provider, PublishedAsset,
+    Ready, Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted, UnixTime,
 };
 use schema::frame;
-use schema::ir::{AbsolutePath, Argv, Container, CpuModel, Image, Mode, Name, Sha256Digest};
+use schema::ir::{
+    AbsolutePath, Argv, AssetFiles, AssetPath, Container, CpuModel, Image, Mode, Name, Sha256Digest,
+};
 use schema::sandbox::op::{
     JobState, Last, LeaseStatusReply, OpCall, OpReply, SessionOp, StatusReply, TransferStatus,
 };
@@ -170,6 +172,8 @@ pub(crate) struct Sim {
     impostor: Option<&'static str>,
     // The companion at whose set-up `main`'s session ends.
     ends_main: Option<&'static str>,
+    publishes_assets: bool,
+    unheld: Option<&'static str>,
 }
 
 // What is called once the run log holds each part in a line.
@@ -244,6 +248,7 @@ struct State {
     reserved: Vec<Reserved>,
     /// What each create was given of each companion, by the sandbox's id.
     companions: Vec<String>,
+    assets: Vec<String>,
     /// The record of the run whose sandboxes these are, once `Sim::records` names it.
     record: Option<PathBuf>,
     /// The run's clock, on a simulated host.
@@ -383,6 +388,7 @@ impl Sim {
                 cpus: 1 << 10,
                 reserved: Vec::new(),
                 companions: Vec::new(),
+                assets: Vec::new(),
                 record: None,
                 time: None,
             })),
@@ -395,6 +401,8 @@ impl Sim {
             turns: None,
             impostor: None,
             ends_main: None,
+            publishes_assets: false,
+            unheld: None,
         }
     }
 
@@ -571,6 +579,31 @@ impl Sim {
     }
 
     #[must_use]
+    /// Makes each class hold assets, though the provider publishes none.
+    pub(crate) fn offering_assets(mut self) -> Self {
+        for class in self.ready.classes.values_mut() {
+            class.offers.assets = true;
+        }
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn holding_assets(self) -> Self {
+        Self {
+            publishes_assets: true,
+            ..self.offering_assets()
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn holding_no_asset_at(self, path: &'static str) -> Self {
+        Self {
+            unheld: Some(path),
+            ..self.holding_assets()
+        }
+    }
+
+    #[must_use]
     /// Makes the containers of each sandbox that holds companions meet the gateway in `turns`.
     /// Each says its hello once the one before it has taken its first request. It moves the clock
     /// to its seconds first. A container without a turn never says hello.
@@ -650,6 +683,10 @@ impl Sim {
         self.state().companions.clone()
     }
 
+    pub(crate) fn held_assets(&self) -> Vec<String> {
+        self.state().assets.clone()
+    }
+
     fn state(&self) -> MutexGuard<'_, State> {
         stdx::unpoisoned(self.state.lock())
     }
@@ -675,6 +712,7 @@ fn ready(startup_seconds: NonZeroU64) -> Ready {
             cpu_features: BTreeSet::new(),
             cpu_model,
             companions: false,
+            assets: false,
         };
         let class = Class {
             offers,
@@ -793,16 +831,7 @@ impl Provider for Sim {
     }
 
     fn reserve(&self, run: &RunTag, phases: &[Vec<Role>]) -> Result<Reservation, String> {
-        let needs = |phase: &Vec<Role>| -> u64 {
-            (phase.iter())
-                .map(|role| {
-                    let cpus = role.resources.cpu_millis.get().div_ceil(1000);
-                    cpus * u64::from(role.instances.get())
-                })
-                .sum()
-        };
-        // A phase starts only once the one before has ended, so the run holds the most of any.
-        let needed = phases.iter().map(needs).max().unwrap_or(0);
+        let needed = needed(phases);
         let mut roles: Vec<(Name, NonZeroU32)> = phases
             .iter()
             .flatten()
@@ -834,6 +863,16 @@ impl Provider for Sim {
         Ok(Reservation::new(live))
     }
 
+    fn fits(&self, phases: &[Vec<Role>]) -> Result<(), String> {
+        let (needed, cpus) = (needed(phases), self.state().cpus);
+        if needed > cpus {
+            return Err(format!(
+                "the run needs {needed} simulated CPUs, and it has {cpus}: need fewer"
+            ));
+        }
+        Ok(())
+    }
+
     fn publish_image(&self, image: &Image) -> Result<ImageRef, String> {
         if *image == self::image(UNPUBLISHED) {
             return Err(format!(
@@ -863,13 +902,69 @@ impl Provider for Sim {
         }
     }
 
+    fn assets(&self) -> Option<&dyn Assets> {
+        self.publishes_assets.then_some(self)
+    }
+
     fn console(&self, run: &RunTag, id: &SandboxId) -> Result<Console, String> {
         self.console_of(run, id)
     }
 }
 
+fn needed(phases: &[Vec<Role>]) -> u64 {
+    let needs = |phase: &Vec<Role>| -> u64 {
+        (phase.iter())
+            .map(|role| {
+                let cpus = role.resources.cpu_millis.get().div_ceil(1000);
+                cpus * u64::from(role.instances.get())
+            })
+            .sum()
+    };
+    // A phase starts only once the one before has ended, so the run holds the most of any.
+    phases.iter().map(needs).max().unwrap_or(0)
+}
+
+impl Assets for Sim {
+    fn holds(&self, path: &AssetPath) -> Result<(), String> {
+        if self.unheld == Some(path.as_str()) {
+            return Err(format!(
+                "its sandboxes hold none at `{path}`: hold it elsewhere"
+            ));
+        }
+        Ok(())
+    }
+
+    fn publish_asset(
+        &self,
+        _run: &RunTag,
+        digest: &AssetDigest,
+        files: &AssetFiles,
+    ) -> Result<PublishedAsset, String> {
+        let paths: Vec<&str> = (files.as_slice().iter())
+            .map(|file| file.path.as_str())
+            .collect();
+        (self.state().published).push(format!("asset {digest}: {}", paths.join(", ")));
+        Ok(PublishedAsset {
+            reference: AssetRef::from(format!("{}:asset:{digest}", self.platform)),
+            fetched: true,
+        })
+    }
+}
+
+impl Sim {
+    fn held(&self, create: &Create) -> Result<(), String> {
+        for HeldAsset { path, reference } in &create.assets {
+            let reference = self.own("the asset", reference.as_str())?;
+            let held = format!("{} holds {reference} at {path}", create.name);
+            self.state().assets.push(held);
+        }
+        Ok(())
+    }
+}
+
 impl Creator<SocketDial> for Sim {
     fn create(&self, create: &Create, dial: SocketDial) -> Result<Created, String> {
+        self.held(create)?;
         let meets = Meets::Dials(dial.dir.join(SOCKET_NAME));
         self.timed(|| self.made(create, meets, Vec::new()))
     }
@@ -877,6 +972,7 @@ impl Creator<SocketDial> for Sim {
 
 impl Creator<ListenDials, Listened> for Sim {
     fn create(&self, create: &Create, dials: ListenDials) -> Result<Listened, String> {
+        self.held(create)?;
         let ListenDials { main, companions } = dials;
         let behind_edge = |listener: &TcpListener| {
             let port = edge::front(listener.local_addr().unwrap());
@@ -1203,6 +1299,8 @@ impl Subject for Sim {
             turns: self.turns,
             impostor: self.impostor,
             ends_main: self.ends_main,
+            publishes_assets: self.publishes_assets,
+            unheld: self.unheld,
         }))
     }
 

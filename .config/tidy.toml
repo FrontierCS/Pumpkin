@@ -10,7 +10,7 @@
 [words]
 "ARCHITECTURE.md" = 2809
 "deploy/aws/README.md" = 2110
-"docs/glossary.md" = 1665
+"docs/glossary.md" = 1704
 "docs/language.md" = 1534
 
 # The Markdown documents, and the Rust files by their comments, with sentences to split: those
@@ -187,7 +187,7 @@
 "crates/runtime/src/record/writer.rs" = 1
 "crates/runtime/src/relay.rs" = 2
 "crates/runtime/src/routes.rs" = 3
-"crates/runtime/src/sandbox.rs" = 11
+"crates/runtime/src/sandbox.rs" = 10
 "crates/runtime/src/sources.rs" = 1
 "crates/runtime/src/start.rs" = 2
 "crates/runtime/tests/it/body.rs" = 1
@@ -221,7 +221,6 @@
 "crates/schema/src/sandbox/op.rs" = 25
 "crates/schema/src/sandbox/tree.rs" = 3
 "crates/schema/src/workflow.rs" = 13
-"crates/schema/src/workflow/errors.rs" = 1
 "crates/schema/src/workflow/place.rs" = 3
 "crates/schema/tests/ir.rs" = 4
 "crates/stdx/src/lib.rs" = 5
@@ -254,7 +253,7 @@
 "examples/hypergraph/README.md" = 4
 "examples/team/README.md" = 6
 "providers/docker/src/cpus.rs" = 9
-"providers/docker/src/lib.rs" = 17
+"providers/docker/src/lib.rs" = 16
 "providers/docker/tests/it/main.rs" = 14
 "providers/ec2/boot/src/main.rs" = 6
 "providers/ec2/boot/tests/it.rs" = 1

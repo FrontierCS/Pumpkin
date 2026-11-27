@@ -80,7 +80,7 @@ impl TestDir {
 impl Drop for TestDir {
     fn drop(&mut self) {
         if !thread::panicking()
-            && let Err(error) = fs::remove_dir_all(&self.0)
+            && let Err(error) = wipe(&self.0)
         {
             panic!(
                 "the test's directory {} can't be removed: {error}",

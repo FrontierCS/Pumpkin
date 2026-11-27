@@ -717,6 +717,9 @@ struct DescriptorJson {
     media_type: String,
 }
 
+/// Where [`confinement`] gives a container an empty, read-only tmpfs.
+pub const READ_ONLY_TMP: &str = "/tmp";
+
 /// The options of `docker create` or `docker run` that confine a container to its role's `user` and
 /// `resources`, wherever a provider's sandbox is a Docker container.
 ///
@@ -762,7 +765,7 @@ pub fn confinement(user: User, resources: Resources) -> Vec<String> {
             "--tmpfs={}:exec,uid={uid},gid={gid},mode=0755,size={PUMPKIN_BYTES}",
             pumpkin_dir()
         ),
-        "--tmpfs=/tmp:ro".to_owned(),
+        format!("--tmpfs={READ_ONLY_TMP}:ro"),
     ]
 }
 

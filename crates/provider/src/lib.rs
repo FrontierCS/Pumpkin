@@ -6,11 +6,12 @@ use std::fmt;
 use std::net::IpAddr;
 use std::path::Path;
 
-use schema::ir::Image;
+use schema::ir::{AssetFiles, AssetPath, Image};
 use schema::sandbox::{Attestation, PrivateDial, SocketDial};
 pub use values::{
-    CompanionDial, Console, Create, Created, ImageRef, Listed, ListenDials, Listened, Phase, Ready,
-    Role, RunTag, SandboxId, SandboxdRef, Undeleted, UnixTime,
+    AssetDigest, AssetRef, CompanionDial, Console, Create, Created, HeldAsset, ImageRef, Listed,
+    ListenDials, Listened, Phase, PublishedAsset, Ready, Role, RunTag, SandboxId, SandboxdRef,
+    Undeleted, UnixTime,
 };
 
 mod values;
@@ -78,6 +79,9 @@ pub trait Provider: Sweep + Send + Sync {
     /// How its sandboxes meet the gateway, with the create that takes what each is given to.
     fn meeting(&self) -> Meeting<'_>;
 
+    /// What publishes the assets that its sandboxes hold, if they hold any.
+    fn assets(&self) -> Option<&dyn Assets>;
+
     /// Reads what sandbox `id` of `run` has printed, its [`Console`]. Fails if `id` isn't one of
     /// `run`'s sandboxes, such as another run's.
     fn console(&self, run: &RunTag, id: &SandboxId) -> Result<Console, String>;
@@ -107,6 +111,26 @@ pub trait Listens: Creator<ListenDials, Listened> {
         images: &[Image],
         sandboxd: &SandboxdRef,
     ) -> Result<Vec<ImageRef>, String>;
+}
+
+/// What a provider whose sandboxes hold assets ([`Create::assets`]) gives from
+/// [`Provider::assets`].
+pub trait Assets: Sync {
+    /// Fails if this provider's sandboxes can't hold an asset at `path`, saying why and where they
+    /// could hold it. It reserves nothing.
+    fn holds(&self, path: &AssetPath) -> Result<(), String>;
+
+    /// Publishes `files`, whose digest is `digest`, so that this provider's sandboxes can hold
+    /// them. It keeps them only if the bytes at each file's URL have the file's size and SHA-256.
+    /// Otherwise it fails, naming the first file that didn't. It then keeps none of the files. A
+    /// sandbox that it makes to fetch them carries `run`'s tag, so that `run`'s
+    /// [`list`](Sweep::list) finds one left behind.
+    fn publish_asset(
+        &self,
+        run: &RunTag,
+        digest: &AssetDigest,
+        files: &AssetFiles,
+    ) -> Result<PublishedAsset, String>;
 }
 
 /// Whether a hello over a private network ([`Meeting::Private`]) is from the sandbox that a create

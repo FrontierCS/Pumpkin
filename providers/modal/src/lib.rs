@@ -29,8 +29,8 @@ use std::path::Path;
 use aws::{Cli, Region, Repository, RepositoryName, RoleArn};
 use engine::{Platform, Pusher};
 use provider::{
-    Console, Create, Creator, ImageRef, Listed, ListenDials, Listened, Listens, Meeting, Provider,
-    Ready, Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
+    Assets, Console, Create, Creator, ImageRef, Listed, ListenDials, Listened, Listens, Meeting,
+    Provider, Ready, Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
 use schema::ir::{self, GpuModel, Image, Name};
 use schema::sandbox::SANDBOXD_PATH;
@@ -182,6 +182,7 @@ impl TryFrom<ClassTable> for SandboxClass {
             cpu_features: BTreeSet::new(),
             cpu_model: None,
             companions: true,
+            assets: false,
         };
         let class = Class {
             offers,
@@ -201,7 +202,7 @@ impl From<SandboxClass> for ClassTable {
             usd_per_hour,
         } = class;
         // Its GPU's count is `gpu`'s, a class of the settings names no CPU's flags or model, and
-        // every class holds companions.
+        // every class holds companions and no assets.
         let Offers {
             cpu_millis,
             memory_bytes,
@@ -209,6 +210,7 @@ impl From<SandboxClass> for ClassTable {
             cpu_features: _,
             cpu_model: _,
             companions: _,
+            assets: _,
         } = offers;
         Self {
             gpu,
@@ -378,6 +380,10 @@ impl Provider for Modal<'_> {
     // A sandbox's only way in is its tunnel, where the gateway dials it.
     fn meeting(&self) -> Meeting<'_> {
         Meeting::Listen(self)
+    }
+
+    fn assets(&self) -> Option<&dyn Assets> {
+        None
     }
 
     fn console(&self, run: &RunTag, id: &SandboxId) -> Result<Console, String> {

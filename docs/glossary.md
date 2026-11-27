@@ -18,6 +18,12 @@ A [role](#role) that works on the [task](#task), such as an AI coding agent, in 
 [sandbox](#sandbox). It runs a [harness](#harness), and holds [grants](#grant) and a
 [model route](#model-route) ([roles](workflows.md#roles)).
 
+### Asset
+
+Files that each [sandbox](#sandbox) of a [role](#role) holds read-only at a path, such as a model's
+weights. Each file is pinned by its SHA-256 and fetched from an `https` URL. The role's `assets` key
+lists them (`ir::Asset`).
+
 ### Body
 
 A function, a `def` in a [task](#task)'s file, that a [call](#call) runs with a handle on its

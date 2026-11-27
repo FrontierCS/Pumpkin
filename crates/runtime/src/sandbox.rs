@@ -21,15 +21,15 @@ use provider::{
     Create, Created, ImageRef, Listed, Meeting, Provider, Role, RunTag, SandboxId, SandboxdRef,
     Sweep, Undeleted, UnixTime,
 };
-use schema::ir::{Command, GpuModel, Image, Name};
+use schema::ir::{Command, GpuModel, Image, JsonPointer, Name};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
     Launch, OpPayloadLimit, PUMPKIN_BYTES, RelativePath, command_env, command_stderr,
     command_stdout, pumpkin_dir,
 };
 use schema::workflow::{
-    AgentId, ByProvider, ByRole, ContainerId, JobFunctionId, Placed, RoleId, RunnerId, SessionId,
-    TargetId, Workflow,
+    AgentId, At, ByProvider, ByRole, ContainerId, JobFunctionId, ParseError, ParseErrors, Placed,
+    RoleId, RunnerId, SessionId, TargetId, Workflow,
 };
 use serde::{Deserialize, Deserializer, de};
 use stdx::time::Clock as _;
@@ -37,10 +37,12 @@ use stdx::{Context, Deadline, time};
 
 use super::{Clock, Host, Input, Stopped, interruption, log, record};
 
+mod assets;
 mod meets;
 
-pub(super) use meets::{Listening, Sessions, listening};
-use meets::{Meets, Registrations, WithCompanions};
+use assets::{Holding, holding};
+pub(super) use meets::Sessions;
+use meets::{Listening, Meets, Registrations, WithCompanions, listening};
 
 /// The most entries, files and directories, that the host collects from a sandbox in one tree.
 pub(super) const ENTRIES: u64 = 100_000;
@@ -158,10 +160,57 @@ fn provider_role(workflow: &Workflow, role: RoleId, instances: NonZeroU32) -> Ro
     }
 }
 
+pub(super) struct Capable<'p> {
+    listening: Listening<'p>,
+    holding: Holding<'p>,
+}
+
+/// Refuses the workflow if `placed` could never run on `providers`, whatever other runs use. It
+/// reserves nothing. `providers` has each provider that `placed` names.
+///
+/// The inner error lists each refusal at its place in the IR. The outer error is a refusal with no
+/// place in the IR, such as a provider whose class offers what the provider can't give.
+// A request that no resources could ever satisfy is refused as it is made, as Slurm fails a job
+// whose request has a fundamental flaw:
+// https://github.com/SchedMD/slurm/blob/4e8cf4192ade61024f04a1d466d4f97456d178bf/src/slurmctld/job_mgr.c#L5588-L5599
+pub fn fits(
+    placed: &Placed,
+    providers: &ByProvider<&dyn Provider>,
+) -> Result<Result<(), ParseErrors>, String> {
+    let Capable { holding, .. } = capable(placed, providers)?;
+    let capacity = Capacity::of(placed.workflow())?;
+    let mut refused = assets::unheld(placed, &holding);
+    for (name, provider) in providers.iter() {
+        if let Err(why) = provider.fits(&capacity.phases(placed, name)) {
+            refused.push(ParseError {
+                at: At {
+                    ir: JsonPointer::root().token("roles"),
+                    source: None,
+                },
+                message: format!("provider `{name}`: {why}"),
+                label: None,
+                why: Vec::new(),
+                help: Vec::new(),
+            });
+        }
+    }
+    Ok(ParseErrors::check(refused))
+}
+
+pub(super) fn capable<'p>(
+    placed: &Placed,
+    providers: &ByProvider<&'p dyn Provider>,
+) -> Result<Capable<'p>, String> {
+    let listening = listening(placed, providers)?;
+    let holding = holding(placed, providers)?;
+    Ok(Capable { listening, holding })
+}
+
 /// What a run puts on each provider before any sandbox starts, and the directory of its sockets.
 pub(super) struct Published<'p> {
     providers: ByProvider<Hosting<'p>>,
     images: ByRole<ImageRef>,
+    assets: assets::Held,
     companions: BTreeMap<RunnerId, WithCompanions<'p>>,
     sockets: Sockets,
 }
@@ -173,6 +222,7 @@ pub(super) struct Sandboxes<'p, H: Host> {
     placed: &'p Placed,
     providers: ByProvider<Hosting<'p>>,
     images: ByRole<ImageRef>,
+    assets: assets::Held,
     companions: BTreeMap<RunnerId, WithCompanions<'p>>,
     sockets: Sockets,
     record: &'p Path,
@@ -355,23 +405,16 @@ pub(super) struct Started<C> {
 }
 
 impl<'p> Published<'p> {
-    /// Publishes `sandboxd` on each provider that hosts a role, and each role's image there, once
-    /// however many roles name it. Then it publishes the images of each runner's companions on
-    /// the provider that `listening` gives it. Last, it makes the run's sockets directory in
-    /// `record`, which must not exist yet. A provider that is private meets the gateway at
-    /// `private`, which then must be some; one whose sandboxes listen, through `dialer`.
-    ///
-    /// Stops as interrupted before each publish once a signal has come, as a publish may take
-    /// minutes.
+    /// Stops as interrupted before each publish once a signal has come, as one may take minutes.
     pub(super) fn create(
+        run: &RunTag,
         providers: &ByProvider<&'p dyn Provider>,
         placed: &'p Placed,
-        listening: &Listening<'p>,
+        capable: &Capable<'p>,
         sandboxd: &Path,
-        private: Option<&'p Listener>,
-        dialer: &'p Dialer,
+        (private, dialer): (Option<&'p Listener>, &'p Dialer),
         record: &Path,
-    ) -> Result<Self, Stopped> {
+    ) -> Result<(Self, Vec<log::AssetPublished>), Stopped> {
         let workflow = placed.workflow();
         let providers = placed.by_provider(|name| {
             // Each publish is a provider call that a stop doesn't cut short, and one may take
@@ -401,6 +444,9 @@ impl<'p> Published<'p> {
                 meets,
             })
         })?;
+        // Before the images, so that a file that isn't as the workflow pins it fails the run
+        // before any image is published.
+        let (assets, published_assets) = assets::publish(run, placed, &capable.holding)?;
         let mut published = BTreeMap::<(&Name, Image), ImageRef>::new();
         let images = workflow.by_role(|(role, sandbox)| {
             let on = &placed.placement(role).provider;
@@ -417,18 +463,21 @@ impl<'p> Published<'p> {
                 }
             }
         })?;
+        let listening = &capable.listening;
         let companions = meets::publish_companions(placed, &providers, listening, dialer)?;
         // In the record, so that they go where it goes: `record::create` made it, and checked the
         // path to it, so that no other user may rename entries in it, or above it, as
         // `Sockets::create` needs.
         let sockets =
             Sockets::create(record::sockets(record)).map_err(|error| error.to_string())?;
-        Ok(Self {
+        let published = Self {
             providers,
             images,
+            assets,
             companions,
             sockets,
-        })
+        };
+        Ok((published, published_assets))
     }
 }
 
@@ -445,6 +494,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         let Published {
             providers,
             images,
+            assets,
             companions,
             sockets,
         } = published;
@@ -460,6 +510,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             placed,
             providers,
             images,
+            assets,
             companions,
             sockets,
             record,
@@ -499,6 +550,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             instance: which.instance(),
             class: placement.class.clone(),
             image: self.images.get(role).clone(),
+            assets: self.assets.get(&role).cloned().unwrap_or_default(),
             sandboxd: hosting.sandboxd.clone(),
             ops: ops.is_some(),
             model,

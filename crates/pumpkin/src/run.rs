@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::time::SystemTime;
 
-use docker::Docker;
+use docker::{AssetCache, Docker};
 use ec2::Ec2;
 use engine::Engine;
 use gateway::{Dialer, Listener};
@@ -373,10 +373,11 @@ fn reached<'e>(
         offered,
     )?;
     let fits = runtime::fits(&placed, &placed_on.as_ref().map(Connected::provider));
-    fits.map_err(|error| match offered {
+    let fits = fits.map_err(|error| match offered {
         Offered::Here { config, .. } => format!("{}: {error}", config.display()),
         Offered::Controller { name, .. } => format!("controller `{name}`: {error}"),
     })?;
+    fits.map_err(|refused| unfit(refused, source_map, offered))?;
     Ok(placed_on.into_iter().collect())
 }
 
@@ -393,7 +394,9 @@ impl<'e> Offer<'e> {
     fn new(name: &Name, kind: config::Kind, engine: &'e Engine) -> Result<Self, String> {
         let offer = match kind {
             config::Kind::Docker(config::Empty {}) => {
-                let docker = Docker::connect(engine);
+                let assets =
+                    Workspace::find().map(|workspace| AssetCache::new(&workspace.docker_assets()));
+                let docker = assets.and_then(|assets| Docker::connect(engine, assets));
                 Self::Docker(docker.context(format_args!("reaching provider `{name}` failed"))?)
             }
             config::Kind::Ec2(settings) => {
@@ -483,16 +486,9 @@ enum Offered<'a> {
     Controller { name: &'a controller::Name },
 }
 
-/// Says each of `errors`, a placement's, where `source_map` places it, then how many there are,
-/// as `offered` has it. The errors are styled where the standard error is. Returns where to read
-/// how a class is offered.
 fn misplaced(errors: ParseErrors, source_map: &SourceMap, offered: &Offered<'_>) -> String {
     let count = errors.as_slice().len();
-    let errors = errors.in_source(|at| source_map.place(at));
-    let paint = Paint(paint::styled(&io::stderr()));
-    for error in errors.as_slice() {
-        say(paint.error(error));
-    }
+    say_each(errors, source_map);
     let has = match offered {
         Offered::Here { entry, config } => format!(
             "{}: placing the workflow's roles in the classes that {}'s providers offer has",
@@ -506,6 +502,30 @@ fn misplaced(errors: ParseErrors, source_map: &SourceMap, offered: &Offered<'_>)
     };
     say(closing_problems(format_args!("{has}"), count));
     "to read how a configuration offers a class: pumpkin help config".to_owned()
+}
+
+fn unfit(errors: ParseErrors, source_map: &SourceMap, offered: &Offered<'_>) -> String {
+    let count = errors.as_slice().len();
+    say_each(errors, source_map);
+    let has = match offered {
+        Offered::Here { entry, config } => format!(
+            "{}: running the workflow's roles on {}'s providers has",
+            entry.display(),
+            config.display()
+        ),
+        Offered::Controller { name } => {
+            format!("controller `{name}`: running the workflow's roles on its providers has")
+        }
+    };
+    closing_problems(format_args!("{has}"), count)
+}
+
+fn say_each(errors: ParseErrors, source_map: &SourceMap) {
+    let errors = errors.in_source(|at| source_map.place(at));
+    let paint = Paint(paint::styled(&io::stderr()));
+    for error in errors.as_slice() {
+        say(paint.error(error));
+    }
 }
 
 /// Fails as [`reached`] does, to the member of the controller that they name `controller`, if

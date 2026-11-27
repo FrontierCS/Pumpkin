@@ -174,6 +174,7 @@ fn offered() -> BTreeMap<Name, BTreeMap<Name, Class>> {
             cpu_features: BTreeSet::new(),
             cpu_model,
             companions: true,
+            assets: false,
         };
         let declared = Class {
             offers,

@@ -19,6 +19,7 @@ use std::num::{NonZeroU32, NonZeroU64};
 use serde::{Deserialize, Serialize};
 
 pub mod argument;
+mod asset;
 pub(crate) mod container;
 mod final_call;
 mod grant;
@@ -29,6 +30,7 @@ mod session;
 pub(crate) mod values;
 
 pub use argument::{Argument, ArgumentType, ArgumentValue};
+pub use asset::{Asset, AssetFile, AssetFiles};
 pub use container::{CompanionName, Container};
 pub use final_call::{Final, FinalBody};
 pub use grant::{Body, Function, Grant};
@@ -37,8 +39,8 @@ pub use label::{Label, Root};
 pub use now::NowFunction;
 pub use session::{NamedSession, Session};
 pub use values::{
-    AbsolutePath, Argv, CpuFlag, CpuModel, Env, EnvVar, GpuModel, HeaderName, Image, JsonPointer,
-    Mode, ModelName, Models, Name, RolePath, Sha256Digest, WorkflowName,
+    AbsolutePath, Argv, AssetPath, CpuFlag, CpuModel, Env, EnvVar, GpuModel, HeaderName, HttpsUrl,
+    Image, JsonPointer, Mode, ModelName, Models, Name, RolePath, Sha256Digest, WorkflowName,
 };
 
 /// The IR's root: a workflow as written, which [`crate::workflow::Workflow::parse`] checks.
@@ -80,6 +82,12 @@ pub enum IrVersion {
 pub struct Role {
     pub name: Name,
     pub image: Image,
+    /// The files that each of the role's sandboxes holds in `main`, never in a companion, each
+    /// asset read-only at its path. No two are at one path, or one below another, and an agent's
+    /// `dirs` and `files` are outside them. The role fits only a class that holds assets
+    /// ([`Offers::assets`](crate::workflow::Offers::assets)). Absent, none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assets: Vec<Asset>,
     /// The user the role's commands run as.
     pub user: User,
     /// What each of the role's sandboxes needs of the class of sandbox it is created in, which

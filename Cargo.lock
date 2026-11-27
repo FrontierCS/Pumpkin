@@ -327,8 +327,10 @@ dependencies = [
  "schema",
  "serde",
  "serde_json",
+ "sha2",
  "stdx",
  "test-support",
+ "ureq",
 ]
 
 [[package]]

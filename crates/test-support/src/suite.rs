@@ -623,7 +623,7 @@ impl<'a> Suite<'a> {
     }
 }
 
-/// The create of `role`'s one instance in `run`, with neither ops nor a model route, and with a
+/// The create of `role`'s one instance in `run`, with no ops, model route or asset, and with a
 /// hard end far past a test's.
 pub fn asked(
     run: &RunTag,
@@ -639,6 +639,7 @@ pub fn asked(
         instance: 0,
         class,
         image: image.clone(),
+        assets: Vec::new(),
         sandboxd: sandboxd.clone(),
         ops: false,
         model: false,

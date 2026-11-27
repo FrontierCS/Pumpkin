@@ -222,6 +222,8 @@ pub(crate) fn request<'a>(
         // Taken as the parameter `gpu`.
         class: _,
         image,
+        // It publishes no assets, so a create holds none (`provider::Create::assets`).
+        assets: _,
         sandboxd,
         ops,
         model,

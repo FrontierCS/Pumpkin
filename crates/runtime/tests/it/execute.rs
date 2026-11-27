@@ -20,8 +20,8 @@ use decision::{Outcome, lasts};
 use expect_test::{Expect, expect};
 use gateway::Dialer;
 use provider::{
-    Console, Create, Created, Creator, ImageRef, Listed, ListenDials, Listened, Listens, Meeting,
-    Provider, Ready, Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
+    Assets, Console, Create, Created, Creator, ImageRef, Listed, ListenDials, Listened, Listens,
+    Meeting, Provider, Ready, Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
 use route::Serving;
 use runtime::{
@@ -33,6 +33,7 @@ use schema::sandbox::{RESULT_MAX_DEPTH, SocketDial};
 use schema::workflow::{ByRole, Placed, Workflow};
 use serde_json::{Value, json};
 use stdx::Deadline;
+use test_support::asset::{B, CONFIG, SHARD};
 use test_support::http::{read_request, write_chunk};
 use test_support::{TestDir, files, sandboxes, standard_outputs};
 
@@ -146,6 +147,10 @@ impl Provider for Interrupting<'_> {
                 panic!("the simulated provider's sandboxes dial no private address")
             }
         }
+    }
+
+    fn assets(&self) -> Option<&dyn Assets> {
+        self.sim.assets()
     }
 
     fn console(&self, run: &RunTag, id: &SandboxId) -> Result<Console, String> {
@@ -4876,9 +4881,16 @@ fn names_mains_end_before_a_companions_failure() {
 #[test]
 fn companions_where_sandboxes_dial() {
     let sim = Sim::new().offering_companions();
-    let ir = serde_json::from_value(companions_workflow(&["exit", "0"])).unwrap();
+    expect![[r#"
+        fits: provider `simulated`'s class `sim` holds companions, and its sandboxes don't listen: expected only a provider whose sandboxes listen to offer companions
+        prepared: the same; records: []"#]]
+    .assert_eq(&unprepared(&sim, companions_workflow(&["exit", "0"])));
+}
+
+fn unprepared(sim: &Sim, ir: Value) -> String {
+    let ir = serde_json::from_value(ir).unwrap();
     let placed = placed(&ir, sim.ready()).unwrap();
-    let on = providers_of(&placed, |_| &sim);
+    let on = providers_of(&placed, |_| sim);
     let fits = runtime::fits(&placed, &on).unwrap_err();
     let runs = TestDir::new();
     let servings = StandIn::servings(None, placed.workflow(), runs.path());
@@ -4886,16 +4898,114 @@ fn companions_where_sandboxes_dial() {
     let (models, recorded) = kept(&placed, &servings, &prices);
     let prepared = Run::prepare(&System, placed, on, runs.path(), id, models, recorded);
     let Err(prepared) = prepared else {
-        panic!("a run whose companions no sandbox holds is prepared")
+        panic!("a run that `fits` refuses is prepared")
     };
     let records = files(runs.path());
-    expect![[r#"
-        fits: provider `simulated`'s class `sim` holds companions, and its sandboxes don't listen: expected only a provider whose sandboxes listen to offer companions
-        prepared: the same; records: []"#]]
-    .assert_eq(&format!(
+    format!(
         "fits: {fits}\nprepared: {}; records: {records:?}",
-        if prepared == fits { "the same" } else { &prepared }
-    ));
+        if prepared == fits {
+            "the same"
+        } else {
+            &prepared
+        }
+    )
+}
+
+fn asset_file(base: &str, file: (&str, &[u8], &str)) -> Value {
+    let (path, bytes, sha256) = file;
+    let (url, sha256) = (format!("{base}/{path}"), format!("sha256:{sha256}"));
+    json!({ "path": path, "url": url, "size": bytes.len(), "sha256": sha256 })
+}
+
+// Each digest is published once on its provider before the run, however many roles hold it and
+// whichever URLs serve its files. Each create holds its role's assets.
+#[test]
+fn holds_each_roles_assets() {
+    let model = json!([
+        asset_file("https://example.com", CONFIG),
+        asset_file("https://example.com", SHARD),
+    ]);
+    let b = |base: &str| json!([asset_file(base, B)]);
+    let mut ir = workflow(&["exit", "0"]);
+    ir["roles"][0]["assets"] = json!([{ "path": "/opt/model", "files": model.clone() }]);
+    ir["roles"][1]["assets"] = json!([{ "path": "/opt/b", "files": b("https://example.com") }]);
+    ir["roles"][2]["assets"] = json!([
+        { "path": "/opt/weights", "files": model },
+        { "path": "/opt/b", "files": b("https://mirror.example.com") },
+    ]);
+    let sim = Sim::new().holding_assets();
+    let shown = executed(
+        &SimHost::new(),
+        "holds-each-roles-assets",
+        &[(PROVIDER, &sim)],
+        &ir,
+        SANDBOXD,
+        &[],
+    );
+    let ended = shown.lines().take(1).map(str::to_owned);
+    let published =
+        (sim.published().into_iter()).filter(|published| published.starts_with("asset"));
+    let logged = (shown.lines())
+        .filter(|line| line.contains("asset_published"))
+        .map(|line| {
+            let mut line: Value = serde_json::from_str(line).unwrap();
+            // The machine's clock, which `SimHost` doesn't script, times each publish.
+            line["event"]["took_ns"] = json!("<ns>");
+            line.to_string()
+        });
+    let shown: Vec<String> = (ended
+        .chain(published)
+        .chain(sim.held_assets())
+        .chain(logged))
+    .collect();
+    // Each digest is what a shell prints in a directory of the asset's files, by this command:
+    // `find . -type f -printf '%P\n' | LC_ALL=C sort | xargs -d '\n' sha256sum | sha256sum`.
+    expect![[r#"
+        finished, showing [score=0]
+        asset sha256:db7e6a1a23aacc416c441bbb070046f249bf5b5d7fb72273e956c45deb0a9d6e: config.json, shards/1.bin
+        asset sha256:eeb0cd7d8c9d9d34ac22ea13505d7249a4f9f8408c491c32a4c2d2d300bf2efa: b
+        agent-0 holds asset:sha256:db7e6a1a23aacc416c441bbb070046f249bf5b5d7fb72273e956c45deb0a9d6e at /opt/model
+        job-0 holds asset:sha256:db7e6a1a23aacc416c441bbb070046f249bf5b5d7fb72273e956c45deb0a9d6e at /opt/weights
+        job-0 holds asset:sha256:eeb0cd7d8c9d9d34ac22ea13505d7249a4f9f8408c491c32a4c2d2d300bf2efa at /opt/b
+        {"actions":[],"at_ns":"0","event":{"digest":"sha256:db7e6a1a23aacc416c441bbb070046f249bf5b5d7fb72273e956c45deb0a9d6e","fetched":true,"kind":"asset_published","provider":"simulated","took_ns":"<ns>"},"seq":1}
+        {"actions":[],"at_ns":"0","event":{"digest":"sha256:eeb0cd7d8c9d9d34ac22ea13505d7249a4f9f8408c491c32a4c2d2d300bf2efa","fetched":true,"kind":"asset_published","provider":"simulated","took_ns":"<ns>"},"seq":2}"#]].assert_eq(&shown.join("\n"));
+}
+
+// A provider whose class holds assets where it publishes none is refused before any image is
+// built, and no run on it is prepared.
+#[test]
+fn assets_where_none_are_published() {
+    let sim = Sim::new().offering_assets();
+    let mut ir = workflow(&["exit", "0"]);
+    let b = json!([asset_file("https://example.com", B)]);
+    ir["roles"][1]["assets"] = json!([{ "path": "/opt/b", "files": b }]);
+    expect![[r#"
+        fits: provider `simulated`'s class `sim` holds assets, and the provider publishes none: expected only a provider that publishes assets to offer a class that holds them
+        prepared: the same; records: []"#]]
+    .assert_eq(&unprepared(&sim, ir));
+}
+
+// Each asset at a path where its provider holds none is refused at that path in the IR. A provider
+// that could never hold the roles at once is refused beside them.
+#[test]
+fn refuses_each_unheld_asset_and_unfit_provider() {
+    let sim = Sim::new().holding_no_asset_at("/tmp").with_cpus(1);
+    let mut ir = workflow(&["exit", "0"]);
+    let b = json!([asset_file("https://example.com", B)]);
+    let held = |path: &str| json!({ "path": path, "files": b.clone() });
+    ir["roles"][1]["assets"] = json!([held("/opt/b"), held("/tmp")]);
+    ir["roles"][2]["assets"] = json!([held("/tmp")]);
+    let ir = serde_json::from_value(ir).unwrap();
+    let placed = placed(&ir, sim.ready()).unwrap();
+    let on = providers_of(&placed, |_| &sim);
+    let fits = runtime::fits(&placed, &on).unwrap().unwrap_err();
+    expect![[r#"
+        error: role `trainer` holds an asset at `/tmp`, where provider `simulated` holds none: its sandboxes hold none at `/tmp`: hold it elsewhere
+          --> roles[1].assets[1].path
+        error: role `final_judge` holds an asset at `/tmp`, where provider `simulated` holds none: its sandboxes hold none at `/tmp`: hold it elsewhere
+          --> roles[2].assets[0].path
+        error: provider `simulated`: the run needs 16 simulated CPUs, and it has 1: need fewer
+          --> roles"#]].assert_eq(&fits.to_string());
 }
 
 #[test]

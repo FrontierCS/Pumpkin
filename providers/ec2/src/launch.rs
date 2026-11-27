@@ -62,6 +62,8 @@ impl Ec2<'_> {
             instance: _,
             class,
             image,
+            // It publishes no assets, so a create holds none (`provider::Create::assets`).
+            assets: _,
             sandboxd,
             ops,
             model,

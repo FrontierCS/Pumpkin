@@ -132,13 +132,19 @@ impl fmt::Display for ParseError {
 
 impl Error for ParseError {}
 
-/// The rules an IR breaks, in the order the parse, or the placement, finds them; see
-/// [`Workflow::parse`](crate::workflow::Workflow::parse) and
-/// [`Workflow::place`](crate::workflow::Workflow::place) for which rules. Never empty.
+/// The rules an IR breaks, in the order that a check of it finds them. Never empty.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParseErrors(Vec<ParseError>);
 
 impl ParseErrors {
+    /// Fails with `errors`, in their order, unless there are none.
+    pub fn check(errors: Vec<ParseError>) -> Result<(), Self> {
+        if errors.is_empty() {
+            return Ok(());
+        }
+        Err(Self(errors))
+    }
+
     pub fn as_slice(&self) -> &[ParseError] {
         &self.0
     }

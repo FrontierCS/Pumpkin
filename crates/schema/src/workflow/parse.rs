@@ -109,20 +109,25 @@ impl<'ir> Parser<'ir> {
             let ir::Role {
                 name,
                 image,
+                assets,
                 user,
                 needs,
                 runtime,
             } = role;
+            self.assets(&at, assets);
             self.roles.push(Sandbox {
                 name: name.clone(),
                 image: image.clone(),
+                assets: assets.clone(),
                 user: *user,
                 needs: needs.clone(),
                 at: at.clone(),
             });
             let runtime_at = at.token("runtime");
             match runtime {
-                ir::Runtime::Agent(agent) => self.agent(runtime_at.token("agent"), id, agent),
+                ir::Runtime::Agent(agent) => {
+                    self.agent(runtime_at.token("agent"), id, agent, assets);
+                }
                 ir::Runtime::Target(target) => self.target(&runtime_at.token("target"), id, target),
                 ir::Runtime::Runner(runner) => self.runner(&runtime_at.token("runner"), id, runner),
             }
@@ -131,7 +136,40 @@ impl<'ir> Parser<'ir> {
         }
     }
 
-    fn agent(&mut self, at: JsonPointer, role: RoleId, runtime: &'ir ir::AgentRuntime) {
+    fn assets(&mut self, role: &JsonPointer, assets: &[ir::Asset]) {
+        let at = |index: usize| role.token("assets").token(index);
+        for (index, ir::Asset { path, files: _ }) in assets.iter().enumerate() {
+            let overlaps = |other: &ir::Asset| {
+                other.path.holds(path.as_str()) || path.holds(other.path.as_str())
+            };
+            let Some(other) = assets[..index].iter().position(overlaps) else {
+                continue;
+            };
+            let (other_path, other_at) = (&assets[other].path, at(other));
+            let message = if other_path == path {
+                format!("`{path}` is also the path of {other_at}: hold an asset at each path once")
+            } else {
+                let relation = if other_path.holds(path.as_str()) {
+                    "is below"
+                } else {
+                    "holds"
+                };
+                format!(
+                    "`{path}` {relation} `{other_path}`, the path of {other_at}: hold each asset \
+                     outside the others"
+                )
+            };
+            self.errors.report(at(index).token("path"), message);
+        }
+    }
+
+    fn agent(
+        &mut self,
+        at: JsonPointer,
+        role: RoleId,
+        runtime: &'ir ir::AgentRuntime,
+        assets: &[ir::Asset],
+    ) {
         let ir::AgentRuntime {
             command,
             dirs,
@@ -142,7 +180,7 @@ impl<'ir> Parser<'ir> {
             egress,
             grants: _,
         } = runtime;
-        self.agent_paths(&at, dirs, files);
+        self.agent_paths(&at, dirs, files, assets);
         let model = egress.model.clone();
         let mut dirs = dirs.clone();
         dirs.sort_by(|a, b| a.path.cmp(&b.path));
@@ -158,7 +196,13 @@ impl<'ir> Parser<'ir> {
         self.agents.push(DeclaredAgent { at, agent, runtime });
     }
 
-    fn agent_paths(&mut self, runtime: &JsonPointer, dirs: &[ir::Dir], files: &[ir::File]) {
+    fn agent_paths(
+        &mut self,
+        runtime: &JsonPointer,
+        dirs: &[ir::Dir],
+        files: &[ir::File],
+        assets: &[ir::Asset],
+    ) {
         let file_paths = files.iter().map(|file| &file.path);
         let all: Vec<&RolePath> = dirs.iter().map(|dir| &dir.path).chain(file_paths).collect();
         let at = |index: usize| match index.checked_sub(dirs.len()) {
@@ -168,17 +212,30 @@ impl<'ir> Parser<'ir> {
         for (index, path) in all.iter().enumerate() {
             let earlier = all[..index].iter().position(|earlier| earlier == path);
             let file = (dirs.len()..all.len()).find(|&file| path.is_below(all[file]));
-            let message = match (earlier, file) {
-                (Some(earlier), _) => {
+            // The role's sandboxes hold each asset read-only, so nothing can be put there.
+            let asset = assets.iter().find(|asset| asset.path.holds(path.as_str()));
+            let message = match (earlier, file, asset) {
+                (Some(earlier), _, _) => {
                     let earlier = at(earlier);
                     format!("`{path}` is also the path of {earlier}: put each path once")
                 }
-                (None, Some(file)) => format!(
+                (None, Some(file), _) => format!(
                     "`{path}` is below `{}`, the file at {}: put it in a directory",
                     all[file],
                     at(file)
                 ),
-                (None, None) => continue,
+                (None, None, Some(asset)) => {
+                    let at = if asset.path.as_str() == path.as_str() {
+                        String::from("is")
+                    } else {
+                        format!("is below `{}`,", asset.path)
+                    };
+                    format!(
+                        "`{path}` {at} where the role holds an asset read-only: put it outside \
+                         every asset"
+                    )
+                }
+                (None, None, None) => continue,
             };
             self.errors.report(at(index).token("path"), message);
         }

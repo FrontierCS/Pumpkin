@@ -523,7 +523,7 @@ workflow(
 )
 "#,
         &expect![[r#"
-            bad/status/task.star:5:37: `status` is no field of an element of `roles`: expected one of `name`, `image`, `user`, `needs`, `runtime`
+            bad/status/task.star:5:37: `status` is no field of an element of `roles`: expected one of `name`, `image`, `assets`, `user`, `needs`, `runtime`
                 5 |     roles = [AGENT, FINAL_TARGET | {"status": "ready"}],
                   |                                     ^^^^^^^^
                 the IR's /roles/1"#]],

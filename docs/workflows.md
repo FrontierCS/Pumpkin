@@ -31,6 +31,10 @@ The run places the role by those needs ([providers](providers.md#placing-a-run))
 A body names a container with `container`, as [Bodies](#bodies) shows.
 [`examples/companions`](../examples/companions/task.star) starts a service in each.
 
+A role may declare [`assets`](../crates/schema/src/ir/asset.rs): pinned files that each sandbox
+holds read-only in `main`. Such a role fits only a class that holds assets, as
+[Docker's](providers.md#the-docker-provider) does.
+
 Every sandbox has `/pumpkin`, which holds Pumpkin's own files. The `schema` crate's
 [`sandbox`](../crates/schema/src/sandbox.rs) module lays them out:
 

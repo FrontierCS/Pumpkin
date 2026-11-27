@@ -28,7 +28,7 @@ use aws::{Bound, Cli, Region, Repository, RepositoryName, RoleArn};
 use engine::{Platform, Pusher};
 use identity::Documents;
 use provider::{
-    Admits, Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready,
+    Admits, Assets, Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready,
     Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
 use schema::ec2_boot::{BOOT_IN_IMAGE, SANDBOXD_IN_IMAGE};
@@ -90,6 +90,7 @@ impl Settings {
                 cpu_features: class.cpu_features.clone(),
                 cpu_model: class.cpu_model.clone(),
                 companions: false,
+                assets: false,
             };
             let class = Class {
                 offers,
@@ -375,6 +376,10 @@ impl Provider for Ec2<'_> {
     // An instance reaches the gateway's host only on the envelope's network.
     fn meeting(&self) -> Meeting<'_> {
         Meeting::Private(self)
+    }
+
+    fn assets(&self) -> Option<&dyn Assets> {
+        None
     }
 
     fn console(&self, run: &RunTag, id: &SandboxId) -> Result<Console, String> {

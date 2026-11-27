@@ -74,7 +74,8 @@ pub use record::{
     writer,
 };
 use record::{Lock, Payloads};
-use sandbox::{Capacity, Listening, Published, Sandboxes, listening};
+pub use sandbox::fits;
+use sandbox::{Capable, Capacity, Published, Sandboxes, capable};
 
 // The longest the loop waits on its inbox before it looks for a signal: a stop that comes this
 // late goes unnoticed by the person who asked for it, and the loop wakes for it at most 20 times a
@@ -91,24 +92,6 @@ pub struct Recorded<'a> {
     pub sources: &'a BTreeMap<Label, String>,
 }
 
-/// Fails if a provider could never hold the roles that `placed` places on it, whatever other runs
-/// hold.
-///
-/// It names the provider and says why, as [`Provider::fits`] does, and holds nothing. `providers`
-/// holds each provider that `placed` names.
-// A request that no resources could ever satisfy is refused as it is made, as Slurm fails a job
-// whose request has a fundamental flaw:
-// https://github.com/SchedMD/slurm/blob/4e8cf4192ade61024f04a1d466d4f97456d178bf/src/slurmctld/job_mgr.c#L5588-L5599
-pub fn fits(placed: &Placed, providers: &ByProvider<&dyn Provider>) -> Result<(), String> {
-    listening(placed, providers)?;
-    let capacity = Capacity::of(placed.workflow())?;
-    placed.by_provider(|name| {
-        let phases = capacity.phases(placed, name);
-        (providers.get(name).fits(&phases)).context(format_args!("provider `{name}`"))
-    })?;
-    Ok(())
-}
-
 /// The upstreams that serve each role's model route, one for each entry in the route's order, and
 /// the budgets that bound what the roles spend through them ([`budgets`]).
 pub struct ModelRoutes<'s> {
@@ -122,7 +105,7 @@ pub struct Run<'r, H> {
     host: &'r H,
     placed: Placed,
     providers: ByProvider<&'r dyn Provider>,
-    listening: Listening<'r>,
+    capable: Capable<'r>,
     routes: ByRole<Vec<Serving>>,
     budgets: Budgets,
     prices: &'r BTreeMap<ModelName, TokenPrices>,
@@ -157,7 +140,7 @@ impl<'r, H: Host> Run<'r, H> {
         } = recorded;
         let ModelRoutes { servings, budgets } = models;
         let routes = model::routes(placed.workflow(), servings)?;
-        let listening = listening(&placed, &providers)?;
+        let capable = capable(&placed, &providers)?;
         let capacity = Capacity::of(placed.workflow())?;
         let reserved = placed.by_provider(|name| {
             let phases = capacity.phases(&placed, name);
@@ -171,7 +154,7 @@ impl<'r, H: Host> Run<'r, H> {
             host,
             placed,
             providers,
-            listening,
+            capable,
             routes,
             budgets,
             prices,
@@ -240,13 +223,13 @@ impl<'r, H: Host> Run<'r, H> {
         let host = self.host;
         let provided = record::provided(&self.placed, &self.providers, &self.routes, self.prices);
         record::write_json(host, &self.dir, "provider.json", &provided)?;
-        let published = Published::create(
+        let (published, published_assets) = Published::create(
+            &self.id,
             &self.providers,
             &self.placed,
-            &self.listening,
+            &self.capable,
             sandboxd,
-            private,
-            dialer,
+            (private, dialer),
             &self.dir,
         )?;
         // A run interrupted as it publishes never starts, so nothing tells of a start that the
@@ -265,7 +248,7 @@ impl<'r, H: Host> Run<'r, H> {
             host,
             inbox.sender(),
         );
-        let log = Log::create(host, clock.clone(), &self.dir)?;
+        let log = Log::create(host, clock.clone(), &self.dir, published_assets)?;
         let mut runtime = Runtime {
             placed: &self.placed,
             routes: &self.routes,

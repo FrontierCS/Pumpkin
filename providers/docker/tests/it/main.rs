@@ -9,6 +9,8 @@
 )]
 #![expect(clippy::disallowed_methods, reason = "nextest bounds each test")]
 
+mod assets;
+
 use std::collections::BTreeSet;
 use std::fs::DirBuilder;
 use std::num::{NonZeroU32, NonZeroU64};
@@ -19,7 +21,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant, SystemTime};
 use std::{env, fs, thread};
 
-use docker::Docker;
+use docker::{AssetCache, Docker};
 use engine::{BuildContext, ContextName, Engine, Recipe, Security};
 use expect_test::{Expect, expect};
 use gateway::{Arrival, IncomingModelRequest, Op, Process, Put, Registration, Session, Sockets};
@@ -216,7 +218,12 @@ fn reached() -> &'static Result<Engine, String> {
 
 fn connected() -> &'static Result<Docker<'static>, String> {
     static PROVIDER: OnceLock<Result<Docker<'static>, String>> = OnceLock::new();
-    PROVIDER.get_or_init(|| Docker::connect(reached().as_ref().map_err(String::clone)?))
+    PROVIDER.get_or_init(|| Docker::connect(reached().as_ref().map_err(String::clone)?, cache()))
+}
+
+// Shared by every run of the tests, as a machine's runs share their workspace's.
+fn cache() -> AssetCache {
+    AssetCache::new(&Path::new(env!("CARGO_TARGET_TMPDIR")).join("assets"))
 }
 
 // Shared by every run of the tests, as a machine's runs share their workspace's.
@@ -719,7 +726,7 @@ struct Platform;
 
 impl Subject for Platform {
     fn connect(&self) -> Result<Box<dyn Provider + '_>, String> {
-        Ok(Box::new(Docker::connect(engine())?))
+        Ok(Box::new(Docker::connect(engine(), cache())?))
     }
 
     fn locals(&self, dir: &Path) -> Locals {

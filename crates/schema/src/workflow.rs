@@ -14,8 +14,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::ir::{
-    AbsolutePath, Command, Companion, CpuFlag, CpuModel, Dir, Env, File, Gpu, Image, JsonPointer,
-    ModelRoute, Name, Needs, TargetLifetime, User, WorkflowName,
+    AbsolutePath, Asset, Command, Companion, CpuFlag, CpuModel, Dir, Env, File, Gpu, Image,
+    JsonPointer, ModelRoute, Name, Needs, TargetLifetime, User, WorkflowName,
 };
 use crate::sandbox::OpPayloadLimit;
 
@@ -254,8 +254,7 @@ impl From<UsdPerHour> for f64 {
 /// What a class of sandbox offers the roles of its sandboxes, as its provider states it.
 ///
 /// It is the most CPU and memory that a role may need, its GPUs, and its CPU's flags and model,
-/// which a role's [needs](crate::ir::Needs) are matched against, and whether its sandboxes hold a
-/// runner's companions ([`Workflow::place`]).
+/// which a role's [needs](crate::ir::Needs) are matched against ([`Workflow::place`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Offers {
     /// In thousandths of a CPU.
@@ -269,6 +268,8 @@ pub struct Offers {
     /// Whether each sandbox holds a runner's companions beside its own container
     /// ([`ir::RunnerRuntime::companions`](crate::ir::RunnerRuntime::companions)).
     pub companions: bool,
+    /// Whether each sandbox holds a role's assets ([`ir::Role::assets`](crate::ir::Role::assets)).
+    pub assets: bool,
 }
 
 /// A value for each provider that a [`Placed`] workflow places a role on: what its placing gave
@@ -378,10 +379,19 @@ pub enum JobOf {
 pub struct Sandbox {
     pub name: Name,
     pub image: Image,
+    /// See [`ir::Role::assets`](crate::ir::Role::assets), whose rules they keep.
+    pub assets: Vec<Asset>,
     pub user: User,
     pub needs: Needs,
     /// The role's place in the IR, where placing it reports what is wrong.
     pub(crate) at: JsonPointer,
+}
+
+impl Sandbox {
+    /// The role's place in the IR, such as `/roles/1`.
+    pub fn at(&self) -> &JsonPointer {
+        &self.at
+    }
 }
 
 /// The agent role; see [`ir::AgentRuntime`](crate::ir::AgentRuntime), whose rules its `dirs`

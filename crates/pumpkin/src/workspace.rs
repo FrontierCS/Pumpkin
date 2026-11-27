@@ -80,6 +80,10 @@ impl Workspace {
         self.0.join("docker")
     }
 
+    pub(crate) fn docker_assets(&self) -> PathBuf {
+        self.0.join("assets")
+    }
+
     pub(crate) fn ec2(&self) -> PathBuf {
         self.0.join("ec2")
     }

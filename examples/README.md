@@ -8,6 +8,7 @@
 | [Team](team/README.md) | Two Codex agents write C++ hypergraph solvers, exchange a test graph and evaluate their source. A scripted version runs without a model. |
 | [Native hypergraph benchmark](hypergraph-benchmark/README.md) | Five Codex agents develop C++ with a shared board, native training feedback and a timed final judge. Includes a model-free replay of their selections. |
 | [Smoke](smoke/task.star) | A deployment check probes sandbox confinement in the agent, a runner lease and the judge. No model required. |
+| [Assets](assets/task.star) | The final call leases a runner that holds pinned files read-only. It checks their SHA-256s, that each write there fails, and that a fresh lease sees them unchanged. No model required. It needs a provider whose classes hold assets, as Docker's do. |
 | [Companions](companions/task.star) | The final call leases a runner with as many companions as `--arg companions=<n>` says, on the needs that its args give. It checks each container's user, that they reach one another by name and no public address, and times their round trips. No model required. It needs a provider whose classes offer companions, as Modal's do. |
 
 Run them in place, from the root of a Pumpkin checkout. `cargo xtask build` builds `pumpkin`

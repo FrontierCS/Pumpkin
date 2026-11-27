@@ -908,6 +908,8 @@ fn examples() {
         false,
         &[],
         &expect![[r#"
+            $ pumpkin check assets/task.star
+            exit status: Some(0)
             $ pumpkin check codex/task.star --arg model=model-a
             exit status: Some(0)
             $ pumpkin check companions/task.star

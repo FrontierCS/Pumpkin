@@ -12,10 +12,10 @@
 //! `observed_ns` only if the runtime timed it. The first line is `run_started`, observed at 0.
 //!
 //! Every `..._ns` is a string of decimal digits, a count of nanoseconds. Most are times since the
-//! run started. Two are durations: `timeout_ns` and a phase's `took_ns`. The `unix_ns` of
-//! `run_started` is a time since the Unix epoch, by the driving machine's clock. `u64::MAX` stands
-//! for anything longer. Grants appear by name, jobs, ops and leases by number, payloads by size
-//! and digest, and a `caller` or `holder` as `agent-<role index>` or `job-<n>`.
+//! run started. Durations are `timeout_ns`, and a phase's or an `asset_published`'s `took_ns`. The
+//! `unix_ns` of `run_started` is a time since the Unix epoch, by the driving machine's clock.
+//! `u64::MAX` stands for anything longer. Grants appear by name, jobs, ops and leases by number,
+//! payloads by size and digest, and a `caller` or `holder` as `agent-<role index>` or `job-<n>`.
 //!
 //! The runtime syncs a line and all preceding lines before acting on it, including delivering a
 //! runner receipt to a body. Other lines last with the next sync. The run's end syncs the log
@@ -34,7 +34,7 @@ use decision::{
     Action, Caller, Effect, Evaluated, Event, JobId, Outcome, PayloadRef, Request, Unevaluated,
 };
 use gateway::RefusedOp;
-use provider::{Phase, UnixTime};
+use provider::{AssetDigest, Phase, UnixTime};
 use route::{Answer, Bar, Usage};
 use schema::ir::{AbsolutePath, Api, Argv, Container, GpuModel, Name};
 use schema::sandbox::op::{CommandEnd, OpReply, SessionOp};
@@ -76,10 +76,17 @@ pub(super) struct Log<'h, H: Host> {
     seq: u64,
     host: &'h H,
     clock: H::Clock,
+    published: Vec<AssetPublished>,
 }
 
 impl<'h, H: Host> Log<'h, H> {
-    pub(super) fn create(host: &'h H, clock: H::Clock, dir: &Path) -> Result<Self, String> {
+    /// `published` waits for [`start`](Self::start), as `run_started` is the log's first line.
+    pub(super) fn create(
+        host: &'h H,
+        clock: H::Clock,
+        dir: &Path,
+        published: Vec<AssetPublished>,
+    ) -> Result<Self, String> {
         let path = dir.join("log.jsonl");
         let file = OpenOptions::new()
             .append(true)
@@ -94,6 +101,7 @@ impl<'h, H: Host> Log<'h, H> {
             seq: 0,
             host,
             clock,
+            published,
         })
     }
 
@@ -109,7 +117,23 @@ impl<'h, H: Host> Log<'h, H> {
             "unix_ns": nanos(unix.since_epoch()),
             "hard_end_ns": nanos(hard_end),
         });
-        self.decided(workflow, Duration::ZERO, event, actions, false)
+        self.decided(workflow, Duration::ZERO, event, actions, false)?;
+        for AssetPublished {
+            provider,
+            digest,
+            fetched,
+            took,
+        } in std::mem::take(&mut self.published)
+        {
+            self.told(json!({
+                "kind": "asset_published",
+                "provider": provider,
+                "digest": digest.to_string(),
+                "fetched": fetched,
+                "took_ns": nanos(took),
+            }))?;
+        }
+        Ok(())
     }
 
     pub(super) fn event(
@@ -437,6 +461,13 @@ impl<'h, H: Host> Log<'h, H> {
             .sync(&self.file, Durable::Data)
             .context(self.path.display())
     }
+}
+
+pub(super) struct AssetPublished {
+    pub(super) provider: Name,
+    pub(super) digest: AssetDigest,
+    pub(super) fetched: bool,
+    pub(super) took: Duration,
 }
 
 pub(super) enum Entry {

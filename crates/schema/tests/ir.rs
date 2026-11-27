@@ -175,6 +175,7 @@ fn offered() -> BTreeMap<ir::Name, BTreeMap<ir::Name, Class>> {
         cpu_features: flags(&["avx2", "sse4_2"]),
         cpu_model: None,
         companions: false,
+        assets: false,
     };
     let h100 = |count, cpus, memory_gib| {
         let model = valid("NVIDIA H100 80GB HBM3");
@@ -1485,6 +1486,116 @@ fn agent_files() {
     );
 }
 
+fn asset_file(path: &str, digit: char) -> Value {
+    json!({
+        "path": path, "url": format!("https://example.com/{digit}"), "size": 963,
+        "sha256": format!("sha256:{}", digit.to_string().repeat(64)),
+    })
+}
+
+fn holding(path: &str, files: Value) -> Value {
+    let mut asset = json!({ "path": path });
+    asset["files"] = files;
+    fixture_with("/roles/1/assets", json!([asset]))
+}
+
+#[test]
+fn asset_values() {
+    let one = || json!([asset_file("config.json", 'a')]);
+    let at_url = |url: &str| {
+        let mut file = asset_file("a", 'a');
+        file["url"] = json!(url);
+        holding("/opt/model", json!([file]))
+    };
+    let many = |count: usize| {
+        let files = (0..count).map(|index| asset_file(&index.to_string(), 'a'));
+        holding("/opt/model", files.collect())
+    };
+    check(
+        [
+            holding(
+                "/opt/model",
+                json!([
+                    asset_file("config.json", 'a'),
+                    asset_file("shards/1.bin", 'b')
+                ]),
+            ),
+            holding("/usr", one()),
+            holding("/pumpkin/model", one()),
+            holding("/dev/shm", one()),
+            holding("/proc", one()),
+            holding("/opt/model", json!([])),
+            many(100_001),
+            holding("/opt/model", json!([asset_file("a\nb", 'a')])),
+            holding(
+                "/opt/model",
+                json!([asset_file("a", 'a'), asset_file("a", 'b')]),
+            ),
+            holding(
+                "/opt/model",
+                json!([asset_file("a", 'a'), asset_file("a/b", 'b')]),
+            ),
+            at_url("http://example.com/a"),
+            at_url("https://user:secret@example.com/a"),
+            at_url("https://example.com/a b"),
+            at_url("https:///a"),
+            at_url(&format!("https://example.com/{}", "a".repeat(7981))),
+        ],
+        &expect![[r#"
+            parsed
+            parsed
+            `/pumpkin/model` is in `/pumpkin`, which holds Pumpkin's own files: name a path outside it
+            `/dev/shm` is in `/dev`, which the sandbox's kernel serves: hold the asset outside it
+            `/proc` is in `/proc`, which the sandbox's kernel serves: hold the asset outside it
+            the asset holds no file: give one at least
+            the asset holds 100001 files: give at most 100000
+            `a\nb` holds a newline: give the file a path without one
+            `a` is the path of more than one file: give each file a path of its own
+            `a/b` is below `a`, which is a file of the asset: put it in a directory
+            `http://example.com/a` isn't an `https://` URL: give an `https://` URL with a host, no user, no whitespace and at most 8000 bytes
+            `https://user:secret@example.com/a` names a user: give an `https://` URL with a host, no user, no whitespace and at most 8000 bytes
+            `https://example.com/a b` holds whitespace or a control character: give an `https://` URL with a host, no user, no whitespace and at most 8000 bytes
+            `https:///a` names no host: give an `https://` URL with a host, no user, no whitespace and at most 8000 bytes
+            `https://example.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa…` is 8001 bytes long: give an `https://` URL with a host, no user, no whitespace and at most 8000 bytes"#]],
+    );
+}
+
+#[test]
+fn asset_paths() {
+    let assets = |assets: Value| fixture_with("/roles/0/assets", assets);
+    let asset =
+        |path: &str, digit: char| json!({ "path": path, "files": [asset_file("a", digit)] });
+    check(
+        [
+            assets(json!([asset("/opt/a", 'a'), asset("/opt/b", 'b')])),
+            assets(json!([asset("/opt/a", 'a'), asset("/opt/a", 'b')])),
+            assets(json!([asset("/opt/a", 'a'), asset("/opt/a/b", 'b')])),
+            assets(json!([asset("/opt/a/b", 'a'), asset("/opt/a", 'b')])),
+            assets(json!([
+                asset("/workspace/.tmp", 'a'),
+                asset("/workspace/.codex/x", 'a')
+            ])),
+            assets(json!([asset("/workspace", 'a')])),
+        ],
+        &expect![[r#"
+            parsed
+            error: `/opt/a` is also the path of /roles/0/assets/0: hold an asset at each path once
+              --> roles[0].assets[1].path
+            error: `/opt/a/b` is below `/opt/a`, the path of /roles/0/assets/0: hold each asset outside the others
+              --> roles[0].assets[1].path
+            error: `/opt/a` holds `/opt/a/b`, the path of /roles/0/assets/0: hold each asset outside the others
+              --> roles[0].assets[1].path
+            error: `/workspace/.tmp` is where the role holds an asset read-only: put it outside every asset
+              --> roles[0].runtime.agent.dirs[1].path
+            error: `/workspace/.codex` is below `/workspace`, where the role holds an asset read-only: put it outside every asset
+              --> roles[0].runtime.agent.dirs[0].path
+            error: `/workspace/.tmp` is below `/workspace`, where the role holds an asset read-only: put it outside every asset
+              --> roles[0].runtime.agent.dirs[1].path
+            error: `/workspace/.codex/config.toml` is below `/workspace`, where the role holds an asset read-only: put it outside every asset
+              --> roles[0].runtime.agent.files[0].path"#]],
+    );
+}
+
 #[test]
 fn broken_references() {
     let mut ir = workflow();
@@ -1703,18 +1814,12 @@ impl Case for Accompanying {
         let companions = (0..self.companions).map(|index| companion(&format!("c{index}"), '4'));
         let mut ir = accompanied(companions.collect());
         ir["roles"][3]["needs"] = self.needs.clone();
-        let ir = serde_json::from_value::<ir::Workflow>(ir).unwrap();
-        let placed = Workflow::parse(&ir)
-            .unwrap()
-            .place(self.offered, |classes| classes);
-        let at = match placed {
-            Ok((placed, _)) => {
-                let (runner, _) = placed.workflow().roles().nth(3).unwrap();
-                let placement = placed.placement(runner);
-                format!("`{}` `{}`", placement.provider, placement.class)
-            }
-            Err(errors) => errors.to_string(),
-        };
+        let at = Holding {
+            ir,
+            role: 3,
+            offered: self.offered,
+        }
+        .outcome();
         format!("{} with {}: {at}", self.needs, self.companions)
     }
 }
@@ -1799,6 +1904,75 @@ fn placed_companions() {
               --> roles[3].needs: 0.5 CPUs, 1.0 GiB, 1 × `NVIDIA H100 80GB HBM3`
               = no class is offered
               = help: add a class with 1 × `NVIDIA H100 80GB HBM3`, and at least 0.5 CPUs and 1.0 GiB"#]],
+    );
+}
+
+struct Holding {
+    ir: Value,
+    role: usize,
+    offered: BTreeMap<ir::Name, BTreeMap<ir::Name, Class>>,
+}
+
+impl Case for Holding {
+    fn outcome(self) -> String {
+        let ir = serde_json::from_value::<ir::Workflow>(self.ir).unwrap();
+        let placed = Workflow::parse(&ir)
+            .unwrap()
+            .place(self.offered, |classes| classes);
+        match placed {
+            Ok((placed, _)) => {
+                let (role, _) = placed.workflow().roles().nth(self.role).unwrap();
+                let placement = placed.placement(role);
+                format!("`{}` `{}`", placement.provider, placement.class)
+            }
+            Err(errors) => errors.to_string(),
+        }
+    }
+}
+
+fn holding_assets(
+    mut offered: BTreeMap<ir::Name, BTreeMap<ir::Name, Class>>,
+    classes: &[(&str, &str)],
+) -> BTreeMap<ir::Name, BTreeMap<ir::Name, Class>> {
+    for (provider, class) in classes {
+        let class = offered
+            .get_mut(&valid::<ir::Name>(provider))
+            .and_then(|classes| classes.get_mut(&valid::<ir::Name>(class)))
+            .unwrap();
+        class.offers.assets = true;
+    }
+    offered
+}
+
+#[test]
+fn placed_assets() {
+    let asset = |path: &str| json!({ "path": path, "files": [asset_file("config.json", 'a')] });
+    let trainer = || holding("/opt/model", json!([asset_file("config.json", 'a')]));
+    let mut runner = accompanied(json!([companion("scheduler", '4')]));
+    runner["roles"][3]["assets"] = json!([asset("/opt/a"), asset("/opt/b")]);
+    runner["roles"][3]["needs"] = json!({ "cpu_millis": 500, "memory_bytes": 1 << 30 });
+    let on = |ir: Value, role: usize, offered| Holding { ir, role, offered };
+    check(
+        [
+            on(trainer(), 1, holding_assets(offered(), &[("aws", "judge")])),
+            on(trainer(), 1, holding_assets(offered(), &[("gpus", "h100")])),
+            on(trainer(), 1, offered()),
+            on(runner, 3, holding_assets(with_cpu(), &[("aws", "judge")])),
+        ],
+        &expect![[r#"
+            `aws` `judge`
+            error: role `trainer` declares assets, and no class that fits its needs holds them
+              --> roles[1].assets: 1 asset at `/opt/model`
+              = help: declare none,
+                      or change its needs to fit a class that holds them
+            error: role `trainer` declares assets, and no class of sandbox holds them
+              --> roles[1].assets: 1 asset at `/opt/model`
+              = help: declare none,
+                      or run it where a class holds them
+            error: role `gpu` declares assets, and no class that fits its needs and holds its companions holds them
+              --> roles[3].assets: 2 assets at `/opt/a`, `/opt/b`
+              = help: declare none,
+                      or change its needs to fit a class that holds them"#]],
     );
 }
 

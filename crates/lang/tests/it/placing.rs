@@ -35,6 +35,7 @@ fn check(fixture: &str, expect: &Expect) {
                 cpu_features: BTreeSet::new(),
                 cpu_model: None,
                 companions: false,
+                assets: false,
             },
             startup_seconds: NonZeroU64::new(60).unwrap(),
             usd_per_hour: None,
