@@ -1,5 +1,6 @@
-//! The asset cache's fetch, from a stand-in HTTPS server behind the stand-in TLS edge
-//! ([`test_support::edge`]), on the loopback. A file's server is HTTP's documented API.
+//! The asset cache's fetch over HTTPS, on the loopback, from a stand-in server behind the
+//! stand-in TLS edge ([`test_support::edge`]). The server behind the edge answers plain HTTP/1.1
+//! `GET`, a documented API that the cache speaks as a client, as `docs/dev/testing.md` allows.
 
 use std::fs::{DirBuilder, Permissions};
 use std::io::{BufReader, Write as _};

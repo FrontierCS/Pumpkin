@@ -15,31 +15,34 @@ use sha2::{Digest as _, Sha256};
 use stdx::{Context as _, Deadline};
 use ureq::tls::{Certificate, RootCerts, TlsConfig};
 
-/// How long a fetch may take to resolve a server's name, and then to connect to it, its TLS
-/// handshake included.
-// As long as cargo gives a download's connect:
+// Name resolution and the connect, its TLS handshake included, each get this long. So each
+// connection may take 60 s to set up. A redirect's connection gets fresh budgets:
+// https://github.com/algesten/ureq/blob/33ca9d35e97b6a10e767fb0fa3139f01d315e89c/src/lib.rs#L101-L104
+// Cargo gives a download's connect 30 s, which in libcurl covers name resolution too:
 // https://github.com/rust-lang/cargo/blob/ecb9851afd3095e988daaa35a48bc7f3cb748e04/src/cargo/util/network/http.rs#L202-L226
+// https://github.com/curl/curl/blob/b1ef0e1a01c0bb6ee5367bd9c186a603bde3615a/docs/libcurl/opts/CURLOPT_CONNECTTIMEOUT.md?plain=1#L30-L34
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How long a fetch may wait on any one read of its response.
-// As long as cargo lets a download stall, below 10 bytes a second, at the lines above.
+// The longest that one read of a response may wait. Cargo waits as long on a download below 10
+// bytes a second, at the lines above. A server that sends a byte now and then passes this bound,
+// and `FETCH_TIMEOUT` ends its fetch.
 const STALL_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How long a fetch of an asset's files may take in all.
-// Sized only to turn a server that trickles into a failure, as the engine's push timeout is. At
-// 10 MiB a second, it admits 70 GiB.
+// It bounds the fetch of all of an asset's files together. It is sized only to end the fetch of a
+// server that trickles, as the engine's `PUSH_TIMEOUT` ends a push that hangs. At 10 MiB a
+// second, it admits 70 GiB.
 const FETCH_TIMEOUT: Duration = Duration::from_hours(2);
 
-/// The most redirects that a fetch follows.
 // As many as Bazel's downloader follows:
 // https://github.com/bazelbuild/bazel/blob/06deebfb5b73f848de5a0ea0e00fcfaa26788d1f/src/main/java/com/google/devtools/build/lib/bazel/repository/downloader/HttpConnector.java#L56
 const MAX_REDIRECTS: u32 = 40;
 
-/// The cache of the files of the assets that the provider's sandboxes hold, on the machine, and
-/// the servers that it fetches them from.
+/// The cache, on the machine, of the files of the assets that the provider's sandboxes hold, and
+/// the HTTPS client that fetches them.
 ///
-/// Processes may share its directory. A publish fetches a digest's files only if no earlier
-/// publish did, and never names an entry whose files aren't all as pinned.
+/// Processes may share the cache's directory. A digest's files are fetched once, however many
+/// publishes of it run, at once or later. A publish that succeeds returns a directory that holds
+/// each of the digest's files, read-only and as pinned.
 #[derive(Debug)]
 pub struct AssetCache {
     dir: PathBuf,
@@ -66,8 +69,9 @@ impl AssetCache {
             // A redirect may lead to another server, but never off `https`.
             .https_only(true)
             .max_redirects(MAX_REDIRECTS)
-            // Runs are hermetic: otherwise a proxy that the environment names would carry each
-            // fetch.
+            // The fetch ignores the proxy that ureq takes by default from `ALL_PROXY`,
+            // `HTTPS_PROXY` or `HTTP_PROXY`. So the driver's environment doesn't decide where a
+            // run's fetches go.
             .proxy(None)
             .timeout_resolve(Some(CONNECT_TIMEOUT))
             .timeout_connect(Some(CONNECT_TIMEOUT))
@@ -127,7 +131,7 @@ impl AssetCache {
                  SHA-256 of the file that the URL serves"
             ));
         }
-        // So that a crash once the entry is named leaves none of its files short.
+        // So that a crash after the rename to the entry leaves no file short.
         written.sync_all().context(to.display())?;
         // Read-only, as the mount is: a second guard, should the mount's flag ever fail, against a
         // sandbox's user that isn't the file's owner.
@@ -167,17 +171,25 @@ impl Assets for AssetCache {
             .recursive(true)
             .create(&self.dir);
         made.context(self.dir.display())?;
-        // The wait for the lock is unbounded, as Go's module cache waits for its lockfile. Its
-        // holder's fetch is bounded by `FETCH_TIMEOUT`, and the kernel releases the lock of a
-        // killed holder.
-        // https://github.com/golang/go/blob/46b62495e1bf4d56e0313320772ae588d9119aed/src/cmd/go/internal/modfetch/fetch.go#L218-L234
+        // The wait for the lock has no bound, as Go's module cache waits on its own lock:
+        // https://github.com/golang/go/blob/46b62495e1bf4d56e0313320772ae588d9119aed/src/cmd/go/internal/modfetch/fetch.go#L183
+        // https://github.com/golang/go/blob/46b62495e1bf4d56e0313320772ae588d9119aed/src/cmd/go/internal/modfetch/cache.go#L149-L158
+        // The holder's downloads end within `FETCH_TIMEOUT`. `File::lock` is `flock(2)`, whose lock
+        // ends once its descriptor and every copy of it are closed:
+        // https://github.com/rust-lang/rust/blob/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/fs.rs#L825-L830
+        // The kernel closes a process's descriptors as it ends, however it ends. Rust opens each
+        // file close-on-exec, so no child process holds a copy:
+        // https://github.com/rust-lang/rust/blob/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/sys/fs/unix.rs#L1233
         let lock = self.dir.join(format!(".{}.lock", digest.hex()));
         let lock = (OpenOptions::new().create(true).truncate(false).write(true))
             .mode(0o600)
             .open(&lock)
             .and_then(|file| file.lock().map(|()| file))
             .context(lock.display())?;
-        // Only a fetch that checked each file names an entry.
+        // A publish that held the lock first may have made the entry while this one waited. Only
+        // a fetch that checked each file renames its staging directory to the entry. Go checks
+        // again after its wait too:
+        // https://github.com/golang/go/blob/46b62495e1bf4d56e0313320772ae588d9119aed/src/cmd/go/internal/modfetch/fetch.go#L192-L197
         if fs::exists(&entry).context(entry.display())? {
             return Ok(PublishedAsset {
                 reference,
@@ -188,7 +200,10 @@ impl Assets for AssetCache {
             dir: self.dir.join(format!(".{}.part", digest.hex())),
             _lock: lock,
         };
-        // A staging directory that the lock's holder finds is a dead fetch's.
+        // Only the lock's holder writes a staging directory. So one that the holder finds was left
+        // by a fetch that died, or whose removal of the directory failed. Go removes a dead
+        // writer's partial directories alike:
+        // https://github.com/golang/go/blob/46b62495e1bf4d56e0313320772ae588d9119aed/src/cmd/go/internal/modfetch/fetch.go#L218-L234
         match remove(&staging.dir) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             removed => removed.context(format_args!("removing {}", staging.dir.display()))?,
@@ -200,8 +215,9 @@ impl Assets for AssetCache {
             let below = Path::new(file.path.as_str()).ancestors().skip(1);
             dirs.extend(below.map(|dir| staging.dir.join(dir)));
         }
-        // Deepest first, so that a crash once the entry is named leaves none of its files out.
-        for dir in dirs.iter().rev() {
+        // Each directory turns read-only, as each file does, and is synced before the rename. So a
+        // crash after the rename leaves no file out of the entry. The loop's order doesn't matter.
+        for dir in &dirs {
             let read_only = fs::set_permissions(dir, Permissions::from_mode(0o555));
             read_only.context(dir.display())?;
             sync(dir)?;
@@ -251,7 +267,7 @@ fn remove(root: &Path) -> io::Result<()> {
     fs::remove_dir_all(root)
 }
 
-/// Syncs the directory at `dir`, so that the entries made or renamed in it last.
+/// Syncs the directory at `dir`, so that the entries made or renamed in it survive a crash.
 fn sync(dir: &Path) -> Result<(), String> {
     let synced = File::open(dir).and_then(|dir| dir.sync_all());
     synced.context(format_args!("syncing {}", dir.display()))

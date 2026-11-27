@@ -4919,8 +4919,8 @@ fn asset_file(base: &str, file: (&str, &[u8], &str)) -> Value {
     json!({ "path": path, "url": url, "size": bytes.len(), "sha256": sha256 })
 }
 
-// Each digest is published once on its provider before the run, whatever roles hold it, from any
-// URL. So are a role's that never starts. Each create holds its role's assets.
+// Each digest is published once on its provider before the run, however many roles hold it and
+// whichever URLs serve its files. Each create holds its role's assets.
 #[test]
 fn holds_each_roles_assets() {
     let model = json!([
@@ -4951,7 +4951,7 @@ fn holds_each_roles_assets() {
         .filter(|line| line.contains("asset_published"))
         .map(|line| {
             let mut line: Value = serde_json::from_str(line).unwrap();
-            // The machine's clock times a publish, on any host.
+            // The machine's clock, which `SimHost` doesn't script, times each publish.
             line["event"]["took_ns"] = json!("<ns>");
             line.to_string()
         });

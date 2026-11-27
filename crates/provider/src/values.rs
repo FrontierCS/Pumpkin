@@ -186,7 +186,6 @@ impl fmt::Display for AssetDigest {
 /// What [`Assets::publish_asset`](crate::Assets::publish_asset) made of an asset's files.
 #[derive(Debug)]
 pub struct PublishedAsset {
-    /// For each create whose sandbox holds the files to name ([`HeldAsset::reference`]).
     pub reference: AssetRef,
     /// Whether this publish fetched the files: false if the provider held them already.
     pub fetched: bool,

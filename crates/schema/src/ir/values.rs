@@ -436,7 +436,13 @@ fn check_role_path(path: &str) -> Result<(), String> {
 
 fn check_asset_path(path: &str) -> Result<(), String> {
     check_role_path(path)?;
-    // The sandbox's kernel serves these, and its container's runtime fills `/dev`.
+    // `runc` refuses a mount below `/proc`, but for a few files that lxcfs emulates:
+    // https://github.com/opencontainers/runc/blob/bc20cb4497af9af01bea4a8044f1678ffca2745c/libcontainer/rootfs_linux.go#L633-L658
+    // The kernel's sysfs makes no directory, so a fresh path below `/sys` has no mount point:
+    // https://github.com/torvalds/linux/blob/adc218676eef25575469234709c2d87185ca223a/fs/sysfs/mount.c#L101-L102
+    // https://github.com/torvalds/linux/blob/adc218676eef25575469234709c2d87185ca223a/fs/kernfs/dir.c#L1240-L1241
+    // An asset at an existing path there would hide the kernel's files. `/dev` holds the
+    // sandbox's devices. The rule refuses a fresh path below `/dev` too, though one would mount.
     let served = ["/dev", "/proc", "/sys"]
         .into_iter()
         .find(|dir| holds(dir, path));

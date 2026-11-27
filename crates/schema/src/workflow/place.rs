@@ -134,8 +134,8 @@ fn smallest<'p>(
     Err(errors.add(assets_unheld(sandbox, classes, change)))
 }
 
-/// That `sandbox`'s role declares assets that no `classes` holds, and that `change` would place
-/// it, or declaring none.
+/// The error that `sandbox`'s role declares assets that no class holds. `classes` says which
+/// classes, such as "class that fits its needs". The help is to declare none, or `change`.
 fn assets_unheld(sandbox: &Sandbox, classes: &str, change: &str) -> ParseError {
     let Sandbox {
         name, assets, at, ..

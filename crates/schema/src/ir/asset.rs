@@ -20,7 +20,8 @@ pub struct Asset {
 /// A digest names them, by which a provider keeps them once for every asset that holds them. It
 /// is `sha256:` and the SHA-256 of one line for each file, in the bytewise order of their paths.
 /// A line is the file's SHA-256 as 64 hexadecimal digits, two spaces, its path and a newline. The
-/// URLs and sizes stay out, as where a file is kept isn't what it is.
+/// URLs stay out, as a file is the same wherever it is served. The sizes stay out, as each
+/// SHA-256 already pins its file's size.
 // The lines are those of Go's module hash, which it hashes again too:
 // https://github.com/golang/mod/blob/b71060237c896c7c9fc602ab66e33ea6079659fa/sumdb/dirhash/hash.go#L30-L65
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,8 +39,8 @@ pub struct AssetFile {
 }
 
 /// The most files that an asset holds.
-// As many as the entries that the host collects from a sandbox in one tree, the most that Pumpkin
-// handles in any tree (`runtime`'s `ENTRIES`). An asset is a tree in each of its sandboxes.
+// The same number as `runtime`'s `ENTRIES`, the most files and directories that the host
+// collects from a sandbox in one tree.
 const MAX_ASSET_FILES: usize = 100_000;
 
 impl AssetFiles {

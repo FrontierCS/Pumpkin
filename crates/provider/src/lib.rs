@@ -113,17 +113,18 @@ pub trait Listens: Creator<ListenDials, Listened> {
     ) -> Result<Vec<ImageRef>, String>;
 }
 
-/// A provider whose sandboxes hold assets ([`Create::assets`]): where they hold one, and what
-/// publishes the files of each.
+/// What a provider whose sandboxes hold assets ([`Create::assets`]) gives from
+/// [`Provider::assets`]: where its sandboxes hold one, and the publish of each asset's files.
 pub trait Assets: Sync {
-    /// Fails, saying why and where it would hold one, if this provider's sandboxes can't hold an
-    /// asset at `path`. Holds nothing.
+    /// Fails if this provider's sandboxes can't hold an asset at `path`, saying why and where they
+    /// could hold it. It reserves nothing.
     fn holds(&self, path: &AssetPath) -> Result<(), String>;
 
     /// Publishes `files`, whose digest is `digest`, so that this provider's sandboxes can hold
-    /// them. It keeps them only if each file's URL gives the file's size and SHA-256. Fails, naming
-    /// the first file that didn't, and then keeps none of them by `digest`. Each sandbox that it
-    /// makes carries `run`'s tag, so that `run`'s [`list`](Sweep::list) finds one that it left.
+    /// them. It keeps them only if the bytes at each file's URL have the file's size and SHA-256.
+    /// Otherwise it fails, naming the first file that didn't. It then keeps none of the files, so
+    /// a later publish of `digest` fetches them all again. A sandbox that it makes to fetch them
+    /// carries `run`'s tag, so that `run`'s [`list`](Sweep::list) finds one left behind.
     fn publish_asset(
         &self,
         run: &RunTag,

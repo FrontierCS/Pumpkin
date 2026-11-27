@@ -13,7 +13,6 @@ use stdx::time::{Clock as _, Machine};
 use crate::log::AssetPublished;
 use crate::{Stopped, interruption};
 
-/// The assets that the sandboxes of each role that declares any hold, by the role.
 pub(super) type Held = BTreeMap<RoleId, Vec<HeldAsset>>;
 
 /// Each role that declares assets, with the provider that it is placed on, which publishes them
@@ -50,8 +49,8 @@ pub(crate) fn holding<'p>(
     Ok(Holding(holding))
 }
 
-/// Each asset of a role that `holding` gives whose provider there can't hold it at its path, at
-/// that path in the IR, with why.
+/// An error for each asset of a role in `holding` whose provider can't hold it at its path. The
+/// error is at that path in the IR, and gives the provider's reason.
 pub(crate) fn unheld(placed: &Placed, holding: &Holding<'_>) -> Vec<ParseError> {
     let workflow = placed.workflow();
     let mut unheld = Vec::new();

@@ -1627,7 +1627,7 @@ dials_from = "203.0.113.7"
 classes.a100 = { gpu = "A100-80GB", gpu_model = "NVIDIA A100-SXM4-80GB", cpu_millis = 8000, memory_bytes = 85899345920, startup_seconds = 1800 }
 "#;
 
-// `examples/assets` holds every fact it checks on Docker.
+// On Docker, every fact that `examples/assets` checks is true, so its final call scores 3 of 3.
 #[test]
 #[ignore = "needs Docker and GitHub: run cargo xtask live docker"]
 fn holds_assets_read_only() {
