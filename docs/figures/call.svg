@@ -34,7 +34,7 @@ text{font:12.5px system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;f
 <rect class="zone" x="256" y="16" width="368" height="284" rx="12"/>
 <text class="zone-label" x="272" y="38">THE DRIVER</text>
 <rect class="box" x="272" y="56" width="336" height="44" rx="8"/>
-<text class="mid" x="440" y="83"><tspan class="code">gateway</tspan><tspan class="note">  one end of each sandbox's session</tspan></text>
+<text class="mid" x="440" y="83"><tspan class="code">gateway</tspan><tspan class="note" dx="8">one end of each container's session</tspan></text>
 <rect class="hot" x="272" y="140" width="140" height="132" rx="10"/>
 <text class="code mid" x="342" y="164">decision</text>
 <text class="note mid" x="342" y="184">checks the call against</text>

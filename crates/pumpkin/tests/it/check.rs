@@ -910,6 +910,8 @@ fn examples() {
         &expect![[r#"
             $ pumpkin check codex/task.star --arg model=model-a
             exit status: Some(0)
+            $ pumpkin check companions/task.star
+            exit status: Some(0)
             $ pumpkin check hello/task.star
             exit status: Some(0)
             $ pumpkin check hypergraph-benchmark/replay/task.star

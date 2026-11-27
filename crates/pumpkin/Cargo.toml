@@ -42,6 +42,7 @@ serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 toml.workspace = true
+webpki-roots.workspace = true
 
 [target.'cfg(target_env = "musl")'.dependencies]
 # Without `no_thp`, mimalloc advises the kernel to back its arena with 2 MiB pages. A fault there

@@ -30,7 +30,6 @@ use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
 use std::sync::mpsc::{self, Receiver, Sender as PartSender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
-use std::time::Duration;
 
 use schema::frame::{MAX_BODY_BYTES, MAX_MESSAGE_BYTES};
 use schema::sandbox::{
@@ -38,6 +37,7 @@ use schema::sandbox::{
 };
 use stdx::{Context, unpoisoned};
 
+use crate::accept;
 use crate::session::Sender;
 
 // As JSON, a head grows to at most ten thirds of its size, from its shortest header line, three
@@ -117,19 +117,17 @@ impl Model {
         Ok(())
     }
 
-    fn accept(&self, listener: &TcpListener, sender: &Sender) {
-        for connection in listener.incoming() {
-            let Ok(connection) = connection else {
-                // Out of descriptors, say: wait for clients to finish rather than spin.
-                thread::sleep(Duration::from_millis(10));
-                continue;
-            };
-            let (model, sender) = (self.clone(), sender.clone());
-            let _ = thread::Builder::new()
-                // A client that can't get a thread sees its connection close.
-                .name("model-request".to_owned())
-                .spawn(move || model.carry(connection, &sender));
-        }
+    fn accept(&self, listener: &TcpListener, sender: &Sender) -> ! {
+        accept::each(
+            || listener.accept(),
+            |(connection, _)| {
+                let (model, sender) = (self.clone(), sender.clone());
+                let _ = thread::Builder::new()
+                    // A client that can't get a thread sees its connection close.
+                    .name("model-request".to_owned())
+                    .spawn(move || model.carry(connection, &sender));
+            },
+        )
     }
 
     /// Hands a part of the response to request `request` to its client; the end takes the request

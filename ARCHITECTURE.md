@@ -20,17 +20,18 @@ reads only the IR, and the driver hands it the bodies of the IR's functions, so 
 on no language.
 
 Each instance of a role is a sandbox, which a provider makes: a container on the operator's Docker
-engine, a container on an EC2 instance of its own, or a Modal sandbox. In each sandbox, `sandboxd`
-serves one session, the sandbox's only way out. Over it the host moves files and runs commands,
-and code in the sandbox makes ops, such as a call of a function, and model requests. On the host,
-the gateway holds each session's end, the decision core decides what the run does next, and the
-runtime carries out those decisions on the providers and keeps the run's record. The model route
-sends each model request that it admits to the model provider, with the provider's key.
+engine, a container on an EC2 instance of its own, or a Modal sandbox. A sandbox holds `main` and,
+for a runner, its companions. In each container, `sandboxd` serves one session, its only way out.
+Over it the host moves files and runs commands, and code in the sandbox makes ops, such as a call
+of a function, and model requests. On the host, the gateway holds each session's end, the decision
+core decides what the run does next, and the runtime carries out those decisions on the providers
+and keeps the run's record. The model route sends each model request that it admits to the model
+provider, with the provider's key.
 
 A run is one process, the driver, on one machine: the operator's own, or a team's controller, an
 EC2 instance or a container on a Docker host, which runs the runs a machine sends it.
 
-![The programs and machines of a run: the operator's pumpkin starts the driver on the operator's machine or on the controller; the driver's parts, the sandboxes that the providers create and the model provider that the route reaches.](docs/figures/run-machines.svg)
+![The programs and machines of a run: the operator's pumpkin starts the driver on its machine or the controller; the driver's parts, the providers' sandboxes, each container serving its own session, and the model provider the route reaches.](docs/figures/run-machines.svg)
 
 ## Entry points
 
@@ -118,11 +119,11 @@ protocol.
 **Architecture Invariant:** a sandbox can't harm the host through its session. Anything out of
 protocol ends the session, and a session costs the host only bounded memory and bounded waits.
 
-**Architecture Invariant:** the two ends share no Pumpkin crate but `schema` and `stdx`, so the
-protocol is all they agree on. The gateway knows no provider, so every provider's sandboxes have
-the same sessions.
+**Architecture Invariant:** the two ends share no Pumpkin crate but `schema`, `stdx` and `tls`, so
+the protocol is all they agree on. The gateway knows no provider, so every provider's sandboxes
+have the same sessions.
 
-**Architecture Invariant:** `sandboxd` is no boundary within its sandbox. It has its role's
+**Architecture Invariant:** `sandboxd` is no boundary within its container. It has its role's
 privileges, so what it does the role's own code could do too. The session is the boundary.
 
 ### `crates/route`
@@ -223,11 +224,11 @@ The agent's code, and whatever a target or a runner runs, is untrusted, and so i
 Each guard either limits what that code can reach, or keeps a sandbox from harming the host or
 the run.
 
-A sandbox reaches the host only over its session, and nothing else of the network: a Docker
-sandbox has loopback alone, an EC2 sandbox's instance drops all but the gateway's address and port,
-and a Modal sandbox opens no connection but DNS. Through the session, ops go to the core, which
-authorizes each against the caller's grants, and model requests go through the closed route. The
-agent never reaches the final call's target.
+A sandbox reaches the host only over its session, and nothing else of the network: a Docker sandbox
+has loopback alone, an EC2 sandbox's instance drops all but the gateway's address and port, and a
+Modal sandbox's containers open no connection but to one another and DNS. Nothing separates them.
+Through the session, ops go to the core, which authorizes each against the caller's grants, and
+model requests go through the closed route. The agent never reaches the final call's target.
 
 A sandbox proves which it is by how it meets the gateway. On the host, it dials a socket that only
 it can reach. On a private network, its hello presents an `Attestation` that its provider checks,
@@ -237,9 +238,9 @@ that the sandbox's create gave, and answers the hello with a `RegistrationGrant`
 
 No credential is reachable from a sandbox. The model provider's key stays in the host's `Upstream`,
 and the record keeps no header's value. Images are private: an EC2 instance pulls them with its
-instance profile, and Modal with a role that it assumes by its own identity. The driver reads
-each key file itself, so no key crosses argv or the environment. A machine sends its keys to its
-controller only on the connection's standard input.
+instance profile, and Modal with a role that it assumes by its own identity. The driver reads each
+of the operator's key files itself, so no such key crosses argv or the environment. A machine sends
+its keys to its controller only on the connection's standard input.
 
 ### Deadlines and spending bounds
 

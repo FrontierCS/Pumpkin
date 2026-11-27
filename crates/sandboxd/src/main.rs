@@ -4,7 +4,9 @@
 //! It meets the gateway, at a Unix socket of the sandbox's own, at a TCP address, or with
 //! `--listen` where the gateway dials it, opens the session ([`schema::sandbox`]) with its hello,
 //! presenting the attestation in [`SANDBOXD_ATTESTATION`] where it dials a TCP address, and serves
-//! it until the gateway closes it.
+//! it until the gateway closes it. With `--tls`, it serves the session under TLS of its own.
+//! With `--relay`, it also carries the gateway's connections to its sandbox's companions
+//! ([`relay`]).
 //! When the session ends it kills its commands and exits, which stops a sandbox it is first in.
 //!
 //! As a sandbox's first process (PID 1) it reaps the orphans the kernel hands it, and freezing
@@ -19,7 +21,6 @@
 //! boundary within its sandbox. It does make itself non-dumpable first, so that the role's code
 //! can't reach it through `/proc` ([`sys::make_non_dumpable`] says why).
 
-use std::env;
 use std::ffi::OsString;
 use std::fmt::Display;
 use std::fs::{DirBuilder, OpenOptions};
@@ -33,10 +34,10 @@ use std::process::ExitCode;
 use std::str::FromStr;
 use std::time::Duration;
 
-use schema::ir::User;
+use schema::ir::{CompanionName, User};
 use schema::sandbox::{
-    Attestation, HELLO_TIMEOUT, RegistrationGrant, SANDBOXD_ATTESTATION, SANDBOXD_GRANT,
-    pumpkin_dir,
+    Attestation, HELLO_TIMEOUT, RegistrationGrant, SANDBOXD_ATTESTATION, SANDBOXD_GIVEN,
+    SANDBOXD_GRANT, SANDBOXD_TLS_CERTIFICATE, SANDBOXD_TLS_KEY, TlsIdentity, pumpkin_dir,
 };
 use stdx::{Context, Deadline};
 
@@ -47,11 +48,13 @@ use crate::session::Gateway;
 /// three times that no start that the gateway would complete.
 const UNCLAIMED_SLACK: Duration = HELLO_TIMEOUT.saturating_mul(4);
 
+mod accept;
 mod commands;
 mod ctl;
 mod files;
 mod model;
 mod ops;
+mod relay;
 mod session;
 mod sys;
 mod until;
@@ -62,12 +65,18 @@ mod flags {
         reason = "xflags declares the types it generates `pub`"
     )]
     #![expect(
+        clippy::struct_excessive_bools,
+        reason = "xflags generates a field of its own for each switch"
+    )]
+    #![expect(
         clippy::allow_attributes,
         clippy::allow_attributes_without_reason,
         reason = "xflags generates `#[allow(dead_code)]`, without a reason, on its parsers"
     )]
 
-    use super::{Address, RoleUser};
+    use std::net::SocketAddr;
+
+    use super::{Address, Companion, RoleUser};
 
     xflags::xflags! {
         src "./src/main.rs"
@@ -91,6 +100,20 @@ mod flags {
             /// minute after it exits with 1, since the gateway that would claim it gives up then,
             /// which ends a sandbox that its provider made too late. Refused without --listen.
             optional --by seconds: u64
+            /// With --listen, serves the session under TLS, as a companion behind its sandbox's
+            /// relay does. SANDBOXD_TLS_CERTIFICATE and SANDBOXD_TLS_KEY hold the certificate
+            /// and its PKCS #8 key, each as the lowercase hexadecimal digits of its DER. No
+            /// command that sandboxd starts gets either. Refused without --listen.
+            optional --tls
+            /// With --listen, relays at this TCP address of the sandbox's own, such as
+            /// `0.0.0.0:7435`, from before it listens for the gateway. A connection there first
+            /// names a companion, in a line. It is then carried to that companion's sandboxd, or
+            /// closed. Needs --relayed. Refused without --listen, and with --tls.
+            optional --relay address: SocketAddr
+            /// A companion that --relay carries connections to, by its name, which must resolve
+            /// within the sandbox. It carries one connection a companion at a time. Repeatable,
+            /// once for each companion. Refused without --relay.
+            repeated --relayed companion: Companion
             /// Becomes this user, `uid:gid`, each a number but 0, as sandboxd starts, which must be
             /// as root, having given the user /pumpkin, made if absent: no command, nor sandboxd,
             /// then keeps or regains a privilege. Freezing then kills every other process of the
@@ -116,6 +139,9 @@ mod flags {
 
         pub listen: bool,
         pub by: Option<u64>,
+        pub tls: bool,
+        pub relay: Option<SocketAddr>,
+        pub relayed: Vec<Companion>,
         pub user: Option<RoleUser>,
         pub ops: bool,
         pub model: bool,
@@ -152,10 +178,14 @@ fn main() -> ExitCode {
     if Path::new(&name).file_name() == Some("sandboxctl".as_ref()) {
         return ctl::main(args);
     }
+    let given = Given::take();
     let flags::Sandboxd {
         gateway,
         listen,
         by,
+        tls,
+        relay,
+        relayed,
         user,
         ops,
         model,
@@ -183,8 +213,43 @@ fn main() -> ExitCode {
         eprintln!("sandboxd: making the process non-dumpable failed: {error}");
         return ExitCode::FAILURE;
     }
+    let relaying = relaying(relay, relayed, listen, tls);
+    let gateway = relaying.and_then(|relaying| {
+        let gateway = gateway_of(gateway, listen, by, tls, given?)?;
+        // Before `sandboxd` listens for the gateway, which so finds the relay once it has met it.
+        if let Some((address, relayed)) = relaying {
+            relay::serve(address, relayed)?;
+        }
+        Ok(gateway)
+    });
+    match gateway.and_then(|gateway| session::serve(&gateway, ops, model)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("sandboxd: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn gateway_of(
+    address: Address,
+    listen: bool,
+    by: Option<u64>,
+    tls: bool,
+    given: Given,
+) -> Result<Gateway, String> {
+    let Given {
+        attestation,
+        grant,
+        tls_certificate,
+        tls_key,
+    } = given;
     let by = by.map(|seconds| Deadline::at_unix(Duration::from_secs(seconds) + UNCLAIMED_SLACK));
-    let gateway = match (gateway, listen, by) {
+    match (address, listen, by) {
+        (Address::Socket(_) | Address::Tcp(_), false, _) if tls => Err(
+            "--tls serves the session to a gateway that dials sandboxd: give it with --listen"
+                .to_owned(),
+        ),
         (Address::Socket(socket), false, None) => Ok(Gateway::Socket(socket)),
         (Address::Socket(_), true, _) => Err(
             "--listen takes a TCP address of the sandbox's own: give one, such as `0.0.0.0:7434`, \
@@ -192,10 +257,12 @@ fn main() -> ExitCode {
                 .to_owned(),
         ),
         (Address::Tcp(address), false, None) => {
-            attestation().map(|attestation| Gateway::Tcp(address, attestation))
+            parsed_attestation(attestation)
+                .map(|attestation| Gateway::Tcp(address, attestation))
         }
         (Address::Tcp(address), true, Some(by)) => {
-            grant().map(|grant| Gateway::Listen(address, grant, by))
+            let server = tls.then(|| server(tls_certificate, tls_key)).transpose()?;
+            parsed_grant(grant).map(|grant| Gateway::Listen(address, grant, by, server))
         }
         (Address::Tcp(_), true, None) => Err(
             "--listen waits until the start's deadline: give it as --by, in seconds since the Unix \
@@ -205,12 +272,38 @@ fn main() -> ExitCode {
         (Address::Socket(_) | Address::Tcp(_), false, Some(_)) => Err(
             "--by bounds how long a sandboxd that listens waits: give it with --listen".to_owned(),
         ),
-    };
-    match gateway.and_then(|gateway| session::serve(&gateway, ops, model)) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("sandboxd: {error}");
-            ExitCode::FAILURE
+    }
+}
+
+/// Where `--relay` says to relay, and the companions that `--relayed` names, if it relays.
+fn relaying(
+    relay: Option<SocketAddr>,
+    relayed: Vec<Companion>,
+    listen: bool,
+    tls: bool,
+) -> Result<Option<(SocketAddr, Vec<CompanionName>)>, String> {
+    match (relay, relayed.is_empty()) {
+        (None, true) => Ok(None),
+        (None, false) => Err(
+            "--relayed names a companion that --relay carries to: give it with --relay".to_owned(),
+        ),
+        (Some(_), true) => Err(
+            "--relay carries connections to the companions that --relayed names: name each \
+             with a --relayed"
+                .to_owned(),
+        ),
+        (Some(_), false) if !listen => Err(
+            "--relay carries the connections of a gateway that dials the sandbox: give it with \
+             --listen"
+                .to_owned(),
+        ),
+        (Some(_), false) if tls => Err(
+            "--relay runs in a sandbox's `main`, and --tls in a companion: give one of them"
+                .to_owned(),
+        ),
+        (Some(address), false) => {
+            let relayed = relayed.into_iter().map(|Companion(name)| name);
+            Ok(Some((address, relayed.collect())))
         }
     }
 }
@@ -258,6 +351,18 @@ impl FromStr for RoleUser {
     }
 }
 
+/// A companion that `--relayed` names.
+#[derive(Debug)]
+struct Companion(CompanionName);
+
+impl FromStr for Companion {
+    type Err = String;
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        CompanionName::try_from(name.to_owned()).map(Self)
+    }
+}
+
 /// Gives [`pumpkin_dir`] to `user`, made with mode 0755 if absent, then becomes `user`, and has
 /// the kernel hand `sandboxd` the orphans of what it starts, as what starts it as root may put a
 /// process of its own first in the sandbox. Refuses, before any of it, a process that isn't root.
@@ -286,8 +391,37 @@ fn become_role(User { uid, gid }: User) -> Result<(), String> {
     sys::adopt_orphans().context("taking the orphans of sandboxd's commands failed")
 }
 
-fn grant() -> Result<RegistrationGrant, String> {
-    let Some(grant) = env::var_os(SANDBOXD_GRANT) else {
+/// What a provider gives `sandboxd` alone ([`SANDBOXD_GIVEN`]), each `None` where it is unset.
+struct Given {
+    attestation: Option<OsString>,
+    grant: Option<OsString>,
+    tls_certificate: Option<OsString>,
+    tls_key: Option<OsString>,
+}
+
+impl Given {
+    /// Takes what a provider gives `sandboxd` alone from its environment. It is to be called
+    /// before `sandboxd` starts a thread, as `stdx::env::take` needs.
+    fn take() -> Result<Self, String> {
+        // Taken as it starts, as Buildkite's agent unsets its configuration and GitHub's runner
+        // its inputs, so that nothing it starts inherits them:
+        // https://github.com/buildkite/agent/blob/dc696c5ecad164b5aafc678b76bba69eef5111be/clicommand/agent_start.go#L902-L905
+        // https://github.com/actions/runner/blob/d1eb12d4b115c301201de27d667284e1a80f2ab5/src/Runner.Listener/CommandSettings.cs#L110-L139
+        let taken = stdx::env::take(SANDBOXD_GIVEN);
+        // In the list's order.
+        let [attestation, grant, tls_certificate, tls_key] =
+            taken.context("listing sandboxd's threads in /proc/self/task failed")?;
+        Ok(Self {
+            attestation,
+            grant,
+            tls_certificate,
+            tls_key,
+        })
+    }
+}
+
+fn parsed_grant(grant: Option<OsString>) -> Result<RegistrationGrant, String> {
+    let Some(grant) = grant else {
         return Err(format!(
             "{SANDBOXD_GRANT} is not set: set it to the registration grant issued for the \
              sandbox, which the gateway that dials a sandboxd that listens presents"
@@ -299,8 +433,30 @@ fn grant() -> Result<RegistrationGrant, String> {
     RegistrationGrant::try_from(digits).context(SANDBOXD_GRANT)
 }
 
-fn attestation() -> Result<Attestation, String> {
-    let Some(attestation) = env::var_os(SANDBOXD_ATTESTATION) else {
+/// The TLS server that shows the identity whose digits `certificate` and `key` hold.
+fn server(certificate: Option<OsString>, key: Option<OsString>) -> Result<tls::Server, String> {
+    let digits = |digits: Option<OsString>, variable: &str| {
+        let Some(digits) = digits else {
+            return Err(format!(
+                "{variable} is not set: set it to the digits of the identity issued for the \
+                 companion, which a sandboxd that listens with --tls serves TLS with"
+            ));
+        };
+        Ok(digits.into_string().unwrap_or_default())
+    };
+    let certificate = digits(certificate, SANDBOXD_TLS_CERTIFICATE)?;
+    let key = digits(key, SANDBOXD_TLS_KEY)?;
+    let identity = TlsIdentity::from_digits(&certificate, &key)?;
+    tls::Server::new(&[identity.certificate()], identity.key()).map_err(|error| {
+        format!(
+            "the identity in {SANDBOXD_TLS_CERTIFICATE} and {SANDBOXD_TLS_KEY} can't serve TLS: \
+             {error}: expected the certificate and the key issued for the companion"
+        )
+    })
+}
+
+fn parsed_attestation(attestation: Option<OsString>) -> Result<Attestation, String> {
+    let Some(attestation) = attestation else {
         return Err(format!(
             "{SANDBOXD_ATTESTATION} is not set: set it to the sandbox's attestation, which a \
              sandboxd that dials its gateway over TCP presents"

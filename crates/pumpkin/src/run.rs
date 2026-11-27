@@ -17,7 +17,7 @@ use lang::SourceMap;
 use modal::Modal;
 use provider::{Meeting, Provider, RunTag};
 use runtime::{Budgets, ModelRoutes, Record, Recorded, Run, System, TokenPrices};
-use rustix::process::Signal;
+use rustix::process::{Resource, Signal};
 use schema::ir::{ModelName, Name};
 use schema::sandbox::HELLO_TIMEOUT;
 use schema::workflow::{ByProvider, ByRole, Class, ParseErrors, Placed, Workflow};
@@ -206,7 +206,7 @@ pub(crate) fn driver_run(driver: cli::Driver) -> Result<Exit, String> {
     // `execute` records why the run stopped in its `outcome.json`; these lines, the driver's last,
     // then close that ending, which a controller's client says from its copy instead.
     // Binds nothing, so every run has one, whether or not a role's sandboxes listen.
-    let dialer = Dialer::new(tls::Client::web_pki());
+    let dialer = Dialer::new(tls::Client::trusting_roots(webpki_roots::TLS_SERVER_ROOTS));
     let bodies = Bodies::new(&sources, &args);
     let executed = run.execute(
         sandboxd.path(),
@@ -259,6 +259,16 @@ fn driver_started(driver: cli::Driver) -> Result<(RunTag, Reader, cli::Run), Str
     // `ps` and `pgrep` show the driver by this name, rather than as `exe`, the base name of the
     // path that `run` executes.
     rustix::thread::set_name(driver::NAME).context("naming the driver failed")?;
+    // Each of the driver's sessions holds descriptors open while its sandbox lasts. The driver
+    // never calls `select`, so it takes its hard limit, as systemd's `LimitNOFILE=` doc advises:
+    // https://github.com/systemd/systemd/blob/ca78951bd398e191ebc4550710e33ef34190514e/man/systemd.exec.xml#L1179
+    // Its children inherit the limit, as Buck2's do. A child meets a descriptor past 1023 only by
+    // opening that many itself:
+    // https://github.com/facebook/buck2/blob/e3dc98f84acf5f70c40b857819556baa7ec9c929/app/buck2_common/src/rlimits.rs#L42
+    let mut limit = rustix::process::getrlimit(Resource::Nofile);
+    limit.current = limit.maximum;
+    let raised = rustix::process::setrlimit(Resource::Nofile, limit);
+    raised.context("raising the driver's soft limit on open files to its hard limit failed")?;
     // `run` passes on its own command line, which it has parsed, but anyone can start the driver.
     let Some(run) = cli::parse(run).ok().and_then(cli::Command::into_run) else {
         let refused = "the driver was asked for something other than `pumpkin run` asks of it: \

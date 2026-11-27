@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 408" width="880" height="408" role="img" aria-labelledby="title desc">
 <title id="title">From a task's sources to a run and its record</title>
-<desc id="desc">A task's sources, its entry file, the files it loads and its images' recipes, go to pumpkin, which evaluates them to the workflow IR and builds the images. The driver, one process for each run, reads the IR and the images, evaluates the functions' bodies from the text of the files the evaluation read, and has a provider create a sandbox for each instance of a role. The driver writes the run's record as the run goes, and pumpkin wait, pumpkin ls and the page read that record.</desc>
+<desc id="desc">A task's sources, its entry file, the files it loads and its images' recipes, go to pumpkin, which evaluates them to the workflow IR and builds the images. The driver, one process for each run, reads the IR and the images, evaluates the functions' bodies from the text of the files the evaluation read, and has a provider create a sandbox for each instance of a role. A sandbox holds main and, for a runner, its companions, and each container has a session of its own to the driver, its only way out of the sandbox. The driver writes the run's record as the run goes, and pumpkin wait, pumpkin ls and the page read that record.</desc>
 <style>
 :root{--bg:#ffffff;--ink:#1f2328;--mute:#59636e;--line:#818b98;--card:#f6f8fa;--hot:#0969da;--hot-bg:#ddf4ff}
 @media (prefers-color-scheme:dark){:root{--bg:#0d1117;--ink:#e6edf3;--mute:#9198a1;--line:#6e7681;--card:#151b23;--hot:#58a6ff;--hot-bg:#10243e}}
@@ -49,18 +49,22 @@ text{font:12.5px system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;f
 <text class="note mid" x="508" y="273">reads the IR; evaluates</text>
 <text class="note mid" x="508" y="288">bodies from the sources</text>
 
-<rect class="zone" x="664" y="16" width="200" height="264" rx="12"/>
+<rect class="zone" x="664" y="16" width="200" height="280" rx="12"/>
 <text class="zone-label" x="680" y="38">SANDBOXES</text>
 <text class="note" x="680" y="54">one for each instance of a role,</text>
 <text class="note" x="680" y="69">made by a provider:</text>
 <text class="note" x="680" y="84">Docker, EC2 or Modal</text>
 <rect class="box" x="680" y="100" width="168" height="44" rx="8"/>
 <text class="name mid" x="764" y="127">a role's sandbox</text>
-<rect class="box" x="680" y="156" width="168" height="44" rx="8"/>
-<text class="name mid" x="764" y="183">a role's sandbox</text>
-<text class="note" x="680" y="226">each reaches the driver</text>
-<text class="note" x="680" y="241">over one session, and</text>
-<text class="note" x="680" y="256">nothing else</text>
+<rect class="box" x="680" y="154" width="168" height="72" rx="8"/>
+<text class="name mid" x="764" y="175">a runner's sandbox</text>
+<rect class="box" x="692" y="186" width="48" height="28" rx="6"/>
+<text class="code mid" x="716" y="205">main</text>
+<rect class="box" x="748" y="186" width="88" height="28" rx="6"/>
+<text class="note mid" x="792" y="204">companions</text>
+<text class="note" x="680" y="248">each container has its own</text>
+<text class="note" x="680" y="263">session to the driver, its</text>
+<text class="note" x="680" y="278">only way out of the sandbox</text>
 <path class="arrow" d="M589 248H662" marker-end="url(#head)"/>
 <text class="note mid" x="626" y="240">creates</text>
 

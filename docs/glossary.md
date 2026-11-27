@@ -144,8 +144,8 @@ call at a time, while the caller goes on (`ir::JobFunction`).
 
 ### Lease
 
-The loan of a fresh [runner](#runner) sandbox to an agent or a target's call, from its opening
-until it closes or times out (`.open`, `ir::Session`).
+The loan of a fresh [runner](#runner) sandbox to an agent or a target's call, until it closes or
+times out (`ir::Session`). A [session](#session)'s `<name>.open` opens it.
 
 ### Lost
 
@@ -164,9 +164,9 @@ The [container](#container) of each [sandbox](#sandbox) that runs its [role](#ro
 
 ### Meeting
 
-How a [provider](#provider)'s sandboxes first reach the [gateway](#gateway), such as by a local
-socket (`provider::Meeting`). A [container](#container) has met once its [session](#session) is
-set up, and its sandbox once all have (`container_met`, `sandbox_met`).
+How a [container](#container) first reaches the [gateway](#gateway), such as by a local socket,
+and sets up its [session](#session) (`provider::Meeting`). Then it has met, and its sandbox once
+all have (`container_met`, `sandbox_met`).
 
 ### Member
 
@@ -241,11 +241,11 @@ pins (the `recipe` crate).
 
 ### Relay
 
-A forwarder that a [provider](#provider) gives each listening [sandbox](#sandbox) with
-[companions](#companion), at the endpoint its create returns (`Listened::relay`). It carries
-each connection from the [gateway](#gateway) to the companion that the connection's first line
-names (`sandbox::route`). `sandbox::Relayed` is what a companion is given for this. **Open:**
-also `runtime::relay`'s verb, what a call's thread does between its target's session and the loop.
+The part of [`main`](#main)'s `sandboxd` that carries each of the [gateway](#gateway)'s
+connections to the [companion](#companion) whose name it starts with (`sandbox::route`). Only a
+[sandbox](#sandbox) with companions that the gateway dials has one. Its create gives the relay's
+address (`Listened::relay`), and each companion's `sandbox::Relayed`. **Open:** also
+`runtime::relay`'s verb, what a call's thread does between its target's session and the loop.
 
 ### Result
 

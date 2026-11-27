@@ -91,9 +91,9 @@ mod flags {
             /// `controller` makes a controller with `deploy/docker`, runs `examples/smoke` through
             /// it, and checks its members. `ec2` and `modal` cost money: each runs `pumpkin-admin
             /// check`, then `examples/smoke` on that provider through the controller that
-            /// `~/.config/pumpkin/pumpkin.toml` names. Each runs Pumpkin at `HEAD`. Every probe of
-            /// a sandbox must pass, and every sandbox must be deleted. Anything of the run left on
-            /// EC2, EventBridge Scheduler or Modal fails the check, which cancels the run.
+            /// `~/.config/pumpkin/pumpkin.toml` names. `modal` then runs `examples/companions`.
+            /// Each runs Pumpkin at `HEAD`. Every probe must pass, and every sandbox be deleted. A
+            /// run that leaves anything on EC2, EventBridge Scheduler or Modal fails, and is ended.
             cmd live {
                 /// `docker`, `controller`, `ec2` or `modal`.
                 required target: String
@@ -107,6 +107,20 @@ mod flags {
                 /// `controller`, kills the job likewise, makes the controller's container anew, and
                 /// checks that its boot reaped the run.
                 optional --lost
+            }
+
+            /// Samples the driver of a started run, on the controller that
+            /// `~/.config/pumpkin/pumpkin.toml` names, every 100 ms until it exits. It reads the
+            /// driver's `/proc` alone, over the SSH that `live` uses, as the job's user. Each
+            /// sample is a line of its threads, resident memory and peak, open files and their
+            /// limits, and its tasks by name.
+            /// Every tenth also has a line for each task, with its switches and `schedstat`.
+            cmd sample-driver {
+                /// The run's id.
+                required id: String
+                /// The `.pumpkin` of the task repository that sent the run, which holds where the
+                /// controller was found.
+                required --workspace dir: PathBuf
             }
 
             /// Counts incoming operations by request kind in a run's `log.jsonl`. Reports the
@@ -194,6 +208,7 @@ mod flags {
         Figures(Figures),
         AwsCertificates(AwsCertificates),
         Live(Live),
+        SampleDriver(SampleDriver),
         OpStats(OpStats),
         Sandboxd(Sandboxd),
         Build(Build),
@@ -223,6 +238,13 @@ mod flags {
 
         pub gpu_model: Option<String>,
         pub lost: bool,
+    }
+
+    #[derive(Debug)]
+    pub struct SampleDriver {
+        pub id: String,
+
+        pub workspace: PathBuf,
     }
 
     #[derive(Debug)]
@@ -343,6 +365,7 @@ fn try_main() -> Result<()> {
             };
             live::smoke(provider, gpu_model.as_deref(), lost)
         }
+        flags::XtaskCmd::SampleDriver(sample) => live::sample_driver(&sample),
         flags::XtaskCmd::OpStats(flags::OpStats { run_dir, caller }) => {
             op_stats::report(&run_dir, caller.as_deref())
         }
@@ -822,7 +845,8 @@ fn sandboxd() -> Result<PathBuf> {
 fn release_binary(package: &str, target: &str) -> Result<PathBuf> {
     let mut build = cargo(&["build", "--release", "--locked", "--package", package]);
     build.args(["--target", target]);
-    if package == "pumpkin" && target == MUSL {
+    // A static build compiles `ring`'s C and assembly.
+    if target == MUSL {
         tools::musl_cc(&mut build)?;
     }
     let artifacts = executables(build)?;

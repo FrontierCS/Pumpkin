@@ -38,11 +38,11 @@ We built Pumpkin to provide clean abstractions so people can easily do error han
 
 `pumpkin` evaluates a task to its workflow IR. Each run's driver carries out the IR in sandboxes, and writes the record that `wait`, `ls` and `view` read.
 
-![A task's sources go to pumpkin, which evaluates them to the workflow IR and builds the images; the driver, one process for each run, reads the IR, calls the functions' bodies from the sources the evaluation read, and has a provider create a sandbox for each instance of a role; it writes the record, which pumpkin wait, pumpkin ls and the page read.](docs/figures/overview.svg)
+![A task's sources go to pumpkin, which evaluates them to the workflow IR and builds the images; the driver, one process for each run, reads the IR, calls the functions' bodies from the sources the evaluation read, and has a provider create a sandbox for each instance of a role, where each container, main or a runner's companion, has a session of its own; it writes the record, which pumpkin wait, pumpkin ls and the page read.](docs/figures/overview.svg)
 
 Each run's sandboxes come from Docker, EC2 or Modal. Each run's driver runs on this machine, or on a team's controller, which this machine reaches over `ssh`.
 
-![On the operator's machine, pumpkin builds images on the Docker engine, where the Docker provider's containers also run. A machine with a controller sends its runs over ssh to the controller. The controller is an EC2 instance or a privileged container on a Docker host. An EC2 controller builds the images on its own engine and pushes them to ECR. It launches EC2 instances that pull the images, and creates Modal sandboxes, which Modal imports from the same repositories. A Docker controller builds the images on an engine inside its own container, never on the host's. The Docker provider's containers also run on that engine.](docs/figures/providers.svg)
+![On the operator's machine, pumpkin builds images on the Docker engine, which also runs the Docker provider's containers. A machine with a controller sends it its runs over ssh. An EC2 controller pushes its images to ECR, launches EC2 instances that pull them, and creates Modal sandboxes, from images that Modal imports. A Modal sandbox may hold companions. A Docker controller, a privileged container, builds and runs on an engine of its own, never the host's.](docs/figures/providers.svg)
 
 [`ARCHITECTURE.md`](ARCHITECTURE.md) maps the code. [Providers](docs/providers.md) says what each provider and the controller need.
 

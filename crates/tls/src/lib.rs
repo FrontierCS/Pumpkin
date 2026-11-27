@@ -23,7 +23,7 @@ use std::time::Duration;
 use rustix::event::{self, PollFd, PollFlags, Timespec};
 use rustix::io::Errno;
 use rustls::crypto::CryptoProvider;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, TrustAnchor};
 use rustls::{
     ClientConfig, ClientConnection, ConfigBuilder, Connection, RootCertStore, ServerConfig,
     ServerConnection, WantsVerifier,
@@ -47,11 +47,10 @@ pub struct Client {
 }
 
 impl Client {
-    /// A client that trusts Web PKI's roots, those of Mozilla's program as `webpki-roots` ships
-    /// them.
-    pub fn web_pki() -> Self {
+    /// A client that trusts `roots` alone, such as Web PKI's, which `webpki-roots` ships.
+    pub fn trusting_roots(roots: &[TrustAnchor<'static>]) -> Self {
         let roots = RootCertStore {
-            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+            roots: roots.to_vec(),
         };
         Self::with(roots)
     }
@@ -212,6 +211,29 @@ impl Stream {
 
     pub fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         self.socket.set_write_timeout(timeout)
+    }
+}
+
+// Its socket, for the options of a socket, such as a bound on its reads.
+impl AsFd for Stream {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.socket.as_fd()
+    }
+}
+
+impl Read for Stream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        (&*self).read(buf)
+    }
+}
+
+impl Write for Stream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        (&*self).write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        (&*self).flush()
     }
 }
 

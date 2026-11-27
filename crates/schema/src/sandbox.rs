@@ -548,6 +548,14 @@ impl fmt::Debug for TlsIdentity {
     }
 }
 
+/// The TCP port at which a `sandboxd` that listens ([`Listening`], [`Relayed`]) does so, at every
+/// address of its container. A sandbox's relay connects to each companion by its name, at this
+/// port.
+// One port for every container, as each container of a sandbox has an address of its own. IANA's
+// registry assigns none of 7432 to 7436, so no registered service claims it:
+// https://www.iana.org/assignments/service-names-port-numbers
+pub const LISTEN_PORT: u16 = 7434;
+
 /// The most bytes of a [`route`]: the longest name of a companion, and a line feed.
 pub const MAX_ROUTE_BYTES: usize = MAX_LABEL_BYTES + 1;
 
@@ -698,6 +706,15 @@ pub const SANDBOXD_TLS_KEY: &str = "SANDBOXD_TLS_KEY";
 // Kept as `SANDBOXD_GRANT` is, for the same reason: a role's code that ran before the hello could
 // present it first, from the sandbox's own address.
 pub const SANDBOXD_ATTESTATION: &str = "SANDBOXD_ATTESTATION";
+
+/// The environment variables that hold what a provider gives `sandboxd` alone. `sandboxd` takes
+/// each from its environment as it starts, so no program that it runs inherits one.
+pub const SANDBOXD_GIVEN: [&str; 4] = [
+    SANDBOXD_ATTESTATION,
+    SANDBOXD_GRANT,
+    SANDBOXD_TLS_CERTIFICATE,
+    SANDBOXD_TLS_KEY,
+];
 
 /// The gateway's answer to the session's first frame, with an empty body: `{"type":"accepted"}`, or
 /// `{"type":"accepted","grant":"…"}` where the gateway dialed, or a refusal.

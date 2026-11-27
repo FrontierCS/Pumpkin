@@ -25,8 +25,11 @@ The run places the role by those needs ([providers](providers.md#placing-a-run))
   call, so nothing could tell its requests apart by job.
 - A **runner** is a sandbox that a session leases. The lease's holder drives it. A runner holds no
   egress and no grants. A runner may declare [`companions`](../crates/schema/src/ir.rs):
-  containers beside its own in each of its sandboxes. Placing refuses such a runner, as no
-  provider's class offers companions.
+  containers beside its own, `main`, in each of its sandboxes. Such a runner fits only a class
+  that holds companions, as only Modal's do ([providers](providers.md#the-modal-provider)).
+
+A body names a container with `container`, as [Bodies](#bodies) shows.
+[`examples/companions`](../examples/companions/task.star) starts a service in each.
 
 Every sandbox has `/pumpkin`, which holds Pumpkin's own files. The `schema` crate's
 [`sandbox`](../crates/schema/src/sandbox.rs) module lays them out:
@@ -53,9 +56,9 @@ holder calls it by name. The run checks each call against the grant before anyth
 - A **session** leases runners. Its holder opens a lease, runs commands and copies trees in it one
   at a time across all its runner's containers, then closes the lease. Work that must overlap
   starts detached, from a command of its own. Pumpkin neither times such work nor reports its exit.
-  A lease's end collects only the output of the command that still runs, and `main`'s `out`. A
-  target's body holds the target's sessions, and each call gets them afresh. A call target's
-  commands hold them too.
+  When the lease closes, the record keeps the output of a command that still runs, and `main`'s
+  `out`, but no companion's. A target's body holds the target's sessions, and each call gets them
+  afresh. A call target's commands hold them too.
 
 The parts name each other by role. An agent may name a call target in at most one of its job
 functions. Other agents may name the same target too. The final call's target is a call target
@@ -114,8 +117,8 @@ if it returns anything else. The record keeps why it failed. The caller hears on
 An agent and a call target's commands make ops with `sandboxctl`, which comes first on `PATH`.
 `sandboxctl --help` gives each command's arguments and exit statuses. The `schema` crate's
 [`sandbox::op`](../crates/schema/src/sandbox/op.rs) module gives each reply's fields.
-`sandboxctl ops` lists the role's grants with their `help`, limits and parameters, and a session's
-with the companions of its runner.
+`sandboxctl ops` lists the role's grants with their `help`, limits and parameters, and, for a
+session, the companions of its runner.
 `sandboxctl ops --text` prints their usage for a shell.
 
 ![One job function's call, end to end: in the agent's sandbox, sandboxctl call sends the payload over the session; the driver's core checks it against the grant and answers with the job's number; the runtime starts a fresh sandbox of the target and evaluates the body, from the sources the record keeps, whose put, run and get drive the target; the target ends, and the dict the body returned goes to the agent's sandboxctl status and to the record.](figures/call.svg)

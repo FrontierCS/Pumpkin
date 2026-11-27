@@ -10,13 +10,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use schema::sandbox::RegistrationGrant;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use stdx::process::{Bound, Echo, Environment, Failure, Run};
 use stdx::{Context as _, Deadline};
 
-use crate::Gpu;
+use crate::create::{self, Sandboxd};
 
 // `HOME` is where Modal's own configuration lies, and `PATH` where `uv` is. No variable of Modal's
 // or of `uv`'s, such as `MODAL_TOKEN_ID` or `UV_INDEX`, steers the helper to another workspace or
@@ -29,9 +28,14 @@ const CALL_ENVIRONMENT: Environment = Environment::Only(&["HOME", "PATH"]);
 // https://github.com/modal-labs/modal-client/blob/dbb24aba92e2c6c4fa8a123234813cfa48e09b0b/py/modal/_utils/grpc_utils.py#L427-L428
 pub(crate) const ASK_TIMEOUT: Duration = Duration::from_mins(2);
 
-// Modal pulls the image and builds it within the call, which takes minutes for a large image and
-// about half an hour for one that holds a task's weights.
-pub(crate) const IMPORT_TIMEOUT: Duration = Duration::from_mins(45);
+// Modal pulls the images and builds them within the call, with a role that it assumes through
+// STS's `AssumeRoleWithWebIdentity`. It asks for no `DurationSeconds`, so the credentials last
+// STS's default of 3600 s, whatever the role allows:
+// https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRoleWithWebIdentity.html
+// A copy that outlasts them fails. So an import that hasn't ended by then never will. Modal goes
+// on with a build whose call was killed, and a later import of the same image waits for that
+// build.
+pub(crate) const IMPORT_TIMEOUT: Duration = Duration::from_secs(3600);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 // The name of a profile in Modal's configuration file, which Modal refuses if the file lacks it.
@@ -63,48 +67,24 @@ impl TryFrom<PathBuf> for ConfigFile {
 pub(crate) enum Request<'a> {
     /// Reaches the workspace that the profile names.
     Ready,
-    /// Imports the image at `reference`, a reference by digest, which Modal pulls with the AWS
-    /// role `role_arn` in `region`, and answers its id.
+    /// Imports the image at each of `references`, a reference by digest, which Modal pulls with
+    /// the AWS role `role_arn` in `region`, in one call. With `sandboxd`, it builds that into
+    /// each. Answers their ids, in the order of `references`.
     Import {
-        reference: &'a str,
+        references: Vec<&'a str>,
         role_arn: &'a str,
         region: &'a str,
+        sandboxd: Option<Sandboxd<'a>>,
     },
-    /// Creates a sandbox of `run`, for `role`, and answers its id, its tunnel's host and port, and
-    /// the phases of the create that it timed.
-    Create {
-        run: &'a str,
-        role: &'a str,
-        image: &'a str,
-        sandboxd: Sandboxd<'a>,
-        user: String,
-        ops: bool,
-        model: bool,
-        grant: &'a RegistrationGrant,
-        cpu_millis: u64,
-        memory_mib: u64,
-        gpu: Option<&'a Gpu>,
-        /// The sandbox's hard end, in whole seconds since the Unix epoch, from which the helper
-        /// takes the sandbox's timeout as it creates it, as Modal counts that from then.
-        hard_end: u64,
-        /// When the sandbox's start is due by, in whole seconds since the Unix epoch, which its
-        /// `sandboxd` takes as `--by`, so that one no start claims ends itself.
-        by: u64,
-        /// The only source, a CIDR, that the sandbox's tunnel takes connections from.
-        source: String,
-    },
+    /// Creates a sandbox, and answers its id, its tunnels and the phases of the create that it
+    /// timed.
+    Create(create::Request<'a>),
     /// The sandboxes of `run` that haven't finished, each with whether it has ended.
     List { run: &'a str },
     /// Terminates each of `run`'s sandboxes that `ids` name, and answers why each that failed did.
     Delete { run: &'a str, ids: Vec<&'a str> },
     /// The end of what sandbox `id` of `run` has printed.
     Console { run: &'a str, id: &'a str },
-}
-
-#[derive(Serialize)]
-pub(crate) struct Sandboxd<'a> {
-    pub(crate) path: &'a str,
-    pub(crate) sha256: &'a str,
 }
 
 #[derive(Deserialize)]
@@ -147,8 +127,21 @@ impl Helper {
         request: &Request<'_>,
         by: Deadline,
     ) -> Result<T, String> {
+        self.call_expecting(request, by, "expected Modal to answer by then")
+    }
+
+    /// Makes `request` as [`call`](Self::call) does, and says `expected` of a helper that it
+    /// killed at `by`.
+    pub(crate) fn call_expecting<T: DeserializeOwned>(
+        &self,
+        request: &Request<'_>,
+        by: Deadline,
+        expected: &str,
+    ) -> Result<T, String> {
+        // A request derives its `Serialize`, of strings, numbers, and lists of them. Its one map
+        // has strings as its keys (`create::Start`).
         let Ok(input) = serde_json::to_value(request) else {
-            unreachable!("a request holds only strings, which serde_json never fails to write")
+            unreachable!("a request holds nothing that serde_json fails to write")
         };
         let call = input["call"].as_str().unwrap_or_default();
         // Python's `tempfile` takes another directory, such as `/tmp`, for one that is missing.
@@ -170,7 +163,7 @@ impl Helper {
         let output = stdx::process::run(&mut uv, how).map_err(|failure| {
             let failed = match failure {
                 Failure::Unended { started: true, .. } => {
-                    format!("{}: expected Modal to answer by then", failure.unadvised())
+                    format!("{}: {expected}", failure.unadvised())
                 }
                 // Only the caller, which chose the deadline, can say what to do.
                 Failure::Unended { started: false, .. } => failure.unadvised(),

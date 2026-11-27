@@ -13,7 +13,6 @@ doctest = false
 stdx = { path = "../stdx" }
 rustix = { workspace = true, features = ["event"] }
 rustls.workspace = true
-webpki-roots.workspace = true
 
 [dev-dependencies]
 test-support = { path = "../test-support" }

@@ -1,6 +1,7 @@
 //! `sandboxd` and the gateway's end of its session, together, meeting at a socket of the
 //! sandbox's own, at a TCP address on the loopback, or where `sandboxd` listens on the loopback,
-//! behind the stand-in TLS edge. `sandboxd` runs here as an ordinary process, not as a
+//! behind the stand-in TLS edge. A companion's listens under TLS of its own, behind a stand-in
+//! relay too. `sandboxd` runs here as an ordinary process, not as a
 //! sandbox's first process, and a temporary directory stands in for the sandbox. So `sandboxd`
 //! serves no ops, which it serves only at the sandbox's own `/pumpkin`, nor the model endpoint,
 //! at a port of the sandbox's own loopback. A fake gateway sends what the gateway's end never
@@ -14,8 +15,9 @@
 #![expect(clippy::disallowed_methods, reason = "nextest bounds each test")]
 
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
-use std::io::{self, Read};
+use std::io::{self, Read, Write as _};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
@@ -28,15 +30,17 @@ use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 
 use expect_test::{Expect, expect};
-use gateway::{Arrival, Dialer, GatewayAddress, Listener, Process, Put, Sockets};
+use gateway::{Arrival, Dialer, GatewayAddress, Listener, Process, Put, Sockets, Unreached};
 use schema::frame;
 use schema::frame::MAX_BODY_BYTES;
-use schema::ir::{AbsolutePath, Argv, Env, EnvVar, Mode, Name};
+use schema::ir::{AbsolutePath, Argv, CompanionName, Env, EnvVar, Mode, Name};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
-    Endpoint, Entry, ExitStatus, FromSandbox, HELLO_TIMEOUT, HelloReply, Launch, Listening,
-    MAX_ATTESTATION_BYTES, PROTOCOL_VERSION, PrivateDial, RegistrationGrant, RelativePath, Root,
-    SANDBOXD_ATTESTATION, SANDBOXD_GRANT, SOCKET_NAME, SocketDial, ToSandbox, dir_mode, file_mode,
+    Endpoint, Entry, ExitStatus, FromSandbox, HELLO_TIMEOUT, HelloReply, LISTEN_PORT, Launch,
+    Listening, MAX_ATTESTATION_BYTES, PROTOCOL_VERSION, PrivateDial, RegistrationGrant,
+    RelativePath, Relayed, Root, SANDBOXD_ATTESTATION, SANDBOXD_GIVEN, SANDBOXD_GRANT,
+    SANDBOXD_TLS_CERTIFICATE, SANDBOXD_TLS_KEY, SOCKET_NAME, SocketDial, ToSandbox, dir_mode,
+    file_mode,
 };
 use serde_json::{Value, json};
 use stdx::Deadline;
@@ -48,23 +52,31 @@ type Session = gateway::Session<Machine>;
 
 const PATH_ONLY: Environment = Environment::Only(&["PATH"]);
 
-// The programs that `sandboxd` and the tests' commands run, on a `PATH` of their own that lacks
-// `nvidia-smi`, so that the hello names no GPU and no start waits on a probe for them.
+// The programs that `sandboxd` and the tests' commands run, on a `PATH` of their own. Its
+// `nvidia-smi` names no GPU, so the hello names none and no start waits on a probe for them.
 const TOOLS: [&str; 8] = ["sh", "env", "sleep", "stat", "chmod", "mkdir", "wc", "cp"];
+
+// An `nvidia-smi` that records the environment it is run with, beside itself, and fails.
+const PROBE: &str = "#!/bin/sh\nenv > \"$0.env\"\nexit 1\n";
 
 // A registration grant that no gateway of the tests issues.
 const GRANT: &str = "00112233445566778899aabbccddeeff";
+
+// The companion whose `sandboxd` listens under TLS.
+const COMPANION: &str = "companion";
 
 // The attestation of the sandbox that dials over TCP, which its registration's check admits.
 const ATTESTATION: &str = "the sandbox's attestation";
 
 #[derive(Clone, Copy)]
 enum Meeting {
-    // `sandboxd` gets `GRANT` and `ATTESTATION` in its environment all the same, which a command
-    // shows it doesn't get.
+    // `sandboxd` gets each of `SANDBOXD_GIVEN` in its environment all the same, which a command
+    // and the probe for GPUs show they don't get.
     Socket,
     Tcp,
     Listen,
+    // As the companion `COMPANION`, under TLS, behind a stand-in for its sandbox's relay.
+    Relayed,
 }
 
 #[expect(
@@ -109,8 +121,7 @@ impl Sandbox {
                 let (SocketDial { dir }, registration) = sockets.issue(&name).unwrap();
                 sandboxd
                     .arg(dir.join(SOCKET_NAME))
-                    .env(SANDBOXD_GRANT, GRANT)
-                    .env(SANDBOXD_ATTESTATION, ATTESTATION);
+                    .envs(SANDBOXD_GIVEN.map(|name| (name, GRANT)));
                 (Gateway::Sockets(sockets), registration)
             }
             Meeting::Tcp => {
@@ -144,11 +155,33 @@ impl Sandbox {
                 let endpoint = Endpoint::new(test_support::edge::NAME.to_owned(), port).unwrap();
                 (Gateway::Listen(address), unreached.at(endpoint))
             }
+            Meeting::Relayed => {
+                let dialer = Dialer::new(test_support::edge::client());
+                let (relayed, unreached) = dialer.relayed(&companion()).unwrap();
+                let address = unlistened();
+                let by = unix_seconds(3600);
+                sandboxd
+                    .args(["--listen", &address.to_string(), "--by", &by, "--tls"])
+                    .envs(given(&relayed));
+                let companions = BTreeMap::from([(companion(), address.into())]);
+                let relay = test_support::relayed::relay(companions);
+                let port = test_support::edge::front(relay.address);
+                let endpoint = Endpoint::new(test_support::edge::NAME.to_owned(), port).unwrap();
+                (Gateway::Listen(address), unreached.at(endpoint))
+            }
         };
         let sandboxd = sandboxd.spawn().unwrap();
         // Dialed only once `sandboxd` listens, as a dial before would wait a redial out.
         if let Gateway::Listen(address) = gateway {
             listened(address);
+            if matches!(meeting, Meeting::Relayed) {
+                // A peer that speaks no TLS comes first. The gateway's meeting comes after it,
+                // so the listen went on.
+                let mut accepted = Vec::new();
+                frame::write(&mut accepted, &HelloReply::Accepted { grant: None }, &[]).unwrap();
+                let hello = heard_hello(address.into(), &accepted);
+                assert!(!hello, "a peer that speaks no TLS was to hear no hello");
+            }
         }
         let (sender, arrivals) = mpsc::channel();
         let accepted =
@@ -257,6 +290,20 @@ impl Sandbox {
     }
 }
 
+fn companion() -> CompanionName {
+    CompanionName::try_from(COMPANION.to_owned()).unwrap()
+}
+
+/// What `relayed` gives its companion's `sandboxd`, each in the variable that holds it.
+fn given(relayed: &Relayed) -> [(&'static str, String); 3] {
+    let Relayed { grant, identity } = relayed;
+    [
+        (SANDBOXD_GRANT, grant.digits()),
+        (SANDBOXD_TLS_CERTIFICATE, identity.certificate_digits()),
+        (SANDBOXD_TLS_KEY, identity.key_digits()),
+    ]
+}
+
 fn absolute(path: &Path) -> AbsolutePath {
     AbsolutePath::try_from(path.to_str().unwrap().to_owned()).unwrap()
 }
@@ -265,7 +312,7 @@ fn relative(path: &str) -> RelativePath {
     RelativePath::try_from(path.to_owned()).unwrap()
 }
 
-/// A `PATH` of one directory below `dir`, which holds links to [`TOOLS`] alone.
+/// A `PATH` of one directory below `dir`, which holds links to [`TOOLS`], and [`PROBE`].
 fn tools(dir: &Path) -> OsString {
     let path = env::var_os("PATH").unwrap();
     let bin = dir.join("bin");
@@ -277,6 +324,9 @@ fn tools(dir: &Path) -> OsString {
         };
         symlink(tool, bin.join(name)).unwrap();
     }
+    let probe = bin.join("nvidia-smi");
+    fs::write(&probe, PROBE).unwrap();
+    fs::set_permissions(&probe, fs::Permissions::from_mode(0o755)).unwrap();
     bin.into_os_string()
 }
 
@@ -418,7 +468,9 @@ fn puts_runs_and_collects() {
             out/result.json: {"bytes": 2109497}
             payload collected intact: true
             log/1.stderr: warning
-            log/1.stdout: home=/pumpkin/home mode=train grant=unset attestation=unset path=/usr/bin:/bin in $ROOT/home
+            log/1.stdout: home=/pumpkin/home mode=train path=/usr/bin:/bin in $ROOT/home
+            the command was given: []
+            the probe for GPUs was given: []
             then Ended { reason: "the owner dropped the session" }
             sandboxd: exit status: 0
             left running: 0"#]],
@@ -439,7 +491,8 @@ fn put_run_collect(sandbox: &mut Sandbox) -> Vec<String> {
         printf '{"bytes": %s}' "$(wc --bytes < ../in/payload/raw)" > ../out/result.json
         mkdir ../out/evidence && cp ../in/payload/raw ../out/evidence/payload
         mkdir ../out/empty
-        echo "home=$HOME mode=$MODE grant=${SANDBOXD_GRANT-unset} attestation=${SANDBOXD_ATTESTATION-unset} path=$PATH in $(pwd)"
+        echo "home=$HOME mode=$MODE path=$PATH in $(pwd)"
+        env > ../command.env
         echo warning >&2
         exit 3"#;
     let launch = sandbox.sh(
@@ -454,6 +507,18 @@ fn put_run_collect(sandbox: &mut Sandbox) -> Vec<String> {
     let kept = fs::read(sandbox.root.join("collected/out/evidence/payload")).unwrap();
     lines.push(format!("payload collected intact: {}", kept == raw));
     lines.extend(sandbox.collect("log").unwrap());
+    let ran = [
+        ("the command", "command.env"),
+        ("the probe for GPUs", "bin/nvidia-smi.env"),
+    ];
+    for (program, env) in ran {
+        let env = fs::read_to_string(sandbox.root.join(env)).unwrap();
+        let given: Vec<&str> = (env.lines())
+            .filter_map(|line| line.split_once('=').map(|(name, _)| name))
+            .filter(|name| SANDBOXD_GIVEN.contains(name))
+            .collect();
+        lines.push(format!("{program} was given: {given:?}"));
+    }
     lines
 }
 
@@ -986,6 +1051,120 @@ fn listening() {
     );
 }
 
+// A case of flags that `sandboxd` refuses: its name, its arguments and its environment.
+type Refused<'a> = (&'a str, &'a [&'a str], &'a [&'a (&'a str, String)]);
+
+#[test]
+fn under_tls() {
+    check(
+        Meeting::Relayed,
+        |sandbox| {
+            let mut lines = Vec::new();
+            let dialer = Dialer::new(test_support::edge::client());
+            let (ours, _) = dialer.relayed(&companion()).unwrap();
+            let [grant, certificate, key] = given(&ours);
+            let (closed, by) = (unlistened().to_string(), unix_seconds(3600));
+            let listening = [&closed, "--listen", "--by", &by, "--tls"];
+            let cases: [Refused<'_>; 2] = [
+                ("no certificate", &listening, &[&grant, &key]),
+                ("no key", &listening, &[&grant, &certificate]),
+            ];
+            for (case, args, env) in cases {
+                let args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
+                let env: Vec<_> = (env.iter())
+                    .map(|(name, value)| (*name, OsStr::new(value)))
+                    .collect();
+                let refused = ended(sandbox.sandboxd(&args, &env));
+                lines.push(format!("{case}: {refused}"));
+            }
+            lines
+        },
+        &expect![[r#"
+            no certificate: exit status: 1: sandboxd: SANDBOXD_TLS_CERTIFICATE is not set: set it to the digits of the identity issued for the companion, which a sandboxd that listens with --tls serves TLS with
+            no key: exit status: 1: sandboxd: SANDBOXD_TLS_KEY is not set: set it to the digits of the identity issued for the companion, which a sandboxd that listens with --tls serves TLS with
+            then Ended { reason: "the owner dropped the session" }
+            sandboxd: exit status: 0
+            left running: 0"#]],
+    );
+}
+
+#[test]
+fn relay_refusals() {
+    check(
+        Meeting::Socket,
+        |sandbox| {
+            let (apart, relay) = (unlistened(), SocketAddr::from(unlistened()));
+            let (apart_text, relay_text) = (apart.to_string(), relay.to_string());
+            let by = unix_seconds(3600);
+            let listening = ["--listen", &apart_text, "--by", &by];
+            let relaying = [
+                "--relay",
+                &relay_text,
+                "--relayed",
+                "web",
+                "--relayed",
+                "db",
+            ];
+            let args: Vec<&OsStr> = (listening.iter().chain(&relaying))
+                .map(OsStr::new)
+                .collect();
+            let sandboxd = sandbox.sandboxd(&args, &grant());
+            listened(apart);
+            let mut peers = Vec::new();
+            let unnamed = routed(relay, b"cache\n", &mut peers);
+            let mut lines = vec![format!(
+                "a companion that --relayed doesn't name: {unnamed}"
+            )];
+            let ours = HelloReply::Accepted {
+                grant: Some(RegistrationGrant::try_from(GRANT.to_owned()).unwrap()),
+            };
+            greeted(apart.into(), &ours, &mut Vec::new());
+            let said = ended(sandboxd).replace(&peers[0], "$PEER");
+            lines.push(format!("then, its session ended: {said}"));
+            lines
+        },
+        &expect![[r#"
+            a companion that --relayed doesn't name: closed, with no answer
+            then, its session ended: exit status: 0: sandboxd: the relay closed the connection from $PEER: its route names `cache`, which this relay carries nothing to: expected a companion that --relayed names
+            then Ended { reason: "the owner dropped the session" }
+            sandboxd: exit status: 0
+            left running: 0"#]],
+    );
+}
+
+/// Connects to the relay at `relay`, which listens, says `route` and no more, and returns what
+/// the relay did. Adds the connection's own address to `peers`.
+fn routed(relay: SocketAddr, route: &[u8], peers: &mut Vec<String>) -> String {
+    // One dial, as the relay listens from before `sandboxd` does.
+    let mut peer = TcpStream::connect(relay).unwrap();
+    peer.set_read_timeout(Some(HUNG)).unwrap();
+    peers.push(peer.local_addr().unwrap().to_string());
+    peer.write_all(route).unwrap();
+    peer.shutdown(Shutdown::Write).unwrap();
+    let mut answer = Vec::new();
+    match peer.read_to_end(&mut answer) {
+        Ok(0) => "closed, with no answer".to_owned(),
+        answered => format!("{answered:?}: {answer:?}"),
+    }
+}
+
+/// Says `said` to what listens at `address`, and no more, and reads until the connection
+/// closes. Returns whether what it heard holds a hello.
+fn heard_hello(address: SocketAddr, said: &[u8]) -> bool {
+    let mut peer = TcpStream::connect(address).unwrap();
+    peer.set_read_timeout(Some(HUNG)).unwrap();
+    peer.write_all(said).unwrap();
+    peer.shutdown(Shutdown::Write).unwrap();
+    let mut answer = Vec::new();
+    match peer.read_to_end(&mut answer) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::ConnectionReset => {}
+        Err(error) => panic!("{error}"),
+    }
+    // A hello's message has a `version`. A TLS alert, which the peer may hear, has none.
+    answer.windows(9).any(|bytes| bytes == b"\"version\"")
+}
+
 fn listening_apart(sandbox: &Sandbox) -> Vec<String> {
     let apart = unlistened();
     let apart_text = apart.to_string();
@@ -1009,7 +1188,9 @@ fn listening_apart(sandbox: &Sandbox) -> Vec<String> {
     lines.extend(answers.map(|answer| greeted(apart.into(), &answer, &mut peers)));
     let mut said = ended(listening);
     for (n, peer) in peers.iter().enumerate() {
-        said = said.replace(peer, &format!("$PEER{n}"));
+        // The kernel may give a later peer the address of one that has closed. So each mask
+        // replaces one occurrence, in the order that `sandboxd` tells of its peers.
+        said = said.replacen(peer, &format!("$PEER{n}"), 1);
     }
     lines.push(format!("then, its session ended: {said}"));
     lines
@@ -1431,7 +1612,11 @@ fn as_root_with_user() {
     let (sender, arrivals) = mpsc::channel();
     let accepted = registration.accept((&Machine, hung()), None, false, sender, |a| a, || false);
     let mut session = accepted.unwrap();
-    let mut lines = as_user(&mut session, &arrivals, &root.join("collected"));
+    let script = r#"
+        stat -c '/pumpkin: %u:%g %a' /pumpkin
+        grep -E '^(Uid|Gid|Groups|CapInh|CapPrm|CapEff|CapAmb|NoNewPrivs):' /proc/self/status
+        nsenter --setuid=0 id 2>&1 || echo "root refused""#;
+    let mut lines = as_user(&mut session, &arrivals, &root.join("collected"), script);
     lines.extend(left_behind(&mut session, &arrivals, &container));
     drop(session);
     // Gone already, once the session ended, which is as good as removed.
@@ -1461,29 +1646,44 @@ fn as_root_with_user() {
 fn start_as_root(dir: &Path, container: &str, user: &str) {
     let mount =
         |host: &Path, at: &str| format!("--mount=type=bind,source={},target={at}", host.display());
+    let options = [
+        "--network=none".to_owned(),
+        "--user=0:0".to_owned(),
+        format!("--name={container}"),
+        mount(dir, "/.pumpkin/gateway"),
+        mount(&test_support::sandboxd(), "/.pumpkin/sandboxd"),
+    ];
+    let socket = format!("/.pumpkin/gateway/{SOCKET_NAME}");
+    let command = ["/.pumpkin/sandboxd", "--user", user, &socket];
+    start(&options.each_ref().map(String::as_str), &command);
+}
+
+/// Starts a container of `BUSYBOX` that runs `command`, with `options` of `docker run`'s.
+fn start(options: &[&str], command: &[&str]) {
     let mut docker = test_support::docker();
-    docker.args(["run", "--detach", "--rm", "--network=none", "--user=0:0"]);
-    docker.arg("--init");
-    docker.arg(format!("--name={container}"));
-    docker.arg(mount(dir, "/.pumpkin/gateway"));
-    docker.arg(mount(&test_support::sandboxd(), "/.pumpkin/sandboxd"));
-    docker.args([test_support::BUSYBOX, "/.pumpkin/sandboxd", "--user", user]);
-    docker.arg(format!("/.pumpkin/gateway/{SOCKET_NAME}"));
+    docker.args(["run", "--detach", "--rm", "--init"]);
+    docker
+        .args(options)
+        .arg(test_support::BUSYBOX)
+        .args(command);
     // Not the container's id, which `docker run --detach` prints.
     let started = docker.stdout(Stdio::null()).status().unwrap().success();
     assert!(started, "the container was to start");
 }
 
-fn as_user(session: &mut Session, arrivals: &Receiver<Arrival>, collected: &Path) -> Vec<String> {
+/// Runs `script` over `session`, in a container whose `sandboxd` became a user, and returns its
+/// exit and what it printed, collected into `collected`.
+fn as_user(
+    session: &mut Session,
+    arrivals: &Receiver<Arrival>,
+    collected: &Path,
+    script: &str,
+) -> Vec<String> {
     let dirs = ["home", "log"].map(relative);
     let put = dirs.map(|dir| Put::Dir(dir, dir_mode()));
     session
         .put(&absolute(Path::new("/pumpkin")), put, hung())
         .unwrap();
-    let script = r#"
-        stat -c '/pumpkin: %u:%g %a' /pumpkin
-        grep -E '^(Uid|Gid|Groups|CapInh|CapPrm|CapEff|CapAmb|NoNewPrivs):' /proc/self/status
-        nsenter --setuid=0 id 2>&1 || echo "root refused""#;
     let exited = sh_as_user(session, arrivals, script);
     let limits = Limits {
         bytes: 1 << 20,
@@ -1563,5 +1763,249 @@ fn contained(container: &str, done: impl Fn(&str) -> bool) -> String {
             return listed;
         }
         thread::sleep(Duration::from_millis(10));
+    }
+}
+
+// Containers on a Docker network of their own, which resolves names as a sandbox's network does.
+// The gateway meets the companion through the relay in `main`.
+#[test]
+#[ignore = "needs Docker: run cargo xtask live docker"]
+fn relays_to_a_companion() {
+    let scratch = TestDir::new();
+    let net = Network::create();
+    let dialer = Dialer::new(test_support::edge::client());
+    let (Listening { grant }, main) = dialer.issue().unwrap();
+    let (relayed, behind) = dialer.relayed(&companion()).unwrap();
+    let by = unix_seconds(3600);
+    // A container that takes a connection, reads nothing of it and never ends it.
+    let deaf = ["nc", "-l", "-p", "7434", "-e", "sleep", "3600"];
+    net.start("deaf", &["--network-alias=deaf"], &deaf);
+    net.listening("deaf");
+    let relaying = ["--relay", "0.0.0.0:7435", "--relayed", COMPANION];
+    let unreached = ["--relayed", "ghost", "--relayed", "deaf"];
+    let publish = ["--publish=127.0.0.1::7434", "--publish=127.0.0.1::7435"];
+    let main_given = [(SANDBOXD_GRANT, grant.digits())];
+    let relaying: Vec<&str> = relaying.into_iter().chain(unreached).collect();
+    net.run("main", (&publish, &main_given), &by, &relaying);
+    let alias = [format!("--network-alias={COMPANION}")];
+    let alias = alias.each_ref().map(String::as_str);
+    net.run(COMPANION, (&alias, &given(&relayed)), &by, &["--tls"]);
+    // So that the relay's first connection reaches the companion, and it tells of none refused.
+    net.listening(COMPANION);
+    let (listens, relay) = (net.published("main", 7434), net.published("main", 7435));
+    let (mut within, exits) = met(behind, relay);
+    let script = r#"echo "in $(hostname), with key ${SANDBOXD_TLS_KEY-unset}""#;
+    let collected = scratch.path().join("companion");
+    let mut lines = as_user(&mut within, &exits, &collected, script);
+    let (mut own, own_exits) = met(main, listens);
+    let collected = scratch.path().join("main");
+    lines.extend(as_user(
+        &mut own,
+        &own_exits,
+        &collected,
+        "echo in $(hostname)",
+    ));
+    let again = routed(relay, format!("{COMPANION}\n").as_bytes(), &mut Vec::new());
+    lines.push(format!("a second connection to the companion: {again}"));
+    let ghost = routed(relay, b"ghost\n", &mut Vec::new());
+    lines.push(format!("to a companion that nothing resolves: {ghost}"));
+    let deaf = routed(relay, b"deaf\n", &mut Vec::new());
+    lines.push(format!("ended, to one that never ends its own way: {deaf}"));
+    // The one wait on the real clock, for the 15 s that the relay gives a route.
+    let mut silent = TcpStream::connect(relay).unwrap();
+    silent.set_read_timeout(Some(HUNG)).unwrap();
+    let closed = silent.read(&mut [0]).map_err(|error| error.kind());
+    lines.push(format!("a connection that says no route: {closed:?}"));
+    // Its first connection's thread has long finished, so nothing of it is in flight.
+    let ghost = routed(relay, b"ghost\n", &mut Vec::new());
+    lines.push(format!(
+        "to the companion that nothing resolves, again: {ghost}"
+    ));
+    let still = sh_as_user(&mut within, &exits, "true");
+    lines.push(format!("the companion's session, after them: {still:?}"));
+    lines.extend(net.told("main"));
+    drop(within);
+    net.gone(COMPANION);
+    lines.push("the companion's container, once its session ended: gone".to_owned());
+    drop(own);
+    expect![[r#"
+        exited: Code(0)
+        in companion, with key unset
+        exited: Code(0)
+        in main
+        a second connection to the companion: closed, with no answer
+        to a companion that nothing resolves: closed, with no answer
+        ended, to one that never ends its own way: closed, with no answer
+        a connection that says no route: Ok(0)
+        to the companion that nothing resolves, again: closed, with no answer
+        the companion's session, after them: Code(0)
+        sandboxd: the relay closed the connection from $PEER: a connection to companion `companion` is in flight: expected one at a time, as the gateway opens one session with it
+        sandboxd: the relay closed the connection from $PEER: companion `ghost` wasn't reached at ghost:7434: its name didn't resolve: <reason>
+        sandboxd: the relay closed the connection from $PEER: it sent no route within 15 s: expected a companion's name and a line feed, as the connection opens
+        sandboxd: the relay closed the connection from $PEER: companion `ghost` wasn't reached at ghost:7434: its name didn't resolve: <reason>
+        the companion's container, once its session ended: gone"#]].assert_eq(&lines.join("\n"));
+}
+
+/// Meets the `sandboxd` that `unreached` was issued for, behind the stand-in edge in front of
+/// `at`.
+fn met(unreached: Unreached, at: SocketAddr) -> (Session, Receiver<Arrival>) {
+    let port = test_support::edge::front(at);
+    let endpoint = Endpoint::new(test_support::edge::NAME.to_owned(), port).unwrap();
+    let (sender, arrivals) = mpsc::channel();
+    let registration = unreached.at(endpoint);
+    let accepted = registration.accept((&Machine, hung()), None, false, sender, |a| a, || false);
+    (accepted.unwrap(), arrivals)
+}
+
+/// A Docker network of the test's own, and the containers that the test runs on it. Dropping it
+/// removes them all.
+struct Network {
+    network: String,
+}
+
+impl Network {
+    fn create() -> Self {
+        let network = format!("sandboxd-{}-relays", std::process::id());
+        let created = (test_support::docker())
+            .args(["network", "create", &network])
+            .stdout(Stdio::null())
+            .status();
+        assert!(created.unwrap().success(), "the network was to be made");
+        Self { network }
+    }
+
+    fn container(&self, host: &str) -> String {
+        format!("{}-{host}", self.network)
+    }
+
+    /// Starts a container named for `host`, its host name, whose `sandboxd` listens until `by`
+    /// as a user, with `flags` more. `options` are `docker run`'s, and `sandboxd`'s environment.
+    fn run(&self, host: &str, options: (&[&str], &[(&str, String)]), by: &str, flags: &[&str]) {
+        let (options, given) = options;
+        let given = given
+            .iter()
+            .map(|(name, value)| format!("--env={name}={value}"));
+        let sandboxd = test_support::sandboxd();
+        let mount = format!(
+            "--mount=type=bind,source={},target=/.pumpkin/sandboxd",
+            sandboxd.display()
+        );
+        let options: Vec<String> = (options.iter().map(|option| (*option).to_owned()))
+            .chain(given)
+            .chain(["--user=0:0".to_owned(), mount])
+            .collect();
+        let options: Vec<&str> = options.iter().map(String::as_str).collect();
+        let at = format!("0.0.0.0:{LISTEN_PORT}");
+        let listening = ["/.pumpkin/sandboxd", &at, "--listen", "--by", by];
+        let command: Vec<&str> = (listening.into_iter())
+            .chain(["--user", "1234:1235"])
+            .chain(flags.iter().copied())
+            .collect();
+        self.start(host, &options, &command);
+    }
+
+    /// Starts a container named for `host`, its host name, that runs `command`, with `options`
+    /// of `docker run`'s.
+    fn start(&self, host: &str, options: &[&str], command: &[&str]) {
+        let named = [
+            format!("--network={}", self.network),
+            format!("--name={}", self.container(host)),
+            format!("--hostname={host}"),
+        ];
+        let named = named.iter().map(String::as_str);
+        start(
+            &named.chain(options.iter().copied()).collect::<Vec<_>>(),
+            command,
+        );
+    }
+
+    /// Returns once a socket listens at `LISTEN_PORT` in the container named for `host`.
+    fn listening(&self, host: &str) {
+        let by = Deadline::after(HUNG);
+        loop {
+            let listed = (test_support::docker())
+                .args(["exec", &self.container(host), "netstat", "-l", "-t", "-n"])
+                .output()
+                .unwrap();
+            let listed = String::from_utf8(listed.stdout).unwrap();
+            if listed.contains(&format!(":{LISTEN_PORT} ")) {
+                return;
+            }
+            assert!(
+                by.remaining().is_some(),
+                "nothing listens in the container named for {host}: it was to listen"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Where the engine publishes `port` of the container named for `host`, on the loopback.
+    fn published(&self, host: &str, port: u16) -> SocketAddr {
+        let listed = (test_support::docker())
+            .args(["port", &self.container(host), &format!("{port}/tcp")])
+            .output()
+            .unwrap();
+        let listed = String::from_utf8(listed.stdout).unwrap();
+        listed.trim().parse().unwrap()
+    }
+
+    /// Returns once the engine lists no container named for `host`, as it removes one whose
+    /// `sandboxd` has exited.
+    fn gone(&self, host: &str) {
+        let name = format!("name=^{}$", self.container(host));
+        let by = Deadline::after(HUNG);
+        loop {
+            let listed = (test_support::docker())
+                .args(["ps", "--all", "--quiet", "--filter", &name])
+                .output()
+                .unwrap();
+            if listed.stdout.is_empty() {
+                return;
+            }
+            assert!(
+                by.remaining().is_some(),
+                "the container named for {host} still runs: its sandboxd was to exit"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// What the relay in the container named for `host` told of, each peer's address and each
+    /// reason of the resolver's masked.
+    fn told(&self, host: &str) -> Vec<String> {
+        let logs = (test_support::docker())
+            .args(["logs", &self.container(host)])
+            .output()
+            .unwrap();
+        let told = String::from_utf8(logs.stderr).unwrap();
+        let (from, resolved) = ("the connection from ", "didn't resolve: ");
+        let masked = told.lines().map(|line| {
+            let line = match line.split_once(from) {
+                Some((before, rest)) => {
+                    let why = rest.split_once(": ").map_or("", |(_peer, why)| why);
+                    format!("{before}{from}$PEER: {why}")
+                }
+                None => line.to_owned(),
+            };
+            match line.split_once(resolved) {
+                Some((before, _reason)) => format!("{before}{resolved}<reason>"),
+                None => line,
+            }
+        });
+        masked.collect()
+    }
+}
+
+impl Drop for Network {
+    fn drop(&mut self) {
+        // A container whose session has ended is gone already, which is as good as removed.
+        for host in ["main", COMPANION, "deaf"] {
+            let _ = (test_support::docker())
+                .args(["rm", "--force", &self.container(host)])
+                .output();
+        }
+        let _ = (test_support::docker())
+            .args(["network", "rm", &self.network])
+            .output();
     }
 }

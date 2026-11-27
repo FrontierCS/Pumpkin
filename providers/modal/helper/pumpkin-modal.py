@@ -20,6 +20,7 @@ import json
 import math
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 # The App that holds the images Pumpkin imports, which Modal builds once for each definition, and
 # every run's sandboxes. Nothing stops it: an App that holds no sandbox costs nothing.
@@ -29,14 +30,12 @@ APP = "pumpkin-images"
 RUN_TAG = "pumpkin-run"
 ROLE_TAG = "pumpkin-role"
 
-# Where a sandbox has `sandboxd`, and `sandboxctl` for a role that makes ops
-# (`schema::sandbox::SANDBOXD_PATH`, `SANDBOXCTL_PATH`), which Modal attaches to it from this
-# host as it starts it.
-SANDBOXD_PATH = "/.pumpkin/sandboxd"
-SANDBOXCTL_PATH = "/.pumpkin/bin/sandboxctl"
-
-# The port `sandboxd` listens at in its sandbox, which Modal's tunnel exposes behind its TLS.
-PORT = 7434
+# How many images an import builds at once, and how many sidecars a create makes at once. Each
+# waits on Modal on a thread of its own. The builds share the SDK's one HTTP/2 connection, a stream
+# each. HTTP/2 asks a server to allow at least 100 streams at once, so 64 leaves room for the calls
+# beside them: https://www.rfc-editor.org/rfc/rfc9113.html#section-6.5.2
+# Past what Modal allows, its SDK waits rather than fails.
+AT_ONCE = 64
 
 # How often a create lists its run until the list finds its sandbox: as often as Modal's SDK asks
 # about a sandbox it has just created.
@@ -81,31 +80,40 @@ def ready(modal, request: dict) -> dict:
     return {"workspace": workspace.name}
 
 
-def imported(modal, request: dict) -> str:
-    secret = modal.Secret.from_dict(
-        {"AWS_ROLE_ARN": request["role_arn"], "AWS_REGION": request["region"]}
-    )
-    # Modal runs an image's ENTRYPOINT with a sandbox's command as its arguments, and no role's
-    # sandbox runs its image's own (`schema::ir`), so the import leaves the image none.
-    image = modal.Image.from_registry(
-        request["reference"], secret=secret, setup_dockerfile_commands=["ENTRYPOINT []"]
-    )
-    image.build(modal.App.lookup(APP, create_if_missing=True))
-    return image.object_id
-
-
-def create(modal, request: dict) -> dict:
-    """Creates the run's sandbox of the request's role, and returns its ID, its tunnel's host and
-    port, and the `phases` that it timed: `lookup`, `create`, `tunnels` and `list`, in order.
-
-    Modal ends it at its `hard_end`, in seconds since the Unix epoch, if nothing ends it
-    first. Its `sandboxd` ends it too if no gateway has claimed it a minute after its start's
-    deadline, `by`, as when Modal makes it after the create was given up."""
-    # Modal counts the timeout from its create, which this is just before.
-    timeout = request["hard_end"] - int(time.time())
-    if timeout <= 0:
-        raise Refused("the create's hard end has passed: expected one to come")
+def imported(modal, request: dict) -> list[str]:
+    """Imports the image at each of the request's `references`, at most `AT_ONCE` at a time, and
+    returns their IDs in that order. With the request's `sandboxd`, each holds that too, built in,
+    as a sidecar's image must."""
     sandboxd = request["sandboxd"]
+    if sandboxd is not None:
+        unchanged(sandboxd)
+    app = modal.App.lookup(APP, create_if_missing=True)
+
+    def build(reference: str) -> str:
+        secret = modal.Secret.from_dict(
+            {"AWS_ROLE_ARN": request["role_arn"], "AWS_REGION": request["region"]}
+        )
+        # Modal runs an image's ENTRYPOINT with a container's command as its arguments, and no
+        # role's sandbox runs its image's own (`schema::ir`), so the import leaves the image none.
+        image = modal.Image.from_registry(
+            reference, secret=secret, setup_dockerfile_commands=["ENTRYPOINT []"]
+        )
+        if sandboxd is not None:
+            for at in sandboxd["at"]:
+                image = image.add_local_file(sandboxd["path"], at, copy=True)
+        try:
+            image.build(app)
+        except modal.exception.Error as error:
+            raise Refused(f"image {reference}: {type(error).__name__}: {error}") from error
+        return image.object_id
+
+    with ThreadPoolExecutor(AT_ONCE) as pool:
+        # The first failure in the request's order is raised here, once every build has ended.
+        return list(pool.map(build, request["references"]))
+
+
+def unchanged(sandboxd: dict) -> None:
+    """Refuses a `sandboxd` whose file is no longer the one published."""
     with open(sandboxd["path"], "rb") as file:
         digest = hashlib.sha256(file.read()).hexdigest()
     if digest != sandboxd["sha256"]:
@@ -113,27 +121,39 @@ def create(modal, request: dict) -> dict:
             f"the sandboxd at {sandboxd['path']} has changed since it was published: expected "
             f"the file whose SHA-256 is {sandboxd['sha256']}"
         )
+
+
+def create(modal, request: dict) -> dict:
+    """Creates the run's sandbox of the request's role, then its `sidecars`. Returns the sandbox's
+    ID, a tunnel for each of the request's `ports` in their order, and the `phases` that it timed.
+    The phases are `lookup`, `create`, `tunnels` and `list`, then `companions` if it made any.
+
+    Each container starts with the `args` and `env` that the request gives it, which this passes
+    on as they are. `main` has the request's `sandboxd` attached at each path of its `at`.
+
+    Modal ends the sandbox at its `hard_end`, in seconds since the Unix epoch, if nothing ends it
+    first, and its sidecars with it."""
+    # Modal counts the timeout from its create, which this is just before.
+    timeout = request["hard_end"] - int(time.time())
+    if timeout <= 0:
+        raise Refused("the create's hard end has passed: expected one to come")
+    sandboxd = request["sandboxd"]
+    unchanged(sandboxd)
     run = request["run"]
     phases = []
     with timed(phases, "lookup"):
         app = modal.App.lookup(APP, create_if_missing=True)
     image = modal.Image.from_id(request["image"])
-    image = image.add_local_file(sandboxd["path"], SANDBOXD_PATH, copy=False)
-    args = [SANDBOXD_PATH, f"0.0.0.0:{PORT}", "--listen", "--by", str(request["by"])]
-    args += ["--user", request["user"]]
-    if request["ops"]:
-        image = image.add_local_file(sandboxd["path"], SANDBOXCTL_PATH, copy=False)
-        args.append("--ops")
-    if request["model"]:
-        args.append("--model")
+    for at in sandboxd["at"]:
+        image = image.add_local_file(sandboxd["path"], at, copy=False)
     cpu, memory = cores(request["cpu_millis"]), request["memory_mib"]
     with timed(phases, "create"):
         sandbox = modal.Sandbox.create(
-            *args,
+            *request["args"],
             app=app,
             tags={RUN_TAG: run, ROLE_TAG: request["role"]},
             image=image,
-            env={"SANDBOXD_GRANT": request["grant"]},
+            env=request["env"],
             timeout=timeout,
             gpu=request["gpu"],
             cpu=(cpu, cpu),
@@ -141,14 +161,68 @@ def create(modal, request: dict) -> dict:
             runtime="gvisor",
             outbound_cidr_allowlist=[],
             inbound_cidr_allowlist=[request["source"]],
-            encrypted_ports=[PORT],
+            encrypted_ports=request["ports"],
         )
     with timed(phases, "tunnels"):
-        tunnel = sandbox.tunnels()[PORT]
+        tunnels = sandbox.tunnels()
     with timed(phases, "list"):
         while sandbox.object_id not in ids(modal, app, run) and sandbox.poll() is None:
             time.sleep(LISTED_EVERY)
-    return {"id": sandbox.object_id, "host": tunnel.host, "port": tunnel.port, "phases": phases}
+    if request["sidecars"]:
+        with timed(phases, "companions"):
+            accompany(modal, sandbox, request["sidecars"])
+    return {
+        "id": sandbox.object_id,
+        "tunnels": [
+            {"host": tunnels[port].host, "port": tunnels[port].port} for port in request["ports"]
+        ],
+        "phases": phases,
+    }
+
+
+def accompany(modal, sandbox, sidecars: list[dict]) -> None:
+    """Starts each of `sidecars` beside `sandbox`'s own container, at most `AT_ONCE` at a time.
+
+    If one isn't created, this ends the sandbox, and then raises the first failure in the order of
+    `sidecars`, by its sidecar's name. A sandbox that has ended refuses every sidecar, and Modal
+    may not say for seconds that it has, so the first sidecar is then named for the sandbox's own
+    end."""
+
+    def start(sidecar: dict) -> str | None:
+        try:
+            sandbox._experimental_sidecars.create(
+                *sidecar["args"],
+                name=sidecar["name"],
+                image=modal.Image.from_id(sidecar["image"]),
+                env=sidecar["env"],
+                outbound_cidr_allowlist=[],
+            )
+        # Whatever fails, as the SDK lets through errors of its transport that aren't its own, and
+        # the sandbox is to be ended before any is reported.
+        except Exception as error:
+            return f"{type(error).__name__}: {error}"
+        return None
+
+    with ThreadPoolExecutor(AT_ONCE) as pool:
+        failures = list(pool.map(start, sidecars))
+    failed = [(sidecar["name"], why) for sidecar, why in zip(sidecars, failures) if why]
+    if not failed:
+        return
+    name, why = failed[0]
+    was = "is ended"
+    try:
+        status = sandbox.poll()
+        if status is not None:
+            was = f"had exited with status {status}"
+    except modal.exception.Error:
+        pass
+    try:
+        end(modal, sandbox)
+    except modal.exception.Error as error:
+        was = f"wasn't ended ({type(error).__name__}: {error}), so the run's list finds it"
+    raise Refused(
+        f"sidecar `{name}` of sandbox {sandbox.object_id} wasn't created: {why}; the sandbox {was}"
+    )
 
 
 @contextlib.contextmanager
@@ -197,17 +271,23 @@ def owned(modal, run: str, id: str):
     return sandbox
 
 
+def end(modal, sandbox) -> None:
+    """Terminates `sandbox`, and returns once it has finished, its sidecars with it."""
+    try:
+        sandbox.terminate(wait=True)
+    except modal.exception.SandboxTimeoutError:
+        # The wait's report of a sandbox that Modal ended at its timeout, which has finished as
+        # any other.
+        pass
+
+
 def delete(modal, request: dict) -> dict:
     failed = {}
     for id in request["ids"]:
         try:
             sandbox = owned(modal, request["run"], id)
             if sandbox is not None:
-                sandbox.terminate(wait=True)
-        except modal.exception.SandboxTimeoutError:
-            # The wait's report of a sandbox that Modal ended at its timeout, which has finished
-            # as any other.
-            pass
+                end(modal, sandbox)
         except modal.exception.Error as error:
             failed[id] = f"{type(error).__name__}: {error}"
         except Refused as error:
@@ -216,20 +296,40 @@ def delete(modal, request: dict) -> dict:
 
 
 def console(modal, request: dict) -> str:
-    """The last `CONSOLE_ENTRIES` entries of the sandbox's log, then, if Modal reports it ended, a
-    line `pumpkin-modal: sandbox <id> exited with status <N>`."""
+    """The last `CONSOLE_ENTRIES` entries of the sandbox's log, which holds its sidecars' output
+    too, unmarked. Then, while the sandbox runs, a line `pumpkin-modal: sidecar <name> exited with
+    status <N>` for each sidecar that has ended. Once Modal reports the sandbox ended, the one
+    line `pumpkin-modal: sandbox <id> exited with status <N>` instead."""
     sandbox = owned(modal, request["run"], request["id"])
     if sandbox is None:
         raise Refused(f"Modal holds no sandbox {request['id']}: expected one of the run's")
     text = "".join(entry.message for entry in sandbox.logs.tail(CONSOLE_ENTRIES))
     # A sandbox that the kernel's OOM killer ends prints nothing of why: only its status, 137,
-    # says how it ended.
+    # says how it ended. The same holds of a sidecar.
     status = sandbox.poll()
     if status is None:
+        lines = [f"sidecar {name} exited with status {code}" for name, code in exited(sandbox)]
+    else:
+        lines = [f"sandbox {sandbox.object_id} exited with status {status}"]
+    if not lines:
         return text
     if text and not text.endswith("\n"):
         text += "\n"
-    return f"{text}{CONSOLE_PREFIX} sandbox {sandbox.object_id} exited with status {status}\n"
+    return text + "".join(f"{CONSOLE_PREFIX} {line}\n" for line in lines)
+
+
+def exited(sandbox) -> list[tuple[str, int]]:
+    """Each sidecar of `sandbox`, which runs, that has ended, by its name, with its exit status."""
+    try:
+        every = sandbox._experimental_sidecars.list(include_terminated=True)
+        running = {sidecar.object_id for sidecar in sandbox._experimental_sidecars.list()}
+        ended = [sidecar for sidecar in every if sidecar.object_id not in running]
+        # An ended sidecar's status came with the list, so its poll asks Modal nothing.
+        return [(sidecar.name, sidecar.poll()) for sidecar in ended]
+    # Whatever fails, as the console is for diagnostics alone, and the log's end is still worth
+    # giving. A sandbox that ends meanwhile fails these calls.
+    except Exception:
+        return []
 
 
 if __name__ == "__main__":

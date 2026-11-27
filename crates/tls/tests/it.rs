@@ -249,7 +249,7 @@ fn refused_servers() {
             server: Err("the TLS handshake failed: received fatal alert: BadCertificate: expected a client's TLS 1.3")"#]],
     );
     check(
-        (&Client::web_pki(), edge::NAME),
+        (&edge::web_pki(), edge::NAME),
         Peer::Server,
         within,
         unreached,

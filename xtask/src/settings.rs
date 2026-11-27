@@ -1,7 +1,8 @@
 //! What `cargo xtask live` reads of `pumpkin`'s configuration when it sends runs to the person's
 //! controller that `deploy/aws` made, the one of its `[controllers.<name>]` that names a `region`.
 //! A smoke run on one of its providers reads the controller's name and region. A run on Modal also
-//! reads the profile that reaches the workspace, and the GPU of a class there.
+//! reads the profile that reaches the workspace, and the GPU of a class there. It checks that
+//! another class there has no GPU.
 
 use std::error::Error;
 use std::path::Path;
@@ -106,6 +107,21 @@ impl Modal {
         let profile = text(modal, "profile")
             .ok_or_else(|| format!("{shown}'s `{table}` names no `profile`: name it"))?;
         let classes = modal.get("classes").and_then(toml::Value::as_table);
+        // A run on Modal also runs `examples/companions`, whose runner needs no GPU, and so only a
+        // class without one holds it.
+        let without_gpu = (classes.into_iter().flatten()).any(|(_, class)| {
+            class
+                .as_table()
+                .is_some_and(|class| !class.contains_key("gpu"))
+        });
+        if !without_gpu {
+            return Err(format!(
+                "a live run on Modal runs examples/companions on a class without a GPU, and \
+                 {shown}'s `{table}` has none: add one, such as `classes.cpu = {{ cpu_millis = \
+                 2000, memory_bytes = 4294967296, startup_seconds = 600 }}`"
+            )
+            .into());
+        }
         let mut models: Vec<String> = (classes.into_iter().flatten())
             .filter_map(|(_, class)| class.as_table().and_then(|class| text(class, "gpu_model")))
             .collect();
