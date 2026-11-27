@@ -19,7 +19,7 @@
 [sentences]
 "ARCHITECTURE.md" = 28
 "crates/aws/src/iam/simulate.rs" = 1
-"crates/aws/src/lib.rs" = 12
+"crates/aws/src/lib.rs" = 11
 "crates/aws/src/problem.rs" = 1
 "crates/decision/src/call/job.rs" = 2
 "crates/decision/src/jobs.rs" = 8

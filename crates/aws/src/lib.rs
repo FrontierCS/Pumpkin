@@ -60,6 +60,11 @@ const ECR_USER: &str = "AWS";
 /// The failure code by which ECR says it holds no image by the identifier it was asked.
 const NOT_FOUND: &str = "ImageNotFound";
 
+/// The most images that one `aws ecr batch-get-image` asks for.
+// ECR's BatchGetImage takes 1 to 100 image ids:
+// https://docs.aws.amazon.com/AmazonECR/latest/APIReference/API_BatchGetImage.html
+const MAX_LOOKUP_IMAGES: usize = 100;
+
 /// An AWS region, such as `us-west-1`.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(try_from = "String")]
@@ -282,6 +287,12 @@ impl Repository {
         let uri = &self.uri;
         uri.split_once('/').map_or(uri, |(registry, _)| registry)
     }
+
+    /// The reference of `image` in it, by its digest: `<URI>@<image>`. A pull by the reference
+    /// finds the image once [`Cli::publish`] has published it here.
+    pub fn reference(&self, image: &Image) -> String {
+        format!("{}@{image}", self.uri)
+    }
 }
 
 /// An IAM instance profile, as IAM describes it ([`Cli::instance_profile`]).
@@ -472,77 +483,63 @@ impl Cli {
         }))
     }
 
-    /// `image`, an image of `engine`'s, in `repository`, `<URI>@<image>`, once the repository holds
-    /// it: pushed from the engine, tagged with its digest's hexadecimal digits, unless the
-    /// repository holds it already, by its digest, as ECR answers. It fails if the repository
-    /// holds no image by its digest once the push ends.
+    /// Makes `repository` hold each of `images`, which are distinct images of `engine`'s. It pushes
+    /// each from the engine unless ECR answers that the repository holds it already, by its
+    /// digest. The push tags the image with its digest's hexadecimal digits. It fails if the
+    /// repository holds no image by an image's digest once its push ends.
     pub fn publish(
         &self,
         engine: &Pusher<'_>,
         repository: &Repository,
-        image: &Image,
-    ) -> Result<String, String> {
-        let reference = format!("{}@{image}", repository.uri);
-        if self.holds(repository, image)? {
-            return Ok(reference);
+        images: &[&Image],
+    ) -> Result<(), String> {
+        let answer = self.look_up(repository, images);
+        for image in images {
+            if holds(repository, image, &answer)? {
+                continue;
+            }
+            let pushed = self.push(engine, repository, image);
+            // Another publisher, such as a run that starts at once with the same image, may have
+            // pushed it since: then this push fails, as the repository's tags can't be moved, and
+            // the repository holds the image all the same.
+            let held = holds(repository, image, &self.look_up(repository, &[image]));
+            match (pushed, held) {
+                (_, Ok(true)) => Ok(()),
+                (Ok(()), Ok(false)) => Err(format!(
+                    "repository `{}` holds no image {image} once it was pushed there: expected \
+                     the push to keep the image's manifest, as the containerd image store does",
+                    repository.name.0
+                )),
+                (Err(pushing), Ok(false)) => Err(pushing),
+                (Ok(()), Err(looking)) => Err(looking),
+                (Err(pushing), Err(looking)) => Err(format!("{pushing}; and then {looking}")),
+            }?;
         }
-        let pushed = self.push(engine, repository, image);
-        // Another publisher, such as a run that starts at once with the same image, may have
-        // pushed it since: then this push fails, as the repository's tags can't be moved, and
-        // the repository holds the image all the same.
-        let holds = self.holds(repository, image);
-        match (pushed, holds) {
-            (_, Ok(true)) => Ok(reference),
-            (Ok(()), Ok(false)) => Err(format!(
-                "repository `{}` holds no image {image} once it was pushed there: expected the \
-                 push to keep the image's manifest, as the containerd image store does",
-                repository.name.0
-            )),
-            (Err(pushing), Ok(false)) => Err(pushing),
-            (Ok(()), Err(looking)) => Err(looking),
-            (Err(pushing), Err(looking)) => Err(format!("{pushing}; and then {looking}")),
-        }
+        Ok(())
     }
 
-    /// Whether `repository` holds `image`, by its digest, as `aws ecr batch-get-image` answers:
-    /// with the image, or with a failure whose code is [`NOT_FOUND`] for it.
-    fn holds(&self, repository: &Repository, image: &Image) -> Result<bool, String> {
-        let id = format!("imageDigest={image}");
-        let mut args = vec![
-            "--repository-name",
-            &repository.name.0,
-            "--image-ids",
-            &id,
-            "--accepted-media-types",
-        ];
-        args.extend(MANIFEST_TYPES);
-        let looking = format_args!(
-            "looking up {image} in repository `{}` failed",
-            repository.name.0
-        );
-        let found = self.json(&repository.ecr.holds, &args, Bound::Call);
-        let BatchImages { images, failures } = found.context(looking)?;
-        let ours = |id: &ImageId| id.image_digest.as_deref() == Some(image.as_str());
-        if images.iter().any(|found| ours(&found.image_id)) {
-            return Ok(true);
+    /// What `aws ecr batch-get-image` answers for `images` in `repository`, by their digests. It
+    /// asks in calls of at most [`MAX_LOOKUP_IMAGES`] images each. It fails with the error of the
+    /// first call that fails. It makes no call when `images` is empty.
+    fn look_up(&self, repository: &Repository, images: &[&Image]) -> Result<BatchImages, String> {
+        let mut answer = BatchImages {
+            images: Vec::new(),
+            failures: Vec::new(),
+        };
+        for chunk in images.chunks(MAX_LOOKUP_IMAGES) {
+            let ids: Vec<String> = (chunk.iter())
+                .map(|image| format!("imageDigest={image}"))
+                .collect();
+            let mut args = vec!["--repository-name", &repository.name.0, "--image-ids"];
+            args.extend(ids.iter().map(String::as_str));
+            args.push("--accepted-media-types");
+            args.extend(MANIFEST_TYPES);
+            let BatchImages { images, failures } =
+                self.json(&repository.ecr.holds, &args, Bound::Call)?;
+            answer.images.extend(images);
+            answer.failures.extend(failures);
         }
-        let absent =
-            |failure: &ImageFailure| ours(&failure.image_id) && failure.failure_code == NOT_FOUND;
-        if failures.iter().any(absent) {
-            return Ok(false);
-        }
-        let reported = failures.iter().map(|failure| {
-            let reason = failure.failure_reason.as_deref().unwrap_or_default();
-            format!(
-                "`{}` ({})",
-                failure.failure_code,
-                reason.trim_end_matches('.')
-            )
-        });
-        Err(format!(
-            "{looking}: ECR reports {}: expected the image, or `{NOT_FOUND}` for it",
-            reported.collect::<Vec<_>>().join("; ")
-        ))
+        Ok(answer)
     }
 
     fn push(
@@ -581,6 +578,47 @@ impl Cli {
         ]);
         command
     }
+}
+
+/// Whether `repository` holds `image`, by its digest, as `answer` says: with the image, or with a
+/// failure whose code is [`NOT_FOUND`] for it. `answer` is what a lookup of images that include it
+/// answered ([`Cli::look_up`]).
+fn holds(
+    repository: &Repository,
+    image: &Image,
+    answer: &Result<BatchImages, String>,
+) -> Result<bool, String> {
+    let looking = format_args!(
+        "looking up {image} in repository `{}` failed",
+        repository.name.0
+    );
+    let BatchImages { images, failures } = answer.as_ref().context(looking)?;
+    let ours = |id: &ImageId| id.image_digest.as_deref() == Some(image.as_str());
+    if images.iter().any(|found| ours(&found.image_id)) {
+        return Ok(true);
+    }
+    let absent =
+        |failure: &ImageFailure| ours(&failure.image_id) && failure.failure_code == NOT_FOUND;
+    if failures.iter().any(absent) {
+        return Ok(false);
+    }
+    // A failure that names no digest may be of any image the lookup asked for.
+    let mine = |failure: &&ImageFailure| {
+        let id = &failure.image_id;
+        id.image_digest.is_none() || ours(id)
+    };
+    let reported = failures.iter().filter(mine).map(|failure| {
+        let reason = failure.failure_reason.as_deref().unwrap_or_default();
+        format!(
+            "`{}` ({})",
+            failure.failure_code,
+            reason.trim_end_matches('.')
+        )
+    });
+    Err(format!(
+        "{looking}: ECR reports {}: expected the image, or `{NOT_FOUND}` for it",
+        reported.collect::<Vec<_>>().join("; ")
+    ))
 }
 
 fn aws() -> Command {
