@@ -54,7 +54,7 @@ const UNCLAIMED: &str = "no gateway claimed the sandbox by its start's deadline,
 // likes. Ten is enough to show why the gateway's own dials failed, which come first unless
 // another peer races them, and as many as the kernel's rate limit lets a burst of its
 // messages print (`printk_ratelimit_burst`).
-const TOLD_PEERS_COUNT: usize = 10;
+pub(crate) const TOLD_PEERS_COUNT: usize = 10;
 
 impl fmt::Display for Gateway {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

@@ -106,8 +106,8 @@ mod flags {
             optional --tls
             /// With --listen, relays at this TCP address of the sandbox's own, such as
             /// `0.0.0.0:7435`, from before it listens for the gateway. A connection there first
-            /// names a companion, in a line. It is then carried to that companion's sandboxd, at
-            /// port 7434, or closed. Needs --relayed. Refused without --listen.
+            /// names a companion, in a line. It is then carried to that companion's sandboxd, or
+            /// closed. Needs --relayed. Refused without --listen, and with --tls.
             optional --relay address: SocketAddr
             /// A companion that --relay carries connections to, by its name, which must resolve
             /// within the sandbox. It carries one connection a companion at a time. Repeatable, a
@@ -212,7 +212,7 @@ fn main() -> ExitCode {
         eprintln!("sandboxd: making the process non-dumpable failed: {error}");
         return ExitCode::FAILURE;
     }
-    let relaying = relaying(relay, relayed, listen);
+    let relaying = relaying(relay, relayed, listen, tls);
     let gateway = relaying.and_then(|relaying| {
         let gateway = gateway_of(gateway, listen, by, tls, given?)?;
         // Before `sandboxd` listens for the gateway, which so finds the relay once it has met it.
@@ -280,6 +280,7 @@ fn relaying(
     relay: Option<SocketAddr>,
     relayed: Vec<Companion>,
     listen: bool,
+    tls: bool,
 ) -> Result<Option<(SocketAddr, Vec<CompanionName>)>, String> {
     match (relay, relayed.is_empty()) {
         (None, true) => Ok(None),
@@ -294,6 +295,10 @@ fn relaying(
         (Some(_), false) if !listen => Err(
             "--relay carries the connections of a gateway that dials the sandbox: give it with \
              --listen"
+                .to_owned(),
+        ),
+        (Some(_), false) if tls => Err(
+            "--relay runs in a sandbox's `main`, and --tls in a companion: give one of them"
                 .to_owned(),
         ),
         (Some(address), false) => {

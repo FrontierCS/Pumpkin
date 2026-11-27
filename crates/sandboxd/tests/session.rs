@@ -174,6 +174,14 @@ impl Sandbox {
         // Dialed only once `sandboxd` listens, as a dial before would wait a redial out.
         if let Gateway::Listen(address) = gateway {
             listened(address);
+            if matches!(meeting, Meeting::Relayed) {
+                // A peer that speaks no TLS comes first. The gateway's meeting comes after it,
+                // so the listen went on.
+                let mut accepted = Vec::new();
+                frame::write(&mut accepted, &HelloReply::Accepted { grant: None }, &[]).unwrap();
+                let hello = heard_hello(address.into(), &accepted);
+                assert!(!hello, "a peer that speaks no TLS was to hear no hello");
+            }
         }
         let (sender, arrivals) = mpsc::channel();
         let accepted =
@@ -1166,6 +1174,7 @@ fn relay_refusals() {
             sandboxd: the relay closed the connection from $PEER3: the route names no companion: `main` names the runner's own container: give the companion another name
             sandboxd: the relay closed the connection from $PEER4: the route names no companion: `` is not a companion's name: use 1 to 63 characters from a-z, 0-9 and `-`, starting with a letter and ending with a letter or a digit
             sandboxd: the relay closed the connection from $PEER5: the route has no line feed in its first 64 bytes: expected a companion's name and a line feed
+            --relay with --tls: exit status: 1: sandboxd: --relay runs in a sandbox's `main`, and --tls in a companion: give one of them
             --relay without --relayed: exit status: 1: sandboxd: --relay carries connections to the companions that --relayed names: name each with a --relayed
             --relayed without --relay: exit status: 1: sandboxd: --relayed names a companion that --relay carries to: give it with --relay
             --relayed with no companion's name: exit status: 1: sandboxd: can't parse `--relayed`, `main` names the runner's own container: give the companion another name: see `sandboxd --help`
@@ -1193,7 +1202,11 @@ fn relay_flags(sandbox: &Sandbox) -> Vec<String> {
     let mut lines = Vec::new();
     let taken = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let taken_text = taken.local_addr().unwrap().to_string();
-    let flags: [(&str, &[&str]); 5] = [
+    let flags: [(&str, &[&str]); 6] = [
+        (
+            "--relay with --tls",
+            &["--relay", &relay_text, "--relayed", "web", "--tls"],
+        ),
         ("--relay without --relayed", &["--relay", &relay_text]),
         ("--relayed without --relay", &["--relayed", "web"]),
         ("--relayed with no companion's name", &["--relayed", "main"]),
@@ -1234,6 +1247,23 @@ fn routed(relay: SocketAddr, route: &[u8], peers: &mut Vec<String>) -> String {
         Ok(0) => "closed, with no answer".to_owned(),
         answered => format!("{answered:?}: {answer:?}"),
     }
+}
+
+/// Says `said` to what listens at `address`, and no more, and reads until the connection
+/// closes. Returns whether what it heard holds a hello.
+fn heard_hello(address: SocketAddr, said: &[u8]) -> bool {
+    let mut peer = TcpStream::connect(address).unwrap();
+    peer.set_read_timeout(Some(HUNG)).unwrap();
+    peer.write_all(said).unwrap();
+    peer.shutdown(Shutdown::Write).unwrap();
+    let mut answer = Vec::new();
+    match peer.read_to_end(&mut answer) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::ConnectionReset => {}
+        Err(error) => panic!("{error}"),
+    }
+    // A hello's message has a `version`. A TLS alert, which the peer may hear, has none.
+    answer.windows(9).any(|bytes| bytes == b"\"version\"")
 }
 
 /// `said`, with the reason that TLS's library gave in it, if any, masked.
@@ -1859,6 +1889,8 @@ fn relays_to_a_companion() {
     let alias = [format!("--network-alias={COMPANION}")];
     let alias = alias.each_ref().map(String::as_str);
     pair.run(COMPANION, (&alias, &given(&relayed)), &by, &["--tls"]);
+    // So that the relay's first connection reaches the companion, and it tells of none refused.
+    pair.listening(COMPANION);
     let (listens, relay) = (pair.published("main", 7434), pair.published("main", 7435));
     let (mut within, exits) = met(behind, relay);
     let script = r#"echo "in $(hostname), with key ${SANDBOXD_TLS_KEY-unset}""#;
@@ -1883,6 +1915,11 @@ fn relays_to_a_companion() {
     silent.set_read_timeout(Some(HUNG)).unwrap();
     let closed = silent.read(&mut [0]).map_err(|error| error.kind());
     lines.push(format!("a connection that says no route: {closed:?}"));
+    // Its first connection's thread has long finished, so nothing of it is in flight.
+    let ghost = routed(relay, b"ghost\n", &mut Vec::new());
+    lines.push(format!(
+        "to the companion that nothing resolves, again: {ghost}"
+    ));
     let still = sh_as_user(&mut within, &exits, "true");
     lines.push(format!("the companion's session, after them: {still:?}"));
     lines.extend(pair.told("main"));
@@ -1899,10 +1936,12 @@ fn relays_to_a_companion() {
         to a companion that nothing resolves: closed, with no answer
         ended, to one that never ends its own way: closed, with no answer
         a connection that says no route: Ok(0)
+        to the companion that nothing resolves, again: closed, with no answer
         the companion's session, after them: Code(0)
         sandboxd: the relay closed the connection from $PEER: a connection to companion `companion` is in flight: expected one at a time, as the gateway opens one session with it
         sandboxd: the relay closed the connection from $PEER: companion `ghost` wasn't reached at ghost:7434: its name didn't resolve: <reason>
         sandboxd: the relay closed the connection from $PEER: it sent no route within 15 s: expected a companion's name and a line feed, as the connection opens
+        sandboxd: the relay closed the connection from $PEER: companion `ghost` wasn't reached at ghost:7434: its name didn't resolve: <reason>
         the companion's container, once its session ended: gone"#]].assert_eq(&lines.join("\n"));
 }
 

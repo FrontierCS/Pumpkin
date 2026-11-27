@@ -26,19 +26,20 @@ use schema::sandbox::{HELLO_TIMEOUT, RELAYED_PORT, read_route};
 use stdx::{Context, Deadline};
 
 use crate::print_line;
+use crate::session::TOLD_PEERS_COUNT;
 use crate::until::Until;
 
 // A route is the first that its connection says, as a hello is, so it waits for the network
 // alone. The other connections wait their turn meanwhile.
 const ROUTE_TIMEOUT: Duration = HELLO_TIMEOUT;
 
-// How long a companion has to take the relay's connection. The gateway gives a whole dial no
-// longer, so it has given this one up by then.
+// How long a companion has to take the relay's connection: as long as a hello gets, as it waits
+// for the network alone too.
 const CONNECT_TIMEOUT: Duration = HELLO_TIMEOUT;
 
-// How many closed connections the relay tells of: as many as the peers that a `sandboxd` that
-// listens tells of. Any container of the sandbox may reach the relay, as often as it likes.
-const TOLD_COUNT: usize = 10;
+// How many closed connections the relay tells of. Any container of the sandbox may reach the
+// relay, as often as it likes.
+const TOLD_COUNT: usize = TOLD_PEERS_COUNT;
 
 // How long the relay waits before it takes a connection again, once taking one has failed. It
 // fails while the process has no descriptor to spare.
@@ -71,23 +72,22 @@ impl Relay {
     fn take(&mut self, listener: &TcpListener) -> ! {
         loop {
             match listener.accept() {
-                Ok((gateway, peer)) => {
-                    // A connection that isn't carried closes as `route` drops it.
-                    if let Err(why) = self.route(gateway, peer) {
-                        self.told.tell(peer, &why);
-                    }
-                }
+                Ok((gateway, peer)) => match self.routed(&gateway) {
+                    Ok(companion) => self.carry(gateway, peer, &companion),
+                    // Told before `gateway` drops, which closes it.
+                    Err(why) => self.told.tell(peer, &why),
+                },
                 Err(_) => thread::sleep(RETAKE),
             }
         }
     }
 
-    /// Reads the route of `gateway`, a connection from `peer`, and starts the thread that
-    /// carries it. Fails, saying why, for a connection that the relay doesn't carry.
-    fn route(&mut self, gateway: TcpStream, peer: SocketAddr) -> Result<(), String> {
-        stdx::net::set_options(&gateway).context("setting its connection's options failed")?;
-        let companion = routed(&gateway)?;
-        let Some(carrying) = self.carried.get_mut(&companion) else {
+    /// The companion that the route of `gateway` names, if the relay is to carry the connection
+    /// to it. Fails, saying why, for a connection that the relay doesn't carry.
+    fn routed(&self, gateway: &TcpStream) -> Result<CompanionName, String> {
+        stdx::net::set_options(gateway).context("setting its connection's options failed")?;
+        let companion = routed(gateway)?;
+        let Some(carrying) = self.carried.get(&companion) else {
             return Err(format!(
                 "its route names `{companion}`, which this relay carries nothing to: expected a \
                  companion that --relayed names"
@@ -99,20 +99,33 @@ impl Relay {
                  as the gateway opens one session with it"
             ));
         }
+        Ok(companion)
+    }
+
+    /// Starts the thread that carries `gateway`, a connection from `peer`, to `companion`, which
+    /// has no connection in flight.
+    fn carry(&mut self, gateway: TcpStream, peer: SocketAddr, companion: &CompanionName) {
         let (told, name) = (Arc::clone(&self.told), companion.clone());
         let carry = move || {
+            // Told before `gateway` drops, which closes it.
             if let Err(why) = carry(&gateway, &name) {
                 told.tell(peer, &why);
             }
         };
-        // A thread that can't start drops `carry`, and so closes the connection.
-        let thread = thread::Builder::new()
-            .name("relayed".to_owned())
-            .spawn(carry);
-        *carrying = Some(thread.context(format_args!(
-            "the thread that carries its connection to companion `{companion}` didn't start"
-        ))?);
-        Ok(())
+        let thread = thread::Builder::new().name("relayed".to_owned());
+        match thread.spawn(carry) {
+            Ok(thread) => {
+                self.carried.insert(companion.clone(), Some(thread));
+            }
+            // A thread that can't start has dropped `carry`, and so closed the connection.
+            Err(error) => self.told.tell(
+                peer,
+                &format!(
+                    "the thread that carries its connection to companion `{companion}` didn't \
+                     start: {error}"
+                ),
+            ),
+        }
     }
 }
 
