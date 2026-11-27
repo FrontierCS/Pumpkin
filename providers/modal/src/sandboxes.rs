@@ -11,9 +11,8 @@
 //! and Modal ends it at its hard end, if nothing ends it first.
 //!
 //! A runner's companions are the sandbox's sidecars, which share its CPU, memory, tag and end.
-//! Each runs its image with `sandboxd` built in, as Modal starts a sidecar only from an image
-//! that it has built. A sidecar has no tunnel and no connection out. The sandbox's containers
-//! reach one another by name, and nothing separates them.
+//! A sidecar has no tunnel and no connection out. The sandbox's containers reach one another by
+//! name, and nothing separates them.
 
 use std::collections::BTreeMap;
 use std::fs;

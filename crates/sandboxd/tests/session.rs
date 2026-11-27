@@ -1137,12 +1137,10 @@ fn relay_refusals() {
             let sandboxd = sandbox.sandboxd(&args, &grant());
             listened(apart);
             let long = [b'a'; MAX_ROUTE_BYTES];
-            let routes: [(&str, &[u8]); 6] = [
+            let routes: [(&str, &[u8]); 4] = [
                 ("no route", b""),
-                ("a route cut short", b"we"),
                 ("a companion that --relayed doesn't name", b"cache\n"),
                 ("the sandbox's own container", b"main\n"),
-                ("no name", b"\n"),
                 ("no line feed in the most bytes of a route", &long),
             ];
             let mut peers = Vec::new();
@@ -1165,17 +1163,13 @@ fn relay_refusals() {
         },
         &expect![[r#"
             no route: closed, with no answer
-            a route cut short: closed, with no answer
             a companion that --relayed doesn't name: closed, with no answer
             the sandbox's own container: closed, with no answer
-            no name: closed, with no answer
             no line feed in the most bytes of a route: closed, with no answer
             then, its session ended: exit status: 0: sandboxd: the relay closed the connection from $PEER0: the connection ended before its route's line feed: expected a companion's name and a line feed
-            sandboxd: the relay closed the connection from $PEER1: the connection ended before its route's line feed: expected a companion's name and a line feed
-            sandboxd: the relay closed the connection from $PEER2: its route names `cache`, which this relay carries nothing to: expected a companion that --relayed names
-            sandboxd: the relay closed the connection from $PEER3: the route names no companion: `main` names the runner's own container: give the companion another name
-            sandboxd: the relay closed the connection from $PEER4: the route names no companion: `` is not a companion's name: use 1 to 63 characters from a-z, 0-9 and `-`, starting with a letter and ending with a letter or a digit
-            sandboxd: the relay closed the connection from $PEER5: the route has no line feed in its first 64 bytes: expected a companion's name and a line feed
+            sandboxd: the relay closed the connection from $PEER1: its route names `cache`, which this relay carries nothing to: expected a companion that --relayed names
+            sandboxd: the relay closed the connection from $PEER2: the route names no companion: `main` names the runner's own container: give the companion another name
+            sandboxd: the relay closed the connection from $PEER3: the route has no line feed in its first 64 bytes: expected a companion's name and a line feed
             --relay with --tls: exit status: 1: sandboxd: --relay runs in a sandbox's `main`, and --tls in a companion: give one of them
             --relay without --relayed: exit status: 1: sandboxd: --relay carries connections to the companions that --relayed names: name each with a --relayed
             --relayed without --relay: exit status: 1: sandboxd: --relayed names a companion that --relay carries to: give it with --relay

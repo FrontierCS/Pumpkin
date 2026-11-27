@@ -7,8 +7,7 @@
 //! `main` listens for the gateway behind a tunnel. In a sandbox that holds companions, it also
 //! relays to them, behind a second tunnel. Each companion is a sidecar of Modal's, whose
 //! `sandboxd` listens under TLS of its own, where only the sandbox's containers reach it
-//! (`schema::sandbox::Relayed`). Modal starts a sidecar's command as root, whatever its image's
-//! `USER` says, so `sandboxd` becomes the companion's user itself (`--user`), as `main`'s does.
+//! (`schema::sandbox::Relayed`).
 
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;

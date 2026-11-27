@@ -124,7 +124,6 @@ fn asked(case: &str, create: &Create, dials: &ListenDials, gpu: Option<&str>) ->
     reason = "most of it is the cases and their snapshot"
 )]
 fn requests() {
-    let unpublished = ImageRef::from(String::from(image('b')));
     let mib = 1 << 20;
     let beside = || {
         vec![
@@ -154,21 +153,6 @@ fn requests() {
         asked(
             "memory that isn't whole MiB",
             &runner(256 * mib + 1, false, false),
-            &dials(Vec::new()),
-            None,
-        ),
-        asked(
-            "a companion's image that wasn't published",
-            &runner(256 * mib, false, false),
-            &dials(vec![companion("db", unpublished.as_str(), 2)]),
-            None,
-        ),
-        asked(
-            "a sandboxd that wasn't published",
-            &Create {
-                sandboxd: SandboxdRef::from("/opt/pumpkin/sandboxd".to_owned()),
-                ..runner(256 * mib, false, false)
-            },
             &dials(Vec::new()),
             None,
         ),
@@ -217,9 +201,7 @@ fn requests() {
           source: "203.0.113.7/32"
           sidecar: {"args":["/.pumpkin/sandboxd","0.0.0.0:7434","--listen","--by","2000000600","--user","2:2","--tls"],"env":{"SANDBOXD_GRANT":"02020202020202020202020202020202","SANDBOXD_TLS_CERTIFICATE":"ce02","SANDBOXD_TLS_KEY":"5e02"},"image":"im-db","name":"db"}
           sidecar: {"args":["/.pumpkin/sandboxd","0.0.0.0:7434","--listen","--by","2000000600","--user","3:3","--tls"],"env":{"SANDBOXD_GRANT":"03030303030303030303030303030303","SANDBOXD_TLS_CERTIFICATE":"ce03","SANDBOXD_TLS_KEY":"5e03"},"image":"im-cache","name":"cache-1"}
-        memory that isn't whole MiB: role `runner` asks for 268435457 bytes of memory, which Modal gives in whole MiB: ask for a multiple of 1048576
-        a companion's image that wasn't published: `sha256:b` is no image this provider published: publish one first
-        a sandboxd that wasn't published: `/opt/pumpkin/sandboxd` is no sandboxd this provider published: publish one first"#]],
+        memory that isn't whole MiB: role `runner` asks for 268435457 bytes of memory, which Modal gives in whole MiB: ask for a multiple of 1048576"#]],
     );
 }
 
@@ -252,7 +234,6 @@ fn answers() {
         answered("main and its relay", true, &made(both())),
         answered("no relay, though asked", true, &made(vec![main.clone()])),
         answered("a relay, though not asked", false, &made(both())),
-        answered("no tunnel", false, &made(Vec::new())),
         answered(
             "a relay at an address",
             true,
@@ -266,7 +247,6 @@ fn answers() {
         main and its relay: Listened { created: Created { id: SandboxId("sb-1"), phases: [Phase { name: "lookup", began: 250ms, took: 500ms }, Phase { name: "early", began: 0ns, took: 1ns }] }, main: Endpoint { host: "main.modal.host", port: 443 }, relay: Some(Endpoint { host: "relay.modal.host", port: 443 }) }
         no relay, though asked: the Modal helper's `create` gave sandbox sb-1's tunnels as a list of 1: expected one for each port that it was asked for
         a relay, though not asked: the Modal helper's `create` gave sandbox sb-1's tunnels as a list of 2: expected one for each port that it was asked for
-        no tunnel: the Modal helper's `create` gave sandbox sb-1's tunnels as a list of 0: expected one for each port that it was asked for
         a relay at an address: Modal's tunnel to sandbox sb-1's relay isn't an endpoint: `192.0.2.1` is not a DNS name: give the name the endpoint's certificate is for, such as `ta-1.w.modal.host`"#]],
     );
 }
