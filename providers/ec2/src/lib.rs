@@ -349,27 +349,27 @@ impl Provider for Ec2<'_> {
 
     /// Publishes `image`, a role's, as [`Provider::publish_image`] asks: the engine must have it,
     /// as the digest of a manifest for the instances' platform, which is checked before any call
-    /// to AWS; and it is named as it is in the roles' repository ([`aws::Cli::publish`]).
+    /// to AWS; and it is named as it is in the roles' repository ([`aws::Repository::reference`]).
     fn publish_image(&self, image: &Image) -> Result<ImageRef, String> {
         // The instances', whose AMIs are all for `sandboxd`'s architecture, as the envelope has it.
         let runs = "the envelope's instances run";
         (self.pusher.engine()).check_platform(image, &Platform::sandboxd(), runs)?;
-        let cli = &self.reached.cli;
-        let published = cli.publish(&self.pusher, &self.repositories.roles, image);
-        published.map(ImageRef::from)
+        let (cli, repository) = (&self.reached.cli, &self.repositories.roles);
+        cli.publish(&self.pusher, repository, &[image])?;
+        Ok(ImageRef::from(repository.reference(image)))
     }
 
     /// Publishes the static `sandboxd` at `path`, as [`Provider::publish_sandboxd`] asks, with
     /// the static `ec2-boot` beside it, as `cargo xtask sandboxd` builds them: in the image that
     /// the engine loads ([`engine::Engine::load_sandboxd`]), which the same pair always gives,
-    /// named as it is in `sandboxd`'s repository ([`aws::Cli::publish`]).
+    /// named as it is in `sandboxd`'s repository ([`aws::Repository::reference`]).
     fn publish_sandboxd(&self, path: &Path) -> Result<SandboxdRef, String> {
         let boot = path.with_file_name("ec2-boot");
         let binaries = [(SANDBOXD_IN_IMAGE, path), (BOOT_IN_IMAGE, &*boot)];
         let image = self.pusher.engine().load_sandboxd(&binaries)?;
-        let cli = &self.reached.cli;
-        let published = cli.publish(&self.pusher, &self.repositories.sandboxd, &image);
-        published.map(SandboxdRef::from)
+        let (cli, repository) = (&self.reached.cli, &self.repositories.sandboxd);
+        cli.publish(&self.pusher, repository, &[&image])?;
+        Ok(SandboxdRef::from(repository.reference(&image)))
     }
 
     // An instance reaches the gateway's host only on the envelope's network.

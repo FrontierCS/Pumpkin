@@ -361,7 +361,7 @@ impl Provider for Modal<'_> {
     /// It fails if the engine lacks the image or has it for another platform, or if Modal can't
     /// import it, as one its role may not pull.
     fn publish_image(&self, image: &Image) -> Result<ImageRef, String> {
-        let imported = self.import(&[self.push(image)?], None)?;
+        let imported = self.import(&self.push(&[image])?, None)?;
         let [imported] = <[String; 1]>::try_from(imported).map_err(|imported| {
             format!(
                 "the Modal helper's `import` answered {} ids for one image: expected its id",
@@ -386,13 +386,18 @@ impl Provider for Modal<'_> {
 }
 
 impl Modal<'_> {
-    /// Pushes `image` to the repository, unless held there, and returns its reference there, by
-    /// its digest. Fails if the engine lacks the image, or has it for another platform.
-    fn push(&self, image: &Image) -> Result<String, String> {
+    /// Pushes each of `images`, which are distinct, to the repository, unless held there. Returns
+    /// their references there, by their digests, in their order. Fails if the engine lacks one of
+    /// them, or has one for another platform, before it pushes any.
+    fn push(&self, images: &[&Image]) -> Result<Vec<String>, String> {
         // Modal runs `sandboxd`'s platform alone.
         let runs = "Modal runs sandboxes on";
-        (self.pusher.engine()).check_platform(image, &Platform::sandboxd(), runs)?;
-        self.cli.publish(&self.pusher, &self.repository, image)
+        for image in images {
+            (self.pusher.engine()).check_platform(image, &Platform::sandboxd(), runs)?;
+        }
+        self.cli.publish(&self.pusher, &self.repository, images)?;
+        let references = images.iter().map(|image| self.repository.reference(image));
+        Ok(references.collect())
     }
 
     /// Has Modal import the image at each of `references`, which [`push`](Self::push) gave, with
@@ -441,8 +446,7 @@ impl Listens for Modal<'_> {
     ) -> Result<Vec<ImageRef>, String> {
         let sandboxd = Sandboxd::published(sandboxd, vec![SANDBOXD_PATH])?;
         let batch = Batch::of(images);
-        let pushed: Result<Vec<String>, String> =
-            batch.distinct().map(|image| self.push(image)).collect();
-        batch.references(self.import(&pushed?, Some(sandboxd))?)
+        let pushed = self.push(&batch.distinct().collect::<Vec<_>>())?;
+        batch.references(self.import(&pushed, Some(sandboxd))?)
     }
 }
