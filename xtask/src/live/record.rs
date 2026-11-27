@@ -166,7 +166,7 @@ pub(crate) fn uncompanioned(values: &[Value]) -> Vec<String> {
 }
 
 /// What is wrong in `values`, a run's result that counts the facts that hold as `score`, of `of`.
-/// That is a fact that doesn't hold, or a result that counts none.
+/// That is a `score` other than `of`, a `score` or `of` that isn't a whole number, or an `of` of 0.
 pub(crate) fn unscored(values: &[Value]) -> Vec<String> {
     let value = |name: &str| {
         (values.iter())

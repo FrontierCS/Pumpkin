@@ -98,12 +98,12 @@ pub(crate) fn docker() -> Result<()> {
 
 /// Runs `examples/smoke` at `HEAD` on `provider` through the controller, and fails unless every
 /// probe passed, every sandbox was deleted and nothing of the run is left on the provider. On
-/// Modal, it then runs `examples/companions` likewise. That fails too unless each fact that its
-/// result names holds. Last, it runs `examples/assets`, which fails unless each of its facts holds,
-/// and its log shows the asset's publish and each create's mount. It first runs `pumpkin-admin
-/// check` on the controller's deployment, and fails if that finds a problem. With `lost`, it loses
-/// a smoke run instead, and checks that its sandboxes end by themselves and that a reap removes the
-/// rest.
+/// Modal, it then runs `examples/companions` and `examples/assets` likewise. Each of those fails
+/// too unless each fact that its result names holds. The assets run also fails unless its log
+/// records a publish of an asset and an `assets` phase in each create. It first runs
+/// `pumpkin-admin check` on the controller's deployment, and fails if that finds a problem. With
+/// `lost`, it loses a smoke run instead, and checks that its sandboxes end by themselves and that a
+/// reap removes the rest.
 /// `again` names the command that repeats it.
 pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> Result<()> {
     let again = match provider {

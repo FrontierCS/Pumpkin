@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 596" width="880" height="596" role="img" aria-labelledby="title desc">
 <title id="title">Where a run's sandboxes run, and how their images and assets reach them</title>
-<desc id="desc">On the operator's machine, pumpkin builds images on the machine's Docker engine, where the Docker provider also runs its sandboxes as containers. A machine whose configuration names a controller sends its runs, over ssh, to the controller, which runs the same pumpkin and is an EC2 instance in the operator's AWS account or a privileged container on a Docker host. The EC2 controller builds the images on its own Docker engine, pushes them to private ECR repositories, launches EC2 instances that pull them, one sandbox each, and creates Modal sandboxes, which Modal imports from the same repositories, and whose companions run as Modal's sidecars. The Docker controller builds the images on a Docker engine of its container's own, never the host's, where the Docker provider also runs its sandboxes as containers. The Docker provider mounts each asset read-only from the machine's cache. Modal mounts each asset at a sandbox's create from an image, which Modal fills once from the files' URLs.</desc>
+<desc id="desc">On the operator's machine, pumpkin builds images on the machine's Docker engine, where the Docker provider also runs its sandboxes as containers. A machine whose configuration names a controller sends its runs, over ssh, to the controller, which runs the same pumpkin and is an EC2 instance in the operator's AWS account or a privileged container on a Docker host. The EC2 controller builds the images on its own Docker engine, pushes them to private ECR repositories, launches EC2 instances that pull them, one sandbox each, and creates Modal sandboxes, which Modal imports from the same repositories, and whose companions run as Modal's sidecars. The Docker controller builds the images on a Docker engine of its container's own, never the host's, where the Docker provider also runs its sandboxes as containers. The Docker provider mounts each asset read-only from the machine's cache. On Modal, each create mounts an image of the asset's files. A Modal sandbox fetches those files into the image once for each machine that publishes the asset, and the image stays on Modal.</desc>
 <style>
 :root{--bg:#ffffff;--ink:#1f2328;--mute:#59636e;--line:#818b98;--card:#f6f8fa;--hot:#0969da;--hot-bg:#ddf4ff}
 @media (prefers-color-scheme:dark){:root{--bg:#0d1117;--ink:#e6edf3;--mute:#9198a1;--line:#6e7681;--card:#151b23;--hot:#58a6ff;--hot-bg:#10243e}}
@@ -70,8 +70,8 @@ text{font:12.5px system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;f
 <text class="note mid" x="576" y="264">Modal imports the images</text>
 <rect class="box" x="712" y="284" width="136" height="84" rx="8"/>
 <text class="name mid" x="780" y="304">asset images</text>
-<text class="note mid" x="780" y="322">each filled once</text>
-<text class="note mid" x="780" y="337">from its files' URLs,</text>
+<text class="note mid" x="780" y="322">files fetched here</text>
+<text class="note mid" x="780" y="337">once per machine,</text>
 <text class="note mid" x="780" y="352">mounted at create</text>
 <path class="arrow" d="M816 283V254" marker-end="url(#head)"/>
 

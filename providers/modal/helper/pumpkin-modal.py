@@ -47,8 +47,13 @@ CONSOLE_ENTRIES = 20
 # What begins the line of a sandbox's console that this helper adds.
 CONSOLE_PREFIX = "pumpkin-modal:"
 
-# The most bytes of a fill's files, as JSON, that one write to its fetch's standard input holds,
-# below the SDK's buffer of 2 MiB.
+# The most bytes of a fill's files, as JSON, that one write to its fetch's standard input holds.
+# The SDK buffers an exec's standard input up to 16 MiB:
+# https://github.com/modal-labs/modal-client/blob/e8a24c8e304766d1b3b6905f297e3f43d08e1d93/py/modal/io_streams.py#L633-L636
+# It refuses a write past that until a drain sends what it holds:
+# https://github.com/modal-labs/modal-client/blob/e8a24c8e304766d1b3b6905f297e3f43d08e1d93/py/modal/io_streams.py#L746-L754
+# Each chunk is drained before the next, and one chunk stays below that limit, so no write is
+# refused. Any size up to 16 MiB would do.
 STDIN_CHUNK = 1 << 20
 
 
@@ -172,8 +177,8 @@ def fill(modal, request: dict) -> dict:
 
 
 def held(modal, request: dict) -> bool:
-    """Whether Modal holds the request's `image`, by its ID: false once the image is deleted. An
-    image past its TTL still counts as held, as no fill gives one a TTL."""
+    """Whether Modal holds the request's `image`, by its ID: false once the image is deleted. A
+    fill's image never expires, as `create::fill` asks for its snapshot with no TTL."""
     app = modal.App.lookup(APP, create_if_missing=True)
     try:
         modal.Image.from_id(request["image"]).build(app)
