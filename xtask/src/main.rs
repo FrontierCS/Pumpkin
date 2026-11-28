@@ -31,6 +31,7 @@ mod figure;
 mod live;
 mod op_stats;
 mod page;
+mod python;
 mod release;
 mod repo;
 mod settings;
@@ -563,6 +564,7 @@ fn side_checks(held: &mut Held) -> Result<()> {
     terraform::check(held)?;
     figure::check(root(), &metadata()?)?;
     page::check(held)?;
+    python::check(held, &repo)?;
     Ok(())
 }
 

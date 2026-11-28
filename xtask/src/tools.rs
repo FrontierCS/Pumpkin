@@ -54,6 +54,16 @@ pub(crate) const TSC: Release = Release {
     member: Some("package/lib/tsc"),
 };
 
+/// Astral's linter and formatter of Python, in its static build. Its SHA-256 is the one in the
+/// `.sha256` file that ruff publishes beside it.
+pub(crate) const RUFF: Release = Release {
+    name: "ruff",
+    version: "0.17.6",
+    url: "https://github.com/astral-sh/ruff/releases/download/0.17.6/ruff-x86_64-unknown-linux-musl.tar.gz",
+    sha256: "3c8d5a4264558df8b1587ce32409b658069b6a1ef5bfe4d279431eb1db62a183",
+    member: Some("ruff-x86_64-unknown-linux-musl/ruff"),
+};
+
 const ZIG: Release = Release {
     name: "zig",
     version: "0.16.0",
@@ -102,9 +112,10 @@ const AWS_PROVIDER: Release = Release {
     member: Some("terraform-provider-aws_v6.72.0_x5"),
 };
 
-const RELEASES: [Release; 7] = [
+const RELEASES: [Release; 8] = [
     BUILDIFIER,
     TSC,
+    RUFF,
     ZIG,
     NEXTEST,
     MUTANTS,

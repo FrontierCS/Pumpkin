@@ -25,11 +25,15 @@ CATEGORIES = {
     "empty": "The patch changes nothing.",
     "too_large": "The patch is larger than the task allows.",
     "malformed": "The patch does not apply to the starter tree.",
-    "forbidden_file_type": "The patch adds or changes a file of a kind the task does not allow "
-                           "(binary, symlink, executable, submodule, or a mode change).",
-    "out_of_scope": "The patch changes something outside the task's editable surface: a file "
-                    "it may not change, add or delete, or a part of an editable file that must "
-                    "stay as it is.",
+    "forbidden_file_type": (
+        "The patch adds or changes a file of a kind the task does not allow "
+        "(binary, symlink, executable, submodule, or a mode change)."
+    ),
+    "out_of_scope": (
+        "The patch changes something outside the task's editable surface: a file "
+        "it may not change, add or delete, or a part of an editable file that must "
+        "stay as it is."
+    ),
     "too_many_files": "The patch changes more files than the task allows.",
     "content_policy": "The patch uses content the task forbids in the editable files.",
 }
@@ -55,7 +59,8 @@ class Result:
     message: str = ""
     paths: tuple[str, ...] = ()  # the offending paths of a rejection
     changes: tuple[Change, ...] = ()
-    tree: Path | None = None     # the starter with the changed files: what the judge measures
+    # the starter with the changed files: what the judge measures
+    tree: Path | None = None
     metrics: dict = field(default_factory=dict)
     _scratch: Path | None = None
 
@@ -66,7 +71,9 @@ class Result:
 
 
 def editable(path: str) -> bool:
-    return path == EDITABLE or re.fullmatch(re.escape(SOLUTION) + ".*", path) is not None
+    return (
+        path == EDITABLE or re.fullmatch(re.escape(SOLUTION) + ".*", path) is not None
+    )
 
 
 def check(patch: bytes, pristine: str | Path, *, build_tree: bool = True) -> Result:
@@ -75,13 +82,22 @@ def check(patch: bytes, pristine: str | Path, *, build_tree: bool = True) -> Res
     On success `result.tree` (when `build_tree`) is a fresh copy of `pristine` with only the
     changed files overlaid; the caller measures it and calls `result.dispose()`.
     """
-    metrics = {"patch_bytes": len(patch), "patch_sha256": hashlib.sha256(patch).hexdigest(),
-               "changed_files": 0}
+    metrics = {
+        "patch_bytes": len(patch),
+        "patch_sha256": hashlib.sha256(patch).hexdigest(),
+        "changed_files": 0,
+    }
 
     def reject(category: str, paths: list[str] | tuple[str, ...] = ()) -> Result:
         metrics["edit_scope"] = category
-        shown = f" ({', '.join(paths[:5])}{', ...' if len(paths) > 5 else ''})" if paths else ""
-        return Result(False, category, CATEGORIES[category] + shown, tuple(paths), metrics=metrics)
+        shown = (
+            f" ({', '.join(paths[:5])}{', ...' if len(paths) > 5 else ''})"
+            if paths
+            else ""
+        )
+        return Result(
+            False, category, CATEGORIES[category] + shown, tuple(paths), metrics=metrics
+        )
 
     pristine = Path(pristine)
     if not pristine.is_dir():
@@ -103,12 +119,31 @@ def check(patch: bytes, pristine: str | Path, *, build_tree: bool = True) -> Res
         env = _git_env(scratch)
         _git(base, env, "init", "--quiet")
         _git(base, env, "add", "--all", "--force")
-        _git(base, env, "commit", "--quiet", "--allow-empty", "--no-verify", "-m", "pristine")
+        _git(
+            base,
+            env,
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "--no-verify",
+            "-m",
+            "pristine",
+        )
         staged = scratch / "submission.patch"
         staged.write_bytes(patch)
         # One strict application: no fuzz, no 3-way, no reject files, no fallbacks.
-        if _git(base, env, "apply", "--index", "--whitespace=nowarn", str(staged),
-                check=False).returncode != 0:
+        if (
+            _git(
+                base,
+                env,
+                "apply",
+                "--index",
+                "--whitespace=nowarn",
+                str(staged),
+                check=False,
+            ).returncode
+            != 0
+        ):
             _remove(scratch)
             return reject("malformed")
 
@@ -140,7 +175,9 @@ def check(patch: bytes, pristine: str | Path, *, build_tree: bool = True) -> Res
                 target = tree / change.path
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(base / change.path, target, follow_symlinks=False)
-        return Result(True, changes=tuple(changes), tree=tree, metrics=metrics, _scratch=scratch)
+        return Result(
+            True, changes=tuple(changes), tree=tree, metrics=metrics, _scratch=scratch
+        )
     except BaseException:
         _remove(scratch)
         raise
@@ -149,7 +186,9 @@ def check(patch: bytes, pristine: str | Path, *, build_tree: bool = True) -> Res
 def _changes(base: Path, env: dict) -> tuple[list[Change], list[str], list[str]]:
     """Every file the applied patch changed; the paths whose change is not a plain regular-file
     edit; and new executable files."""
-    raw = _git(base, env, "diff", "--cached", "--raw", "--no-renames", "-z", "HEAD").stdout
+    raw = _git(
+        base, env, "diff", "--cached", "--raw", "--no-renames", "-z", "HEAD"
+    ).stdout
     fields = raw.split("\0")
     changes, odd, new_executables = [], [], []
     for meta, path in zip(fields[0::2], fields[1::2]):
@@ -157,43 +196,79 @@ def _changes(base: Path, env: dict) -> tuple[list[Change], list[str], list[str]]
         status = status[0]
         changes.append(Change(status, path))
         modes = {m for m in (old_mode, new_mode) if m != "000000"}
-        if not modes <= {"100644", "100755"} or (status == "M" and old_mode != new_mode):
+        if not modes <= {"100644", "100755"} or (
+            status == "M" and old_mode != new_mode
+        ):
             odd.append(path)
         elif status == "A" and new_mode == "100755":
             new_executables.append(path)
     # `git apply --index` stages what it writes; anything else it left behind is suspect.
-    odd.extend(p for p in _git(base, env, "ls-files", "--others", "-z").stdout.split("\0") if p)
+    odd.extend(
+        p for p in _git(base, env, "ls-files", "--others", "-z").stdout.split("\0") if p
+    )
     return changes, odd, new_executables
 
 
 def _git_env(scratch: Path) -> dict:
-    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env = {
+        key: value for key, value in os.environ.items() if not key.startswith("GIT_")
+    }
     env.update(
         # Never discover an enclosing repository (a TMPDIR below a checkout), never read the
         # user's or system's git config, and commit with a fixed identity.
-        GIT_CEILING_DIRECTORIES=str(scratch.resolve()), GIT_CONFIG_NOSYSTEM="1",
-        GIT_CONFIG_GLOBAL=os.devnull, HOME=str(scratch),
-        GIT_AUTHOR_NAME="edit-scope", GIT_AUTHOR_EMAIL="edit-scope@invalid",
-        GIT_COMMITTER_NAME="edit-scope", GIT_COMMITTER_EMAIL="edit-scope@invalid",
-        GIT_AUTHOR_DATE="1970-01-01T00:00:00Z", GIT_COMMITTER_DATE="1970-01-01T00:00:00Z",
+        GIT_CEILING_DIRECTORIES=str(scratch.resolve()),
+        GIT_CONFIG_NOSYSTEM="1",
+        GIT_CONFIG_GLOBAL=os.devnull,
+        HOME=str(scratch),
+        GIT_AUTHOR_NAME="edit-scope",
+        GIT_AUTHOR_EMAIL="edit-scope@invalid",
+        GIT_COMMITTER_NAME="edit-scope",
+        GIT_COMMITTER_EMAIL="edit-scope@invalid",
+        GIT_AUTHOR_DATE="1970-01-01T00:00:00Z",
+        GIT_COMMITTER_DATE="1970-01-01T00:00:00Z",
     )
     return env
 
 
-def _git(cwd: Path, env: dict, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-    command = ["git", "-c", "core.fileMode=true", "-c", "core.symlinks=true",
-               "-c", "core.autocrlf=false", "-c", "core.quotePath=false", *args]
-    result = subprocess.run(command, cwd=cwd, env=env, capture_output=True, text=True,
-                            errors="surrogateescape", timeout=GIT_TIMEOUT_SECONDS)
+def _git(
+    cwd: Path, env: dict, *args: str, check: bool = True
+) -> subprocess.CompletedProcess:
+    command = [
+        "git",
+        "-c",
+        "core.fileMode=true",
+        "-c",
+        "core.symlinks=true",
+        "-c",
+        "core.autocrlf=false",
+        "-c",
+        "core.quotePath=false",
+        *args,
+    ]
+    result = subprocess.run(
+        command,
+        check=False,
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        errors="surrogateescape",
+        timeout=GIT_TIMEOUT_SECONDS,
+    )
     if check and result.returncode != 0:
-        raise RuntimeError(f"git {args[0]} failed: {(result.stderr or result.stdout).strip()[:300]}")
+        raise RuntimeError(
+            f"git {args[0]} failed: {(result.stderr or result.stdout).strip()[:300]}"
+        )
     return result
 
 
 def _make_owner_writable(root: Path) -> None:
     """The starter is read-only in the image; only this disposable copy becomes writable."""
     for directory, names, files in os.walk(root, followlinks=False):
-        for path in [Path(directory), *(Path(directory) / name for name in names + files)]:
+        for path in [
+            Path(directory),
+            *(Path(directory) / name for name in names + files),
+        ]:
             if path.is_symlink():
                 continue
             mode = path.lstat().st_mode

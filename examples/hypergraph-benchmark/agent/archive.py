@@ -30,31 +30,63 @@ def make_patch(scratch):
     reported rather than dropped, and new files below the editable paths alone, so that build
     outputs elsewhere stay out.
     """
-    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
-    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_LITERAL_PATHSPECS="1")
+    env = {
+        key: value for key, value in os.environ.items() if not key.startswith("GIT_")
+    }
+    env.update(
+        GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_LITERAL_PATHSPECS="1"
+    )
     env["GIT_INDEX_FILE"] = str(scratch / "index")
-    git = ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.quotePath=false",
-           "-c", "core.autocrlf=false", "-C", str(SOURCE)]
+    git = [
+        "git",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.quotePath=false",
+        "-c",
+        "core.autocrlf=false",
+        "-C",
+        str(SOURCE),
+    ]
 
     def run(*args):
-        return subprocess.run([*git, *args], env=env, stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE, check=True, timeout=60).stdout
+        return subprocess.run(
+            [*git, *args], env=env, capture_output=True, check=True, timeout=60
+        ).stdout
 
     try:
-        base = run("rev-parse", "--verify", "--quiet", BASELINE_REF + "^{commit}").decode().strip()
+        base = (
+            run("rev-parse", "--verify", "--quiet", BASELINE_REF + "^{commit}")
+            .decode()
+            .strip()
+        )
     except subprocess.CalledProcessError:
         raise Refused(f"{BASELINE_REF} is missing from {SOURCE}") from None
     run("read-tree", base)
     run("add", "--update")
-    new = [name for name in run("ls-files", "--others", "--exclude-standard", "-z")
-           .decode("utf-8", "surrogateescape").split("\0")
-           if name and edit_scope.editable(name)]
+    new = [
+        name
+        for name in run("ls-files", "--others", "--exclude-standard", "-z")
+        .decode("utf-8", "surrogateescape")
+        .split("\0")
+        if name and edit_scope.editable(name)
+    ]
     if new:
         listing = scratch / "new"
         listing.write_bytes("\0".join(new).encode("utf-8", "surrogateescape") + b"\0")
         run("add", "--pathspec-from-file=" + str(listing), "--pathspec-file-nul")
-    patch = run("diff", "--cached", "--binary", "--no-renames", "--no-ext-diff", "--no-textconv",
-                "--no-color", "--src-prefix=a/", "--dst-prefix=b/", base)
+    patch = run(
+        "diff",
+        "--cached",
+        "--binary",
+        "--no-renames",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+        base,
+    )
     result = edit_scope.check(patch, STARTER, build_tree=False)
     if not result.ok:
         raise Refused(result.message)
