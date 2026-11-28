@@ -1,7 +1,7 @@
 // The lanes of a run's sandboxes over its time, and the inspector of one lane.
 
 import { card, cardRows, clock, count, fill, h, plural, span as lasted, utc } from "./h.js";
-import { laneRole } from "./talk.js";
+import { containerGroups, laneRole } from "./talk.js";
 import { laneMark } from "./failure.js";
 
 /**
@@ -55,6 +55,7 @@ export function drawLanes(node, data, jobs, view, picked, change, pick, pickFail
   // A lane's name says its role and the role's place; the lane's own place, which can name its
   // GPU, is in its title and the inspector.
   const sandboxes = data.lanes.filter((lane) => !lane.service);
+  const companionsOf = (/** @type {Lane} */ lane) => companions(lane, data);
   const labels = sandboxes.map((lane) => {
     const role = laneRole(lane, data);
     const name = lane.lane + (role && role !== lane.lane ? " · " + role : "");
@@ -76,7 +77,7 @@ export function drawLanes(node, data, jobs, view, picked, change, pick, pickFail
     ];
     const start = lane.sandbox.start;
     if (started !== null) {
-      parts.push(start ? startBar(lane, start, end, where, { at, width }) : card(h("div", { class: "span starting", style: { left: at(asked), width: width(asked, started) } }), () => cardRows([...where, ["Asked for", clock(asked)], ["Starting", lasted(started - asked)]])));
+      parts.push(start ? startBar(lane, start, end, where, { at, width }, companionsOf(lane)) : card(h("div", { class: "span starting", style: { left: at(asked), width: width(asked, started) } }), () => cardRows([...where, ["Asked for", clock(asked)], ["Starting", lasted(started - asked)]])));
       parts.push(
         card(h("div", { class: "span" + (gone === null ? " open" : ""), style: { left: at(started), width: width(started, end) } }), () =>
           cardRows([...where, ["Started", clock(started)], [gone === null ? "Running" : "Ran", lasted(end - started)], gone === null ? null : ["Gone", clock(gone)], ["", lane.said]]),
@@ -85,7 +86,7 @@ export function drawLanes(node, data, jobs, view, picked, change, pick, pickFail
     } else {
       parts.push(
         start
-          ? startBar(lane, start, end, where, { at, width })
+          ? startBar(lane, start, end, where, { at, width }, companionsOf(lane))
           : card(h("div", { class: "span starting" + (gone === null ? " open" : ""), style: { left: at(asked), width: width(asked, end) } }), () =>
               cardRows([...where, ["Asked for", clock(asked)], [gone === null ? "Starting" : "Never started", lasted(end - asked)], ["", lane.said]]),
             ),
@@ -154,8 +155,8 @@ export function drawLanes(node, data, jobs, view, picked, change, pick, pickFail
 // the create, the create, meeting the gateway and setting up. The lanes have no zoom, so the bar
 // can be a pixel wide, and a phase of the create narrower still: one card for the whole bar lists
 // every part and phase.
-/** @param {Lane} lane @param {SandboxStart} start @param {number} end @param {Array<[string, string]>} where @param {{ at: (seconds: number) => string, width: (from: number, to: number) => string }} scale */
-function startBar(lane, start, end, where, scale) {
+/** @param {Lane} lane @param {SandboxStart} start @param {number} end @param {Array<[string, string]>} where @param {{ at: (seconds: number) => string, width: (from: number, to: number) => string }} scale @param {string[] | undefined} held */
+function startBar(lane, start, end, where, scale, held) {
   const { asked, started, gone } = lane.sandbox;
   const { began, created, met, phases, more_phases } = start;
   const until = started ?? end;
@@ -185,7 +186,7 @@ function startBar(lane, start, end, where, scale) {
       ...phases.map((phase) => /** @type {[string, string]} */ (["· " + phase.name, phaseSaid(phase)])),
       more_phases ? ["· …", morePhasesSaid(more_phases)] : null,
       ["Meeting", lasted(meeting - created) + (open && met === null ? rest : "")],
-      ...containersSaid(start, started !== null || gone !== null),
+      ...containersSaid(start, started !== null || gone !== null, held),
       met === null ? null : ["Setting up", lasted(until - met) + (open ? rest : "")],
       started === null ? null : ["Started", clock(started)],
       [started === null && gone !== null ? "Never started" : "Starting", lasted(until - asked)],
@@ -201,15 +202,24 @@ function phaseSaid(phase) {
   return lasted(phase.to - phase.from) + " from " + clock(phase.from);
 }
 
+// The companions that each sandbox of `lane`'s role holds, as the IR declares them.
+/** @param {Lane} lane @param {Run} data */
+function companions(lane, data) {
+  const role = laneRole(lane, data);
+  return data.talk?.roles.find((r) => r.name === role)?.companions;
+}
+
 // The meetings of a start's containers, as the card and the inspector both say them: each time
-// since the create returned. `over` says whether the start has ended.
-/** @param {SandboxStart} start @param {boolean} over @returns {Array<[string, string] | null>} */
-function containersSaid(start, over) {
+// since the create returned. `over` says whether the start has ended. `companions` are those
+// that the sandbox holds beside `main`.
+/** @param {SandboxStart} start @param {boolean} over @param {string[] | undefined} companions @returns {Array<[string, string] | null>} */
+function containersSaid(start, over, companions) {
   if (!start.containers) return [];
   const { held, met, first, slowest, unmet, more_unmet } = start.containers;
   const since = (/** @type {number} */ at) => lasted(at - start.created);
   return [
     ["Containers", (held === null ? met : met + " of " + held) + " met"],
+    companions ? ["· held", containerGroups(companions).map(([said]) => said).join(", ")] : null,
     first === null ? null : ["· first met", since(first)],
     // A container's name and time keep to one line.
     slowest.length ? ["· slowest", slowest.map((container) => (container.name + " " + since(container.met)).replaceAll(" ", "\u00a0")).join(", ")] : null,
@@ -262,7 +272,7 @@ export function inspectLane(lane, inspector, nearest, data, callList, failureOf)
             at(start.created, ", " + lasted(start.created - start.began) + " after the create began"),
             h("dt", {}, "Met"),
             start.met === null ? at(null) : at(start.met, ", " + lasted(start.met - start.created) + " after it was created"),
-            ...containersSaid(start, started !== null || gone !== null).flatMap((row) => (row ? [h("dt", {}, row[0]), h("dd", {}, row[1])] : [])),
+            ...containersSaid(start, started !== null || gone !== null, companions(lane, data)).flatMap((row) => (row ? [h("dt", {}, row[0]), h("dd", {}, row[1])] : [])),
           ]
         : null,
       h("dt", {}, "Started"),

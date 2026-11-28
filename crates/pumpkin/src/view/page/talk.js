@@ -18,6 +18,9 @@ const NAME_CHAR_PX = 7.3;
 // The diagram's end of the edges of model requests, the model upstream, which is no role.
 const MODEL = "model";
 const PLACE_CHAR_PX = 7.3;
+// The fewest characters that the line of a box naming its sandboxes' containers may take. The line
+// otherwise keeps to the width that the box's name and place need, and its card names them all.
+const CONTAINERS_MIN_CHARS = 36;
 
 /** @param {Lane} lane @param {Run} data */
 export function laneRole(lane, data) {
@@ -28,13 +31,43 @@ export function laneRole(lane, data) {
   return lane.role ?? null;
 }
 
+// A sandbox's containers as few words, each with how many it stands for: `main`, then its
+// `companions`. Companions whose names differ only in their digits make one group, its digits `*`
+// and its size after `×`.
+/** @param {string[]} companions @returns {Array<[string, number]>} */
+export function containerGroups(companions) {
+  /** @type {Map<string, string[]>} */
+  const groups = new Map();
+  for (const name of companions) {
+    const key = name.replace(/[0-9]+/g, "*");
+    groups.set(key, [...(groups.get(key) || []), name]);
+  }
+  return [["main", 1], ...[...groups].map(([key, names]) => /** @type {[string, number]} */ ([names.length > 1 ? key + " ×" + names.length : names[0], names.length]))];
+}
+
+// The line of a box that names the containers of each of its role's sandboxes, in at most `chars`
+// characters but its first group's, then how many containers it leaves out.
+/** @param {string[]} companions @param {number} chars */
+function containersLine(companions, chars) {
+  const groups = containerGroups(companions);
+  let line = 1 + companions.length + " containers: " + groups[0][0];
+  let left = companions.length;
+  for (const [said, count] of groups.slice(1)) {
+    if ((line + ", " + said + (left > count ? ", +" + (left - count) : "")).length > chars) break;
+    line += ", " + said;
+    left -= count;
+  }
+  return line + (left ? ", +" + left : "");
+}
+
 // Who talks to whom, in layers left to right: a role sits one layer right of the furthest role
 // that reaches it, by a grant of the IR or by what the log shows, so every line but a cycle's
 // runs left to right and needs no arrow. In a layer, roles sit at the mean row of what reaches
 // them, so a runner sits on its holder's row; the model upstream sits under the agent. A line
 // leaves and enters a box level, at its own point of the box's side; a grant the log shows no
 // use of is dashed, as is a role with no sandbox yet. A role of more than one sandbox is drawn
-// as a stack, with how many it had and how many of them run now. Below, what went
+// as a stack, with how many it had and how many of them run now. A runner whose sandboxes hold
+// companions names their containers on a third line of its box. Below, what went
 // between them. What a selection lights is lit, the rest dim; a role picked lights its lines,
 // and a click off every box puts the lighting down. The failure `failed` is marked on the line
 // between its subject's two ends, if the diagram draws one, else on the box of its role.
@@ -111,21 +144,30 @@ export function drawTalk(node, data, lit, picked, failed, pick) {
   const had = new Map();
   /** @type {Map<string, number>} */
   const running = new Map();
+  // How many of each sandbox's containers met the gateway, by its role, for a card.
+  /** @type {Map<string, string[]>} */
+  const met = new Map();
   for (const lane of data.lanes || []) {
     const role = laneRole(lane, data);
     if (!role || lane.service) continue;
     had.set(role, (had.get(role) ?? 0) + 1);
     if (lane.sandbox.started !== null && lane.sandbox.gone === null) running.set(role, (running.get(role) ?? 0) + 1);
+    const containers = lane.sandbox.start?.containers;
+    if (containers) met.set(role, [...(met.get(role) || []), lane.lane + ": " + containers.met + (containers.held === null ? "" : " of " + containers.held)]);
   }
-  const [boxH, gapX, gapY, bow, stack] = [34, 64, 18, 28, 6];
+  // Every box gets the third line's height if one has the line, so that the rows stay level.
+  const tall = shown.some((n) => n.companions);
+  const [boxH, gapX, gapY, bow, stack] = [tall ? 46 : 34, 64, 18, 28, 6];
   const chipOf = (/** @type {string} */ name) => ((had.get(name) ?? 0) > 1 ? "×" + had.get(name) : "");
   const placeOf = (/** @type {Role} */ n) => {
     const now = n.kind === "agent" ? 0 : (running.get(n.name) ?? 0);
     return (n.place || "-") + (now ? " · " + now + " running" : "");
   };
+  const lineChars = (/** @type {Role} */ n) => Math.max(CONTAINERS_MIN_CHARS, n.name.length + (chipOf(n.name) ? chipOf(n.name).length + 3 : 0), placeOf(n).length);
   const widthOf = (/** @type {Role} */ n) => {
     const chip = chipOf(n.name) ? (chipOf(n.name).length * 6.5 + 18) : 0;
-    return Math.ceil(Math.max(n.name.length * NAME_CHAR_PX + (n.final_target ? 14 : 0) + chip, placeOf(n).length * PLACE_CHAR_PX)) + 14;
+    const containers = n.companions ? containersLine(n.companions, lineChars(n)).length * PLACE_CHAR_PX : 0;
+    return Math.ceil(Math.max(n.name.length * NAME_CHAR_PX + (n.final_target ? 14 : 0) + chip, placeOf(n).length * PLACE_CHAR_PX, containers)) + 14;
   };
   // Rows: the first layer in the IR's order, the model under the agent; each later layer at the
   // mean row of the roles that reach it, then by kind and the IR's order, a row to each.
@@ -219,6 +261,7 @@ export function drawTalk(node, data, lit, picked, failed, pick) {
       n.final_target ? svg("rect", { class: "final", x: 6, y: 6, width: 8, height: 8, rx: 2 }) : null,
       svg("text", { x: n.final_target ? 20 : 6, y: 14 }, n.name),
       svg("text", { x: 6, y: 27, class: "place" }, placeOf(n)),
+      n.companions ? svg("text", { x: 6, y: 40, class: "containers" }, containersLine(n.companions, Math.floor((n.w - 14) / PLACE_CHAR_PX))) : null,
       chip ? svg("rect", { class: "chip", x: n.w - chip.length * 6.5 - 14, y: 4, width: chip.length * 6.5 + 8, height: 14, rx: 2 }) : null,
       chip ? svg("text", { class: "chip", x: n.w - chip.length * 3.25 - 10, y: 14.5, "text-anchor": "middle" }, chip) : null,
     );
@@ -228,6 +271,9 @@ export function drawTalk(node, data, lit, picked, failed, pick) {
         ["Role", n.name + (n.final_target ? " (the final call's target)" : "")],
         ["On", n.place || null],
         ["Sandboxes", many ? String(had.get(n.name)) : none ? "None yet" : null],
+        n.companions ? ["Containers", 1 + n.companions.length + (many ? " in each sandbox" : "")] : null,
+        n.companions ? ["· held", containerGroups(n.companions).map(([said]) => said).join(", ")] : null,
+        met.has(n.name) ? ["· met", (met.get(n.name) || []).join(", ")] : null,
         .../** @type {Array<[string, string]>} */ ([...pairs.keys()].map((key) => key.split("\u0000")).filter(([from, to]) => from === n.name || to === n.name).map(([from, to]) => [from + " → " + to, said(from, to)])),
       ]),
     );
