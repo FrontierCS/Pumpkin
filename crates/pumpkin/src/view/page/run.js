@@ -97,7 +97,7 @@ import { drawLanes, inspectLane } from "./lanes.js";
  * @typedef {{ kind: string, label: string, from: number, to: number | null, end: any }} Work
  * @typedef {{ roles: Role[], grants?: Grant[], edges: Edge[] }} Talk
  * @typedef {{ from: string, to: string, kind: string }} Grant a grant of the IR: its holder and the role it reaches
- * @typedef {{ name: string, kind: string | null, lifetime?: "work_phase" | "per_call", place: string | null, routed: boolean, final_target: boolean, routes: Route[] | "unknown" }} Role
+ * @typedef {{ name: string, kind: string | null, lifetime?: "work_phase" | "per_call", place: string | null, routed: boolean, final_target: boolean, routes: Route[] | "unknown", companions?: string[] }} Role a role; `companions` names those that each of a runner's sandboxes holds beside `main`, if it declares any
  * @typedef {{ api: string, upstream: string, models: Record<string, string> }} Route an entry of a role's model route: each model by the name the upstream takes it as
  * @typedef {{ from: string, to: string, kind: string, count: number, bytes: number | null, back_bytes: number | null }} Edge
  * @typedef {import("./records.js").LogRecord} LogRecord

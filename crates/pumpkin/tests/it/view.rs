@@ -1285,14 +1285,21 @@ fn shows_when_a_sandboxs_containers_met() {
                 lane["lane"], lane["sandbox"]["start"]["containers"]
             )
         });
+    // The diagram names a runner role's companions, and only one that declares some.
+    let roles = (polled["run"]["talk"]["roles"].as_array().unwrap().iter())
+        .filter(|role| role["kind"] == "runner")
+        .map(|role| format!("role {}: {}", role["name"], role["companions"]));
     check(
         &scratch,
-        said.map(Step::Ran),
+        said.chain(roles).map(Step::Ran),
         false,
         &[],
         &expect![[r#"
             "lease 2": {"first":31.1,"held":8,"met":8,"more_unmet":0,"slowest":[{"met":31.8,"name":"search"},{"met":31.7,"name":"mail"},{"met":31.6,"name":"cache"},{"met":31.5,"name":"queue"},{"met":31.4,"name":"db"}],"unmet":[]}
-            "lease 3": {"first":32.0,"held":8,"met":2,"more_unmet":1,"slowest":[{"met":33.0,"name":"auth"},{"met":32.0,"name":"db"}],"unmet":["main","web","queue","cache","mail"]}"#]],
+            "lease 3": {"first":32.0,"held":8,"met":2,"more_unmet":1,"slowest":[{"met":33.0,"name":"auth"},{"met":32.0,"name":"db"}],"unmet":["main","web","queue","cache","mail"]}
+            role "gpu": null
+            role "cpu": ["web","db","queue","cache","mail","search","auth"]
+            role "box": null"#]],
     );
 }
 

@@ -361,7 +361,7 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 .talk .node { cursor: pointer; }
 .talk .node rect { fill: var(--panel); stroke: var(--line); stroke-width: 1.5; }
 .talk .node text { font-family: var(--mono); font-size: var(--fs-diagram); fill: var(--text); }
-.talk .node text.place { fill: var(--dim); }
+.talk .node text.place, .talk .node text.containers { fill: var(--dim); }
 .talk .node rect.final { fill: var(--accent); stroke: none; }
 .talk .node.agent rect { stroke: var(--agent); } .talk .node.target rect { stroke: var(--target); }
 .talk .node.runner rect { stroke: var(--runner); } .talk .node.model rect { stroke: var(--model); }

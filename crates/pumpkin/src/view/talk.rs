@@ -411,6 +411,10 @@ fn role_json(
         });
         Value::Array(entries.collect())
     });
+    let companions = match &role.runtime {
+        ir::Runtime::Runner(runner) => runner.companions.as_slice(),
+        _ => &[],
+    };
     let mut role = json!({
         "name": name,
         "kind": kind,
@@ -421,6 +425,10 @@ fn role_json(
     });
     if let Some(lifetime) = lifetime {
         role["lifetime"] = json!(lifetime);
+    }
+    if !companions.is_empty() {
+        let names = companions.iter().map(|companion| &companion.name);
+        role["companions"] = json!(names.collect::<Vec<_>>());
     }
     role
 }
